@@ -1,0 +1,39 @@
+[package]
+name = "agtx"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal-native kanban board for managing coding agents"
+authors = ["agtx contributors"]
+license = "MIT"
+repository = "https://github.com/yourusername/agtx"
+keywords = ["tui", "tmux", "agents", "kanban", "claude"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
+
+# Async runtime
+tokio = { version = "1.44", features = ["full"] }
+
+# Database
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Utilities
+anyhow = "1.0"
+thiserror = "2.0"
+which = "7.0"
+directories = "6.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.16", features = ["v4"] }
+
+
+
+[dev-dependencies]
+tempfile = "3"
