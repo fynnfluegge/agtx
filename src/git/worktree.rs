@@ -97,6 +97,14 @@ pub fn initialize_worktree(
                 continue;
             }
 
+            if src.is_dir() {
+                warnings.push(format!(
+                    "copy_files: '{}' is a directory, only individual files are supported",
+                    file_name
+                ));
+                continue;
+            }
+
             if let Err(e) = std::fs::copy(&src, &dst) {
                 warnings.push(format!("Failed to copy '{}' to worktree: {}", file_name, e));
             }

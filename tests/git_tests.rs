@@ -546,3 +546,22 @@ fn test_initialize_worktree_empty_copy_files() {
     );
     assert!(warnings.is_empty());
 }
+
+#[test]
+fn test_initialize_worktree_copy_directory_rejected() {
+    let temp_dir = setup_git_repo();
+    let config_dir = temp_dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("app.toml"), "key = 1").unwrap();
+
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-dir").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some("config"),
+        None,
+    );
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("directory"));
+}
