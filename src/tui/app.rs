@@ -13,11 +13,13 @@ use crate::agent;
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig};
 use crate::db::{Database, Task, TaskStatus};
 use crate::git;
+use crate::operations::{RealTmuxOps, TmuxOperations};
 use crate::tmux;
 use crate::AppMode;
 
 use super::board::BoardState;
 use super::input::InputMode;
+use super::shell_popup::{self, ShellPopup};
 
 /// Helper to convert hex color string to ratatui Color
 fn hex_to_color(hex: &str) -> Color {
@@ -27,6 +29,11 @@ fn hex_to_color(hex: &str) -> Color {
 }
 
 type Terminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
+
+/// Shell popup dimensions - used for both rendering and tmux window sizing
+const SHELL_POPUP_WIDTH: u16 = 82;          // Total width including borders
+const SHELL_POPUP_CONTENT_WIDTH: u16 = 80;  // Content width (SHELL_POPUP_WIDTH - 2 for borders)
+const SHELL_POPUP_HEIGHT_PERCENT: u16 = 75; // Percentage of terminal height
 
 /// Application state (separate from terminal for borrow checker)
 struct AppState {
@@ -135,14 +142,6 @@ struct PrConfirmPopup {
     pr_body: String,
     editing_title: bool, // true = editing title, false = editing body
     generating: bool,    // true while Claude is generating description
-}
-
-/// State for the shell popup that shows a detached tmux window
-#[derive(Debug, Clone)]
-struct ShellPopup {
-    task_title: String,
-    window_name: String,
-    scroll_offset: i32, // Negative means scroll up (see more history)
 }
 
 /// Info about a project for the sidebar
@@ -313,6 +312,11 @@ impl App {
                         self.handle_key(key)?;
                     }
                 }
+            }
+
+            // Refresh shell popup content periodically (every poll cycle when open)
+            if let Some(ref mut popup) = self.state.shell_popup {
+                popup.cached_content = capture_tmux_pane_with_history(&popup.window_name, 500);
             }
 
             // Periodically refresh session status
@@ -617,87 +621,7 @@ impl App {
 
         // Shell popup overlay
         if let Some(popup) = &state.shell_popup {
-            let popup_area = centered_rect_fixed_width(82, 75, area); // +2 for border
-            frame.render_widget(Clear, popup_area);
-
-            // Draw border around the popup
-            let border_block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)));
-            let inner_area = border_block.inner(popup_area);
-            frame.render_widget(border_block, popup_area);
-
-            // Resize tmux pane to match popup dimensions for proper display
-            let pane_width = inner_area.width;
-            let pane_height = inner_area.height.saturating_sub(2); // -2 for title and footer
-            let _ = std::process::Command::new("tmux")
-                .args(["-L", tmux::AGENT_SERVER])
-                .args(["resize-pane", "-t", &popup.window_name])
-                .args(["-x", &pane_width.to_string()])
-                .args(["-y", &pane_height.to_string()])
-                .output();
-
-            // Capture tmux pane content with more history
-            let pane_content = capture_tmux_pane_with_history(&popup.window_name, 500);
-
-            // Layout: header, content, footer (inside the border)
-            let popup_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1), // Title bar
-                    Constraint::Min(0),    // Shell content
-                    Constraint::Length(1), // Footer
-                ])
-                .split(inner_area);
-
-            // Title bar
-            let title = format!(" {} ", popup.task_title);
-            let title_bar = Paragraph::new(title)
-                .style(Style::default().fg(Color::Black).bg(hex_to_color(&state.config.theme.color_popup_header)));
-            frame.render_widget(title_bar, popup_chunks[0]);
-
-            // Shell content - parse ANSI escape sequences for colors
-            let styled_lines = parse_ansi_to_lines(&pane_content);
-            let visible_height = popup_chunks[1].height as usize;
-
-            // Filter out trailing empty lines to find actual content
-            let non_empty_count = styled_lines.iter()
-                .rposition(|line| !line.spans.is_empty() &&
-                    !line.spans.iter().all(|s| s.content.trim().is_empty()))
-                .map(|i| i + 1)
-                .unwrap_or(styled_lines.len());
-
-            let total_lines = non_empty_count.max(1);
-
-            // Apply scroll offset
-            let start_line = if popup.scroll_offset < 0 {
-                // Scrolling up into history
-                total_lines.saturating_sub(visible_height).saturating_sub((-popup.scroll_offset) as usize)
-            } else {
-                // At bottom (current)
-                total_lines.saturating_sub(visible_height)
-            };
-
-            let visible_lines: Vec<Line> = styled_lines
-                .into_iter()
-                .take(non_empty_count)
-                .skip(start_line)
-                .take(visible_height)
-                .collect();
-
-            let content = Paragraph::new(visible_lines)
-                .wrap(Wrap { trim: false });
-            frame.render_widget(content, popup_chunks[1]);
-
-            // Footer with scroll indicator
-            let scroll_indicator = if popup.scroll_offset < 0 {
-                format!(" [Ctrl+j/k] scroll [Ctrl+d/u] page [Ctrl+g] bottom [Ctrl+q] close | Line {} ", start_line + 1)
-            } else {
-                " [Ctrl+j/k] scroll [Ctrl+d/u] page [Ctrl+q] close | At bottom ".to_string()
-            };
-            let footer = Paragraph::new(scroll_indicator)
-                .style(Style::default().fg(Color::Black).bg(hex_to_color(&state.config.theme.color_dimmed)));
-            frame.render_widget(footer, popup_chunks[2]);
+            Self::draw_shell_popup(popup, frame, area, &state.config.theme);
         }
 
         // Task search popup
@@ -1079,6 +1003,24 @@ impl App {
                 .style(Style::default().fg(Color::Black).bg(hex_to_color(&state.config.theme.color_dimmed)));
             frame.render_widget(footer, popup_chunks[2]);
         }
+    }
+
+    fn draw_shell_popup(popup: &ShellPopup, frame: &mut Frame, area: Rect, theme: &ThemeConfig) {
+        let popup_area = centered_rect_fixed_width(SHELL_POPUP_WIDTH, SHELL_POPUP_HEIGHT_PERCENT, area);
+
+        // Parse ANSI escape sequences for colors
+        let styled_lines = parse_ansi_to_lines(&popup.cached_content);
+
+        // Build colors from theme
+        let colors = shell_popup::ShellPopupColors {
+            border: hex_to_color(&theme.color_popup_border),
+            header_fg: Color::Black,
+            header_bg: hex_to_color(&theme.color_popup_header),
+            footer_fg: Color::Black,
+            footer_bg: hex_to_color(&theme.color_dimmed),
+        };
+
+        shell_popup::render_shell_popup(popup, frame, popup_area, styled_lines, &colors);
     }
 
     fn draw_task_card(frame: &mut Frame, task: &Task, area: Rect, is_selected: bool, theme: &ThemeConfig) {
@@ -1703,33 +1645,35 @@ impl App {
                 }
                 // Scroll up with Ctrl+k or Ctrl+p or Ctrl+Up
                 KeyCode::Char('k') | KeyCode::Char('p') | KeyCode::Up if has_ctrl => {
-                    popup.scroll_offset -= 5;
+                    popup.scroll_up(5);
                 }
                 // Scroll down with Ctrl+j or Ctrl+n or Ctrl+Down
                 KeyCode::Char('j') | KeyCode::Char('n') | KeyCode::Down if has_ctrl => {
-                    popup.scroll_offset = (popup.scroll_offset + 5).min(0);
+                    popup.scroll_down(5);
                 }
                 // Page up with Ctrl+u or PageUp
                 KeyCode::Char('u') if has_ctrl => {
-                    popup.scroll_offset -= 20;
+                    popup.scroll_up(20);
                 }
                 KeyCode::PageUp => {
-                    popup.scroll_offset -= 20;
+                    popup.scroll_up(20);
                 }
                 // Page down with Ctrl+d or PageDown
                 KeyCode::Char('d') if has_ctrl => {
-                    popup.scroll_offset = (popup.scroll_offset + 20).min(0);
+                    popup.scroll_down(20);
                 }
                 KeyCode::PageDown => {
-                    popup.scroll_offset = (popup.scroll_offset + 20).min(0);
+                    popup.scroll_down(20);
                 }
                 // Ctrl+g = go to bottom (current)
                 KeyCode::Char('g') if has_ctrl => {
-                    popup.scroll_offset = 0;
+                    popup.scroll_to_bottom();
                 }
                 _ => {
                     // Forward all other keys to tmux window (including Esc)
                     send_key_to_tmux(&window_name, key.code);
+                    // After sending a key, refresh content to show the result
+                    popup.cached_content = capture_tmux_pane_with_history(&window_name, 500);
                 }
             }
         }
@@ -2336,14 +2280,6 @@ impl App {
                     .args(["sh", "-c", &claude_cmd])
                     .output()?;
 
-                // Resize the new window to fill the popup area
-                // Using 180 width to maximize horizontal space usage
-                let target = format!("{}:{}", self.state.project_name, window_name);
-                std::process::Command::new("tmux")
-                    .args(["-L", tmux::AGENT_SERVER])
-                    .args(["resize-pane", "-t", &target, "-x", "180", "-y", "50"])
-                    .output()?;
-
                 // Wait for Claude to show the bypass warning prompt, then accept it and rename session
                 // Poll until we see "Yes, I accept" option or timeout after 5 seconds
                 let target_clone = target.clone();
@@ -2538,29 +2474,26 @@ impl App {
     fn open_selected_task(&mut self) -> Result<()> {
         if let Some(task) = self.state.board.selected_task() {
             if let Some(window_name) = &task.session_name.clone() {
-                // Calculate popup dimensions based on terminal size
-                // Popup is 75% of terminal size, content area is 2 less (for borders)
-                if let Ok((term_width, term_height)) = crossterm::terminal::size() {
-                    let popup_width = (term_width as u32 * 75 / 100) as u16;
-                    let popup_height = (term_height as u32 * 75 / 100) as u16;
-                    let pane_width = popup_width.saturating_sub(2);
-                    let pane_height = popup_height.saturating_sub(4);
+                let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
 
-                    // Resize tmux pane to match popup dimensions
-                    let _ = std::process::Command::new("tmux")
-                        .args(["-L", tmux::AGENT_SERVER])
-                        .args(["resize-pane", "-t", window_name])
-                        .args(["-x", &pane_width.to_string()])
-                        .args(["-y", &pane_height.to_string()])
-                        .output();
+                // Resize tmux window to match popup dimensions (uses same constants as draw_shell_popup)
+                if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
+                    let pane_width = SHELL_POPUP_CONTENT_WIDTH;
+                    let popup_height = (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
+                    let pane_height = popup_height.saturating_sub(4); // -4 for borders + header/footer
+
+                    let target = format!("{}:{}", self.state.project_name, window_name);
+                    // TODO the resize should be done on target which is
+                    // session_name:window_name, but for some reason that doesn't work
+                    // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
+                    let _ = RealTmuxOps.resize_window(&window_name, pane_width, pane_height);
+                    popup.last_pane_size = Some((pane_width, pane_height));
                 }
 
-                // Open shell popup to view/control the detached tmux window
-                self.state.shell_popup = Some(ShellPopup {
-                    task_title: task.title.clone(),
-                    window_name: window_name.clone(),
-                    scroll_offset: 0,
-                });
+                // Capture initial content
+                popup.cached_content = capture_tmux_pane_with_history(window_name, 500);
+
+                self.state.shell_popup = Some(popup);
             }
         }
         Ok(())
@@ -2739,13 +2672,42 @@ fn capture_tmux_pane_with_history(window_name: &str, history_lines: i32) -> Vec<
     // -e: include escape sequences (colors)
     // -S: start line (negative = history)
     // -J: join wrapped lines (helps with varying pane widths)
-    std::process::Command::new("tmux")
+    let content = std::process::Command::new("tmux")
         .args(["-L", tmux::AGENT_SERVER])
         .args(["capture-pane", "-t", window_name, "-p", "-e", "-J"])
         .args(["-S", &format!("-{}", history_lines)])
         .output()
         .map(|o| o.stdout)
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    // Get the cursor position and pane height to know where the "real" content ends
+    // Lines below the cursor are unused pane buffer space
+    let cursor_info = get_tmux_cursor_info(window_name);
+
+    // Trim content to only include lines up to cursor position
+    shell_popup::trim_content_to_cursor(content, cursor_info)
+}
+
+/// Get cursor Y position and pane height from tmux
+/// Returns (cursor_y, pane_height) - both 0-indexed
+fn get_tmux_cursor_info(window_name: &str) -> Option<(usize, usize)> {
+    // Get both values in a single tmux call for efficiency
+    let output = std::process::Command::new("tmux")
+        .args(["-L", tmux::AGENT_SERVER])
+        .args(["display", "-p", "-t", window_name, "#{cursor_y} #{pane_height}"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = output_str.trim().split_whitespace().collect();
+        if parts.len() == 2 {
+            let cursor_y: usize = parts[0].parse().ok()?;
+            let pane_height: usize = parts[1].parse().ok()?;
+            return Some((cursor_y, pane_height));
+        }
+    }
+    None
 }
 
 /// Check if a PR is merged

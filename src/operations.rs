@@ -23,6 +23,9 @@ pub trait TmuxOperations {
 
     /// Capture pane content
     fn capture_pane(&self, target: &str) -> Result<String>;
+
+    /// Resize a tmux window
+    fn resize_window(&self, target: &str, width: u16, height: u16) -> Result<()>;
 }
 
 /// Operations for git worktree management
@@ -85,6 +88,16 @@ impl TmuxOperations for RealTmuxOps {
             .args(["capture-pane", "-t", target, "-p"])
             .output()?;
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn resize_window(&self, target: &str, width: u16, height: u16) -> Result<()> {
+        std::process::Command::new("tmux")
+            .args(["-L", crate::tmux::AGENT_SERVER])
+            .args(["resize-window", "-t", target])
+            .args(["-x", &width.to_string()])
+            .args(["-y", &height.to_string()])
+            .output()?;
+        Ok(())
     }
 }
 
