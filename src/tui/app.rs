@@ -12,9 +12,8 @@ use std::sync::mpsc;
 use crate::agent;
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig};
 use crate::db::{Database, Task, TaskStatus};
-use crate::git;
-use crate::tmux::{RealTmuxOps, TmuxOperations};
-use crate::tmux;
+use crate::git::{self, GitOperations, RealGitOps};
+use crate::tmux::{self, RealTmuxOps, TmuxOperations};
 use crate::AppMode;
 
 use super::board::BoardState;
@@ -55,6 +54,8 @@ struct AppState {
     available_agents: Vec<agent::Agent>,
     // Tmux operations (injectable for testing)
     tmux_ops: Box<dyn TmuxOperations>,
+    // Git operations (injectable for testing)
+    git_ops: Box<dyn git::GitOperations>,
     // Sidebar
     sidebar_visible: bool,
     sidebar_focused: bool,
@@ -183,10 +184,14 @@ pub struct App {
 
 impl App {
     pub fn new(mode: AppMode) -> Result<Self> {
-        Self::with_tmux_ops(mode, Box::new(RealTmuxOps))
+        Self::with_ops(mode, Box::new(RealTmuxOps), Box::new(RealGitOps))
     }
 
-    pub fn with_tmux_ops(mode: AppMode, tmux_ops: Box<dyn TmuxOperations>) -> Result<Self> {
+    pub fn with_ops(
+        mode: AppMode,
+        tmux_ops: Box<dyn TmuxOperations>,
+        git_ops: Box<dyn GitOperations>,
+    ) -> Result<Self> {
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -219,7 +224,7 @@ impl App {
                 global_db.upsert_project(&project)?;
 
                 // Ensure tmux session exists for this project
-                ensure_project_tmux_session(&name, &canonical);
+                ensure_project_tmux_session(&name, &canonical, tmux_ops.as_ref());
 
                 (Some(db), Some(canonical), name, project_config)
             }
@@ -245,6 +250,7 @@ impl App {
                 project_name: project_name.clone(),
                 available_agents,
                 tmux_ops,
+                git_ops,
                 sidebar_visible: true,
                 sidebar_focused: false,
                 projects: vec![],
@@ -323,7 +329,7 @@ impl App {
 
             // Refresh shell popup content periodically (every poll cycle when open)
             if let Some(ref mut popup) = self.state.shell_popup {
-                popup.cached_content = capture_tmux_pane_with_history(&popup.window_name, 500);
+                popup.cached_content = capture_tmux_pane_with_history(&popup.window_name, 500, self.state.tmux_ops.as_ref());
             }
 
             // Periodically refresh session status
@@ -1342,16 +1348,10 @@ impl App {
             if let Some(mut task) = db.get_task(task_id)? {
                 // Cleanup resources
                 if let Some(session_name) = &task.session_name {
-                    let _ = std::process::Command::new("tmux")
-                        .args(["-L", tmux::AGENT_SERVER])
-                        .args(["kill-window", "-t", session_name])
-                        .output();
+                    let _ = self.state.tmux_ops.kill_window(session_name);
                 }
                 if let Some(worktree) = &task.worktree_path {
-                    let _ = std::process::Command::new("git")
-                        .current_dir(&project_path)
-                        .args(["worktree", "remove", "--force", worktree])
-                        .output();
+                    let _ = self.state.git_ops.remove_worktree(&project_path, worktree);
                 }
                 // Keep the branch so task can be reopened later
 
@@ -1678,9 +1678,9 @@ impl App {
                 }
                 _ => {
                     // Forward all other keys to tmux window (including Esc)
-                    send_key_to_tmux(&window_name, key.code);
+                    send_key_to_tmux(&window_name, key.code, self.state.tmux_ops.as_ref());
                     // After sending a key, refresh content to show the result
-                    popup.cached_content = capture_tmux_pane_with_history(&window_name, 500);
+                    popup.cached_content = capture_tmux_pane_with_history(&window_name, 500, self.state.tmux_ops.as_ref());
                 }
             }
         }
@@ -2101,10 +2101,7 @@ impl App {
             if let Some(task) = db.get_task(task_id)? {
                 // Kill tmux window if exists (not the whole session)
                 if let Some(ref session_name) = task.session_name {
-                    let _ = std::process::Command::new("tmux")
-                        .args(["-L", crate::tmux::AGENT_SERVER])
-                        .args(["kill-window", "-t", session_name])
-                        .output();
+                    let _ = self.state.tmux_ops.kill_window(session_name);
                 }
 
                 // Remove worktree if exists
@@ -2112,13 +2109,10 @@ impl App {
                     // Extract slug from branch_name (format: "task/{slug}")
                     if let Some(ref branch_name) = task.branch_name {
                         let slug = branch_name.strip_prefix("task/").unwrap_or(branch_name);
-                        let _ = git::remove_worktree(project_path, slug);
+                        let _ = self.state.git_ops.remove_worktree(project_path, slug);
 
                         // Also try to delete the branch
-                        let _ = std::process::Command::new("git")
-                            .current_dir(project_path)
-                            .args(["branch", "-D", branch_name])
-                            .output();
+                        let _ = self.state.git_ops.delete_branch(project_path, branch_name);
                     }
                 }
 
@@ -2133,39 +2127,25 @@ impl App {
     fn show_task_diff(&mut self) -> Result<()> {
         if let Some(task) = self.state.board.selected_task() {
             let diff_content = if let Some(worktree_path) = &task.worktree_path {
+                let worktree = Path::new(worktree_path);
                 let mut sections = Vec::new();
 
                 // Unstaged changes (modified tracked files)
-                let unstaged = std::process::Command::new("git")
-                    .current_dir(worktree_path)
-                    .args(["diff"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_default();
+                let unstaged = self.state.git_ops.diff(worktree);
 
                 if !unstaged.trim().is_empty() {
                     sections.push(format!("=== Unstaged Changes ===\n\n{}", unstaged));
                 }
 
                 // Staged changes
-                let staged = std::process::Command::new("git")
-                    .current_dir(worktree_path)
-                    .args(["diff", "--cached"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_default();
+                let staged = self.state.git_ops.diff_cached(worktree);
 
                 if !staged.trim().is_empty() {
                     sections.push(format!("=== Staged Changes ===\n\n{}", staged));
                 }
 
                 // Untracked files - show as diff (new file content)
-                let untracked = std::process::Command::new("git")
-                    .current_dir(worktree_path)
-                    .args(["ls-files", "--others", "--exclude-standard"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_default();
+                let untracked = self.state.git_ops.list_untracked_files(worktree);
 
                 if !untracked.trim().is_empty() {
                     let mut untracked_section = String::from("=== Untracked Files ===\n");
@@ -2174,12 +2154,7 @@ impl App {
                             continue;
                         }
                         // Show diff for untracked file (as if adding new file)
-                        let file_diff = std::process::Command::new("git")
-                            .current_dir(worktree_path)
-                            .args(["diff", "--no-index", "/dev/null", file])
-                            .output()
-                            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                            .unwrap_or_default();
+                        let file_diff = self.state.git_ops.diff_untracked_file(worktree, file);
 
                         if !file_diff.trim().is_empty() {
                             untracked_section.push_str(&format!("\n{}", file_diff));
@@ -2278,7 +2253,7 @@ impl App {
                 let claude_cmd = format!("claude --dangerously-skip-permissions '{}'", escaped_prompt);
 
                 // Ensure project tmux session exists
-                ensure_project_tmux_session(&self.state.project_name, &project_path);
+                ensure_project_tmux_session(&self.state.project_name, &project_path, self.state.tmux_ops.as_ref());
 
                 self.state.tmux_ops.create_window(
                     &self.state.project_name,
@@ -2292,30 +2267,21 @@ impl App {
                 let target_clone = target.clone();
                 let task_id_clone = task.id.clone();
                 std::thread::spawn(move || {
+                    // Use RealTmuxOps directly in the background thread
+                    // (this polling logic is hard to test anyway)
+                    let tmux = RealTmuxOps;
                     let mut accepted = false;
                     for _ in 0..50 {
                         std::thread::sleep(std::time::Duration::from_millis(100));
 
                         // Check pane content for the bypass prompt
-                        let output = std::process::Command::new("tmux")
-                            .args(["-L", crate::tmux::AGENT_SERVER])
-                            .args(["capture-pane", "-t", &target_clone, "-p"])
-                            .output();
-
-                        if let Ok(output) = output {
-                            let content = String::from_utf8_lossy(&output.stdout);
+                        if let Ok(content) = tmux.capture_pane(&target_clone) {
                             // Look for the bypass warning prompt options
                             if content.contains("Yes, I accept") || content.contains("I accept the risk") {
                                 // Found the prompt, send "2" and Enter
-                                let _ = std::process::Command::new("tmux")
-                                    .args(["-L", crate::tmux::AGENT_SERVER])
-                                    .args(["send-keys", "-t", &target_clone, "2"])
-                                    .output();
+                                let _ = tmux.send_keys_literal(&target_clone, "2");
                                 std::thread::sleep(std::time::Duration::from_millis(50));
-                                let _ = std::process::Command::new("tmux")
-                                    .args(["-L", crate::tmux::AGENT_SERVER])
-                                    .args(["send-keys", "-t", &target_clone, "Enter"])
-                                    .output();
+                                let _ = tmux.send_keys_literal(&target_clone, "Enter");
                                 accepted = true;
                                 break;
                             }
@@ -2327,15 +2293,7 @@ impl App {
                         std::thread::sleep(std::time::Duration::from_millis(1000));
                         // Send /rename command to name the session with task ID for later resume
                         let rename_cmd = format!("/rename {}", task_id_clone);
-                        let _ = std::process::Command::new("tmux")
-                            .args(["-L", crate::tmux::AGENT_SERVER])
-                            .args(["send-keys", "-t", &target_clone, &rename_cmd])
-                            .output();
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                        let _ = std::process::Command::new("tmux")
-                            .args(["-L", crate::tmux::AGENT_SERVER])
-                            .args(["send-keys", "-t", &target_clone, "Enter"])
-                            .output();
+                        let _ = tmux.send_keys(&target_clone, &rename_cmd);
                     }
                 });
 
@@ -2347,16 +2305,8 @@ impl App {
             // When moving from Planning to Running, tell Claude to start implementing
             if current_status == TaskStatus::Planning && new_status == TaskStatus::Running {
                 if let Some(session_name) = &task.session_name {
-                    // Send message to start implementation
-                    std::process::Command::new("tmux")
-                        .args(["-L", tmux::AGENT_SERVER])
-                        .args(["send-keys", "-t", session_name, "Looks good, please proceed with the implementation."])
-                        .output()?;
-                    // Send Enter separately
-                    std::process::Command::new("tmux")
-                        .args(["-L", tmux::AGENT_SERVER])
-                        .args(["send-keys", "-t", session_name, "Enter"])
-                        .output()?;
+                    // Send message to start implementation (send_keys adds Enter at the end)
+                    let _ = self.state.tmux_ops.send_keys(session_name, "Looks good, please proceed with the implementation.");
                 }
             }
 
@@ -2432,16 +2382,10 @@ impl App {
                 // No PR - allow moving to Done directly (task might have been abandoned early)
                 // Cleanup any resources that might exist
                 if let Some(session_name) = &task.session_name {
-                    let _ = std::process::Command::new("tmux")
-                        .args(["-L", tmux::AGENT_SERVER])
-                        .args(["kill-window", "-t", session_name])
-                        .output();
+                    let _ = self.state.tmux_ops.kill_window(session_name);
                 }
                 if let Some(worktree) = &task.worktree_path {
-                    let _ = std::process::Command::new("git")
-                        .current_dir(&project_path)
-                        .args(["worktree", "remove", "--force", worktree])
-                        .output();
+                    let _ = self.state.git_ops.remove_worktree(&project_path, worktree);
                 }
                 // Keep the branch so task can be reopened later
                 task.session_name = None;
@@ -2498,7 +2442,7 @@ impl App {
                 }
 
                 // Capture initial content
-                popup.cached_content = capture_tmux_pane_with_history(window_name, 500);
+                popup.cached_content = capture_tmux_pane_with_history(window_name, 500, self.state.tmux_ops.as_ref());
 
                 self.state.shell_popup = Some(popup);
             }
@@ -2580,7 +2524,7 @@ impl App {
         let _ = self.state.global_db.upsert_project(&proj);
 
         // Ensure tmux session exists
-        ensure_project_tmux_session(&project.name, &project_path);
+        ensure_project_tmux_session(&project.name, &project_path, self.state.tmux_ops.as_ref());
 
         // Reload tasks for new project
         self.refresh_tasks()?;
@@ -2597,22 +2541,9 @@ impl Drop for App {
 }
 
 /// Ensure tmux session exists for a project
-fn ensure_project_tmux_session(project_name: &str, project_path: &Path) {
-    // Check if session already exists
-    let session_exists = std::process::Command::new("tmux")
-        .args(["-L", tmux::AGENT_SERVER])
-        .args(["has-session", "-t", project_name])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !session_exists {
-        // Create detached session for this project
-        let _ = std::process::Command::new("tmux")
-            .args(["-L", tmux::AGENT_SERVER])
-            .args(["new-session", "-d", "-s", project_name])
-            .args(["-c", &project_path.to_string_lossy().to_string()])
-            .output();
+fn ensure_project_tmux_session(project_name: &str, project_path: &Path, tmux_ops: &dyn TmuxOperations) {
+    if !tmux_ops.has_session(project_name) {
+        let _ = tmux_ops.create_session(project_name, &project_path.to_string_lossy());
     }
 }
 
@@ -2662,59 +2593,16 @@ fn centered_rect_fixed_width(fixed_width: u16, percent_y: u16, r: Rect) -> Rect 
     }
 }
 
-/// Capture content from a tmux pane (with ANSI escape sequences)
-fn capture_tmux_pane(window_name: &str) -> Vec<u8> {
-    std::process::Command::new("tmux")
-        .args(["-L", tmux::AGENT_SERVER])
-        .args(["capture-pane", "-t", window_name, "-p", "-e"])
-        .output()
-        .map(|o| o.stdout)
-        .unwrap_or_default()
-}
-
 /// Capture content from a tmux pane with history (with ANSI escape sequences)
-fn capture_tmux_pane_with_history(window_name: &str, history_lines: i32) -> Vec<u8> {
-    // Capture visible pane content plus history
-    // -p: print to stdout
-    // -e: include escape sequences (colors)
-    // -S: start line (negative = history)
-    // -J: join wrapped lines (helps with varying pane widths)
-    let content = std::process::Command::new("tmux")
-        .args(["-L", tmux::AGENT_SERVER])
-        .args(["capture-pane", "-t", window_name, "-p", "-e", "-J"])
-        .args(["-S", &format!("-{}", history_lines)])
-        .output()
-        .map(|o| o.stdout)
-        .unwrap_or_default();
+fn capture_tmux_pane_with_history(window_name: &str, history_lines: i32, tmux_ops: &dyn TmuxOperations) -> Vec<u8> {
+    let content = tmux_ops.capture_pane_with_history(window_name, history_lines);
 
     // Get the cursor position and pane height to know where the "real" content ends
     // Lines below the cursor are unused pane buffer space
-    let cursor_info = get_tmux_cursor_info(window_name);
+    let cursor_info = tmux_ops.get_cursor_info(window_name);
 
     // Trim content to only include lines up to cursor position
     shell_popup::trim_content_to_cursor(content, cursor_info)
-}
-
-/// Get cursor Y position and pane height from tmux
-/// Returns (cursor_y, pane_height) - both 0-indexed
-fn get_tmux_cursor_info(window_name: &str) -> Option<(usize, usize)> {
-    // Get both values in a single tmux call for efficiency
-    let output = std::process::Command::new("tmux")
-        .args(["-L", tmux::AGENT_SERVER])
-        .args(["display", "-p", "-t", window_name, "#{cursor_y} #{pane_height}"])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        let parts: Vec<&str> = output_str.trim().split_whitespace().collect();
-        if parts.len() == 2 {
-            let cursor_y: usize = parts[0].parse().ok()?;
-            let pane_height: usize = parts[1].parse().ok()?;
-            return Some((cursor_y, pane_height));
-        }
-    }
-    None
 }
 
 /// Check if a PR is merged
@@ -2750,26 +2638,24 @@ fn get_pr_state(pr_number: i32, project_path: &Path) -> Result<PrState> {
 }
 
 /// Generate PR title and description using Claude
-fn generate_pr_description(task_title: &str, worktree_path: Option<&str>, branch_name: Option<&str>) -> (String, String) {
+fn generate_pr_description(task_title: &str, worktree_path: Option<&str>, _branch_name: Option<&str>) -> (String, String) {
+    // Use RealGitOps directly in this standalone function
+    let git = RealGitOps;
+
     // Default values
     let default_title = task_title.to_string();
     let mut default_body = String::new();
 
     // Try to get git diff for context
     if let Some(worktree) = worktree_path {
+        let worktree_path = Path::new(worktree);
         // Get diff from main
-        let diff_output = std::process::Command::new("git")
-            .current_dir(worktree)
-            .args(["diff", "main", "--stat"])
-            .output();
+        let diff_stat = git.diff_stat_from_main(worktree_path);
 
-        if let Ok(output) = diff_output {
-            let diff_stat = String::from_utf8_lossy(&output.stdout);
-            if !diff_stat.is_empty() {
-                default_body.push_str("## Changes\n```\n");
-                default_body.push_str(&diff_stat);
-                default_body.push_str("```\n");
-            }
+        if !diff_stat.is_empty() {
+            default_body.push_str("## Changes\n```\n");
+            default_body.push_str(&diff_stat);
+            default_body.push_str("```\n");
         }
 
         // Try to use Claude to generate a better description
@@ -2798,50 +2684,27 @@ fn generate_pr_description(task_title: &str, worktree_path: Option<&str>, branch
 
 /// Create a PR with provided title and body, return (pr_number, pr_url)
 fn create_pr_with_content(task: &Task, project_path: &Path, pr_title: &str, pr_body: &str) -> Result<(i32, String)> {
+    // Use RealGitOps directly in this standalone function
+    let git = RealGitOps;
+
     let worktree = task.worktree_path.as_deref().unwrap_or(".");
+    let worktree_path = Path::new(worktree);
 
     // Stage all changes
-    std::process::Command::new("git")
-        .current_dir(worktree)
-        .args(["add", "-A"])
-        .output()?;
+    git.add_all(worktree_path)?;
 
     // Check if there are changes to commit
-    let status_output = std::process::Command::new("git")
-        .current_dir(worktree)
-        .args(["status", "--porcelain"])
-        .output()?;
-
-    let has_changes = !status_output.stdout.is_empty();
+    let has_changes = git.has_changes(worktree_path);
 
     // Commit if there are staged changes
     if has_changes {
         let commit_msg = format!("{}\n\nCo-Authored-By: Claude <noreply@anthropic.com>", pr_title);
-        let commit_output = std::process::Command::new("git")
-            .current_dir(worktree)
-            .args(["commit", "-m", &commit_msg])
-            .output()?;
-
-        if !commit_output.status.success() {
-            let stderr = String::from_utf8_lossy(&commit_output.stderr);
-            // Only fail if it's not "nothing to commit"
-            if !stderr.contains("nothing to commit") {
-                anyhow::bail!("Failed to commit changes: {}", stderr);
-            }
-        }
+        git.commit(worktree_path, &commit_msg)?;
     }
 
     // Push the branch
     if let Some(branch) = &task.branch_name {
-        let push_output = std::process::Command::new("git")
-            .current_dir(worktree)
-            .args(["push", "-u", "origin", branch])
-            .output()?;
-
-        if !push_output.status.success() {
-            let stderr = String::from_utf8_lossy(&push_output.stderr);
-            anyhow::bail!("Failed to push branch: {}", stderr);
-        }
+        git.push(worktree_path, branch, true)?;
     }
 
     // Create PR
@@ -2874,49 +2737,27 @@ fn create_pr_with_content(task: &Task, project_path: &Path, pr_title: &str, pr_b
 
 /// Push changes to an existing PR (commit and push only, no PR creation)
 fn push_changes_to_existing_pr(task: &Task, _project_path: &Path) -> Result<String> {
+    // Use RealGitOps directly in this standalone function
+    let git = RealGitOps;
+
     let worktree = task.worktree_path.as_deref().unwrap_or(".");
+    let worktree_path = Path::new(worktree);
 
     // Stage all changes
-    std::process::Command::new("git")
-        .current_dir(worktree)
-        .args(["add", "-A"])
-        .output()?;
+    git.add_all(worktree_path)?;
 
     // Check if there are changes to commit
-    let status_output = std::process::Command::new("git")
-        .current_dir(worktree)
-        .args(["status", "--porcelain"])
-        .output()?;
-
-    let has_changes = !status_output.stdout.is_empty();
+    let has_changes = git.has_changes(worktree_path);
 
     // Commit if there are staged changes
     if has_changes {
         let commit_msg = "Address review comments\n\nCo-Authored-By: Claude <noreply@anthropic.com>";
-        let commit_output = std::process::Command::new("git")
-            .current_dir(worktree)
-            .args(["commit", "-m", commit_msg])
-            .output()?;
-
-        if !commit_output.status.success() {
-            let stderr = String::from_utf8_lossy(&commit_output.stderr);
-            if !stderr.contains("nothing to commit") {
-                anyhow::bail!("Failed to commit changes: {}", stderr);
-            }
-        }
+        git.commit(worktree_path, commit_msg)?;
     }
 
     // Push the branch
     if let Some(branch) = &task.branch_name {
-        let push_output = std::process::Command::new("git")
-            .current_dir(worktree)
-            .args(["push", "origin", branch])
-            .output()?;
-
-        if !push_output.status.success() {
-            let stderr = String::from_utf8_lossy(&push_output.stderr);
-            anyhow::bail!("Failed to push changes: {}", stderr);
-        }
+        git.push(worktree_path, branch, false)?;
     }
 
     // Return the existing PR URL
@@ -2924,7 +2765,7 @@ fn push_changes_to_existing_pr(task: &Task, _project_path: &Path) -> Result<Stri
 }
 
 /// Send a key to a tmux pane
-fn send_key_to_tmux(window_name: &str, key: KeyCode) {
+fn send_key_to_tmux(window_name: &str, key: KeyCode, tmux_ops: &dyn TmuxOperations) {
     let key_str = match key {
         KeyCode::Char(c) => c.to_string(),
         KeyCode::Enter => "Enter".to_string(),
@@ -2945,10 +2786,7 @@ fn send_key_to_tmux(window_name: &str, key: KeyCode) {
         _ => return,
     };
 
-    let _ = std::process::Command::new("tmux")
-        .args(["-L", tmux::AGENT_SERVER])
-        .args(["send-keys", "-t", window_name, &key_str])
-        .output();
+    let _ = tmux_ops.send_keys_literal(window_name, &key_str);
 }
 
 /// Parse ANSI escape sequences to ratatui Lines with colors
@@ -3092,46 +2930,41 @@ fn parse_sgr(seq: &str, mut style: Style) -> Style {
 
 /// Fuzzy find files in a directory (respects .gitignore)
 fn fuzzy_find_files(project_path: &Path, pattern: &str, max_results: usize) -> Vec<String> {
-    use std::process::Command;
+    // Use RealGitOps directly in this standalone function
+    let git = RealGitOps;
 
     // Use git ls-files to get tracked files (respects .gitignore)
-    let output = Command::new("git")
-        .current_dir(project_path)
-        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
-        .output();
+    let files = git.list_files(project_path);
 
-    if let Ok(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let files: Vec<String> = stdout.lines().map(String::from).collect();
-
-        if pattern.is_empty() {
-            // Show first N files when pattern is empty
-            return files.into_iter().take(max_results).collect();
-        }
-
-        let pattern_lower = pattern.to_lowercase();
-        let mut matches: Vec<(String, i32)> = files
-            .into_iter()
-            .filter_map(|path| {
-                let path_lower = path.to_lowercase();
-
-                // Simple fuzzy matching: check if all pattern chars appear in order
-                let score = fuzzy_score(&path_lower, &pattern_lower);
-                if score > 0 {
-                    Some((path, score))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Sort by score (higher is better)
-        matches.sort_by(|a, b| b.1.cmp(&a.1));
-
-        return matches.into_iter().take(max_results).map(|(path, _)| path).collect();
+    if files.is_empty() {
+        return vec![];
     }
 
-    vec![]
+    if pattern.is_empty() {
+        // Show first N files when pattern is empty
+        return files.into_iter().take(max_results).collect();
+    }
+
+    let pattern_lower = pattern.to_lowercase();
+    let mut matches: Vec<(String, i32)> = files
+        .into_iter()
+        .filter_map(|path| {
+            let path_lower = path.to_lowercase();
+
+            // Simple fuzzy matching: check if all pattern chars appear in order
+            let score = fuzzy_score(&path_lower, &pattern_lower);
+            if score > 0 {
+                Some((path, score))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by score (higher is better)
+    matches.sort_by(|a, b| b.1.cmp(&a.1));
+
+    matches.into_iter().take(max_results).map(|(path, _)| path).collect()
 }
 
 /// Calculate fuzzy match score (higher is better, 0 means no match)
