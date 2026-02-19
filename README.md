@@ -102,6 +102,22 @@ color_accent = "#00FFFF"
 color_description = "#E8909C"
 ```
 
+### Project Configuration
+
+Per-project settings can be placed in `.agtx/config.toml` at the project root:
+
+```toml
+# Files to copy from project root into each new worktree (comma-separated)
+# Paths are relative and preserve directory structure
+copy_files = ".env, .env.local, web/.env.local"
+
+# Shell command to run inside the worktree after creation and file copying
+init_script = "scripts/init_worktree.sh"
+```
+
+Both options run during the Backlog → Planning transition, after `git worktree add`
+and before the agent session starts.
+
 ## How It Works
 
 ### Architecture
