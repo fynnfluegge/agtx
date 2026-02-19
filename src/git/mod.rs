@@ -1,5 +1,7 @@
+mod operations;
 mod worktree;
 
+pub use operations::*;
 pub use worktree::*;
 
 use anyhow::{Context, Result};

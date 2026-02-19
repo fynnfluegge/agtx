@@ -13,7 +13,7 @@ use crate::agent;
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig};
 use crate::db::{Database, Task, TaskStatus};
 use crate::git;
-use crate::operations::{RealTmuxOps, TmuxOperations};
+use crate::tmux::{RealTmuxOps, TmuxOperations};
 use crate::tmux;
 use crate::AppMode;
 
@@ -53,6 +53,8 @@ struct AppState {
     project_path: Option<PathBuf>,
     project_name: String,
     available_agents: Vec<agent::Agent>,
+    // Tmux operations (injectable for testing)
+    tmux_ops: Box<dyn TmuxOperations>,
     // Sidebar
     sidebar_visible: bool,
     sidebar_focused: bool,
@@ -181,6 +183,10 @@ pub struct App {
 
 impl App {
     pub fn new(mode: AppMode) -> Result<Self> {
+        Self::with_tmux_ops(mode, Box::new(RealTmuxOps))
+    }
+
+    pub fn with_tmux_ops(mode: AppMode, tmux_ops: Box<dyn TmuxOperations>) -> Result<Self> {
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -238,6 +244,7 @@ impl App {
                 project_path,
                 project_name: project_name.clone(),
                 available_agents,
+                tmux_ops,
                 sidebar_visible: true,
                 sidebar_focused: false,
                 projects: vec![],
@@ -2273,12 +2280,12 @@ impl App {
                 // Ensure project tmux session exists
                 ensure_project_tmux_session(&self.state.project_name, &project_path);
 
-                std::process::Command::new("tmux")
-                    .args(["-L", tmux::AGENT_SERVER])
-                    .args(["new-window", "-d", "-t", &self.state.project_name, "-n", &window_name])
-                    .args(["-c", &worktree_path_str])
-                    .args(["sh", "-c", &claude_cmd])
-                    .output()?;
+                self.state.tmux_ops.create_window(
+                    &self.state.project_name,
+                    &window_name,
+                    &worktree_path_str,
+                    Some(claude_cmd),
+                )?;
 
                 // Wait for Claude to show the bypass warning prompt, then accept it and rename session
                 // Poll until we see "Yes, I accept" option or timeout after 5 seconds
@@ -2486,7 +2493,7 @@ impl App {
                     // TODO the resize should be done on target which is
                     // session_name:window_name, but for some reason that doesn't work
                     // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
-                    let _ = RealTmuxOps.resize_window(&window_name, pane_width, pane_height);
+                    let _ = self.state.tmux_ops.resize_window(&window_name, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
                 }
 
