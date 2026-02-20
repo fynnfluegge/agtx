@@ -2263,9 +2263,10 @@ impl App {
                 };
 
                 // Initialize worktree: copy files and run init script
+                let worktree_path = Path::new(&worktree_path_str);
                 let init_warnings = git::initialize_worktree(
                     &project_path,
-                    &worktree_path,
+                    worktree_path,
                     self.state.config.copy_files.as_deref(),
                     self.state.config.init_script.as_deref(),
                 );
