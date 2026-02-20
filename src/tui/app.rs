@@ -13,7 +13,7 @@ use crate::agent::{self, AgentOperations, CodingAgent};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig};
 use crate::db::{Database, Task, TaskStatus};
 use crate::git::{self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps};
-use crate::tmux::{self, RealTmuxOps, TmuxOperations};
+use crate::tmux::{RealTmuxOps, TmuxOperations};
 use crate::AppMode;
 
 use super::board::BoardState;
@@ -51,7 +51,6 @@ struct AppState {
     config: MergedConfig,
     project_path: Option<PathBuf>,
     project_name: String,
-    available_agents: Vec<agent::Agent>,
     // Tmux operations (injectable for testing)
     tmux_ops: Arc<dyn TmuxOperations>,
     // Git operations (injectable for testing)
@@ -75,8 +74,6 @@ struct AppState {
     task_search: Option<TaskSearchState>,
     // PR creation confirmation popup
     pr_confirm_popup: Option<PrConfirmPopup>,
-    // Moving Review back to Running
-    review_to_running_task_id: Option<String>,
     // Git diff popup
     diff_popup: Option<DiffPopup>,
     // Channel for receiving PR description generation results
@@ -215,9 +212,6 @@ impl App {
         let global_config = GlobalConfig::load().unwrap_or_default();
         let global_db = Database::open_global()?;
 
-        // Detect available agents
-        let available_agents = agent::detect_available_agents();
-
         // Setup based on mode
         let (db, project_path, project_name, project_config) = match &mode {
             AppMode::Dashboard => (None, None, "Dashboard".to_string(), ProjectConfig::default()),
@@ -260,7 +254,6 @@ impl App {
                 config,
                 project_path,
                 project_name: project_name.clone(),
-                available_agents,
                 tmux_ops,
                 git_ops,
                 git_provider_ops,
@@ -274,7 +267,6 @@ impl App {
                 file_search: None,
                 task_search: None,
                 pr_confirm_popup: None,
-                review_to_running_task_id: None,
                 diff_popup: None,
                 pr_generation_rx: None,
                 pr_status_popup: None,
@@ -460,7 +452,7 @@ impl App {
 
             // Check if we need a scrollbar
             let needs_scrollbar = tasks.len() > max_visible_cards;
-            let content_width = if needs_scrollbar {
+            let _content_width = if needs_scrollbar {
                 columns[i].width.saturating_sub(3) // Leave room for scrollbar
             } else {
                 columns[i].width.saturating_sub(2)
@@ -1477,7 +1469,7 @@ impl App {
 
     fn create_pr_and_move_to_review_with_content(&mut self, task_id: &str, pr_title: &str, pr_body: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, self.state.project_path.clone()) {
-            if let Some(mut task) = db.get_task(task_id)? {
+            if let Some(task) = db.get_task(task_id)? {
                 // Keep tmux window open - session_name stays set for resume
 
                 // Show loading popup
@@ -2398,7 +2390,7 @@ impl App {
                     let popup_height = (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
                     let pane_height = popup_height.saturating_sub(4); // -4 for borders + header/footer
 
-                    let target = format!("{}:{}", self.state.project_name, window_name);
+                    let _target = format!("{}:{}", self.state.project_name, window_name);
                     // TODO the resize should be done on target which is
                     // session_name:window_name, but for some reason that doesn't work
                     // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
@@ -2452,13 +2444,6 @@ impl App {
 
     fn refresh_sessions(&mut self) -> Result<()> {
         // TODO: Periodically check tmux sessions and update task status
-        Ok(())
-    }
-
-    fn switch_to_project(&mut self, project: &ProjectInfo) -> Result<()> {
-        self.switch_to_project_keep_sidebar(project)?;
-        // Unfocus sidebar
-        self.state.sidebar_focused = false;
         Ok(())
     }
 

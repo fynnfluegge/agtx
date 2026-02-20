@@ -38,7 +38,7 @@ impl BoardState {
             .get(self.selected_column)
             .copied()?;
 
-        let mut matching_indices: Vec<usize> = self
+        let matching_indices: Vec<usize> = self
             .tasks
             .iter()
             .enumerate()
