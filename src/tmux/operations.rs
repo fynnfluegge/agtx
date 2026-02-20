@@ -2,11 +2,11 @@
 
 use anyhow::Result;
 
-#[cfg(any(test, feature = "test-mocks"))]
+#[cfg(feature = "test-mocks")]
 use mockall::automock;
 
 /// Operations for tmux window management
-#[cfg_attr(any(test, feature = "test-mocks"), automock)]
+#[cfg_attr(feature = "test-mocks", automock)]
 pub trait TmuxOperations: Send + Sync {
     /// Create a new tmux window in a session with an optional command to run
     fn create_window(
@@ -93,9 +93,15 @@ impl TmuxOperations for RealTmuxOps {
     }
 
     fn send_keys(&self, target: &str, keys: &str) -> Result<()> {
+        // Send the text first
         std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
-            .args(["send-keys", "-t", target, keys, "Enter"])
+            .args(["send-keys", "-t", target, keys])
+            .output()?;
+        // Send Enter separately (like the original implementation)
+        std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["send-keys", "-t", target, "Enter"])
             .output()?;
         Ok(())
     }

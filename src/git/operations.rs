@@ -3,11 +3,11 @@
 use anyhow::Result;
 use std::path::Path;
 
-#[cfg(any(test, feature = "test-mocks"))]
+#[cfg(feature = "test-mocks")]
 use mockall::automock;
 
 /// Operations for git worktree management
-#[cfg_attr(any(test, feature = "test-mocks"), automock)]
+#[cfg_attr(feature = "test-mocks", automock)]
 pub trait GitOperations: Send + Sync {
     /// Create a worktree for a task
     fn create_worktree(&self, project_path: &Path, task_slug: &str) -> Result<String>;

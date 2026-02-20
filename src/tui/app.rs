@@ -7,12 +7,12 @@ use crossterm::{
 use ratatui::{prelude::*, widgets::*};
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
-use crate::agent;
+use crate::agent::{self, AgentOperations, CodingAgent};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig};
 use crate::db::{Database, Task, TaskStatus};
-use crate::git::{self, GitOperations, RealGitOps};
+use crate::git::{self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps};
 use crate::tmux::{self, RealTmuxOps, TmuxOperations};
 use crate::AppMode;
 
@@ -53,9 +53,13 @@ struct AppState {
     project_name: String,
     available_agents: Vec<agent::Agent>,
     // Tmux operations (injectable for testing)
-    tmux_ops: Box<dyn TmuxOperations>,
+    tmux_ops: Arc<dyn TmuxOperations>,
     // Git operations (injectable for testing)
-    git_ops: Box<dyn git::GitOperations>,
+    git_ops: Arc<dyn git::GitOperations>,
+    // Git provider operations (injectable for testing)
+    git_provider_ops: Arc<dyn GitProviderOperations>,
+    // Agent operations (injectable for testing)
+    agent_ops: Arc<dyn AgentOperations>,
     // Sidebar
     sidebar_visible: bool,
     sidebar_focused: bool,
@@ -144,7 +148,7 @@ struct PrConfirmPopup {
     pr_title: String,
     pr_body: String,
     editing_title: bool, // true = editing title, false = editing body
-    generating: bool,    // true while Claude is generating description
+    generating: bool,    // true while agent is generating description
 }
 
 /// Info about a project for the sidebar
@@ -184,13 +188,21 @@ pub struct App {
 
 impl App {
     pub fn new(mode: AppMode) -> Result<Self> {
-        Self::with_ops(mode, Box::new(RealTmuxOps), Box::new(RealGitOps))
+        Self::with_ops(
+            mode,
+            Arc::new(RealTmuxOps),
+            Arc::new(RealGitOps),
+            Arc::new(RealGitHubOps),
+            Arc::new(CodingAgent::default()),
+        )
     }
 
     pub fn with_ops(
         mode: AppMode,
-        tmux_ops: Box<dyn TmuxOperations>,
-        git_ops: Box<dyn GitOperations>,
+        tmux_ops: Arc<dyn TmuxOperations>,
+        git_ops: Arc<dyn GitOperations>,
+        git_provider_ops: Arc<dyn GitProviderOperations>,
+        agent_ops: Arc<dyn AgentOperations>,
     ) -> Result<Self> {
         // Setup terminal
         enable_raw_mode()?;
@@ -251,6 +263,8 @@ impl App {
                 available_agents,
                 tmux_ops,
                 git_ops,
+                git_provider_ops,
+                agent_ops,
                 sidebar_visible: true,
                 sidebar_focused: false,
                 projects: vec![],
@@ -718,7 +732,8 @@ impl App {
                     .as_millis() / 100) as usize % spinner_chars.len();
                 let spinner = spinner_chars[spinner_idx];
 
-                let loading_text = format!("{} Generating PR description with Claude...", spinner);
+                let agent_name = agent::default_agent().map(|a| a.name).unwrap_or_else(|| "agent".to_string());
+                let loading_text = format!("{} Generating PR description with {}...", spinner, agent_name);
                 let loading = Paragraph::new(loading_text)
                     .style(Style::default().fg(Color::Cyan))
                     .alignment(ratatui::layout::Alignment::Center);
@@ -1387,11 +1402,15 @@ impl App {
 
                 let title_for_thread = task_title.clone();
                 let worktree_for_thread = worktree_path.clone();
+                let git_ops = Arc::clone(&self.state.git_ops);
+                let agent_ops = Arc::clone(&self.state.agent_ops);
                 std::thread::spawn(move || {
                     let (pr_title, pr_body) = generate_pr_description(
                         &title_for_thread,
                         worktree_for_thread.as_deref(),
                         None,
+                        git_ops.as_ref(),
+                        agent_ops.as_ref(),
                     );
                     let _ = tx.send((pr_title, pr_body));
                 });
@@ -1480,6 +1499,9 @@ impl App {
                 let project_path_clone = project_path.clone();
                 let pr_title_clone = pr_title.to_string();
                 let pr_body_clone = pr_body.to_string();
+                let git_ops = Arc::clone(&self.state.git_ops);
+                let git_provider_ops = Arc::clone(&self.state.git_provider_ops);
+                let agent_ops = Arc::clone(&self.state.agent_ops);
 
                 // Create channel for result
                 let (tx, rx) = mpsc::channel();
@@ -1487,7 +1509,15 @@ impl App {
 
                 // Spawn background thread to create PR
                 std::thread::spawn(move || {
-                    let result = create_pr_with_content(&task_clone, &project_path_clone, &pr_title_clone, &pr_body_clone);
+                    let result = create_pr_with_content(
+                        &task_clone,
+                        &project_path_clone,
+                        &pr_title_clone,
+                        &pr_body_clone,
+                        git_ops.as_ref(),
+                        git_provider_ops.as_ref(),
+                        agent_ops.as_ref(),
+                    );
                     match result {
                         Ok((pr_number, pr_url)) => {
                             // Update task in database from background thread
@@ -2049,7 +2079,7 @@ impl App {
     fn update_file_search_matches(&mut self) {
         if let (Some(ref mut search), Some(ref project_path)) = (&mut self.state.file_search, &self.state.project_path) {
             let pattern = &search.pattern;
-            search.matches = fuzzy_find_files(project_path, pattern, 10);
+            search.matches = fuzzy_find_files(project_path, pattern, 10, self.state.git_ops.as_ref());
             search.selected = 0;
         }
     }
@@ -2221,19 +2251,19 @@ impl App {
                 let target = format!("{}:{}", self.state.project_name, window_name);
 
                 // Create git worktree from main branch
-                let worktree_path = match git::create_worktree(&project_path, &unique_slug) {
+                let worktree_path_str = match self.state.git_ops.create_worktree(&project_path, &unique_slug) {
                     Ok(path) => path,
                     Err(e) => {
                         // Log error but don't crash - worktree might already exist
                         eprintln!("Failed to create worktree: {}", e);
                         // Try to use existing worktree path
                         project_path.join(".agtx").join("worktrees").join(&unique_slug)
+                            .to_string_lossy().to_string()
                     }
                 };
-                let worktree_path_str = worktree_path.to_string_lossy().to_string();
 
                 // Build the prompt from task title and description
-                // Instruct Claude to plan first and wait for approval
+                // Instruct agent to plan first and wait for approval
                 let task_content = if let Some(desc) = &task.description {
                     format!("{}\n\n{}", task.title, desc)
                 } else {
@@ -2246,11 +2276,9 @@ impl App {
                     task_content
                 );
 
-                // Escape single quotes in prompt for shell
-                let escaped_prompt = prompt.replace('\'', "'\"'\"'");
-
-                // Create tmux window and start Claude Code
-                let claude_cmd = format!("claude --dangerously-skip-permissions '{}'", escaped_prompt);
+                // Get the default agent and build the interactive command
+                let agent = agent::default_agent().unwrap_or_else(|| agent::get_agent("claude").unwrap());
+                let agent_cmd = agent.build_interactive_command(&prompt);
 
                 // Ensure project tmux session exists
                 ensure_project_tmux_session(&self.state.project_name, &project_path, self.state.tmux_ops.as_ref());
@@ -2259,41 +2287,39 @@ impl App {
                     &self.state.project_name,
                     &window_name,
                     &worktree_path_str,
-                    Some(claude_cmd),
+                    Some(agent_cmd),
                 )?;
 
-                // Wait for Claude to show the bypass warning prompt, then accept it and rename session
+                // Wait for agent to show the bypass warning prompt, then accept it and rename session
                 // Poll until we see "Yes, I accept" option or timeout after 5 seconds
                 let target_clone = target.clone();
                 let task_id_clone = task.id.clone();
+                let tmux_ops = Arc::clone(&self.state.tmux_ops);
                 std::thread::spawn(move || {
-                    // Use RealTmuxOps directly in the background thread
-                    // (this polling logic is hard to test anyway)
-                    let tmux = RealTmuxOps;
                     let mut accepted = false;
                     for _ in 0..50 {
                         std::thread::sleep(std::time::Duration::from_millis(100));
 
                         // Check pane content for the bypass prompt
-                        if let Ok(content) = tmux.capture_pane(&target_clone) {
+                        if let Ok(content) = tmux_ops.capture_pane(&target_clone) {
                             // Look for the bypass warning prompt options
                             if content.contains("Yes, I accept") || content.contains("I accept the risk") {
                                 // Found the prompt, send "2" and Enter
-                                let _ = tmux.send_keys_literal(&target_clone, "2");
+                                let _ = tmux_ops.send_keys_literal(&target_clone, "2");
                                 std::thread::sleep(std::time::Duration::from_millis(50));
-                                let _ = tmux.send_keys_literal(&target_clone, "Enter");
+                                let _ = tmux_ops.send_keys_literal(&target_clone, "Enter");
                                 accepted = true;
                                 break;
                             }
                         }
                     }
 
-                    // After accepting, wait for Claude to be ready and rename the session
+                    // After accepting, wait for agent to be ready and rename the session
                     if accepted {
                         std::thread::sleep(std::time::Duration::from_millis(1000));
                         // Send /rename command to name the session with task ID for later resume
                         let rename_cmd = format!("/rename {}", task_id_clone);
-                        let _ = tmux.send_keys(&target_clone, &rename_cmd);
+                        let _ = tmux_ops.send_keys(&target_clone, &rename_cmd);
                     }
                 });
 
@@ -2302,7 +2328,7 @@ impl App {
                 task.branch_name = Some(format!("task/{}", unique_slug));
             }
 
-            // When moving from Planning to Running, tell Claude to start implementing
+            // When moving from Planning to Running, tell agent to start implementing
             if current_status == TaskStatus::Planning && new_status == TaskStatus::Running {
                 if let Some(session_name) = &task.session_name {
                     // Send message to start implementation (send_keys adds Enter at the end)
@@ -2323,12 +2349,14 @@ impl App {
 
                     let task_clone = task.clone();
                     let project_path_clone = project_path.clone();
+                    let git_ops = Arc::clone(&self.state.git_ops);
+                    let agent_ops = Arc::clone(&self.state.agent_ops);
 
                     let (tx, rx) = mpsc::channel();
                     self.state.pr_creation_rx = Some(rx);
 
                     std::thread::spawn(move || {
-                        let result = push_changes_to_existing_pr(&task_clone, &project_path_clone);
+                        let result = push_changes_to_existing_pr(&task_clone, git_ops.as_ref(), agent_ops.as_ref());
                         match result {
                             Ok(pr_url) => {
                                 // Update task in database
@@ -2363,13 +2391,13 @@ impl App {
             // When moving from Review to Done: Show confirmation with PR state
             if current_status == TaskStatus::Review && new_status == TaskStatus::Done {
                 if let Some(pr_number) = task.pr_number {
-                    let pr_state = get_pr_state(pr_number, &project_path)?;
+                    let pr_state = self.state.git_provider_ops.get_pr_state(&project_path, pr_number)?;
 
                     let confirm_state = match pr_state {
-                        PrState::Merged => DoneConfirmPrState::Merged,
-                        PrState::Closed => DoneConfirmPrState::Closed,
-                        PrState::Open => DoneConfirmPrState::Open,
-                        PrState::Unknown => DoneConfirmPrState::Unknown,
+                        PullRequestState::Merged => DoneConfirmPrState::Merged,
+                        PullRequestState::Closed => DoneConfirmPrState::Closed,
+                        PullRequestState::Open => DoneConfirmPrState::Open,
+                        PullRequestState::Unknown => DoneConfirmPrState::Unknown,
                     };
 
                     self.state.done_confirm_popup = Some(DoneConfirmPopup {
@@ -2605,43 +2633,14 @@ fn capture_tmux_pane_with_history(window_name: &str, history_lines: i32, tmux_op
     shell_popup::trim_content_to_cursor(content, cursor_info)
 }
 
-/// Check if a PR is merged
-/// PR state from GitHub
-#[derive(Debug, Clone, PartialEq)]
-enum PrState {
-    Open,
-    Merged,
-    Closed,
-    Unknown,
-}
-
-fn get_pr_state(pr_number: i32, project_path: &Path) -> Result<PrState> {
-    let output = std::process::Command::new("gh")
-        .current_dir(project_path)
-        .args(["pr", "view", &pr_number.to_string(), "--json", "state"])
-        .output()?;
-
-    if !output.status.success() {
-        return Ok(PrState::Unknown);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.contains("MERGED") {
-        Ok(PrState::Merged)
-    } else if stdout.contains("CLOSED") {
-        Ok(PrState::Closed)
-    } else if stdout.contains("OPEN") {
-        Ok(PrState::Open)
-    } else {
-        Ok(PrState::Unknown)
-    }
-}
-
-/// Generate PR title and description using Claude
-fn generate_pr_description(task_title: &str, worktree_path: Option<&str>, _branch_name: Option<&str>) -> (String, String) {
-    // Use RealGitOps directly in this standalone function
-    let git = RealGitOps;
-
+/// Generate PR title and description using the configured agent
+pub(crate) fn generate_pr_description(
+    task_title: &str,
+    worktree_path: Option<&str>,
+    _branch_name: Option<&str>,
+    git_ops: &dyn GitOperations,
+    agent_ops: &dyn AgentOperations,
+) -> (String, String) {
     // Default values
     let default_title = task_title.to_string();
     let mut default_body = String::new();
@@ -2650,7 +2649,7 @@ fn generate_pr_description(task_title: &str, worktree_path: Option<&str>, _branc
     if let Some(worktree) = worktree_path {
         let worktree_path = Path::new(worktree);
         // Get diff from main
-        let diff_stat = git.diff_stat_from_main(worktree_path);
+        let diff_stat = git_ops.diff_stat_from_main(worktree_path);
 
         if !diff_stat.is_empty() {
             default_body.push_str("## Changes\n```\n");
@@ -2658,23 +2657,15 @@ fn generate_pr_description(task_title: &str, worktree_path: Option<&str>, _branc
             default_body.push_str("```\n");
         }
 
-        // Try to use Claude to generate a better description
+        // Try to use the agent to generate a better description
         let prompt = format!(
             "Generate a concise PR description for these changes. Task: '{}'. Output only the description, no markdown code blocks around it. Keep it brief (2-3 sentences max).",
             task_title
         );
 
-        let claude_output = std::process::Command::new("claude")
-            .current_dir(worktree)
-            .args(["--print", &prompt])
-            .output();
-
-        if let Ok(output) = claude_output {
-            if output.status.success() {
-                let generated = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !generated.is_empty() {
-                    default_body = format!("{}\n\n{}", generated, default_body);
-                }
+        if let Ok(generated) = agent_ops.generate_text(worktree_path, &prompt) {
+            if !generated.is_empty() {
+                default_body = format!("{}\n\n{}", generated, default_body);
             }
         }
     }
@@ -2683,81 +2674,68 @@ fn generate_pr_description(task_title: &str, worktree_path: Option<&str>, _branc
 }
 
 /// Create a PR with provided title and body, return (pr_number, pr_url)
-fn create_pr_with_content(task: &Task, project_path: &Path, pr_title: &str, pr_body: &str) -> Result<(i32, String)> {
-    // Use RealGitOps directly in this standalone function
-    let git = RealGitOps;
-
+fn create_pr_with_content(
+    task: &Task,
+    project_path: &Path,
+    pr_title: &str,
+    pr_body: &str,
+    git_ops: &dyn GitOperations,
+    git_provider_ops: &dyn GitProviderOperations,
+    agent_ops: &dyn AgentOperations,
+) -> Result<(i32, String)> {
     let worktree = task.worktree_path.as_deref().unwrap_or(".");
     let worktree_path = Path::new(worktree);
 
     // Stage all changes
-    git.add_all(worktree_path)?;
+    git_ops.add_all(worktree_path)?;
 
     // Check if there are changes to commit
-    let has_changes = git.has_changes(worktree_path);
+    let has_changes = git_ops.has_changes(worktree_path);
 
     // Commit if there are staged changes
     if has_changes {
-        let commit_msg = format!("{}\n\nCo-Authored-By: Claude <noreply@anthropic.com>", pr_title);
-        git.commit(worktree_path, &commit_msg)?;
+        let commit_msg = format!("{}\n\nCo-Authored-By: {}", pr_title, agent_ops.co_author_string());
+        git_ops.commit(worktree_path, &commit_msg)?;
     }
 
     // Push the branch
     if let Some(branch) = &task.branch_name {
-        git.push(worktree_path, branch, true)?;
+        git_ops.push(worktree_path, branch, true)?;
     }
 
     // Create PR
-    let output = std::process::Command::new("gh")
-        .current_dir(project_path)
-        .args([
-            "pr", "create",
-            "--title", pr_title,
-            "--body", pr_body,
-            "--head", task.branch_name.as_deref().unwrap_or(""),
-        ])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to create PR: {}", stderr);
-    }
-
-    let pr_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    // Get PR number from URL
-    let pr_number = pr_url
-        .split('/')
-        .last()
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(0);
-
-    Ok((pr_number, pr_url))
+    git_provider_ops.create_pr(
+        project_path,
+        pr_title,
+        pr_body,
+        task.branch_name.as_deref().unwrap_or(""),
+    )
 }
 
 /// Push changes to an existing PR (commit and push only, no PR creation)
-fn push_changes_to_existing_pr(task: &Task, _project_path: &Path) -> Result<String> {
-    // Use RealGitOps directly in this standalone function
-    let git = RealGitOps;
-
+fn push_changes_to_existing_pr(
+    task: &Task,
+    git_ops: &dyn GitOperations,
+    agent_ops: &dyn AgentOperations,
+) -> Result<String> {
     let worktree = task.worktree_path.as_deref().unwrap_or(".");
     let worktree_path = Path::new(worktree);
 
     // Stage all changes
-    git.add_all(worktree_path)?;
+    git_ops.add_all(worktree_path)?;
 
     // Check if there are changes to commit
-    let has_changes = git.has_changes(worktree_path);
+    let has_changes = git_ops.has_changes(worktree_path);
 
     // Commit if there are staged changes
     if has_changes {
-        let commit_msg = "Address review comments\n\nCo-Authored-By: Claude <noreply@anthropic.com>";
-        git.commit(worktree_path, commit_msg)?;
+        let commit_msg = format!("Address review comments\n\nCo-Authored-By: {}", agent_ops.co_author_string());
+        git_ops.commit(worktree_path, &commit_msg)?;
     }
 
     // Push the branch
     if let Some(branch) = &task.branch_name {
-        git.push(worktree_path, branch, false)?;
+        git_ops.push(worktree_path, branch, false)?;
     }
 
     // Return the existing PR URL
@@ -2929,12 +2907,9 @@ fn parse_sgr(seq: &str, mut style: Style) -> Style {
 }
 
 /// Fuzzy find files in a directory (respects .gitignore)
-fn fuzzy_find_files(project_path: &Path, pattern: &str, max_results: usize) -> Vec<String> {
-    // Use RealGitOps directly in this standalone function
-    let git = RealGitOps;
-
+fn fuzzy_find_files(project_path: &Path, pattern: &str, max_results: usize, git_ops: &dyn GitOperations) -> Vec<String> {
     // Use git ls-files to get tracked files (respects .gitignore)
-    let files = git.list_files(project_path);
+    let files = git_ops.list_files(project_path);
 
     if files.is_empty() {
         return vec![];
@@ -3010,3 +2985,7 @@ fn fuzzy_score(haystack: &str, needle: &str) -> i32 {
         0
     }
 }
+
+#[cfg(test)]
+#[path = "app_tests.rs"]
+mod tests;

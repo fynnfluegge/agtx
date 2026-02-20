@@ -1,3 +1,10 @@
+mod operations;
+
+pub use operations::{AgentOperations, CodingAgent};
+
+#[cfg(feature = "test-mocks")]
+pub use operations::MockAgentOperations;
+
 use serde::{Deserialize, Serialize};
 
 /// Known coding agents that agtx can work with
@@ -7,15 +14,17 @@ pub struct Agent {
     pub command: String,
     pub args: Vec<String>,
     pub description: String,
+    pub co_author: String,
 }
 
 impl Agent {
-    pub fn new(name: &str, command: &str, description: &str) -> Self {
+    pub fn new(name: &str, command: &str, description: &str, co_author: &str) -> Self {
         Self {
             name: name.to_string(),
             command: command.to_string(),
             args: vec![],
             description: description.to_string(),
+            co_author: co_author.to_string(),
         }
     }
 
@@ -23,17 +32,51 @@ impl Agent {
     pub fn is_available(&self) -> bool {
         which::which(&self.command).is_ok()
     }
+
+    /// Build the shell command to start the agent interactively with a prompt
+    pub fn build_interactive_command(&self, prompt: &str) -> String {
+        // Escape single quotes in prompt for shell
+        let escaped_prompt = prompt.replace('\'', "'\"'\"'");
+
+        match self.name.as_str() {
+            "claude" => {
+                format!("claude --dangerously-skip-permissions '{}'", escaped_prompt)
+            }
+            "aider" => {
+                format!("aider --message '{}'", escaped_prompt)
+            }
+            "codex" => {
+                format!("codex '{}'", escaped_prompt)
+            }
+            "gh-copilot" => {
+                format!("gh copilot suggest '{}'", escaped_prompt)
+            }
+            "opencode" => {
+                format!("opencode '{}'", escaped_prompt)
+            }
+            "cline" => {
+                format!("cline '{}'", escaped_prompt)
+            }
+            "q" => {
+                format!("q chat '{}'", escaped_prompt)
+            }
+            _ => {
+                format!("{} '{}'", self.command, escaped_prompt)
+            }
+        }
+    }
 }
 
 /// Get the list of known agents
 pub fn known_agents() -> Vec<Agent> {
     vec![
-        Agent::new("claude", "claude", "Anthropic's Claude Code CLI"),
-        Agent::new("aider", "aider", "AI pair programming in your terminal"),
-        Agent::new("codex", "codex", "OpenAI's Codex CLI"),
-        Agent::new("gh-copilot", "gh", "GitHub Copilot CLI"),
-        Agent::new("mentat", "mentat", "Open source coding assistant"),
-        Agent::new("q", "q", "Amazon Q Developer CLI"),
+        Agent::new("claude", "claude", "Anthropic's Claude Code CLI", "Claude <noreply@anthropic.com>"),
+        Agent::new("aider", "aider", "AI pair programming in your terminal", "Aider <noreply@aider.chat>"),
+        Agent::new("codex", "codex", "OpenAI's Codex CLI", "Codex <noreply@openai.com>"),
+        Agent::new("gh-copilot", "gh", "GitHub Copilot CLI", "GitHub Copilot <noreply@github.com>"),
+        Agent::new("opencode", "opencode", "AI-powered coding assistant", "OpenCode <noreply@opencode.ai>"),
+        Agent::new("cline", "cline", "AI coding assistant for VS Code", "Cline <noreply@cline.bot>"),
+        Agent::new("q", "q", "Amazon Q Developer CLI", "Amazon Q <noreply@amazon.com>"),
     ]
 }
 
@@ -52,7 +95,7 @@ pub fn get_agent(name: &str) -> Option<Agent> {
 
 /// Find the default agent (first available from preference order)
 pub fn default_agent() -> Option<Agent> {
-    let preference_order = ["claude", "aider", "codex", "gh-copilot", "mentat", "q"];
+    let preference_order = ["claude", "aider", "codex", "gh-copilot", "opencode", "cline", "q"];
 
     for name in preference_order {
         if let Some(agent) = get_agent(name) {

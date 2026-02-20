@@ -2,6 +2,9 @@ mod operations;
 
 pub use operations::*;
 
+#[cfg(feature = "test-mocks")]
+pub use operations::MockTmuxOperations;
+
 use anyhow::{Context, Result};
 use std::process::Command;
 

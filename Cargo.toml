@@ -36,7 +36,8 @@ uuid = { version = "1.16", features = ["v4"] }
 
 
 [features]
-test-mocks = ["mockall"]
+default = []
+test-mocks = ["dep:mockall"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -175,8 +175,8 @@ See [CLAUDE.md](CLAUDE.md) for development documentation.
 # Build
 cargo build
 
-# Run tests
-cargo test
+# Run tests (includes mock-based tests)
+cargo test --features test-mocks
 
 # Build release
 cargo build --release

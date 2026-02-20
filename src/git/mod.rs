@@ -1,8 +1,15 @@
 mod operations;
+mod provider;
 mod worktree;
 
 pub use operations::*;
+pub use provider::{GitProviderOperations, PullRequestState, RealGitHubOps};
 pub use worktree::*;
+
+#[cfg(feature = "test-mocks")]
+pub use operations::MockGitOperations;
+#[cfg(feature = "test-mocks")]
+pub use provider::MockGitProviderOperations;
 
 use anyhow::{Context, Result};
 use std::path::Path;
