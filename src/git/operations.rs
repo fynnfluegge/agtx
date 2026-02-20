@@ -50,6 +50,16 @@ pub trait GitOperations: Send + Sync {
 
     /// List all files (tracked + untracked, respects .gitignore)
     fn list_files(&self, project_path: &Path) -> Vec<String>;
+
+    /// Initialize a worktree by copying files and running init script
+    /// Returns a list of warning messages for any issues encountered
+    fn initialize_worktree(
+        &self,
+        project_path: &Path,
+        worktree_path: &Path,
+        copy_files: Option<String>,
+        init_script: Option<String>,
+    ) -> Vec<String>;
 }
 
 /// Real implementation using actual git commands
@@ -191,5 +201,15 @@ impl GitOperations for RealGitOps {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn initialize_worktree(
+        &self,
+        project_path: &Path,
+        worktree_path: &Path,
+        copy_files: Option<String>,
+        init_script: Option<String>,
+    ) -> Vec<String> {
+        super::initialize_worktree(project_path, worktree_path, copy_files.as_deref(), init_script.as_deref())
     }
 }

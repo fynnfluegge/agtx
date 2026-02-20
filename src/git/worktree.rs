@@ -196,50 +196,6 @@ pub fn remove_worktree(project_path: &Path, task_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// List all worktrees for a project
-pub fn list_worktrees(project_path: &Path) -> Result<Vec<WorktreeInfo>> {
-    let output = Command::new("git")
-        .current_dir(project_path)
-        .args(["worktree", "list", "--porcelain"])
-        .output()
-        .context("Failed to list git worktrees")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut worktrees = Vec::new();
-    let mut current: Option<WorktreeInfo> = None;
-
-    for line in stdout.lines() {
-        if line.starts_with("worktree ") {
-            if let Some(wt) = current.take() {
-                worktrees.push(wt);
-            }
-            current = Some(WorktreeInfo {
-                path: PathBuf::from(line.strip_prefix("worktree ").unwrap()),
-                branch: None,
-                is_bare: false,
-            });
-        } else if line.starts_with("branch ") {
-            if let Some(ref mut wt) = current {
-                wt.branch = Some(
-                    line.strip_prefix("branch refs/heads/")
-                        .unwrap_or(line.strip_prefix("branch ").unwrap())
-                        .to_string(),
-                );
-            }
-        } else if line == "bare" {
-            if let Some(ref mut wt) = current {
-                wt.is_bare = true;
-            }
-        }
-    }
-
-    if let Some(wt) = current {
-        worktrees.push(wt);
-    }
-
-    Ok(worktrees)
-}
-
 /// Get the worktree path for a task
 pub fn worktree_path(project_path: &Path, task_id: &str) -> PathBuf {
     project_path
@@ -251,28 +207,4 @@ pub fn worktree_path(project_path: &Path, task_id: &str) -> PathBuf {
 /// Check if a worktree exists for a task
 pub fn worktree_exists(project_path: &Path, task_id: &str) -> bool {
     worktree_path(project_path, task_id).exists()
-}
-
-/// Information about a git worktree
-#[derive(Debug, Clone)]
-pub struct WorktreeInfo {
-    pub path: PathBuf,
-    pub branch: Option<String>,
-    pub is_bare: bool,
-}
-
-impl WorktreeInfo {
-    /// Extract task ID from worktree path if it's an agtx worktree
-    pub fn task_id(&self) -> Option<&str> {
-        self.path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .filter(|_| {
-                self.path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n == WORKTREES_DIR)
-                    .unwrap_or(false)
-            })
-    }
 }

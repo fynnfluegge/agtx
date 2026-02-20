@@ -805,3 +805,246 @@ fn test_hex_to_color_invalid() {
     let color = hex_to_color("invalid");
     assert_eq!(color, Color::White);
 }
+
+// =============================================================================
+// Tests for generate_task_slug
+// =============================================================================
+
+/// Test generate_task_slug with normal title
+#[test]
+fn test_generate_task_slug_normal() {
+    let slug = generate_task_slug("12345678-abcd-efgh", "Add login feature");
+    assert!(slug.starts_with("12345678-"));
+    assert!(slug.contains("Add-login-feature"));
+}
+
+/// Test generate_task_slug with special characters
+#[test]
+fn test_generate_task_slug_special_chars() {
+    let slug = generate_task_slug("abc12345", "Fix bug #123 (urgent!)");
+    assert!(slug.starts_with("abc12345-"));
+    // Special chars should be replaced with dashes
+    assert!(!slug.contains("#"));
+    assert!(!slug.contains("("));
+    assert!(!slug.contains("!"));
+}
+
+/// Test generate_task_slug truncates long titles
+#[test]
+fn test_generate_task_slug_long_title() {
+    let long_title = "This is a very long task title that should be truncated to thirty characters";
+    let slug = generate_task_slug("abcd1234", long_title);
+    // 8 char id prefix + "-" + max 30 chars = max 39 chars
+    assert!(slug.len() <= 39);
+}
+
+/// Test generate_task_slug with empty title
+#[test]
+fn test_generate_task_slug_empty_title() {
+    let slug = generate_task_slug("12345678", "");
+    assert_eq!(slug, "12345678-");
+}
+
+// =============================================================================
+// Tests for cleanup_task_for_done
+// =============================================================================
+
+/// Test cleanup_task_for_done cleans up resources
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cleanup_task_for_done_with_resources() {
+    use crate::db::Task;
+
+    let mut mock_tmux = MockTmuxOperations::new();
+    let mut mock_git = MockGitOperations::new();
+
+    mock_tmux
+        .expect_kill_window()
+        .with(mockall::predicate::eq("project:task-window"))
+        .times(1)
+        .returning(|_| Ok(()));
+
+    mock_git
+        .expect_remove_worktree()
+        .with(
+            mockall::predicate::eq(Path::new("/project")),
+            mockall::predicate::eq("/tmp/worktree"),
+        )
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    let mut task = Task::new("Test task", "claude", "project-1");
+    task.session_name = Some("project:task-window".to_string());
+    task.worktree_path = Some("/tmp/worktree".to_string());
+    task.status = TaskStatus::Review;
+
+    cleanup_task_for_done(
+        &mut task,
+        Path::new("/project"),
+        &mock_tmux,
+        &mock_git,
+    );
+
+    assert!(task.session_name.is_none());
+    assert!(task.worktree_path.is_none());
+    assert_eq!(task.status, TaskStatus::Done);
+}
+
+/// Test cleanup_task_for_done handles missing resources gracefully
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cleanup_task_for_done_no_resources() {
+    use crate::db::Task;
+
+    let mock_tmux = MockTmuxOperations::new();
+    let mock_git = MockGitOperations::new();
+    // No expectations - functions should not be called
+
+    let mut task = Task::new("Test task", "claude", "project-1");
+    // No session_name or worktree_path set
+
+    cleanup_task_for_done(
+        &mut task,
+        Path::new("/project"),
+        &mock_tmux,
+        &mock_git,
+    );
+
+    assert_eq!(task.status, TaskStatus::Done);
+}
+
+// =============================================================================
+// Tests for delete_task_resources
+// =============================================================================
+
+/// Test delete_task_resources cleans up all resources
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_delete_task_resources_full_cleanup() {
+    use crate::db::Task;
+
+    let mut mock_tmux = MockTmuxOperations::new();
+    let mut mock_git = MockGitOperations::new();
+
+    mock_tmux
+        .expect_kill_window()
+        .with(mockall::predicate::eq("project:task-window"))
+        .times(1)
+        .returning(|_| Ok(()));
+
+    mock_git
+        .expect_remove_worktree()
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    mock_git
+        .expect_delete_branch()
+        .with(
+            mockall::predicate::eq(Path::new("/project")),
+            mockall::predicate::eq("task/abc-feature"),
+        )
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    let mut task = Task::new("Feature task", "claude", "project-1");
+    task.session_name = Some("project:task-window".to_string());
+    task.worktree_path = Some("/tmp/worktree".to_string());
+    task.branch_name = Some("task/abc-feature".to_string());
+
+    delete_task_resources(
+        &task,
+        Path::new("/project"),
+        &mock_tmux,
+        &mock_git,
+    );
+}
+
+/// Test delete_task_resources handles task without resources
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_delete_task_resources_no_resources() {
+    use crate::db::Task;
+
+    let mock_tmux = MockTmuxOperations::new();
+    let mock_git = MockGitOperations::new();
+    // No expectations - nothing should be called
+
+    let task = Task::new("Simple task", "claude", "project-1");
+    // No session_name, worktree_path, or branch_name
+
+    delete_task_resources(
+        &task,
+        Path::new("/project"),
+        &mock_tmux,
+        &mock_git,
+    );
+}
+
+// =============================================================================
+// Tests for collect_task_diff
+// =============================================================================
+
+/// Test collect_task_diff with all types of changes
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_collect_task_diff_all_changes() {
+    let mut mock_git = MockGitOperations::new();
+
+    mock_git
+        .expect_diff()
+        .returning(|_| "diff --git a/file.rs\n-old\n+new".to_string());
+
+    mock_git
+        .expect_diff_cached()
+        .returning(|_| "diff --git a/staged.rs\n+added".to_string());
+
+    mock_git
+        .expect_list_untracked_files()
+        .returning(|_| "new_file.rs\n".to_string());
+
+    mock_git
+        .expect_diff_untracked_file()
+        .returning(|_, _| "+++ new_file.rs\n+content".to_string());
+
+    let result = collect_task_diff("/tmp/worktree", &mock_git);
+
+    assert!(result.contains("Unstaged Changes"));
+    assert!(result.contains("Staged Changes"));
+    assert!(result.contains("Untracked Files"));
+}
+
+/// Test collect_task_diff with no changes
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_collect_task_diff_no_changes() {
+    let mut mock_git = MockGitOperations::new();
+
+    mock_git.expect_diff().returning(|_| String::new());
+    mock_git.expect_diff_cached().returning(|_| String::new());
+    mock_git.expect_list_untracked_files().returning(|_| String::new());
+
+    let result = collect_task_diff("/tmp/worktree", &mock_git);
+
+    assert!(result.contains("(no changes)"));
+    assert!(result.contains("/tmp/worktree"));
+}
+
+/// Test collect_task_diff with only unstaged changes
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_collect_task_diff_only_unstaged() {
+    let mut mock_git = MockGitOperations::new();
+
+    mock_git
+        .expect_diff()
+        .returning(|_| "diff --git a/modified.rs".to_string());
+
+    mock_git.expect_diff_cached().returning(|_| String::new());
+    mock_git.expect_list_untracked_files().returning(|_| String::new());
+
+    let result = collect_task_diff("/tmp/worktree", &mock_git);
+
+    assert!(result.contains("Unstaged Changes"));
+    assert!(!result.contains("Staged Changes"));
+    assert!(!result.contains("Untracked Files"));
+}

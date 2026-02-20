@@ -1361,19 +1361,12 @@ impl App {
     fn force_move_to_done(&mut self, task_id: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, self.state.project_path.clone()) {
             if let Some(mut task) = db.get_task(task_id)? {
-                // Cleanup resources
-                if let Some(session_name) = &task.session_name {
-                    let _ = self.state.tmux_ops.kill_window(session_name);
-                }
-                if let Some(worktree) = &task.worktree_path {
-                    let _ = self.state.git_ops.remove_worktree(&project_path, worktree);
-                }
-                // Keep the branch so task can be reopened later
-
-                task.session_name = None;
-                task.worktree_path = None;
-                task.status = TaskStatus::Done;
-                task.updated_at = chrono::Utc::now();
+                cleanup_task_for_done(
+                    &mut task,
+                    &project_path,
+                    self.state.tmux_ops.as_ref(),
+                    self.state.git_ops.as_ref(),
+                );
                 db.update_task(&task)?;
                 self.refresh_tasks()?;
             }
@@ -2127,26 +2120,14 @@ impl App {
     }
 
     fn perform_delete_task(&mut self, task_id: &str) -> Result<()> {
-        if let Some(db) = &self.state.db {
+        if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(task) = db.get_task(task_id)? {
-                // Kill tmux window if exists (not the whole session)
-                if let Some(ref session_name) = task.session_name {
-                    let _ = self.state.tmux_ops.kill_window(session_name);
-                }
-
-                // Remove worktree if exists
-                if let (Some(ref _worktree_path), Some(ref project_path)) = (&task.worktree_path, &self.state.project_path) {
-                    // Extract slug from branch_name (format: "task/{slug}")
-                    if let Some(ref branch_name) = task.branch_name {
-                        let slug = branch_name.strip_prefix("task/").unwrap_or(branch_name);
-                        let _ = self.state.git_ops.remove_worktree(project_path, slug);
-
-                        // Also try to delete the branch
-                        let _ = self.state.git_ops.delete_branch(project_path, branch_name);
-                    }
-                }
-
-                // Delete from database
+                delete_task_resources(
+                    &task,
+                    project_path,
+                    self.state.tmux_ops.as_ref(),
+                    self.state.git_ops.as_ref(),
+                );
                 db.delete_task(&task.id)?;
                 self.refresh_tasks()?;
             }
@@ -2157,50 +2138,7 @@ impl App {
     fn show_task_diff(&mut self) -> Result<()> {
         if let Some(task) = self.state.board.selected_task() {
             let diff_content = if let Some(worktree_path) = &task.worktree_path {
-                let worktree = Path::new(worktree_path);
-                let mut sections = Vec::new();
-
-                // Unstaged changes (modified tracked files)
-                let unstaged = self.state.git_ops.diff(worktree);
-
-                if !unstaged.trim().is_empty() {
-                    sections.push(format!("=== Unstaged Changes ===\n\n{}", unstaged));
-                }
-
-                // Staged changes
-                let staged = self.state.git_ops.diff_cached(worktree);
-
-                if !staged.trim().is_empty() {
-                    sections.push(format!("=== Staged Changes ===\n\n{}", staged));
-                }
-
-                // Untracked files - show as diff (new file content)
-                let untracked = self.state.git_ops.list_untracked_files(worktree);
-
-                if !untracked.trim().is_empty() {
-                    let mut untracked_section = String::from("=== Untracked Files ===\n");
-                    for file in untracked.lines() {
-                        if file.trim().is_empty() {
-                            continue;
-                        }
-                        // Show diff for untracked file (as if adding new file)
-                        let file_diff = self.state.git_ops.diff_untracked_file(worktree, file);
-
-                        if !file_diff.trim().is_empty() {
-                            untracked_section.push_str(&format!("\n{}", file_diff));
-                        } else {
-                            // Fallback: just show file name
-                            untracked_section.push_str(&format!("\n+++ new file: {}\n", file));
-                        }
-                    }
-                    sections.push(untracked_section);
-                }
-
-                if sections.is_empty() {
-                    format!("(no changes)\n\nWorktree: {}", worktree_path)
-                } else {
-                    sections.join("\n\n")
-                }
+                collect_task_diff(worktree_path, self.state.git_ops.as_ref())
             } else {
                 "(task has no worktree yet)".to_string()
             };
@@ -2236,17 +2174,7 @@ impl App {
         if let Some(new_status) = next_status {
             // Create worktree and tmux window when moving from Backlog to Planning
             if current_status == TaskStatus::Backlog && new_status == TaskStatus::Planning {
-                // Sanitize title for worktree/window name
-                let title_slug: String = task.title
-                    .chars()
-                    .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-                    .take(30)
-                    .collect();
-                let title_slug = title_slug.trim_matches('-').to_string();
-
-                // Add task ID prefix to ensure uniqueness (safe slice)
-                let id_prefix: String = task.id.chars().take(8).collect();
-                let unique_slug = format!("{}-{}", id_prefix, title_slug);
+                let unique_slug = generate_task_slug(&task.id, &task.title);
                 let window_name = format!("task-{}", unique_slug);
                 let target = format!("{}:{}", self.state.project_name, window_name);
 
@@ -2264,11 +2192,11 @@ impl App {
 
                 // Initialize worktree: copy files and run init script
                 let worktree_path = Path::new(&worktree_path_str);
-                let init_warnings = git::initialize_worktree(
+                let init_warnings = self.state.git_ops.initialize_worktree(
                     &project_path,
                     worktree_path,
-                    self.state.config.copy_files.as_deref(),
-                    self.state.config.init_script.as_deref(),
+                    self.state.config.copy_files.clone(),
+                    self.state.config.init_script.clone(),
                 );
                 for warning in &init_warnings {
                     eprintln!("Worktree init: {}", warning);
@@ -2420,16 +2348,13 @@ impl App {
                     return Ok(());
                 }
                 // No PR - allow moving to Done directly (task might have been abandoned early)
-                // Cleanup any resources that might exist
-                if let Some(session_name) = &task.session_name {
-                    let _ = self.state.tmux_ops.kill_window(session_name);
-                }
-                if let Some(worktree) = &task.worktree_path {
-                    let _ = self.state.git_ops.remove_worktree(&project_path, worktree);
-                }
-                // Keep the branch so task can be reopened later
-                task.session_name = None;
-                task.worktree_path = None;
+                // Cleanup resources (but don't set status yet - that's done below)
+                cleanup_task_for_done(
+                    &mut task,
+                    &project_path,
+                    self.state.tmux_ops.as_ref(),
+                    self.state.git_ops.as_ref(),
+                );
             }
 
             task.status = new_status;
@@ -2584,6 +2509,108 @@ impl Drop for App {
 fn ensure_project_tmux_session(project_name: &str, project_path: &Path, tmux_ops: &dyn TmuxOperations) {
     if !tmux_ops.has_session(project_name) {
         let _ = tmux_ops.create_session(project_name, &project_path.to_string_lossy());
+    }
+}
+
+/// Generate a URL-safe slug from task ID and title
+fn generate_task_slug(task_id: &str, title: &str) -> String {
+    let title_slug: String = title
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .take(30)
+        .collect();
+    let title_slug = title_slug.trim_matches('-').to_string();
+
+    // Add task ID prefix to ensure uniqueness
+    let id_prefix: String = task_id.chars().take(8).collect();
+    format!("{}-{}", id_prefix, title_slug)
+}
+
+/// Cleanup task resources (tmux window, git worktree) and mark as done
+/// Modifies the task in place, ready for database update
+fn cleanup_task_for_done(
+    task: &mut Task,
+    project_path: &Path,
+    tmux_ops: &dyn TmuxOperations,
+    git_ops: &dyn GitOperations,
+) {
+    if let Some(session_name) = &task.session_name {
+        let _ = tmux_ops.kill_window(session_name);
+    }
+    if let Some(worktree) = &task.worktree_path {
+        let _ = git_ops.remove_worktree(project_path, worktree);
+    }
+    // Keep the branch so task can be reopened later
+    task.session_name = None;
+    task.worktree_path = None;
+    task.status = TaskStatus::Done;
+    task.updated_at = chrono::Utc::now();
+}
+
+/// Delete task resources: kill tmux window, remove worktree, delete branch
+fn delete_task_resources(
+    task: &Task,
+    project_path: &Path,
+    tmux_ops: &dyn TmuxOperations,
+    git_ops: &dyn GitOperations,
+) {
+    // Kill tmux window if exists
+    if let Some(ref session_name) = task.session_name {
+        let _ = tmux_ops.kill_window(session_name);
+    }
+
+    // Remove worktree and delete branch if exists
+    if task.worktree_path.is_some() {
+        if let Some(ref branch_name) = task.branch_name {
+            let slug = branch_name.strip_prefix("task/").unwrap_or(branch_name);
+            let _ = git_ops.remove_worktree(project_path, slug);
+            let _ = git_ops.delete_branch(project_path, branch_name);
+        }
+    }
+}
+
+/// Collect git diff content from a worktree
+/// Returns formatted diff sections (unstaged, staged, untracked)
+fn collect_task_diff(worktree_path: &str, git_ops: &dyn GitOperations) -> String {
+    let worktree = Path::new(worktree_path);
+    let mut sections = Vec::new();
+
+    // Unstaged changes (modified tracked files)
+    let unstaged = git_ops.diff(worktree);
+    if !unstaged.trim().is_empty() {
+        sections.push(format!("=== Unstaged Changes ===\n\n{}", unstaged));
+    }
+
+    // Staged changes
+    let staged = git_ops.diff_cached(worktree);
+    if !staged.trim().is_empty() {
+        sections.push(format!("=== Staged Changes ===\n\n{}", staged));
+    }
+
+    // Untracked files - show as diff (new file content)
+    let untracked = git_ops.list_untracked_files(worktree);
+    if !untracked.trim().is_empty() {
+        let mut untracked_section = String::from("=== Untracked Files ===\n");
+        for file in untracked.lines() {
+            if file.trim().is_empty() {
+                continue;
+            }
+            // Show diff for untracked file (as if adding new file)
+            let file_diff = git_ops.diff_untracked_file(worktree, file);
+            if !file_diff.trim().is_empty() {
+                untracked_section.push_str(&format!("\n{}", file_diff));
+            } else {
+                // Fallback: just show file name
+                untracked_section.push_str(&format!("\n+++ new file: {}\n", file));
+            }
+        }
+        sections.push(untracked_section);
+    }
+
+    if sections.is_empty() {
+        format!("(no changes)\n\nWorktree: {}", worktree_path)
+    } else {
+        sections.join("\n\n")
     }
 }
 

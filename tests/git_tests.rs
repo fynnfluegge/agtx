@@ -43,37 +43,6 @@ fn test_worktree_exists_false_for_nonexistent() {
     assert!(!git::worktree_exists(temp_dir.path(), "nonexistent-task"));
 }
 
-#[test]
-fn test_worktree_info_task_id() {
-    let info = git::WorktreeInfo {
-        path: PathBuf::from("/project/.agtx/worktrees/task-123"),
-        branch: Some("task/task-123".to_string()),
-        is_bare: false,
-    };
-    assert_eq!(info.task_id(), Some("task-123"));
-}
-
-#[test]
-fn test_worktree_info_task_id_not_agtx_worktree() {
-    // A worktree not in the .agtx/worktrees directory should return None
-    let info = git::WorktreeInfo {
-        path: PathBuf::from("/project/other-worktree"),
-        branch: Some("feature-branch".to_string()),
-        is_bare: false,
-    };
-    assert_eq!(info.task_id(), None);
-}
-
-#[test]
-fn test_worktree_info_bare() {
-    let info = git::WorktreeInfo {
-        path: PathBuf::from("/project"),
-        branch: None,
-        is_bare: true,
-    };
-    assert!(info.is_bare);
-    assert!(info.branch.is_none());
-}
 
 // =============================================================================
 // Integration tests (require git)
@@ -168,18 +137,6 @@ fn test_create_and_remove_worktree() {
     assert!(worktree_path.join(".git").exists());
     assert!(git::worktree_exists(temp_dir.path(), "test-task"));
 
-    // List worktrees should include it
-    let worktrees = git::list_worktrees(temp_dir.path()).unwrap();
-    assert!(worktrees.len() >= 2); // main + our worktree
-
-    // Canonicalize paths to handle macOS /var -> /private/var symlink
-    let worktree_path_canonical = worktree_path.canonicalize().unwrap();
-    let task_worktree = worktrees.iter().find(|w| {
-        w.path.canonicalize().ok() == Some(worktree_path_canonical.clone())
-    });
-    assert!(task_worktree.is_some());
-    assert_eq!(task_worktree.unwrap().branch, Some("task/test-task".to_string()));
-
     // Remove worktree
     git::remove_worktree(temp_dir.path(), "test-task").unwrap();
 
@@ -197,19 +154,6 @@ fn test_create_worktree_idempotent() {
 
     assert_eq!(path1, path2);
     assert!(path1.exists());
-}
-
-#[test]
-fn test_list_worktrees_empty_repo() {
-    let temp_dir = setup_git_repo();
-
-    // Should have at least the main worktree
-    let worktrees = git::list_worktrees(temp_dir.path()).unwrap();
-    assert!(!worktrees.is_empty());
-
-    // Main worktree should have branch "main"
-    let main_worktree = worktrees.iter().find(|w| w.branch == Some("main".to_string()));
-    assert!(main_worktree.is_some());
 }
 
 // =============================================================================
@@ -271,13 +215,6 @@ fn test_create_worktree_with_master_branch() {
 
     assert!(worktree_path.exists());
     assert!(worktree_path.join(".git").exists());
-
-    // Verify branch was created
-    let worktrees = git::list_worktrees(temp_dir.path()).unwrap();
-    let task_worktree = worktrees.iter().find(|w| {
-        w.branch == Some("task/master-task".to_string())
-    });
-    assert!(task_worktree.is_some());
 }
 
 #[test]
@@ -301,17 +238,6 @@ fn test_remove_worktree_nonexistent() {
     // The function should complete without panicking
     // We don't assert success/failure since behavior may vary
     let _ = result;
-}
-
-#[test]
-fn test_list_worktrees_on_non_git_directory() {
-    let temp_dir = TempDir::new().unwrap();
-    // Don't initialize git
-
-    let result = git::list_worktrees(temp_dir.path());
-
-    // Should return error or empty list, not panic
-    assert!(result.is_err() || result.unwrap().is_empty());
 }
 
 #[test]
@@ -351,10 +277,6 @@ fn test_create_multiple_worktrees() {
     assert_ne!(path2, path3);
     assert_ne!(path1, path3);
 
-    // List should show all of them
-    let worktrees = git::list_worktrees(temp_dir.path()).unwrap();
-    assert!(worktrees.len() >= 4); // main + 3 tasks
-
     // Clean up
     git::remove_worktree(temp_dir.path(), "task-1").unwrap();
     git::remove_worktree(temp_dir.path(), "task-2").unwrap();
@@ -380,33 +302,6 @@ fn test_worktree_with_uncommitted_changes() {
     assert!(result.is_ok());
 }
 
-#[test]
-fn test_worktree_info_task_id_edge_cases() {
-    // Test with path that has "worktrees" but not ".agtx"
-    let info = git::WorktreeInfo {
-        path: PathBuf::from("/project/worktrees/task-123"),
-        branch: Some("task/task-123".to_string()),
-        is_bare: false,
-    };
-    // Parent is "worktrees" so it should match
-    assert_eq!(info.task_id(), Some("task-123"));
-
-    // Test with deeply nested path
-    let info2 = git::WorktreeInfo {
-        path: PathBuf::from("/a/b/c/.agtx/worktrees/deep-task"),
-        branch: None,
-        is_bare: false,
-    };
-    assert_eq!(info2.task_id(), Some("deep-task"));
-
-    // Test with root path
-    let info3 = git::WorktreeInfo {
-        path: PathBuf::from("/"),
-        branch: None,
-        is_bare: false,
-    };
-    assert_eq!(info3.task_id(), None);
-}
 
 // =============================================================================
 // initialize_worktree tests
