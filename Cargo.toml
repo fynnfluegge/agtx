@@ -1,6 +1,6 @@
 [package]
 name = "agtx"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Terminal-native kanban board for managing coding agents"
 authors = ["agtx contributors"]
@@ -18,17 +18,17 @@ crossterm = "0.29"
 tokio = { version = "1.44", features = ["full"] }
 
 # Database
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "1.0"
 
 # Utilities
 anyhow = "1.0"
 thiserror = "2.0"
-which = "7.0"
+which = "8.0"
 directories = "6.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.16", features = ["v4"] }
@@ -41,8 +41,8 @@ test-mocks = ["dep:mockall"]
 
 [dev-dependencies]
 tempfile = "3"
-mockall = "0.13"
+mockall = "0.14"
 
 [dependencies.mockall]
-version = "0.13"
+version = "0.14"
 optional = true
