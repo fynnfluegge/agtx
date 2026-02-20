@@ -159,7 +159,7 @@ color_popup_header = "#00FFFF"  # Popup headers (cyan)
 ### Task Edit (Description)
 | Key | Action |
 |-----|--------|
-| `#` | Start file search (fuzzy find) |
+| `@` | Start file search (fuzzy find) |
 | `\` + Enter | Line continuation (multi-line) |
 | Arrow keys | Move cursor |
 | `Home/End` | Jump to start/end |

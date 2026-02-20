@@ -161,7 +161,7 @@ struct FileSearchState {
     pattern: String,
     matches: Vec<String>,
     selected: usize,
-    start_pos: usize, // Position in input_buffer where # was typed
+    start_pos: usize, // Position in input_buffer where @ was typed
 }
 
 /// State for delete confirmation popup
@@ -1934,7 +1934,7 @@ impl App {
                     // Select current match
                     if let Some(selected_file) = search.matches.get(search.selected).cloned() {
                         // Replace #pattern with the selected file path, preserving text after
-                        let pattern_end = search.start_pos + 1 + search.pattern.len(); // +1 for #
+                        let pattern_end = search.start_pos + 1 + search.pattern.len(); // +1 for @
                         let suffix = self.state.input_buffer[pattern_end..].to_string();
                         self.state.input_buffer.truncate(search.start_pos);
                         self.state.input_buffer.push_str(&selected_file);
@@ -1966,7 +1966,7 @@ impl App {
                 KeyCode::Backspace => {
                     if search.pattern.is_empty() {
                         // Cancel search if pattern is empty
-                        self.state.input_buffer.pop(); // Remove the #
+                        self.state.input_buffer.pop(); // Remove the @
                         self.state.input_cursor = self.state.input_cursor.saturating_sub(1);
                         self.state.file_search = None;
                     } else {
@@ -2039,10 +2039,10 @@ impl App {
                     self.state.input_buffer.remove(self.state.input_cursor);
                 }
             }
-            KeyCode::Char('#') => {
+            KeyCode::Char('@') => {
                 // Start file search at cursor position
                 let start_pos = self.state.input_cursor;
-                self.state.input_buffer.insert(self.state.input_cursor, '#');
+                self.state.input_buffer.insert(self.state.input_cursor, '@');
                 self.state.input_cursor += 1;
                 self.state.file_search = Some(FileSearchState {
                     pattern: String::new(),
