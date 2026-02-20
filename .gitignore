@@ -17,5 +17,8 @@ Thumbs.db
 # Local agtx data (per-project)
 .agtx/
 
+# Analysis
+architecture/
+
 # Logs
 *.log
