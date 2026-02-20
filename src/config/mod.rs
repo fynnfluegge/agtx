@@ -183,6 +183,12 @@ pub struct ProjectConfig {
 
     /// GitHub URL for this project
     pub github_url: Option<String>,
+
+    /// Comma-separated list of files to copy from project root into worktrees
+    pub copy_files: Option<String>,
+
+    /// Shell command to run inside the worktree after creation and file copying
+    pub init_script: Option<String>,
 }
 
 impl GlobalConfig {
@@ -266,6 +272,8 @@ pub struct MergedConfig {
     pub base_branch: String,
     pub github_url: Option<String>,
     pub theme: ThemeConfig,
+    pub copy_files: Option<String>,
+    pub init_script: Option<String>,
 }
 
 impl MergedConfig {
@@ -284,6 +292,8 @@ impl MergedConfig {
                 .unwrap_or_else(|| global.worktree.base_branch.clone()),
             github_url: project.github_url.clone(),
             theme: global.theme.clone(),
+            copy_files: project.copy_files.clone(),
+            init_script: project.init_script.clone(),
         }
     }
 }

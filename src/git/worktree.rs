@@ -56,6 +56,85 @@ pub fn create_worktree(project_path: &Path, task_slug: &str) -> Result<PathBuf> 
     Ok(worktree_path)
 }
 
+/// Initialize a worktree by copying files and running an init script.
+///
+/// Returns a Vec of warning messages for any issues encountered.
+/// Does not fail fatally — errors are collected and returned for the caller to display.
+pub fn initialize_worktree(
+    project_path: &Path,
+    worktree_path: &Path,
+    copy_files: Option<&str>,
+    init_script: Option<&str>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if let Some(files_str) = copy_files {
+        for entry in files_str.split(',') {
+            let file_name = entry.trim();
+            if file_name.is_empty() {
+                continue;
+            }
+            let src = project_path.join(file_name);
+            let dst = worktree_path.join(file_name);
+
+            if let Some(parent) = dst.parent() {
+                if !parent.exists() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        warnings.push(format!(
+                            "Failed to create directory for '{}': {}",
+                            file_name, e
+                        ));
+                        continue;
+                    }
+                }
+            }
+
+            if !src.exists() {
+                warnings.push(format!(
+                    "copy_files: '{}' not found in project root, skipping",
+                    file_name
+                ));
+                continue;
+            }
+
+            if src.is_dir() {
+                warnings.push(format!(
+                    "copy_files: '{}' is a directory, only individual files are supported",
+                    file_name
+                ));
+                continue;
+            }
+
+            if let Err(e) = std::fs::copy(&src, &dst) {
+                warnings.push(format!("Failed to copy '{}' to worktree: {}", file_name, e));
+            }
+        }
+    }
+
+    if let Some(script) = init_script {
+        let script = script.trim();
+        if !script.is_empty() {
+            match Command::new("sh").arg("-c").arg(script).current_dir(worktree_path).output() {
+                Ok(result) => {
+                    if !result.status.success() {
+                        let stderr = String::from_utf8_lossy(&result.stderr);
+                        warnings.push(format!(
+                            "init_script exited with {}: {}",
+                            result.status,
+                            stderr.trim()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    warnings.push(format!("Failed to run init_script: {}", e));
+                }
+            }
+        }
+    }
+
+    warnings
+}
+
 /// Detect the main branch name (main or master)
 fn detect_main_branch(project_path: &Path) -> Result<String> {
     // Check if 'main' exists

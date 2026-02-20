@@ -61,7 +61,7 @@ Backlog → Planning → Running → Review → Done
 ```
 
 - **Backlog**: Task ideas, not started
-- **Planning**: Creates git worktree at `.agtx/worktrees/{slug}`, starts Claude Code in planning mode
+- **Planning**: Creates git worktree at `.agtx/worktrees/{slug}`, copies configured files, runs init script, starts Claude Code in planning mode
 - **Running**: Claude is implementing (sends "proceed with implementation")
 - **Review**: Optionally create PR. Tmux window stays open. Can resume to address feedback
 - **Done**: Cleanup worktree + tmux window (branch kept locally)

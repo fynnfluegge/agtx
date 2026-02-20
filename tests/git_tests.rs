@@ -407,3 +407,161 @@ fn test_worktree_info_task_id_edge_cases() {
     };
     assert_eq!(info3.task_id(), None);
 }
+
+// =============================================================================
+// initialize_worktree tests
+// =============================================================================
+
+#[test]
+fn test_initialize_worktree_no_config() {
+    let temp_dir = setup_git_repo();
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-none").unwrap();
+
+    let warnings = git::initialize_worktree(temp_dir.path(), &worktree_path, None, None);
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn test_initialize_worktree_copy_files() {
+    let temp_dir = setup_git_repo();
+    std::fs::write(temp_dir.path().join(".env"), "DB_URL=localhost").unwrap();
+    std::fs::write(temp_dir.path().join(".env.local"), "SECRET=abc").unwrap();
+
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-copy").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some(".env, .env.local"),
+        None,
+    );
+    assert!(warnings.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(worktree_path.join(".env")).unwrap(),
+        "DB_URL=localhost"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree_path.join(".env.local")).unwrap(),
+        "SECRET=abc"
+    );
+}
+
+#[test]
+fn test_initialize_worktree_copy_missing_file() {
+    let temp_dir = setup_git_repo();
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-missing").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some(".nonexistent"),
+        None,
+    );
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains(".nonexistent"));
+}
+
+#[test]
+fn test_initialize_worktree_init_script_success() {
+    let temp_dir = setup_git_repo();
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-script-ok").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        None,
+        Some("touch initialized.marker"),
+    );
+    assert!(warnings.is_empty());
+    assert!(worktree_path.join("initialized.marker").exists());
+}
+
+#[test]
+fn test_initialize_worktree_init_script_failure() {
+    let temp_dir = setup_git_repo();
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-script-fail").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        None,
+        Some("exit 1"),
+    );
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("init_script"));
+}
+
+#[test]
+fn test_initialize_worktree_copy_then_script() {
+    let temp_dir = setup_git_repo();
+    std::fs::write(temp_dir.path().join(".env"), "KEY=value").unwrap();
+
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-order").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some(".env"),
+        Some("cat .env > verified.txt"),
+    );
+    assert!(warnings.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(worktree_path.join("verified.txt")).unwrap(),
+        "KEY=value"
+    );
+}
+
+#[test]
+fn test_initialize_worktree_copy_nested_path() {
+    let temp_dir = setup_git_repo();
+    let web_dir = temp_dir.path().join("web");
+    std::fs::create_dir_all(&web_dir).unwrap();
+    std::fs::write(web_dir.join(".env.local"), "NEXT_PUBLIC_KEY=123").unwrap();
+
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-nested").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some("web/.env.local"),
+        None,
+    );
+    assert!(warnings.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(worktree_path.join("web").join(".env.local")).unwrap(),
+        "NEXT_PUBLIC_KEY=123"
+    );
+}
+
+#[test]
+fn test_initialize_worktree_empty_copy_files() {
+    let temp_dir = setup_git_repo();
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-empty").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some(", , "),
+        None,
+    );
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn test_initialize_worktree_copy_directory_rejected() {
+    let temp_dir = setup_git_repo();
+    let config_dir = temp_dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("app.toml"), "key = 1").unwrap();
+
+    let worktree_path = git::create_worktree(temp_dir.path(), "init-dir").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some("config"),
+        None,
+    );
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("directory"));
+}

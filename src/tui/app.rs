@@ -2262,6 +2262,17 @@ impl App {
                     }
                 };
 
+                // Initialize worktree: copy files and run init script
+                let init_warnings = git::initialize_worktree(
+                    &project_path,
+                    &worktree_path,
+                    self.state.config.copy_files.as_deref(),
+                    self.state.config.init_script.as_deref(),
+                );
+                for warning in &init_warnings {
+                    eprintln!("Worktree init: {}", warning);
+                }
+
                 // Build the prompt from task title and description
                 // Instruct agent to plan first and wait for approval
                 let task_content = if let Some(desc) = &task.description {

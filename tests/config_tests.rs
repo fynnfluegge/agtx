@@ -74,6 +74,8 @@ fn test_project_config_default() {
     assert!(config.default_agent.is_none());
     assert!(config.base_branch.is_none());
     assert!(config.github_url.is_none());
+    assert!(config.copy_files.is_none());
+    assert!(config.init_script.is_none());
 }
 
 // === MergedConfig Tests ===
@@ -89,6 +91,8 @@ fn test_merged_config_uses_global_defaults() {
     assert_eq!(merged.base_branch, "main");
     assert!(merged.worktree_enabled);
     assert!(merged.auto_cleanup);
+    assert!(merged.copy_files.is_none());
+    assert!(merged.init_script.is_none());
 }
 
 #[test]
@@ -98,6 +102,8 @@ fn test_merged_config_project_overrides() {
         default_agent: Some("codex".to_string()),
         base_branch: Some("develop".to_string()),
         github_url: Some("https://github.com/user/repo".to_string()),
+        copy_files: Some(".env, .env.local".to_string()),
+        init_script: Some("npm install".to_string()),
     };
 
     let merged = MergedConfig::merge(&global, &project);
@@ -105,4 +111,6 @@ fn test_merged_config_project_overrides() {
     assert_eq!(merged.default_agent, "codex");
     assert_eq!(merged.base_branch, "develop");
     assert_eq!(merged.github_url, Some("https://github.com/user/repo".to_string()));
+    assert_eq!(merged.copy_files, Some(".env, .env.local".to_string()));
+    assert_eq!(merged.init_script, Some("npm install".to_string()));
 }
