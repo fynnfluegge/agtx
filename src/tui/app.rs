@@ -5,6 +5,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, widgets::*};
+use std::collections::HashSet;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
@@ -71,6 +72,8 @@ struct AppState {
     shell_popup: Option<ShellPopup>,
     // File search dropdown
     file_search: Option<FileSearchState>,
+    // File paths inserted via file search (for highlighting)
+    highlighted_file_paths: HashSet<String>,
     // Task search popup
     task_search: Option<TaskSearchState>,
     // PR creation confirmation popup
@@ -164,7 +167,8 @@ struct FileSearchState {
     pattern: String,
     matches: Vec<String>,
     selected: usize,
-    start_pos: usize, // Position in input_buffer where # was typed
+    start_pos: usize,   // Position in input_buffer where trigger was typed
+    trigger_char: char,  // The character that triggered the search (# or @)
 }
 
 /// State for delete confirmation popup
@@ -272,6 +276,7 @@ impl App {
                 show_project_list: false,
                 shell_popup: None,
                 file_search: None,
+                highlighted_file_paths: HashSet::new(),
                 task_search: None,
                 pr_confirm_popup: None,
                 review_to_running_task_id: None,
@@ -574,7 +579,9 @@ impl App {
             let (before_cursor, after_cursor) = state.input_buffer.split_at(
                 state.input_cursor.min(state.input_buffer.len())
             );
-            let content = if state.input_mode == InputMode::InputDescription {
+            let text_color = hex_to_color(&state.config.theme.color_text);
+            let highlight_color = hex_to_color(&state.config.theme.color_accent);
+            let full_text = if state.input_mode == InputMode::InputDescription {
                 format!(
                     "Title: {}\n\n{}{}█{}",
                     state.pending_task_title,
@@ -586,8 +593,14 @@ impl App {
                 format!("{}{}█{}", label, before_cursor, after_cursor)
             };
 
-            let input = Paragraph::new(content)
-                .style(Style::default().fg(hex_to_color(&state.config.theme.color_text)))
+            let styled_text = if state.input_mode == InputMode::InputDescription && !state.highlighted_file_paths.is_empty() {
+                build_highlighted_text(&full_text, &state.highlighted_file_paths, text_color, highlight_color)
+            } else {
+                Text::raw(full_text)
+            };
+
+            let input = Paragraph::new(styled_text)
+                .style(Style::default().fg(text_color))
                 .wrap(Wrap { trim: false })
                 .block(
                     Block::default()
@@ -1292,7 +1305,7 @@ impl App {
             AppMode::Project(_) => {
                 match self.state.input_mode {
                     InputMode::Normal => self.handle_normal_key(key.code),
-                    InputMode::InputTitle => self.handle_title_input(key.code),
+                    InputMode::InputTitle => self.handle_title_input(key),
                     InputMode::InputDescription => self.handle_description_input(key),
                 }
             }
@@ -1861,8 +1874,9 @@ impl App {
         Ok(())
     }
 
-    fn handle_title_input(&mut self, key: KeyCode) -> Result<()> {
-        match key {
+    fn handle_title_input(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let has_alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+        match key.code {
             KeyCode::Esc => {
                 self.state.input_mode = InputMode::Normal;
                 self.state.input_buffer.clear();
@@ -1893,6 +1907,19 @@ impl App {
                     self.state.input_cursor = self.state.input_buffer.len();
                     self.state.input_mode = InputMode::InputDescription;
                 }
+            }
+            KeyCode::Left if has_alt => {
+                self.state.input_cursor = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+            }
+            KeyCode::Right if has_alt => {
+                self.state.input_cursor = word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+            }
+            // macOS: Option+Left/Right sends Alt+b / Alt+f
+            KeyCode::Char('b') if has_alt => {
+                self.state.input_cursor = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+            }
+            KeyCode::Char('f') if has_alt => {
+                self.state.input_cursor = word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Left => {
                 if self.state.input_cursor > 0 {
@@ -1941,13 +1968,14 @@ impl App {
                 KeyCode::Enter | KeyCode::Tab => {
                     // Select current match
                     if let Some(selected_file) = search.matches.get(search.selected).cloned() {
-                        // Replace #pattern with the selected file path, preserving text after
-                        let pattern_end = search.start_pos + 1 + search.pattern.len(); // +1 for #
+                        // Replace trigger+pattern with the selected file path, preserving text after
+                        let pattern_end = search.start_pos + 1 + search.pattern.len(); // +1 for trigger char
                         let suffix = self.state.input_buffer[pattern_end..].to_string();
                         self.state.input_buffer.truncate(search.start_pos);
                         self.state.input_buffer.push_str(&selected_file);
                         self.state.input_cursor = self.state.input_buffer.len();
                         self.state.input_buffer.push_str(&suffix);
+                        self.state.highlighted_file_paths.insert(selected_file);
                     }
                     self.state.file_search = None;
                 }
@@ -1974,7 +2002,7 @@ impl App {
                 KeyCode::Backspace => {
                     if search.pattern.is_empty() {
                         // Cancel search if pattern is empty
-                        self.state.input_buffer.pop(); // Remove the #
+                        self.state.input_buffer.pop(); // Remove the trigger char
                         self.state.input_cursor = self.state.input_cursor.saturating_sub(1);
                         self.state.file_search = None;
                     } else {
@@ -2002,6 +2030,7 @@ impl App {
                 self.state.input_cursor = 0;
                 self.state.pending_task_title.clear();
                 self.state.editing_task_id = None;
+                self.state.highlighted_file_paths.clear();
             }
             KeyCode::Enter => {
                 // Check if line ends with backslash for line continuation
@@ -2018,7 +2047,21 @@ impl App {
                     self.state.input_cursor = 0;
                     self.state.pending_task_title.clear();
                     self.state.editing_task_id = None;
+                    self.state.highlighted_file_paths.clear();
                 }
+            }
+            KeyCode::Left if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
+                self.state.input_cursor = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+            }
+            KeyCode::Right if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
+                self.state.input_cursor = word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+            }
+            // macOS: Option+Left/Right sends Alt+b / Alt+f
+            KeyCode::Char('b') if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
+                self.state.input_cursor = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+            }
+            KeyCode::Char('f') if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
+                self.state.input_cursor = word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Left => {
                 if self.state.input_cursor > 0 {
@@ -2047,16 +2090,18 @@ impl App {
                     self.state.input_buffer.remove(self.state.input_cursor);
                 }
             }
-            KeyCode::Char('#') => {
+            KeyCode::Char('#') | KeyCode::Char('@') => {
                 // Start file search at cursor position
+                let trigger = if let KeyCode::Char(c) = key.code { c } else { '#' };
                 let start_pos = self.state.input_cursor;
-                self.state.input_buffer.insert(self.state.input_cursor, '#');
+                self.state.input_buffer.insert(self.state.input_cursor, trigger);
                 self.state.input_cursor += 1;
                 self.state.file_search = Some(FileSearchState {
                     pattern: String::new(),
                     matches: vec![],
                     selected: 0,
                     start_pos,
+                    trigger_char: trigger,
                 });
                 self.update_file_search_matches();
             }
@@ -2943,6 +2988,89 @@ fn parse_sgr(seq: &str, mut style: Style) -> Style {
     }
 
     style
+}
+
+/// Find the previous word boundary (for Option+Left)
+fn word_boundary_left(s: &str, pos: usize) -> usize {
+    if pos == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = pos - 1;
+    // Skip whitespace/punctuation
+    while i > 0 && !bytes[i].is_ascii_alphanumeric() {
+        i -= 1;
+    }
+    // Skip word characters
+    while i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
+        i -= 1;
+    }
+    i
+}
+
+/// Find the next word boundary (for Option+Right)
+fn word_boundary_right(s: &str, pos: usize) -> usize {
+    let len = s.len();
+    if pos >= len {
+        return len;
+    }
+    let bytes = s.as_bytes();
+    let mut i = pos;
+    // Skip current word characters
+    while i < len && bytes[i].is_ascii_alphanumeric() {
+        i += 1;
+    }
+    // Skip whitespace/punctuation
+    while i < len && !bytes[i].is_ascii_alphanumeric() {
+        i += 1;
+    }
+    i
+}
+
+/// Build styled Text with highlighted file paths
+fn build_highlighted_text<'a>(
+    text: &str,
+    file_paths: &HashSet<String>,
+    text_color: Color,
+    highlight_color: Color,
+) -> Text<'a> {
+    let normal_style = Style::default().fg(text_color);
+    let highlight_style = Style::default().fg(highlight_color).bold();
+
+    let lines: Vec<Line> = text
+        .split('\n')
+        .map(|line| {
+            let mut spans: Vec<Span> = Vec::new();
+            let mut remaining = line;
+
+            while !remaining.is_empty() {
+                // Find the earliest file path match in the remaining text
+                let mut earliest: Option<(usize, &str)> = None;
+                for path in file_paths {
+                    if let Some(pos) = remaining.find(path.as_str()) {
+                        if earliest.is_none() || pos < earliest.unwrap().0 {
+                            earliest = Some((pos, path.as_str()));
+                        }
+                    }
+                }
+
+                if let Some((pos, path)) = earliest {
+                    if pos > 0 {
+                        spans.push(Span::styled(remaining[..pos].to_string(), normal_style));
+                    }
+                    spans.push(Span::styled(path.to_string(), highlight_style));
+                    remaining = &remaining[pos + path.len()..];
+                } else {
+                    spans.push(Span::styled(remaining.to_string(), normal_style));
+                    break;
+                }
+            }
+
+            Line::from(spans)
+        })
+        .collect();
+
+    Text::from(lines)
 }
 
 /// Fuzzy find files in a directory (respects .gitignore)

@@ -1048,3 +1048,201 @@ fn test_collect_task_diff_only_unstaged() {
     assert!(!result.contains("Staged Changes"));
     assert!(!result.contains("Untracked Files"));
 }
+
+// =============================================================================
+// Tests for build_highlighted_text
+// =============================================================================
+
+/// Test build_highlighted_text with no file paths produces plain text
+#[test]
+fn test_build_highlighted_text_no_paths() {
+    let paths = HashSet::new();
+    let text = build_highlighted_text("hello world", &paths, Color::White, Color::Cyan);
+    let lines: Vec<&Line> = text.lines.iter().collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].spans.len(), 1);
+    assert_eq!(lines[0].spans[0].content, "hello world");
+}
+
+/// Test build_highlighted_text highlights a single file path
+#[test]
+fn test_build_highlighted_text_single_path() {
+    let mut paths = HashSet::new();
+    paths.insert("src/main.rs".to_string());
+    let text = build_highlighted_text(
+        "Please edit src/main.rs for me",
+        &paths,
+        Color::White,
+        Color::Cyan,
+    );
+    let lines: Vec<&Line> = text.lines.iter().collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].spans.len(), 3);
+    assert_eq!(lines[0].spans[0].content, "Please edit ");
+    assert_eq!(lines[0].spans[1].content, "src/main.rs");
+    assert_eq!(lines[0].spans[2].content, " for me");
+    // The highlighted span should be bold
+    assert!(lines[0].spans[1].style.add_modifier.contains(Modifier::BOLD));
+}
+
+/// Test build_highlighted_text with multiple file paths on one line
+#[test]
+fn test_build_highlighted_text_multiple_paths() {
+    let mut paths = HashSet::new();
+    paths.insert("a.rs".to_string());
+    paths.insert("b.rs".to_string());
+    let text = build_highlighted_text("fix a.rs and b.rs", &paths, Color::White, Color::Cyan);
+    let lines: Vec<&Line> = text.lines.iter().collect();
+    assert_eq!(lines.len(), 1);
+    // Should be: "fix " | "a.rs" | " and " | "b.rs"
+    assert_eq!(lines[0].spans.len(), 4);
+    assert_eq!(lines[0].spans[1].content, "a.rs");
+    assert_eq!(lines[0].spans[3].content, "b.rs");
+}
+
+/// Test build_highlighted_text with multiline input
+#[test]
+fn test_build_highlighted_text_multiline() {
+    let mut paths = HashSet::new();
+    paths.insert("app.rs".to_string());
+    let text = build_highlighted_text("line1\nfix app.rs\nline3", &paths, Color::White, Color::Cyan);
+    let lines: Vec<&Line> = text.lines.iter().collect();
+    assert_eq!(lines.len(), 3);
+    // First line: no highlight
+    assert_eq!(lines[0].spans.len(), 1);
+    assert_eq!(lines[0].spans[0].content, "line1");
+    // Second line: has highlight
+    assert_eq!(lines[1].spans.len(), 2);
+    assert_eq!(lines[1].spans[0].content, "fix ");
+    assert_eq!(lines[1].spans[1].content, "app.rs");
+    // Third line: no highlight
+    assert_eq!(lines[2].spans.len(), 1);
+    assert_eq!(lines[2].spans[0].content, "line3");
+}
+
+/// Test build_highlighted_text when path is at the start of line
+#[test]
+fn test_build_highlighted_text_path_at_start() {
+    let mut paths = HashSet::new();
+    paths.insert("src/lib.rs".to_string());
+    let text = build_highlighted_text("src/lib.rs is important", &paths, Color::White, Color::Cyan);
+    let lines: Vec<&Line> = text.lines.iter().collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].spans.len(), 2);
+    assert_eq!(lines[0].spans[0].content, "src/lib.rs");
+    assert_eq!(lines[0].spans[1].content, " is important");
+}
+
+/// Test build_highlighted_text when path is the entire line
+#[test]
+fn test_build_highlighted_text_path_is_entire_line() {
+    let mut paths = HashSet::new();
+    paths.insert("Cargo.toml".to_string());
+    let text = build_highlighted_text("Cargo.toml", &paths, Color::White, Color::Cyan);
+    let lines: Vec<&Line> = text.lines.iter().collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].spans.len(), 1);
+    assert_eq!(lines[0].spans[0].content, "Cargo.toml");
+    assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::BOLD));
+}
+
+// =============================================================================
+// Tests for word_boundary_left / word_boundary_right
+// =============================================================================
+
+/// Test word_boundary_left from end of string
+#[test]
+fn test_word_boundary_left_from_end() {
+    assert_eq!(word_boundary_left("hello world", 11), 6);
+}
+
+/// Test word_boundary_left skips to previous word
+#[test]
+fn test_word_boundary_left_between_words() {
+    assert_eq!(word_boundary_left("hello world", 6), 0);
+}
+
+/// Test word_boundary_left from middle of word
+#[test]
+fn test_word_boundary_left_mid_word() {
+    assert_eq!(word_boundary_left("hello world", 8), 6);
+}
+
+/// Test word_boundary_left at start stays at 0
+#[test]
+fn test_word_boundary_left_at_start() {
+    assert_eq!(word_boundary_left("hello", 0), 0);
+}
+
+/// Test word_boundary_left with multiple spaces
+#[test]
+fn test_word_boundary_left_multiple_spaces() {
+    assert_eq!(word_boundary_left("hello   world", 13), 8);
+}
+
+/// Test word_boundary_left with path separators
+#[test]
+fn test_word_boundary_left_path() {
+    // From end of "src/main.rs", should jump back over "rs"
+    assert_eq!(word_boundary_left("src/main.rs", 11), 9);
+}
+
+/// Test word_boundary_right from start of string
+#[test]
+fn test_word_boundary_right_from_start() {
+    assert_eq!(word_boundary_right("hello world", 0), 6);
+}
+
+/// Test word_boundary_right from space between words
+#[test]
+fn test_word_boundary_right_from_space() {
+    assert_eq!(word_boundary_right("hello world", 5), 6);
+}
+
+/// Test word_boundary_right from middle of word
+#[test]
+fn test_word_boundary_right_mid_word() {
+    assert_eq!(word_boundary_right("hello world", 3), 6);
+}
+
+/// Test word_boundary_right at end stays at end
+#[test]
+fn test_word_boundary_right_at_end() {
+    assert_eq!(word_boundary_right("hello", 5), 5);
+}
+
+/// Test word_boundary_right with multiple spaces
+#[test]
+fn test_word_boundary_right_multiple_spaces() {
+    assert_eq!(word_boundary_right("hello   world", 0), 8);
+}
+
+/// Test word_boundary_right with path separators
+#[test]
+fn test_word_boundary_right_path() {
+    // From start of "src/main.rs", should jump over "src" then the separator
+    assert_eq!(word_boundary_right("src/main.rs", 0), 4);
+}
+
+/// Test word_boundary_left with empty string
+#[test]
+fn test_word_boundary_left_empty() {
+    assert_eq!(word_boundary_left("", 0), 0);
+}
+
+/// Test word_boundary_right with empty string
+#[test]
+fn test_word_boundary_right_empty() {
+    assert_eq!(word_boundary_right("", 0), 0);
+}
+
+/// Test word_boundary roundtrip: jumping right then left returns close to start
+#[test]
+fn test_word_boundary_roundtrip() {
+    let s = "hello world foo";
+    let pos = word_boundary_right(s, 0); // -> 6 (start of "world")
+    let pos = word_boundary_right(s, pos); // -> 12 (start of "foo")
+    let pos = word_boundary_left(s, pos); // -> 6 (start of "world")
+    let pos = word_boundary_left(s, pos); // -> 0 (start of "hello")
+    assert_eq!(pos, 0);
+}
