@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use agtx::config::{GlobalConfig, ProjectConfig, WorktreeConfig, ThemeConfig, MergedConfig};
 
 // === ThemeConfig Tests ===
@@ -104,6 +105,7 @@ fn test_merged_config_project_overrides() {
         github_url: Some("https://github.com/user/repo".to_string()),
         copy_files: Some(".env, .env.local".to_string()),
         init_script: Some("npm install".to_string()),
+        agent_flags: None,
     };
 
     let merged = MergedConfig::merge(&global, &project);
@@ -113,4 +115,52 @@ fn test_merged_config_project_overrides() {
     assert_eq!(merged.github_url, Some("https://github.com/user/repo".to_string()));
     assert_eq!(merged.copy_files, Some(".env, .env.local".to_string()));
     assert_eq!(merged.init_script, Some("npm install".to_string()));
+}
+
+// === Agent Flags Tests ===
+
+#[test]
+fn test_global_config_default_agent_flags_empty() {
+    let config = GlobalConfig::default();
+    assert!(config.agent_flags.is_empty());
+}
+
+#[test]
+fn test_merged_config_agent_flags_global_only() {
+    let mut global = GlobalConfig::default();
+    global.agent_flags.insert("claude".to_string(), vec!["--dangerously-skip-permissions".to_string()]);
+    let project = ProjectConfig::default();
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.agent_flags.get("claude").unwrap(), &vec!["--dangerously-skip-permissions".to_string()]);
+}
+
+#[test]
+fn test_merged_config_agent_flags_project_overrides() {
+    let mut global = GlobalConfig::default();
+    global.agent_flags.insert("claude".to_string(), vec!["--dangerously-skip-permissions".to_string()]);
+
+    let mut project_flags = HashMap::new();
+    project_flags.insert("claude".to_string(), vec![]); // Project overrides to empty
+    let project = ProjectConfig {
+        agent_flags: Some(project_flags),
+        ..ProjectConfig::default()
+    };
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.agent_flags.get("claude").unwrap(), &Vec::<String>::new());
+}
+
+#[test]
+fn test_merged_config_agent_flags_project_adds_new_agent() {
+    let global = GlobalConfig::default();
+    let mut project_flags = HashMap::new();
+    project_flags.insert("aider".to_string(), vec!["--no-auto-commits".to_string()]);
+    let project = ProjectConfig {
+        agent_flags: Some(project_flags),
+        ..ProjectConfig::default()
+    };
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.agent_flags.get("aider").unwrap(), &vec!["--no-auto-commits".to_string()]);
 }
