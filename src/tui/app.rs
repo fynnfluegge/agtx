@@ -36,9 +36,11 @@ fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_colu
                 " [j/k] navigate  [Enter] open  [l] board  [e] hide sidebar  [q] quit ".to_string()
             } else {
                 match selected_column {
-                    0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
-                    1 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string(),
-                    2 | 3 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
+                    0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] explore  [M] plan  [e] sidebar  [q] quit".to_string(),
+                    1 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] plan  [e] sidebar  [q] quit".to_string(),
+                    2 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [r] explore  [e] sidebar  [q] quit".to_string(),
+                    3 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] review  [r] plan  [e] sidebar  [q] quit".to_string(),
+                    4 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] run  [e] sidebar  [q] quit".to_string(),
                     _ => " [o] new  [/] search  [Enter] open  [x] del  [e] sidebar  [q] quit".to_string(),
                 }
             }

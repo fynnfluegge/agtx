@@ -1240,37 +1240,44 @@ fn test_footer_text_sidebar_focused() {
 #[test]
 fn test_footer_text_backlog_column() {
     let text = build_footer_text(InputMode::Normal, false, 0);
-    assert!(text.contains("[M] run"));
+    assert!(text.contains("[m] explore"));
+    assert!(text.contains("[M] plan"));
+    assert!(!text.contains("[r]"));
+}
+
+#[test]
+fn test_footer_text_explore_column() {
+    let text = build_footer_text(InputMode::Normal, false, 1);
     assert!(text.contains("[m] plan"));
-    assert!(!text.contains("[r] move left"));
+    assert!(!text.contains("[M]"));
+    assert!(!text.contains("[r]"));
 }
 
 #[test]
 fn test_footer_text_planning_column() {
-    let text = build_footer_text(InputMode::Normal, false, 1);
+    let text = build_footer_text(InputMode::Normal, false, 2);
     assert!(text.contains("[m] run"));
-    assert!(!text.contains("[M] run"));
-    assert!(!text.contains("[r] move left"));
+    assert!(text.contains("[r] explore"));
 }
 
 #[test]
 fn test_footer_text_running_column() {
-    let text = build_footer_text(InputMode::Normal, false, 2);
-    assert!(text.contains("[r] move left"));
-    assert!(text.contains("[m] move"));
+    let text = build_footer_text(InputMode::Normal, false, 3);
+    assert!(text.contains("[m] review"));
+    assert!(text.contains("[r] plan"));
 }
 
 #[test]
 fn test_footer_text_review_column() {
-    let text = build_footer_text(InputMode::Normal, false, 3);
-    assert!(text.contains("[r] move left"));
-    assert!(text.contains("[m] move"));
+    let text = build_footer_text(InputMode::Normal, false, 4);
+    assert!(text.contains("[m] done"));
+    assert!(text.contains("[r] run"));
 }
 
 #[test]
 fn test_footer_text_done_column() {
-    let text = build_footer_text(InputMode::Normal, false, 4);
-    assert!(!text.contains("[m] move"));
+    let text = build_footer_text(InputMode::Normal, false, 5);
+    assert!(!text.contains("[m]"));
     assert!(!text.contains("[r]"));
     assert!(!text.contains("[d] diff"));
 }
