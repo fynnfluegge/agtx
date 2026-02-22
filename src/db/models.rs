@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
     Backlog,
+    Explore,
     Planning,
     Running,
     Review,
@@ -15,6 +16,7 @@ impl TaskStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             TaskStatus::Backlog => "backlog",
+            TaskStatus::Explore => "explore",
             TaskStatus::Planning => "planning",
             TaskStatus::Running => "running",
             TaskStatus::Review => "review",
@@ -25,6 +27,7 @@ impl TaskStatus {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "backlog" => Some(TaskStatus::Backlog),
+            "explore" => Some(TaskStatus::Explore),
             "planning" => Some(TaskStatus::Planning),
             "running" => Some(TaskStatus::Running),
             "review" => Some(TaskStatus::Review),
@@ -36,6 +39,7 @@ impl TaskStatus {
     pub fn columns() -> &'static [TaskStatus] {
         &[
             TaskStatus::Backlog,
+            TaskStatus::Explore,
             TaskStatus::Planning,
             TaskStatus::Running,
             TaskStatus::Review,

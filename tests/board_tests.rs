@@ -31,7 +31,7 @@ fn test_board_state_default() {
 fn test_tasks_in_column_empty() {
     let board = BoardState::new();
 
-    for i in 0..5 {
+    for i in 0..6 {
         assert!(board.tasks_in_column(i).is_empty());
     }
 }
@@ -47,10 +47,11 @@ fn test_tasks_in_column_with_tasks() {
     ];
 
     assert_eq!(board.tasks_in_column(0).len(), 2); // Backlog
-    assert_eq!(board.tasks_in_column(1).len(), 0); // Planning
-    assert_eq!(board.tasks_in_column(2).len(), 1); // Running
-    assert_eq!(board.tasks_in_column(3).len(), 0); // Review
-    assert_eq!(board.tasks_in_column(4).len(), 1); // Done
+    assert_eq!(board.tasks_in_column(1).len(), 0); // Explore
+    assert_eq!(board.tasks_in_column(2).len(), 0); // Planning
+    assert_eq!(board.tasks_in_column(3).len(), 1); // Running
+    assert_eq!(board.tasks_in_column(4).len(), 0); // Review
+    assert_eq!(board.tasks_in_column(5).len(), 1); // Done
 }
 
 #[test]
@@ -114,9 +115,12 @@ fn test_move_right() {
     board.move_right();
     assert_eq!(board.selected_column, 4);
 
+    board.move_right();
+    assert_eq!(board.selected_column, 5);
+
     // Should not go beyond last column
     board.move_right();
-    assert_eq!(board.selected_column, 4);
+    assert_eq!(board.selected_column, 5);
 }
 
 #[test]
@@ -183,9 +187,9 @@ fn test_move_left_clamps_row() {
     board.selected_column = 0; // Backlog with 3 tasks
     board.selected_row = 2; // Last task in Backlog
 
-    board.move_right(); // Move to Planning with 1 task
+    board.move_right(); // Move to Explore (column 1, empty)
 
-    // Row should be clamped to 0 (only task in Planning)
+    // Row should be clamped to 0 (Explore is empty)
     assert_eq!(board.selected_column, 1);
     assert_eq!(board.selected_row, 0);
 }
@@ -196,12 +200,12 @@ fn test_move_to_empty_column_clamps_row() {
     board.tasks = vec![
         create_test_task("Task 1", TaskStatus::Backlog),
         create_test_task("Task 2", TaskStatus::Backlog),
-        // Planning column is empty
+        // Explore and Planning columns are empty
     ];
     board.selected_column = 0;
     board.selected_row = 1;
 
-    board.move_right(); // Move to empty Planning column
+    board.move_right(); // Move to empty Explore column
 
     assert_eq!(board.selected_column, 1);
     assert_eq!(board.selected_row, 0);

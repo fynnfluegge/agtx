@@ -773,6 +773,7 @@ impl App {
 
                     let status_icon = match status {
                         TaskStatus::Backlog => "📋",
+                        TaskStatus::Explore => "🔍",
                         TaskStatus::Planning => "📝",
                         TaskStatus::Running => "⚡",
                         TaskStatus::Review => "👀",
@@ -2367,7 +2368,8 @@ impl App {
 
         let current_status = task.status;
         let next_status = match current_status {
-            TaskStatus::Backlog => Some(TaskStatus::Planning),
+            TaskStatus::Backlog => Some(TaskStatus::Explore),
+            TaskStatus::Explore => Some(TaskStatus::Planning),
             TaskStatus::Planning => Some(TaskStatus::Running),
             TaskStatus::Running => Some(TaskStatus::Review),
             TaskStatus::Review => Some(TaskStatus::Done),

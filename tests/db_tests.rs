@@ -5,6 +5,7 @@ use agtx::db::{Task, TaskStatus, Project};
 #[test]
 fn test_task_status_as_str() {
     assert_eq!(TaskStatus::Backlog.as_str(), "backlog");
+    assert_eq!(TaskStatus::Explore.as_str(), "explore");
     assert_eq!(TaskStatus::Planning.as_str(), "planning");
     assert_eq!(TaskStatus::Running.as_str(), "running");
     assert_eq!(TaskStatus::Review.as_str(), "review");
@@ -14,6 +15,7 @@ fn test_task_status_as_str() {
 #[test]
 fn test_task_status_from_str() {
     assert_eq!(TaskStatus::from_str("backlog"), Some(TaskStatus::Backlog));
+    assert_eq!(TaskStatus::from_str("explore"), Some(TaskStatus::Explore));
     assert_eq!(TaskStatus::from_str("planning"), Some(TaskStatus::Planning));
     assert_eq!(TaskStatus::from_str("running"), Some(TaskStatus::Running));
     assert_eq!(TaskStatus::from_str("review"), Some(TaskStatus::Review));
@@ -25,12 +27,13 @@ fn test_task_status_from_str() {
 #[test]
 fn test_task_status_columns() {
     let columns = TaskStatus::columns();
-    assert_eq!(columns.len(), 5);
+    assert_eq!(columns.len(), 6);
     assert_eq!(columns[0], TaskStatus::Backlog);
-    assert_eq!(columns[1], TaskStatus::Planning);
-    assert_eq!(columns[2], TaskStatus::Running);
-    assert_eq!(columns[3], TaskStatus::Review);
-    assert_eq!(columns[4], TaskStatus::Done);
+    assert_eq!(columns[1], TaskStatus::Explore);
+    assert_eq!(columns[2], TaskStatus::Planning);
+    assert_eq!(columns[3], TaskStatus::Running);
+    assert_eq!(columns[4], TaskStatus::Review);
+    assert_eq!(columns[5], TaskStatus::Done);
 }
 
 #[test]
