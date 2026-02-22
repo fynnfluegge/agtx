@@ -106,6 +106,8 @@ fn test_merged_config_project_overrides() {
         copy_files: Some(".env, .env.local".to_string()),
         init_script: Some("npm install".to_string()),
         agent_flags: None,
+        on_review: None,
+        on_done: None,
     };
 
     let merged = MergedConfig::merge(&global, &project);
@@ -163,4 +165,37 @@ fn test_merged_config_agent_flags_project_adds_new_agent() {
 
     let merged = MergedConfig::merge(&global, &project);
     assert_eq!(merged.agent_flags.get("aider").unwrap(), &vec!["--no-auto-commits".to_string()]);
+}
+
+// === Hook Config Tests ===
+
+#[test]
+fn test_project_config_hooks_default_none() {
+    let config = ProjectConfig::default();
+    assert!(config.on_review.is_none());
+    assert!(config.on_done.is_none());
+}
+
+#[test]
+fn test_merged_config_hooks_from_project() {
+    let global = GlobalConfig::default();
+    let project = ProjectConfig {
+        on_review: Some("skip".to_string()),
+        on_done: Some("scripts/post-done.sh".to_string()),
+        ..ProjectConfig::default()
+    };
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.on_review, Some("skip".to_string()));
+    assert_eq!(merged.on_done, Some("scripts/post-done.sh".to_string()));
+}
+
+#[test]
+fn test_merged_config_hooks_default_none() {
+    let global = GlobalConfig::default();
+    let project = ProjectConfig::default();
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert!(merged.on_review.is_none());
+    assert!(merged.on_done.is_none());
 }

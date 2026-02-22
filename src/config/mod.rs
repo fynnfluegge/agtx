@@ -198,6 +198,12 @@ pub struct ProjectConfig {
 
     /// Per-agent CLI flags (agent name → list of flags), overrides global per-agent
     pub agent_flags: Option<HashMap<String, Vec<String>>>,
+
+    /// Hook to run when a task moves to Review (None = default, Some("skip") = skip, Some("cmd") = run cmd)
+    pub on_review: Option<String>,
+
+    /// Hook to run when a task moves to Done (None = default, Some("skip") = skip, Some("cmd") = run cmd)
+    pub on_done: Option<String>,
 }
 
 impl GlobalConfig {
@@ -284,6 +290,8 @@ pub struct MergedConfig {
     pub copy_files: Option<String>,
     pub init_script: Option<String>,
     pub agent_flags: HashMap<String, Vec<String>>,
+    pub on_review: Option<String>,
+    pub on_done: Option<String>,
 }
 
 impl MergedConfig {
@@ -313,6 +321,8 @@ impl MergedConfig {
                 }
                 flags
             },
+            on_review: project.on_review.clone(),
+            on_done: project.on_done.clone(),
         }
     }
 }
