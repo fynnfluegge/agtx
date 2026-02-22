@@ -1572,3 +1572,285 @@ fn test_setup_task_worktree_passes_init_config() {
 
     assert!(result.is_ok());
 }
+
+// =============================================================================
+// Tests for build_explore_prompt (Step 3)
+// =============================================================================
+
+#[test]
+fn test_build_explore_prompt_with_description() {
+    let prompt = build_explore_prompt("Fix login bug", Some("Users can't log in with email"));
+    assert!(prompt.contains("Fix login bug"));
+    assert!(prompt.contains("Users can't log in with email"));
+    assert!(prompt.contains("Explore the codebase"));
+    assert!(prompt.contains("Don't make any changes yet"));
+}
+
+#[test]
+fn test_build_explore_prompt_without_description() {
+    let prompt = build_explore_prompt("Fix login bug", None);
+    assert!(prompt.contains("Fix login bug"));
+    assert!(prompt.contains("Explore the codebase"));
+    assert!(!prompt.contains("\n\n\n")); // No double-blank from missing description
+}
+
+// =============================================================================
+// Tests for build_planning_prompt (Step 3)
+// =============================================================================
+
+#[test]
+fn test_build_planning_prompt_with_description() {
+    let prompt = build_planning_prompt("Add auth", Some("OAuth2 flow needed"));
+    assert!(prompt.contains("Add auth"));
+    assert!(prompt.contains("OAuth2 flow needed"));
+    assert!(prompt.contains("implementation plan"));
+    assert!(prompt.contains("Wait for my approval"));
+}
+
+#[test]
+fn test_build_planning_prompt_without_description() {
+    let prompt = build_planning_prompt("Add auth", None);
+    assert!(prompt.contains("Add auth"));
+    assert!(prompt.contains("implementation plan"));
+}
+
+// =============================================================================
+// Tests for build_respawn_command (Step 3)
+// =============================================================================
+
+#[test]
+fn test_build_respawn_command_claude_uses_resume() {
+    let agent = crate::agent::get_agent("claude").unwrap();
+    let cmd = build_respawn_command(&agent, "task-123", "Fix bug", &[]);
+    assert!(cmd.contains("--resume"));
+    assert!(cmd.contains("task-123"));
+    assert!(!cmd.contains("Fix bug")); // Claude uses --resume, not task title
+}
+
+#[test]
+fn test_build_respawn_command_claude_includes_flags() {
+    let agent = crate::agent::get_agent("claude").unwrap();
+    let flags = vec!["--dangerously-skip-permissions".to_string()];
+    let cmd = build_respawn_command(&agent, "task-456", "Fix bug", &flags);
+    assert!(cmd.contains("--dangerously-skip-permissions"));
+    assert!(cmd.contains("--resume"));
+    assert!(cmd.contains("task-456"));
+}
+
+#[test]
+fn test_build_respawn_command_non_claude_uses_interactive_prompt() {
+    let agent = crate::agent::get_agent("aider").unwrap();
+    let cmd = build_respawn_command(&agent, "task-789", "Add feature", &[]);
+    assert!(cmd.contains("aider"));
+    assert!(cmd.contains("--message"));
+    assert!(!cmd.contains("--resume"));
+}
+
+#[test]
+fn test_build_respawn_command_non_claude_includes_task_title() {
+    let agent = crate::agent::get_agent("codex").unwrap();
+    let cmd = build_respawn_command(&agent, "task-abc", "Refactor DB", &[]);
+    assert!(cmd.contains("Refactor DB"));
+    assert!(cmd.contains("Resuming task"));
+}
+
+// =============================================================================
+// Tests for transition prompts (Step 3 — mock-based)
+// =============================================================================
+
+/// Verify Explore→Planning sends the correct planning prompt
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_explore_to_planning_sends_correct_prompt() {
+    let mut mock_tmux = MockTmuxOperations::new();
+
+    mock_tmux
+        .expect_send_keys()
+        .withf(|_session: &str, text: &str| {
+            text.contains("implementation plan") && text.contains("Wait for my approval")
+        })
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    // Simulate the send_keys call that happens during Explore→Planning
+    let session_name = "project:task-window";
+    let _ = mock_tmux.send_keys(
+        session_name,
+        "Based on your exploration, please create a detailed implementation plan. \
+         List the files you'll need to modify and the changes you'll make. \
+         Wait for my approval before making any changes.",
+    );
+}
+
+/// Verify Planning→Running sends the correct prompt
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_planning_to_running_sends_correct_prompt() {
+    let mut mock_tmux = MockTmuxOperations::new();
+
+    mock_tmux
+        .expect_send_keys()
+        .withf(|_session: &str, text: &str| {
+            text.contains("proceed with the implementation")
+        })
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    let _ = mock_tmux.send_keys(
+        "project:task-window",
+        "Looks good, please proceed with the implementation.",
+    );
+}
+
+// =============================================================================
+// Tests for build_hook_env_vars (Step 4)
+// =============================================================================
+
+#[test]
+fn test_build_hook_env_vars_all_fields_set() {
+    let mut task = Task::new("Deploy app", "claude", "proj-1");
+    task.branch_name = Some("task/deploy".to_string());
+    task.worktree_path = Some("/tmp/worktree".to_string());
+
+    let env = build_hook_env_vars(&task, Some(Path::new("/project")));
+
+    assert!(env.iter().any(|(k, v)| k == "AGTX_TASK_ID" && !v.is_empty()));
+    assert!(env.iter().any(|(k, v)| k == "AGTX_TASK_TITLE" && v == "Deploy app"));
+    assert!(env.iter().any(|(k, v)| k == "AGTX_BRANCH_NAME" && v == "task/deploy"));
+    assert!(env.iter().any(|(k, v)| k == "AGTX_WORKTREE_PATH" && v == "/tmp/worktree"));
+    assert!(env.iter().any(|(k, v)| k == "AGTX_PROJECT_PATH" && v == "/project"));
+}
+
+#[test]
+fn test_build_hook_env_vars_optional_fields_missing() {
+    let task = Task::new("Simple task", "claude", "proj-1");
+
+    let env = build_hook_env_vars(&task, Some(Path::new("/project")));
+
+    assert!(env.iter().any(|(k, v)| k == "AGTX_BRANCH_NAME" && v.is_empty()));
+    assert!(env.iter().any(|(k, v)| k == "AGTX_WORKTREE_PATH" && v.is_empty()));
+}
+
+#[test]
+fn test_build_hook_env_vars_no_project_path() {
+    let task = Task::new("Orphan task", "claude", "proj-1");
+
+    let env = build_hook_env_vars(&task, None);
+
+    assert!(env.iter().any(|(k, v)| k == "AGTX_PROJECT_PATH" && v.is_empty()));
+}
+
+// =============================================================================
+// Tests for resolve_hook_working_dir (Step 4)
+// =============================================================================
+
+#[test]
+fn test_resolve_hook_working_dir_uses_worktree_first() {
+    let mut task = Task::new("Task", "claude", "proj-1");
+    task.worktree_path = Some("/tmp/worktree".to_string());
+
+    let dir = resolve_hook_working_dir(&task, Some(Path::new("/project")));
+    assert_eq!(dir, "/tmp/worktree");
+}
+
+#[test]
+fn test_resolve_hook_working_dir_falls_back_to_project() {
+    let task = Task::new("Task", "claude", "proj-1");
+
+    let dir = resolve_hook_working_dir(&task, Some(Path::new("/project")));
+    assert_eq!(dir, "/project");
+}
+
+#[test]
+fn test_resolve_hook_working_dir_falls_back_to_dot() {
+    let task = Task::new("Task", "claude", "proj-1");
+
+    let dir = resolve_hook_working_dir(&task, None);
+    assert_eq!(dir, ".");
+}
+
+// =============================================================================
+// Tests for determine_open_task_action (Step 5)
+// =============================================================================
+
+#[test]
+fn test_open_task_action_alive_window_opens_popup() {
+    assert_eq!(
+        determine_open_task_action(true, true),
+        OpenTaskAction::OpenPopup
+    );
+    assert_eq!(
+        determine_open_task_action(true, false),
+        OpenTaskAction::OpenPopup
+    );
+}
+
+#[test]
+fn test_open_task_action_dead_with_worktree_respawns() {
+    assert_eq!(
+        determine_open_task_action(false, true),
+        OpenTaskAction::Respawn
+    );
+}
+
+#[test]
+fn test_open_task_action_dead_without_worktree_clears() {
+    assert_eq!(
+        determine_open_task_action(false, false),
+        OpenTaskAction::ClearSession
+    );
+}
+
+/// Test that respawn for Claude uses --resume flag via build_respawn_command
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_respawn_creates_window_for_claude() {
+    let mut mock_tmux = MockTmuxOperations::new();
+
+    mock_tmux
+        .expect_has_session()
+        .returning(|_| true);
+
+    mock_tmux
+        .expect_create_window()
+        .withf(|_session: &str, _window: &str, _dir: &str, cmd: &Option<String>| {
+            cmd.as_ref().map_or(false, |c| c.contains("--resume") && c.contains("task-id-123"))
+        })
+        .times(1)
+        .returning(|_, _, _, _| Ok(()));
+
+    let agent = crate::agent::get_agent("claude").unwrap();
+    let cmd = build_respawn_command(&agent, "task-id-123", "Test task", &[]);
+
+    ensure_project_tmux_session("project", Path::new("/project"), &mock_tmux);
+
+    let result = mock_tmux.create_window("project", "task-window", "/tmp/worktree", Some(cmd));
+    assert!(result.is_ok());
+}
+
+/// Test that respawn for non-Claude agent uses fresh interactive prompt
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_respawn_creates_window_for_non_claude() {
+    let mut mock_tmux = MockTmuxOperations::new();
+
+    mock_tmux
+        .expect_has_session()
+        .returning(|_| true);
+
+    mock_tmux
+        .expect_create_window()
+        .withf(|_session: &str, _window: &str, _dir: &str, cmd: &Option<String>| {
+            cmd.as_ref().map_or(false, |c| c.contains("aider") && c.contains("Resuming task"))
+        })
+        .times(1)
+        .returning(|_, _, _, _| Ok(()));
+
+    let agent = crate::agent::get_agent("aider").unwrap();
+    let cmd = build_respawn_command(&agent, "task-id-456", "Fix styling", &[]);
+
+    ensure_project_tmux_session("project", Path::new("/project"), &mock_tmux);
+
+    let result = mock_tmux.create_window("project", "task-window", "/tmp/worktree", Some(cmd));
+    assert!(result.is_ok());
+}

@@ -199,3 +199,51 @@ fn test_merged_config_hooks_default_none() {
     assert!(merged.on_review.is_none());
     assert!(merged.on_done.is_none());
 }
+
+#[test]
+fn test_merged_config_on_review_skip_value() {
+    let global = GlobalConfig::default();
+    let project = ProjectConfig {
+        on_review: Some("skip".to_string()),
+        ..ProjectConfig::default()
+    };
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.on_review, Some("skip".to_string()));
+}
+
+#[test]
+fn test_merged_config_on_review_command_value() {
+    let global = GlobalConfig::default();
+    let project = ProjectConfig {
+        on_review: Some("scripts/on-review.sh".to_string()),
+        ..ProjectConfig::default()
+    };
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.on_review, Some("scripts/on-review.sh".to_string()));
+}
+
+#[test]
+fn test_merged_config_on_done_skip_value() {
+    let global = GlobalConfig::default();
+    let project = ProjectConfig {
+        on_done: Some("skip".to_string()),
+        ..ProjectConfig::default()
+    };
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.on_done, Some("skip".to_string()));
+}
+
+#[test]
+fn test_merged_config_on_done_command_value() {
+    let global = GlobalConfig::default();
+    let project = ProjectConfig {
+        on_done: Some("scripts/post-done.sh".to_string()),
+        ..ProjectConfig::default()
+    };
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.on_done, Some("scripts/post-done.sh".to_string()));
+}
