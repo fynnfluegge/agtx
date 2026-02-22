@@ -5,6 +5,7 @@
 #![cfg(feature = "test-mocks")]
 
 use agtx::tmux::{MockTmuxOperations, TmuxOperations};
+use agtx::tui::status::{detect_session_status, SessionStatus};
 
 #[test]
 fn test_is_pane_alive_returns_true_for_running_pane() {
@@ -24,4 +25,113 @@ fn test_is_pane_alive_returns_false_for_dead_pane() {
         .returning(|_| false);
 
     assert!(!mock.is_pane_alive("project:window"));
+}
+
+#[test]
+fn test_detect_active_when_pane_alive_no_idle_pattern() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_is_pane_alive()
+        .returning(|_| true);
+    mock.expect_window_exists()
+        .returning(|_| Ok(true));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("Analyzing src/main.rs...\nReading file contents...\n".to_string()));
+
+    let status = detect_session_status("proj:win", &mock);
+    assert_eq!(status, SessionStatus::Active);
+}
+
+#[test]
+fn test_detect_idle_claude_prompt() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_is_pane_alive()
+        .returning(|_| true);
+    mock.expect_window_exists()
+        .returning(|_| Ok(true));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("Changes applied successfully.\n\n> ".to_string()));
+
+    let status = detect_session_status("proj:win", &mock);
+    assert_eq!(status, SessionStatus::Idle);
+}
+
+#[test]
+fn test_detect_idle_question_prompt() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_is_pane_alive()
+        .returning(|_| true);
+    mock.expect_window_exists()
+        .returning(|_| Ok(true));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("Do you want to proceed?\n? ".to_string()));
+
+    let status = detect_session_status("proj:win", &mock);
+    assert_eq!(status, SessionStatus::Idle);
+}
+
+#[test]
+fn test_detect_idle_completion_phrase() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_is_pane_alive()
+        .returning(|_| true);
+    mock.expect_window_exists()
+        .returning(|_| Ok(true));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("All done! What would you like to do next?\n\n> ".to_string()));
+
+    let status = detect_session_status("proj:win", &mock);
+    assert_eq!(status, SessionStatus::Idle);
+}
+
+#[test]
+fn test_detect_exited_shell_prompt() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_is_pane_alive()
+        .returning(|_| true);
+    mock.expect_window_exists()
+        .returning(|_| Ok(true));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("user@host:~/project$ ".to_string()));
+
+    let status = detect_session_status("proj:win", &mock);
+    assert_eq!(status, SessionStatus::Exited);
+}
+
+#[test]
+fn test_detect_exited_dead_pane() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_is_pane_alive()
+        .returning(|_| false);
+    mock.expect_window_exists()
+        .returning(|_| Ok(true));
+    mock.expect_capture_pane()
+        .returning(|_| Ok(String::new()));
+
+    let status = detect_session_status("proj:win", &mock);
+    assert_eq!(status, SessionStatus::Exited);
+}
+
+#[test]
+fn test_detect_unknown_no_window() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_window_exists()
+        .returning(|_| Ok(false));
+
+    let status = detect_session_status("proj:win", &mock);
+    assert_eq!(status, SessionStatus::Unknown);
+}
+
+#[test]
+fn test_detect_strips_ansi_escapes() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_is_pane_alive()
+        .returning(|_| true);
+    mock.expect_window_exists()
+        .returning(|_| Ok(true));
+    // ANSI-colored prompt: ESC[32m>ESC[0m followed by space
+    mock.expect_capture_pane()
+        .returning(|_| Ok("Done.\n\n\x1b[32m>\x1b[0m ".to_string()));
+
+    let status = detect_session_status("proj:win", &mock);
+    assert_eq!(status, SessionStatus::Idle);
 }
