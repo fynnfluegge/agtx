@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Global configuration (stored in ~/.config/agtx/)
@@ -16,6 +17,10 @@ pub struct GlobalConfig {
     /// UI theme/colors
     #[serde(default)]
     pub theme: ThemeConfig,
+
+    /// Per-agent CLI flags (agent name → list of flags)
+    #[serde(default)]
+    pub agent_flags: HashMap<String, Vec<String>>,
 }
 
 impl Default for GlobalConfig {
@@ -24,6 +29,7 @@ impl Default for GlobalConfig {
             default_agent: default_agent(),
             worktree: WorktreeConfig::default(),
             theme: ThemeConfig::default(),
+            agent_flags: HashMap::new(),
         }
     }
 }
@@ -189,6 +195,15 @@ pub struct ProjectConfig {
 
     /// Shell command to run inside the worktree after creation and file copying
     pub init_script: Option<String>,
+
+    /// Per-agent CLI flags (agent name → list of flags), overrides global per-agent
+    pub agent_flags: Option<HashMap<String, Vec<String>>>,
+
+    /// Hook to run when a task moves to Review (None = default, Some("skip") = skip, Some("cmd") = run cmd)
+    pub on_review: Option<String>,
+
+    /// Hook to run when a task moves to Done (None = default, Some("skip") = skip, Some("cmd") = run cmd)
+    pub on_done: Option<String>,
 }
 
 impl GlobalConfig {
@@ -274,6 +289,9 @@ pub struct MergedConfig {
     pub theme: ThemeConfig,
     pub copy_files: Option<String>,
     pub init_script: Option<String>,
+    pub agent_flags: HashMap<String, Vec<String>>,
+    pub on_review: Option<String>,
+    pub on_done: Option<String>,
 }
 
 impl MergedConfig {
@@ -294,6 +312,17 @@ impl MergedConfig {
             theme: global.theme.clone(),
             copy_files: project.copy_files.clone(),
             init_script: project.init_script.clone(),
+            agent_flags: {
+                let mut flags = global.agent_flags.clone();
+                if let Some(project_flags) = &project.agent_flags {
+                    for (agent, agent_flags) in project_flags {
+                        flags.insert(agent.clone(), agent_flags.clone());
+                    }
+                }
+                flags
+            },
+            on_review: project.on_review.clone(),
+            on_done: project.on_done.clone(),
         }
     }
 }

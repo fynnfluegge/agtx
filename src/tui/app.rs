@@ -5,16 +5,17 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, widgets::*};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
+use std::time::Instant;
 
 use crate::agent::{self, AgentOperations, CodingAgent};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig};
 use crate::db::{Database, Task, TaskStatus};
 use crate::git::{self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps};
-use crate::tmux::{self, RealTmuxOps, TmuxOperations};
+use crate::tmux::{RealTmuxOps, TmuxOperations};
 use crate::AppMode;
 
 use super::board::BoardState;
@@ -36,9 +37,11 @@ fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_colu
                 " [j/k] navigate  [Enter] open  [l] board  [e] hide sidebar  [q] quit ".to_string()
             } else {
                 match selected_column {
-                    0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
-                    1 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string(),
-                    2 | 3 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
+                    0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] explore  [M] plan  [e] sidebar  [q] quit".to_string(),
+                    1 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] plan  [e] sidebar  [q] quit".to_string(),
+                    2 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [r] explore  [e] sidebar  [q] quit".to_string(),
+                    3 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] review  [r] plan  [e] sidebar  [q] quit".to_string(),
+                    4 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] run  [e] sidebar  [q] quit".to_string(),
                     _ => " [o] new  [/] search  [Enter] open  [x] del  [e] sidebar  [q] quit".to_string(),
                 }
             }
@@ -51,9 +54,8 @@ fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_colu
 type Terminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
 
 /// Shell popup dimensions - used for both rendering and tmux window sizing
-const SHELL_POPUP_WIDTH: u16 = 82;          // Total width including borders
-const SHELL_POPUP_CONTENT_WIDTH: u16 = 80;  // Content width (SHELL_POPUP_WIDTH - 2 for borders)
-const SHELL_POPUP_HEIGHT_PERCENT: u16 = 75; // Percentage of terminal height
+const SHELL_POPUP_WIDTH_PERCENT: u16 = 95;
+const SHELL_POPUP_HEIGHT_PERCENT: u16 = 90;
 
 /// Application state (separate from terminal for borrow checker)
 struct AppState {
@@ -72,7 +74,7 @@ struct AppState {
     config: MergedConfig,
     project_path: Option<PathBuf>,
     project_name: String,
-    available_agents: Vec<agent::Agent>,
+    _available_agents: Vec<agent::Agent>,
     // Tmux operations (injectable for testing)
     tmux_ops: Arc<dyn TmuxOperations>,
     // Git operations (injectable for testing)
@@ -98,8 +100,7 @@ struct AppState {
     task_search: Option<TaskSearchState>,
     // PR creation confirmation popup
     pr_confirm_popup: Option<PrConfirmPopup>,
-    // Moving Review back to Running
-    review_to_running_task_id: Option<String>,
+    _review_to_running_task_id: Option<String>,
     // Git diff popup
     diff_popup: Option<DiffPopup>,
     // Channel for receiving PR description generation results
@@ -114,6 +115,16 @@ struct AppState {
     delete_confirm_popup: Option<DeleteConfirmPopup>,
     // Confirmation popup for asking if user wants to create PR when moving to Review
     review_confirm_popup: Option<ReviewConfirmPopup>,
+    // Hook execution status popup
+    hook_status_popup: Option<HookStatusPopup>,
+    // Channel for receiving hook execution results
+    hook_result_rx: Option<mpsc::Receiver<Result<(), String>>>,
+    // Pending action to perform after hook succeeds
+    pending_hook_action: Option<PendingHookAction>,
+    // Agent status cache: session_name -> (status, last_checked)
+    status_cache: HashMap<String, (super::status::SessionStatus, Instant)>,
+    // Spinner animation tick (incremented every event loop cycle)
+    spinner_tick: usize,
 }
 
 /// State for confirming move to Done
@@ -188,7 +199,7 @@ struct FileSearchState {
     matches: Vec<String>,
     selected: usize,
     start_pos: usize,   // Position in input_buffer where trigger was typed
-    trigger_char: char,  // The character that triggered the search (# or @)
+    _trigger_char: char,
 }
 
 /// State for delete confirmation popup
@@ -203,6 +214,26 @@ struct DeleteConfirmPopup {
 struct ReviewConfirmPopup {
     task_id: String,
     task_title: String,
+}
+
+/// State for hook execution status popup
+#[derive(Debug, Clone)]
+struct HookStatusPopup {
+    message: String,
+    status: HookStatus,
+    error_output: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum HookStatus {
+    Running,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+enum PendingHookAction {
+    MoveToReview { task_id: String },
+    MoveToDone { task_id: String },
 }
 
 pub struct App {
@@ -284,7 +315,7 @@ impl App {
                 config,
                 project_path,
                 project_name: project_name.clone(),
-                available_agents,
+                _available_agents: available_agents,
                 tmux_ops,
                 git_ops,
                 git_provider_ops,
@@ -299,7 +330,7 @@ impl App {
                 highlighted_file_paths: HashSet::new(),
                 task_search: None,
                 pr_confirm_popup: None,
-                review_to_running_task_id: None,
+                _review_to_running_task_id: None,
                 diff_popup: None,
                 pr_generation_rx: None,
                 pr_status_popup: None,
@@ -307,6 +338,11 @@ impl App {
                 done_confirm_popup: None,
                 delete_confirm_popup: None,
                 review_confirm_popup: None,
+                hook_status_popup: None,
+                hook_result_rx: None,
+                pending_hook_action: None,
+                status_cache: HashMap::new(),
+                spinner_tick: 0,
             },
         };
 
@@ -358,6 +394,43 @@ impl App {
                 }
             }
 
+            // Check for hook execution results
+            if let Some(rx) = &self.state.hook_result_rx {
+                if let Ok(result) = rx.try_recv() {
+                    self.state.hook_result_rx = None;
+                    match result {
+                        Ok(()) => {
+                            self.state.hook_status_popup = None;
+                            if let Some(action) = self.state.pending_hook_action.take() {
+                                match action {
+                                    PendingHookAction::MoveToReview { task_id } => {
+                                        if let Some(db) = &self.state.db {
+                                            if let Ok(Some(mut task)) = db.get_task(&task_id) {
+                                                task.status = TaskStatus::Review;
+                                                task.updated_at = chrono::Utc::now();
+                                                let _ = db.update_task(&task);
+                                            }
+                                        }
+                                        self.refresh_tasks()?;
+                                    }
+                                    PendingHookAction::MoveToDone { task_id } => {
+                                        self.force_move_to_done(&task_id)?;
+                                    }
+                                }
+                            }
+                        }
+                        Err(error_msg) => {
+                            self.state.hook_status_popup = Some(HookStatusPopup {
+                                message: "Hook failed".to_string(),
+                                status: HookStatus::Failed,
+                                error_output: Some(error_msg),
+                            });
+                            self.state.pending_hook_action = None;
+                        }
+                    }
+                }
+            }
+
             if event::poll(std::time::Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
@@ -373,6 +446,8 @@ impl App {
 
             // Periodically refresh session status
             self.refresh_sessions()?;
+
+            self.state.spinner_tick = self.state.spinner_tick.wrapping_add(1);
         }
 
         Ok(())
@@ -437,15 +512,16 @@ impl App {
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(header, chunks[0]);
 
-        // Board columns (5 columns: Backlog, Planning, Running, Review, Done)
+        // Board columns (6 columns: Backlog, Explore, Planning, Running, Review, Done)
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
+                Constraint::Percentage(17),
+                Constraint::Percentage(17),
+                Constraint::Percentage(17),
+                Constraint::Percentage(17),
+                Constraint::Percentage(16),
+                Constraint::Percentage(16),
             ])
             .split(chunks[1]);
 
@@ -485,8 +561,8 @@ impl App {
 
             // Check if we need a scrollbar
             let needs_scrollbar = tasks.len() > max_visible_cards;
-            let content_width = if needs_scrollbar {
-                columns[i].width.saturating_sub(3) // Leave room for scrollbar
+            let _content_width = if needs_scrollbar {
+                columns[i].width.saturating_sub(3)
             } else {
                 columns[i].width.saturating_sub(2)
             };
@@ -517,7 +593,10 @@ impl App {
                     break;
                 }
 
-                Self::draw_task_card(frame, task, card_area, is_selected, &state.config.theme);
+                let task_status = task.session_name.as_ref()
+                    .and_then(|s| state.status_cache.get(s))
+                    .map(|(status, _)| *status);
+                Self::draw_task_card(frame, task, card_area, is_selected, &state.config.theme, task_status, state.spinner_tick);
             }
 
             // Draw scrollbar if needed
@@ -708,6 +787,7 @@ impl App {
 
                     let status_icon = match status {
                         TaskStatus::Backlog => "📋",
+                        TaskStatus::Explore => "🔍",
                         TaskStatus::Planning => "📝",
                         TaskStatus::Running => "⚡",
                         TaskStatus::Review => "👀",
@@ -905,6 +985,30 @@ impl App {
             }
         }
 
+        // Hook status popup
+        if let Some(ref popup) = state.hook_status_popup {
+            let popup_area = centered_rect(50, 20, area);
+            frame.render_widget(Clear, popup_area);
+
+            let (title, border_color) = match popup.status {
+                HookStatus::Running => (" Running Hook ", hex_to_color(&state.config.theme.color_selected)),
+                HookStatus::Failed => (" Hook Failed ", Color::Red),
+            };
+
+            let main_block = Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color));
+            frame.render_widget(main_block, popup_area);
+
+            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
+            let text = match &popup.error_output {
+                Some(err) => format!("{}\n\n{}\n\nPress Esc to dismiss", popup.message, err),
+                None => popup.message.clone(),
+            };
+            frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
+        }
+
         // Done confirmation popup
         if let Some(ref popup) = state.done_confirm_popup {
             let popup_area = centered_rect(50, 25, area);
@@ -1051,7 +1155,7 @@ impl App {
     }
 
     fn draw_shell_popup(popup: &ShellPopup, frame: &mut Frame, area: Rect, theme: &ThemeConfig) {
-        let popup_area = centered_rect_fixed_width(SHELL_POPUP_WIDTH, SHELL_POPUP_HEIGHT_PERCENT, area);
+        let popup_area = centered_rect(SHELL_POPUP_WIDTH_PERCENT, SHELL_POPUP_HEIGHT_PERCENT, area);
 
         // Parse ANSI escape sequences for colors
         let styled_lines = parse_ansi_to_lines(&popup.cached_content);
@@ -1068,7 +1172,7 @@ impl App {
         shell_popup::render_shell_popup(popup, frame, popup_area, styled_lines, &colors);
     }
 
-    fn draw_task_card(frame: &mut Frame, task: &Task, area: Rect, is_selected: bool, theme: &ThemeConfig) {
+    fn draw_task_card(frame: &mut Frame, task: &Task, area: Rect, is_selected: bool, theme: &ThemeConfig, status: Option<super::status::SessionStatus>, spinner_tick: usize) {
         let border_style = if is_selected {
             Style::default().fg(hex_to_color(&theme.color_selected))
         } else {
@@ -1081,13 +1185,43 @@ impl App {
             Style::default().fg(hex_to_color(&theme.color_text)).bold()
         };
 
+        // Calculate indicator width for title truncation
+        let indicator_width: usize = match status {
+            Some(super::status::SessionStatus::Unknown) | None => 0,
+            Some(_) => 2, // "● " is 2 display columns
+        };
+
         // Truncate title to fit (char-safe for UTF-8)
-        let max_title_len = area.width.saturating_sub(4) as usize;
+        let max_title_len = (area.width.saturating_sub(4) as usize).saturating_sub(indicator_width);
         let title: String = if task.title.chars().count() > max_title_len {
             let truncated: String = task.title.chars().take(max_title_len.saturating_sub(3)).collect();
             format!("{}...", truncated)
         } else {
             task.title.clone()
+        };
+
+        // Build title line with optional colored status indicator
+        let title_spans: Line = if let Some(status) = status {
+            use super::status::SessionStatus;
+            let (indicator, color): (String, Option<Color>) = match status {
+                SessionStatus::Active => {
+                    let frame_char = super::status::SPINNER_FRAMES[spinner_tick % super::status::SPINNER_FRAMES.len()];
+                    (format!("{} ", frame_char), Some(Color::Green))
+                }
+                SessionStatus::Idle => ("○ ".to_string(), Some(Color::Yellow)),
+                SessionStatus::Exited => ("✗ ".to_string(), Some(Color::Red)),
+                SessionStatus::Unknown => (String::new(), None),
+            };
+            if let Some(color) = color {
+                Line::from(vec![
+                    Span::styled(indicator, Style::default().fg(color)),
+                    Span::styled(title, title_style),
+                ])
+            } else {
+                Line::from(Span::styled(title, title_style))
+            }
+        } else {
+            Line::from(Span::styled(title, title_style))
         };
 
         let border_type = if is_selected {
@@ -1104,7 +1238,7 @@ impl App {
         frame.render_widget(card_block, area);
 
         // Title line
-        let title_line = Paragraph::new(title).style(title_style);
+        let title_line = Paragraph::new(title_spans);
         let title_area = Rect {
             x: inner.x,
             y: inner.y,
@@ -1257,6 +1391,17 @@ impl App {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        // Handle hook status popup (takes priority when shown)
+        if let Some(ref popup) = self.state.hook_status_popup {
+            if matches!(popup.status, HookStatus::Failed) {
+                if matches!(key.code, KeyCode::Esc) {
+                    self.state.hook_status_popup = None;
+                    return Ok(());
+                }
+            }
+            return Ok(()); // Swallow all keys while hook is running/shown
+        }
+
         // Handle PR status popup if open (loading/success/error)
         if let Some(ref popup) = self.state.pr_status_popup {
             // Only allow closing if not in Creating/Pushing state
@@ -1391,6 +1536,46 @@ impl App {
         Ok(())
     }
 
+    fn run_hook_async(&mut self, hook: &str, task: &Task, action: PendingHookAction) {
+        let hook_cmd = hook.to_string();
+        let working_dir = resolve_hook_working_dir(task, self.state.project_path.as_deref());
+        let env_vars = build_hook_env_vars(task, self.state.project_path.as_deref());
+
+        self.state.hook_status_popup = Some(HookStatusPopup {
+            message: format!("Running: {}", hook_cmd),
+            status: HookStatus::Running,
+            error_output: None,
+        });
+        self.state.pending_hook_action = Some(action);
+
+        let (tx, rx) = mpsc::channel();
+        self.state.hook_result_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&hook_cmd)
+                .current_dir(&working_dir)
+                .envs(env_vars)
+                .output();
+
+            match result {
+                Ok(output) if output.status.success() => {
+                    let _ = tx.send(Ok(()));
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let msg = if stderr.is_empty() { stdout } else { stderr };
+                    let _ = tx.send(Err(msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e.to_string()));
+                }
+            }
+        });
+    }
+
     fn move_running_to_review_with_pr(&mut self, task_id: &str) -> Result<()> {
         if let Some(db) = &self.state.db {
             if let Some(task) = db.get_task(task_id)? {
@@ -1494,7 +1679,7 @@ impl App {
 
     fn create_pr_and_move_to_review_with_content(&mut self, task_id: &str, pr_title: &str, pr_body: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, self.state.project_path.clone()) {
-            if let Some(mut task) = db.get_task(task_id)? {
+            if let Some(task) = db.get_task(task_id)? {
                 // Keep tmux window open - session_name stays set for resume
 
                 // Show loading popup
@@ -1856,7 +2041,7 @@ impl App {
             KeyCode::Char('x') => self.delete_selected_task()?,
             KeyCode::Char('d') => self.show_task_diff()?,
             KeyCode::Char('m') => self.move_task_right()?,
-            KeyCode::Char('M') => self.move_backlog_to_running()?,
+            KeyCode::Char('M') => self.move_backlog_to_planning()?,
             KeyCode::Char('r') => {
                 if let Some(task) = self.state.board.selected_task() {
                     let task_id = task.id.clone();
@@ -1865,6 +2050,23 @@ impl App {
                         TaskStatus::Review => self.move_review_to_running(&task_id)?,
                         // Move Running task back to Planning
                         TaskStatus::Running => self.move_running_to_planning(&task_id)?,
+                        // Move Planning task back to Explore
+                        TaskStatus::Planning => {
+                            if let Some(session_name) = &task.session_name {
+                                let _ = self.state.tmux_ops.send_keys(
+                                    session_name,
+                                    "Let's go back to exploring. Continue investigating the codebase and discussing approaches."
+                                );
+                            }
+                            if let Some(db) = &self.state.db {
+                                if let Ok(Some(mut t)) = db.get_task(&task_id) {
+                                    t.status = TaskStatus::Explore;
+                                    t.updated_at = chrono::Utc::now();
+                                    let _ = db.update_task(&t);
+                                }
+                            }
+                            self.refresh_tasks()?;
+                        }
                         _ => {}
                     }
                 }
@@ -2109,7 +2311,7 @@ impl App {
                     matches: vec![],
                     selected: 0,
                     start_pos,
-                    trigger_char: trigger,
+                    _trigger_char: trigger,
                 });
                 self.update_file_search_matches();
             }
@@ -2217,7 +2419,8 @@ impl App {
 
         let current_status = task.status;
         let next_status = match current_status {
-            TaskStatus::Backlog => Some(TaskStatus::Planning),
+            TaskStatus::Backlog => Some(TaskStatus::Explore),
+            TaskStatus::Explore => Some(TaskStatus::Planning),
             TaskStatus::Planning => Some(TaskStatus::Running),
             TaskStatus::Running => Some(TaskStatus::Review),
             TaskStatus::Review => Some(TaskStatus::Done),
@@ -2225,21 +2428,9 @@ impl App {
         };
 
         if let Some(new_status) = next_status {
-            // Create worktree and tmux window when moving from Backlog to Planning
-            if current_status == TaskStatus::Backlog && new_status == TaskStatus::Planning {
-                // Build the prompt from task title and description
-                // Instruct agent to plan first and wait for approval
-                let task_content = if let Some(desc) = &task.description {
-                    format!("{}\n\n{}", task.title, desc)
-                } else {
-                    task.title.clone()
-                };
-                let prompt = format!(
-                    "Task: {}\n\nPlease analyze this task and create a detailed implementation plan. \
-                    List the files you'll need to modify and the changes you'll make. \
-                    Wait for my approval before making any changes.",
-                    task_content
-                );
+            // Create worktree and tmux window when moving from Backlog to Explore
+            if current_status == TaskStatus::Backlog && new_status == TaskStatus::Explore {
+                let prompt = build_explore_prompt(&task.title, task.description.as_deref());
 
                 let target = setup_task_worktree(
                     &mut task,
@@ -2248,42 +2439,34 @@ impl App {
                     &prompt,
                     self.state.config.copy_files.clone(),
                     self.state.config.init_script.clone(),
+                    &self.state.config,
                     self.state.tmux_ops.as_ref(),
                     self.state.git_ops.as_ref(),
                 )?;
 
-                // Wait for agent to show the bypass warning prompt, then accept it and rename session
-                // Poll until we see "Yes, I accept" option or timeout after 5 seconds
-                let target_clone = target.clone();
-                let task_id_clone = task.id.clone();
-                let tmux_ops = Arc::clone(&self.state.tmux_ops);
-                std::thread::spawn(move || {
-                    let mut accepted = false;
-                    for _ in 0..50 {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
+                // Auto-accept bypass prompt (if applicable) and rename session
+                let agent_name = &self.state.config.default_agent;
+                let flags = self.state.config.agent_flags.get(agent_name).cloned().unwrap_or_default();
+                let skip = flags.contains(&"--dangerously-skip-permissions".to_string());
+                maybe_auto_accept_and_rename(
+                    target,
+                    task.id.clone(),
+                    Arc::clone(&self.state.tmux_ops),
+                    skip,
+                    agent_name == "claude",
+                );
+            }
 
-                        // Check pane content for the bypass prompt
-                        if let Ok(content) = tmux_ops.capture_pane(&target_clone) {
-                            // Look for the bypass warning prompt options
-                            if content.contains("Yes, I accept") || content.contains("I accept the risk") {
-                                // Found the prompt, send "2" and Enter
-                                let _ = tmux_ops.send_keys_literal(&target_clone, "2");
-                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                let _ = tmux_ops.send_keys_literal(&target_clone, "Enter");
-                                accepted = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    // After accepting, wait for agent to be ready and rename the session
-                    if accepted {
-                        std::thread::sleep(std::time::Duration::from_millis(1000));
-                        // Send /rename command to name the session with task ID for later resume
-                        let rename_cmd = format!("/rename {}", task_id_clone);
-                        let _ = tmux_ops.send_keys(&target_clone, &rename_cmd);
-                    }
-                });
+            // When moving from Explore to Planning, send planning prompt
+            if current_status == TaskStatus::Explore && new_status == TaskStatus::Planning {
+                if let Some(session_name) = &task.session_name {
+                    let _ = self.state.tmux_ops.send_keys(
+                        session_name,
+                        "Based on your exploration, please create a detailed implementation plan. \
+                         List the files you'll need to modify and the changes you'll make. \
+                         Wait for my approval before making any changes."
+                    );
+                }
             }
 
             // When moving from Planning to Running, tell agent to start implementing
@@ -2296,83 +2479,114 @@ impl App {
 
             // When moving from Running to Review: Ask if user wants to create PR
             if current_status == TaskStatus::Running && new_status == TaskStatus::Review {
-                // Check if PR already exists (task was resumed from Review)
-                if task.pr_number.is_some() {
-                    // PR already exists - just commit and push the new changes
-                    self.state.pr_status_popup = Some(PrStatusPopup {
-                        status: PrCreationStatus::Pushing,
-                        pr_url: None,
-                        error_message: None,
-                    });
-
-                    let task_clone = task.clone();
-                    let project_path_clone = project_path.clone();
-                    let git_ops = Arc::clone(&self.state.git_ops);
-                    let agent_ops = Arc::clone(&self.state.agent_ops);
-
-                    let (tx, rx) = mpsc::channel();
-                    self.state.pr_creation_rx = Some(rx);
-
-                    std::thread::spawn(move || {
-                        let result = push_changes_to_existing_pr(&task_clone, git_ops.as_ref(), agent_ops.as_ref());
-                        match result {
-                            Ok(pr_url) => {
-                                // Update task in database
-                                // Keep session_name so popup can still be opened in Review
-                                if let Ok(db) = crate::db::Database::open_project(&project_path_clone) {
-                                    let mut updated_task = task_clone;
-                                    updated_task.status = TaskStatus::Review;
-                                    updated_task.updated_at = chrono::Utc::now();
-                                    let _ = db.update_task(&updated_task);
-                                }
-                                let _ = tx.send(Ok((0, pr_url)));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(Err(e.to_string()));
-                            }
+                match &self.state.config.on_review {
+                    Some(hook) if hook == "skip" => {
+                        task.status = TaskStatus::Review;
+                        task.updated_at = chrono::Utc::now();
+                        if let Some(db) = &self.state.db {
+                            db.update_task(&task)?;
                         }
-                    });
+                        self.refresh_tasks()?;
+                        return Ok(());
+                    }
+                    Some(hook) => {
+                        let hook = hook.clone();
+                        self.run_hook_async(&hook, &task, PendingHookAction::MoveToReview { task_id: task.id.clone() });
+                        return Ok(());
+                    }
+                    None => {
+                        // Check if PR already exists (task was resumed from Review)
+                        if task.pr_number.is_some() {
+                            // PR already exists - just commit and push the new changes
+                            self.state.pr_status_popup = Some(PrStatusPopup {
+                                status: PrCreationStatus::Pushing,
+                                pr_url: None,
+                                error_message: None,
+                            });
 
-                    // Keep tmux window open - session_name stays set for resume
+                            let task_clone = task.clone();
+                            let project_path_clone = project_path.clone();
+                            let git_ops = Arc::clone(&self.state.git_ops);
+                            let agent_ops = Arc::clone(&self.state.agent_ops);
 
-                    return Ok(());
+                            let (tx, rx) = mpsc::channel();
+                            self.state.pr_creation_rx = Some(rx);
+
+                            std::thread::spawn(move || {
+                                let result = push_changes_to_existing_pr(&task_clone, git_ops.as_ref(), agent_ops.as_ref());
+                                match result {
+                                    Ok(pr_url) => {
+                                        // Update task in database
+                                        // Keep session_name so popup can still be opened in Review
+                                        if let Ok(db) = crate::db::Database::open_project(&project_path_clone) {
+                                            let mut updated_task = task_clone;
+                                            updated_task.status = TaskStatus::Review;
+                                            updated_task.updated_at = chrono::Utc::now();
+                                            let _ = db.update_task(&updated_task);
+                                        }
+                                        let _ = tx.send(Ok((0, pr_url)));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(Err(e.to_string()));
+                                    }
+                                }
+                            });
+
+                            // Keep tmux window open - session_name stays set for resume
+
+                            return Ok(());
+                        }
+
+                        // No PR yet - show confirmation popup asking if user wants to create PR
+                        self.state.review_confirm_popup = Some(ReviewConfirmPopup {
+                            task_id: task.id.clone(),
+                            task_title: task.title.clone(),
+                        });
+                        return Ok(());
+                    }
                 }
-
-                // No PR yet - show confirmation popup asking if user wants to create PR
-                self.state.review_confirm_popup = Some(ReviewConfirmPopup {
-                    task_id: task.id.clone(),
-                    task_title: task.title.clone(),
-                });
-                return Ok(());
             }
 
             // When moving from Review to Done: Show confirmation with PR state
             if current_status == TaskStatus::Review && new_status == TaskStatus::Done {
-                if let Some(pr_number) = task.pr_number {
-                    let pr_state = self.state.git_provider_ops.get_pr_state(&project_path, pr_number)?;
+                match &self.state.config.on_done {
+                    Some(hook) if hook == "skip" => {
+                        self.force_move_to_done(&task.id)?;
+                        return Ok(());
+                    }
+                    Some(hook) => {
+                        let hook = hook.clone();
+                        self.run_hook_async(&hook, &task, PendingHookAction::MoveToDone { task_id: task.id.clone() });
+                        return Ok(());
+                    }
+                    None => {
+                        if let Some(pr_number) = task.pr_number {
+                            let pr_state = self.state.git_provider_ops.get_pr_state(&project_path, pr_number)?;
 
-                    let confirm_state = match pr_state {
-                        PullRequestState::Merged => DoneConfirmPrState::Merged,
-                        PullRequestState::Closed => DoneConfirmPrState::Closed,
-                        PullRequestState::Open => DoneConfirmPrState::Open,
-                        PullRequestState::Unknown => DoneConfirmPrState::Unknown,
-                    };
+                            let confirm_state = match pr_state {
+                                PullRequestState::Merged => DoneConfirmPrState::Merged,
+                                PullRequestState::Closed => DoneConfirmPrState::Closed,
+                                PullRequestState::Open => DoneConfirmPrState::Open,
+                                PullRequestState::Unknown => DoneConfirmPrState::Unknown,
+                            };
 
-                    self.state.done_confirm_popup = Some(DoneConfirmPopup {
-                        task_id: task.id.clone(),
-                        pr_number,
-                        pr_state: confirm_state,
-                    });
-                    return Ok(());
+                            self.state.done_confirm_popup = Some(DoneConfirmPopup {
+                                task_id: task.id.clone(),
+                                pr_number,
+                                pr_state: confirm_state,
+                            });
+                            return Ok(());
+                        }
+                        // No PR - allow moving to Done directly (task might have been abandoned early)
+                        // Cleanup resources (but don't set status yet - that's done below)
+                        cleanup_task_for_done(
+                            &mut task,
+                            &project_path,
+                            self.state.tmux_ops.as_ref(),
+                            self.state.git_ops.as_ref(),
+                        );
+                    }
                 }
-                // No PR - allow moving to Done directly (task might have been abandoned early)
-                // Cleanup resources (but don't set status yet - that's done below)
-                cleanup_task_for_done(
-                    &mut task,
-                    &project_path,
-                    self.state.tmux_ops.as_ref(),
-                    self.state.git_ops.as_ref(),
-                );
             }
 
             task.status = new_status;
@@ -2386,8 +2600,8 @@ impl App {
         Ok(())
     }
 
-    /// Move task directly from Backlog to Running (skip Planning)
-    fn move_backlog_to_running(&mut self) -> Result<()> {
+    /// Move task from Backlog to Planning (skip Explore)
+    fn move_backlog_to_planning(&mut self) -> Result<()> {
         let (mut task, project_path) = match (
             self.state.board.selected_task().cloned(),
             self.state.project_path.clone(),
@@ -2400,16 +2614,7 @@ impl App {
             return Ok(());
         }
 
-        // Build prompt - skip planning, go straight to implementation
-        let task_content = if let Some(desc) = &task.description {
-            format!("{}\n\n{}", task.title, desc)
-        } else {
-            task.title.clone()
-        };
-        let prompt = format!(
-            "Task: {}\n\nPlease implement this task directly. No need to plan first - go ahead and make the changes.",
-            task_content
-        );
+        let prompt = build_planning_prompt(&task.title, task.description.as_deref());
 
         let target = setup_task_worktree(
             &mut task,
@@ -2418,38 +2623,24 @@ impl App {
             &prompt,
             self.state.config.copy_files.clone(),
             self.state.config.init_script.clone(),
+            &self.state.config,
             self.state.tmux_ops.as_ref(),
             self.state.git_ops.as_ref(),
         )?;
 
-        // Wait for agent to show the bypass warning prompt, then accept it and rename session
-        let target_clone = target.clone();
-        let task_id_clone = task.id.clone();
-        let tmux_ops = Arc::clone(&self.state.tmux_ops);
-        std::thread::spawn(move || {
-            let mut accepted = false;
-            for _ in 0..50 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+        // Auto-accept bypass prompt (if applicable) and rename session
+        let agent_name = &self.state.config.default_agent;
+        let flags = self.state.config.agent_flags.get(agent_name).cloned().unwrap_or_default();
+        let skip = flags.contains(&"--dangerously-skip-permissions".to_string());
+        maybe_auto_accept_and_rename(
+            target,
+            task.id.clone(),
+            Arc::clone(&self.state.tmux_ops),
+            skip,
+            agent_name == "claude",
+        );
 
-                if let Ok(content) = tmux_ops.capture_pane(&target_clone) {
-                    if content.contains("Yes, I accept") || content.contains("I accept the risk") {
-                        let _ = tmux_ops.send_keys_literal(&target_clone, "2");
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                        let _ = tmux_ops.send_keys_literal(&target_clone, "Enter");
-                        accepted = true;
-                        break;
-                    }
-                }
-            }
-
-            if accepted {
-                std::thread::sleep(std::time::Duration::from_millis(1000));
-                let rename_cmd = format!("/rename {}", task_id_clone);
-                let _ = tmux_ops.send_keys(&target_clone, &rename_cmd);
-            }
-        });
-
-        task.status = TaskStatus::Running;
+        task.status = TaskStatus::Planning;
         task.updated_at = chrono::Utc::now();
 
         if let Some(db) = &self.state.db {
@@ -2495,22 +2686,70 @@ impl App {
         Ok(())
     }
 
+    fn respawn_agent_session(&mut self, task: &Task) -> Result<()> {
+        let worktree_path = task.worktree_path.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No worktree path for task"))?;
+        let project_path = self.state.project_path.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No project path"))?;
+
+        let agent = agent::get_agent(&task.agent)
+            .or_else(|| agent::get_agent(&self.state.config.default_agent))
+            .unwrap_or_else(|| agent::get_agent("claude").unwrap());
+
+        let flags = self.state.config.agent_flags.get(&agent.name).cloned().unwrap_or_default();
+
+        let cmd = build_respawn_command(&agent, &task.id, &task.title, &flags);
+
+        let session_name = task.session_name.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No session name for task"))?;
+        let window_name = session_name.split(':').nth(1).unwrap_or(session_name);
+
+        ensure_project_tmux_session(&self.state.project_name, project_path, self.state.tmux_ops.as_ref());
+
+        self.state.tmux_ops.create_window(
+            &self.state.project_name,
+            window_name,
+            worktree_path,
+            Some(cmd),
+        )?;
+
+        Ok(())
+    }
+
     fn open_selected_task(&mut self) -> Result<()> {
-        if let Some(task) = self.state.board.selected_task() {
-            if let Some(window_name) = &task.session_name.clone() {
-                let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
+        if let Some(task) = self.state.board.selected_task().cloned() {
+            if let Some(ref session_name) = task.session_name {
+                let window_alive = self.state.tmux_ops.window_exists(session_name).unwrap_or(false);
+                let action = determine_open_task_action(window_alive, task.worktree_path.is_some());
+
+                match action {
+                    OpenTaskAction::ClearSession => {
+                        if let Some(db) = &self.state.db {
+                            let mut updated = task.clone();
+                            updated.session_name = None;
+                            updated.updated_at = chrono::Utc::now();
+                            db.update_task(&updated)?;
+                        }
+                        self.refresh_tasks()?;
+                        return Ok(());
+                    }
+                    OpenTaskAction::Respawn => {
+                        self.respawn_agent_session(&task)?;
+                    }
+                    OpenTaskAction::OpenPopup => {}
+                }
+
+                let window_name = session_name.split(':').nth(1).unwrap_or(session_name);
+                let mut popup = ShellPopup::new(task.title.clone(), window_name.to_string());
 
                 // Resize tmux window to match popup dimensions (uses same constants as draw_shell_popup)
-                if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
-                    let pane_width = SHELL_POPUP_CONTENT_WIDTH;
+                if let Ok((term_width, term_height)) = crossterm::terminal::size() {
+                    let pane_width = (term_width as u32 * SHELL_POPUP_WIDTH_PERCENT as u32 / 100) as u16;
+                    let pane_width = pane_width.saturating_sub(2); // subtract borders
                     let popup_height = (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
-                    let pane_height = popup_height.saturating_sub(4); // -4 for borders + header/footer
+                    let pane_height = popup_height.saturating_sub(4); // subtract borders + header/footer
 
-                    let target = format!("{}:{}", self.state.project_name, window_name);
-                    // TODO the resize should be done on target which is
-                    // session_name:window_name, but for some reason that doesn't work
-                    // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
-                    let _ = self.state.tmux_ops.resize_window(&window_name, pane_width, pane_height);
+                    let _ = self.state.tmux_ops.resize_window(window_name, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
                 }
 
@@ -2559,14 +2798,59 @@ impl App {
     }
 
     fn refresh_sessions(&mut self) -> Result<()> {
-        // TODO: Periodically check tmux sessions and update task status
-        Ok(())
-    }
+        use super::status::{detect_session_status, SessionStatus};
 
-    fn switch_to_project(&mut self, project: &ProjectInfo) -> Result<()> {
-        self.switch_to_project_keep_sidebar(project)?;
-        // Unfocus sidebar
-        self.state.sidebar_focused = false;
+        let now = Instant::now();
+        let ttl = std::time::Duration::from_secs(2);
+
+        // Collect running tasks with session names
+        let running_tasks: Vec<(String, String)> = self.state.board.tasks.iter()
+            .filter(|t| t.status == TaskStatus::Running)
+            .filter_map(|t| {
+                t.session_name.as_ref().map(|s| (t.id.clone(), s.clone()))
+            })
+            .collect();
+
+        let mut tasks_to_review = Vec::new();
+
+        for (task_id, session_name) in &running_tasks {
+            // Check cache TTL — skip detection if still fresh
+            if let Some((_cached_status, checked_at)) = self.state.status_cache.get(session_name) {
+                if now.duration_since(*checked_at) < ttl {
+                    continue;
+                }
+            }
+
+            let status = detect_session_status(session_name, self.state.tmux_ops.as_ref());
+            self.state.status_cache.insert(session_name.clone(), (status, now));
+
+            if status == SessionStatus::Idle {
+                tasks_to_review.push(task_id.clone());
+            }
+        }
+
+        // Prune stale cache entries (sessions no longer in running tasks)
+        let active_sessions: std::collections::HashSet<&String> = running_tasks.iter().map(|(_, s)| s).collect();
+        self.state.status_cache.retain(|k, _| active_sessions.contains(k));
+
+        // Auto-move idle tasks to Review
+        for task_id in &tasks_to_review {
+            if let Some(db) = &self.state.db {
+                if let Ok(Some(mut task)) = db.get_task(task_id) {
+                    if task.status == TaskStatus::Running {
+                        task.status = TaskStatus::Review;
+                        task.updated_at = chrono::Utc::now();
+                        let _ = db.update_task(&task);
+                    }
+                }
+            }
+        }
+
+        // Refresh board only if tasks were actually moved
+        if !tasks_to_review.is_empty() {
+            self.refresh_tasks()?;
+        }
+
         Ok(())
     }
 
@@ -2610,6 +2894,91 @@ impl Drop for App {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+    }
+}
+
+/// What action to take when opening a task with a session
+#[derive(Debug, PartialEq)]
+enum OpenTaskAction {
+    Respawn,
+    ClearSession,
+    OpenPopup,
+}
+
+/// Determine the action to take when opening a task
+fn determine_open_task_action(window_alive: bool, has_worktree: bool) -> OpenTaskAction {
+    if window_alive {
+        OpenTaskAction::OpenPopup
+    } else if has_worktree {
+        OpenTaskAction::Respawn
+    } else {
+        OpenTaskAction::ClearSession
+    }
+}
+
+/// Resolve the working directory for hook execution
+fn resolve_hook_working_dir(task: &Task, project_path: Option<&Path>) -> String {
+    task.worktree_path.clone()
+        .or_else(|| project_path.map(|p| p.to_string_lossy().to_string()))
+        .unwrap_or_else(|| ".".to_string())
+}
+
+/// Build environment variables for hook execution
+fn build_hook_env_vars(task: &Task, project_path: Option<&Path>) -> Vec<(String, String)> {
+    vec![
+        ("AGTX_TASK_ID".to_string(), task.id.clone()),
+        ("AGTX_TASK_TITLE".to_string(), task.title.clone()),
+        ("AGTX_BRANCH_NAME".to_string(), task.branch_name.clone().unwrap_or_default()),
+        ("AGTX_WORKTREE_PATH".to_string(), task.worktree_path.clone().unwrap_or_default()),
+        ("AGTX_PROJECT_PATH".to_string(), project_path
+            .map(|p| p.to_string_lossy().to_string()).unwrap_or_default()),
+    ]
+}
+
+/// Build the prompt for exploring a task's codebase (Backlog → Explore)
+fn build_explore_prompt(title: &str, description: Option<&str>) -> String {
+    let task_content = if let Some(desc) = description {
+        format!("{}\n\n{}", title, desc)
+    } else {
+        title.to_string()
+    };
+    format!(
+        "Explore the codebase for this task: {}\n\n\
+         Understand the problem space, look at relevant files, and discuss potential approaches. \
+         Don't make any changes yet — we'll plan next.",
+        task_content
+    )
+}
+
+/// Build the prompt for planning a task (Backlog → Planning skip)
+fn build_planning_prompt(title: &str, description: Option<&str>) -> String {
+    let task_content = if let Some(desc) = description {
+        format!("{}\n\n{}", title, desc)
+    } else {
+        title.to_string()
+    };
+    format!(
+        "Task: {}\n\nPlease analyze this task and create a detailed implementation plan. \
+         List the files you'll need to modify and the changes you'll make. \
+         Wait for my approval before making any changes.",
+        task_content
+    )
+}
+
+/// Build the shell command to respawn an agent session
+fn build_respawn_command(agent: &agent::Agent, task_id: &str, task_title: &str, flags: &[String]) -> String {
+    if agent.name == "claude" {
+        let mut parts = vec!["claude".to_string()];
+        parts.extend(flags.iter().cloned());
+        parts.extend(["--resume".to_string(), task_id.to_string()]);
+        parts.join(" ")
+    } else {
+        let prompt = format!(
+            "Resuming task: {}\n\nPlease continue working on this task. \
+             Check the git log and diff to understand what's been done so far.",
+            task_title
+        );
+        agent.build_interactive_command(&prompt, flags)
     }
 }
 
@@ -2666,6 +3035,7 @@ fn setup_task_worktree(
     prompt: &str,
     copy_files: Option<String>,
     init_script: Option<String>,
+    config: &crate::config::MergedConfig,
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
 ) -> Result<String> {
@@ -2695,9 +3065,12 @@ fn setup_task_worktree(
         eprintln!("Worktree init: {}", warning);
     }
 
-    // Get the default agent and build the interactive command
-    let agent = agent::default_agent().unwrap_or_else(|| agent::get_agent("claude").unwrap());
-    let agent_cmd = agent.build_interactive_command(prompt);
+    // Get the configured agent and build the interactive command
+    let agent = agent::get_agent(&config.default_agent)
+        .or_else(|| agent::default_agent())
+        .unwrap_or_else(|| agent::get_agent("claude").unwrap());
+    let flags = config.agent_flags.get(&agent.name).cloned().unwrap_or_default();
+    let agent_cmd = agent.build_interactive_command(prompt, &flags);
 
     // Ensure project tmux session exists
     ensure_project_tmux_session(project_name, project_path, tmux_ops);
@@ -2714,6 +3087,45 @@ fn setup_task_worktree(
     task.branch_name = Some(format!("task/{}", unique_slug));
 
     Ok(target)
+}
+
+/// Optionally auto-accept the bypass warning prompt and rename the Claude session.
+/// Runs in a background thread. If `skip_permissions` is true, polls for the
+/// "Yes, I accept" prompt and sends the acceptance keystrokes. If `is_claude` is
+/// true, sends a `/rename` command after the agent is ready.
+fn maybe_auto_accept_and_rename(
+    target: String,
+    task_id: String,
+    tmux_ops: std::sync::Arc<dyn TmuxOperations>,
+    skip_permissions: bool,
+    is_claude: bool,
+) {
+    std::thread::spawn(move || {
+        if skip_permissions {
+            let mut accepted = false;
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if let Ok(content) = tmux_ops.capture_pane(&target) {
+                    if content.contains("Yes, I accept") || content.contains("I accept the risk") {
+                        let _ = tmux_ops.send_keys_literal(&target, "2");
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        let _ = tmux_ops.send_keys_literal(&target, "Enter");
+                        accepted = true;
+                        break;
+                    }
+                }
+            }
+            if !accepted {
+                return;
+            }
+        }
+
+        if is_claude {
+            std::thread::sleep(std::time::Duration::from_millis(if skip_permissions { 1000 } else { 3000 }));
+            let rename_cmd = format!("/rename {}", task_id);
+            let _ = tmux_ops.send_keys(&target, &rename_cmd);
+        }
+    });
 }
 
 /// Delete task resources: kill tmux window, remove worktree, delete branch
@@ -2802,31 +3214,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}
-
-/// Create a centered popup with fixed width and percentage height
-fn centered_rect_fixed_width(fixed_width: u16, percent_y: u16, r: Rect) -> Rect {
-    // Cap width to terminal width minus some margin
-    let width = fixed_width.min(r.width.saturating_sub(4));
-
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    // Calculate horizontal centering
-    let horizontal_margin = r.width.saturating_sub(width) / 2;
-
-    Rect {
-        x: r.x + horizontal_margin,
-        y: popup_layout[1].y,
-        width,
-        height: popup_layout[1].height,
-    }
 }
 
 /// Capture content from a tmux pane with history (with ANSI escape sequences)

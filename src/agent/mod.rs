@@ -34,34 +34,41 @@ impl Agent {
     }
 
     /// Build the shell command to start the agent interactively with a prompt
-    pub fn build_interactive_command(&self, prompt: &str) -> String {
+    pub fn build_interactive_command(&self, prompt: &str, flags: &[String]) -> String {
         // Escape single quotes in prompt for shell
         let escaped_prompt = prompt.replace('\'', "'\"'\"'");
 
+        // Build flags string
+        let flags_str = if flags.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", flags.join(" "))
+        };
+
         match self.name.as_str() {
             "claude" => {
-                format!("claude --dangerously-skip-permissions '{}'", escaped_prompt)
+                format!("claude{} '{}'", flags_str, escaped_prompt)
             }
             "aider" => {
-                format!("aider --message '{}'", escaped_prompt)
+                format!("aider{} --message '{}'", flags_str, escaped_prompt)
             }
             "codex" => {
-                format!("codex '{}'", escaped_prompt)
+                format!("codex{} '{}'", flags_str, escaped_prompt)
             }
             "gh-copilot" => {
-                format!("gh copilot suggest '{}'", escaped_prompt)
+                format!("gh copilot suggest{} '{}'", flags_str, escaped_prompt)
             }
             "opencode" => {
-                format!("opencode '{}'", escaped_prompt)
+                format!("opencode{} '{}'", flags_str, escaped_prompt)
             }
             "cline" => {
-                format!("cline '{}'", escaped_prompt)
+                format!("cline{} '{}'", flags_str, escaped_prompt)
             }
             "q" => {
-                format!("q chat '{}'", escaped_prompt)
+                format!("q chat{} '{}'", flags_str, escaped_prompt)
             }
             _ => {
-                format!("{} '{}'", self.command, escaped_prompt)
+                format!("{}{} '{}'", self.command, flags_str, escaped_prompt)
             }
         }
     }

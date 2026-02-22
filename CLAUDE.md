@@ -59,23 +59,24 @@ tests/
 
 ### Task Workflow
 ```
-Backlog → Planning → Running → Review → Done
-            ↓           ↓         ↓        ↓
-         worktree    Claude    optional  cleanup
-         + Claude    working   PR        (keep
-         planning             (resume)   branch)
+Backlog → Explore → Planning → Running → Review → Done
+            ↓          ↓           ↓         ↓        ↓
+         worktree   worktree    Claude    optional  cleanup
+         + agent    + agent     working   PR/hook   (keep
+         exploring  planning             (resume)   branch)
 ```
 
 - **Backlog**: Task ideas, not started
-- **Planning**: Creates git worktree at `.agtx/worktrees/{slug}`, copies configured files, runs init script, starts Claude Code in planning mode
-- **Running**: Claude is implementing (sends "proceed with implementation")
-- **Review**: Optionally create PR. Tmux window stays open. Can resume to address feedback
-- **Done**: Cleanup worktree + tmux window (branch kept locally)
+- **Explore**: Creates git worktree, starts agent in exploration mode (codebase research, no changes). Use `m` to move here, `M` to skip to Planning
+- **Planning**: Agent creates implementation plan. Sends planning prompt to existing session
+- **Running**: Agent is implementing (sends "proceed with implementation")
+- **Review**: Optionally create PR (or run `on_review` hook). Tmux window stays open. Can resume to address feedback
+- **Done**: Cleanup worktree + tmux window, or run `on_done` hook (branch kept locally)
 
 ### Session Persistence
 - Tmux window stays open when moving Running → Review
 - Resume from Review simply changes status back to Running (window already exists)
-- No special Claude resume logic needed - the session just stays alive in tmux
+- Dead sessions are auto-detected on task open and respawned (Claude resumes named session, other agents get fresh prompt)
 
 ### Database Storage
 All databases stored centrally (not in project directories):
@@ -130,6 +131,31 @@ color_popup_border = "#9ffcf8"  # Popup borders (light cyan)
 color_popup_header = "#69fae7"  # Popup headers (light cyan)
 ```
 
+### Per-Agent Flags
+Configure CLI flags per agent in global or project config:
+```toml
+# ~/.config/agtx/config.toml (global)
+[agent_flags]
+claude = ["--dangerously-skip-permissions"]
+aider = ["--no-auto-commits"]
+
+# .agtx/config.toml (project override)
+[agent_flags]
+claude = []  # Use Claude's default permission system for this project
+```
+No default flags for any agent — users must explicitly opt-in.
+
+### Review/Done Hooks
+Customize workflow transitions in project config:
+```toml
+# .agtx/config.toml
+on_review = "skip"                    # Skip PR prompt entirely
+on_done = "scripts/post-done.sh"      # Run custom script
+```
+- `None` (field absent): default built-in behavior
+- `"skip"`: skip built-in behavior, just move the task
+- Any other string: run as shell command (with env vars AGTX_TASK_ID, AGTX_TASK_TITLE, AGTX_BRANCH_NAME, AGTX_WORKTREE_PATH, AGTX_PROJECT_PATH)
+
 ## Keyboard Shortcuts
 
 ### Board Mode
@@ -142,7 +168,8 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `x` | Delete task (with confirmation) |
 | `d` | Show git diff for task |
 | `m` | Move task forward (advance workflow) |
-| `r` | Resume task (Review → Running) |
+| `M` | Skip Explore, move Backlog → Planning directly |
+| `r` | Move task backward (Review → Running, Planning → Explore) |
 | `/` | Search tasks (jumps to and opens task) |
 | `e` | Toggle project sidebar |
 | `q` | Quit |
@@ -197,8 +224,9 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 - Loading spinners shown during async operations
 
 ### Claude Integration
-- Uses `--dangerously-skip-permissions` flag
-- Polls tmux pane for "Yes, I accept" prompt before sending acceptance
+- Permission flags configured via `agent_flags` in config (no longer hardcoded)
+- When `--dangerously-skip-permissions` is in agent flags, polls tmux pane for "Yes, I accept" prompt before sending acceptance
+- Dead sessions auto-respawn using `claude --resume {task_id}` for Claude, fresh prompt for other agents
 
 ## Building & Testing
 
