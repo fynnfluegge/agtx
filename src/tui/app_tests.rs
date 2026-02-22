@@ -1298,6 +1298,7 @@ fn test_footer_text_input_description() {
 #[cfg(feature = "test-mocks")]
 fn test_setup_task_worktree_success() {
     use crate::db::Task;
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
@@ -1323,6 +1324,7 @@ fn test_setup_task_worktree_success() {
 
     let mut task = Task::new("Add login feature", "claude", "project-1");
     task.status = TaskStatus::Backlog;
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
 
     let result = setup_task_worktree(
         &mut task,
@@ -1331,6 +1333,7 @@ fn test_setup_task_worktree_success() {
         "implement this",
         None,
         None,
+        &config,
         &mock_tmux,
         &mock_git,
     );
@@ -1349,6 +1352,7 @@ fn test_setup_task_worktree_success() {
 #[cfg(feature = "test-mocks")]
 fn test_setup_task_worktree_sets_task_fields() {
     use crate::db::Task;
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
@@ -1363,6 +1367,7 @@ fn test_setup_task_worktree_sets_task_fields() {
     mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
 
     let mut task = Task::new("Fix bug", "claude", "project-1");
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
 
     let target = setup_task_worktree(
         &mut task,
@@ -1371,6 +1376,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         "fix the bug",
         Some("CLAUDE.md".to_string()),
         Some("./init.sh".to_string()),
+        &config,
         &mock_tmux,
         &mock_git,
     ).unwrap();
@@ -1389,6 +1395,7 @@ fn test_setup_task_worktree_sets_task_fields() {
 #[cfg(feature = "test-mocks")]
 fn test_setup_task_worktree_worktree_creation_fails() {
     use crate::db::Task;
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
@@ -1406,6 +1413,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
 
     let mut task = Task::new("Test task", "claude", "project-1");
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
 
     let result = setup_task_worktree(
         &mut task,
@@ -1414,6 +1422,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         "do something",
         None,
         None,
+        &config,
         &mock_tmux,
         &mock_git,
     );
@@ -1429,6 +1438,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
 #[cfg(feature = "test-mocks")]
 fn test_setup_task_worktree_tmux_window_fails() {
     use crate::db::Task;
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
@@ -1447,6 +1457,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         .returning(|_, _, _, _| Err(anyhow::anyhow!("tmux not running")));
 
     let mut task = Task::new("Test task", "claude", "project-1");
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
 
     let result = setup_task_worktree(
         &mut task,
@@ -1455,6 +1466,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         "do something",
         None,
         None,
+        &config,
         &mock_tmux,
         &mock_git,
     );
@@ -1469,6 +1481,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
 #[cfg(feature = "test-mocks")]
 fn test_setup_task_worktree_creates_session_when_missing() {
     use crate::db::Task;
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
@@ -1492,6 +1505,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         .returning(|_, _, _, _| Ok(()));
 
     let mut task = Task::new("New task", "claude", "project-1");
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
 
     let result = setup_task_worktree(
         &mut task,
@@ -1500,6 +1514,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         "do work",
         None,
         None,
+        &config,
         &mock_tmux,
         &mock_git,
     );
@@ -1512,6 +1527,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
 #[cfg(feature = "test-mocks")]
 fn test_setup_task_worktree_passes_init_config() {
     use crate::db::Task;
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
@@ -1533,6 +1549,7 @@ fn test_setup_task_worktree_passes_init_config() {
     mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
 
     let mut task = Task::new("Task with config", "claude", "project-1");
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
 
     let result = setup_task_worktree(
         &mut task,
@@ -1541,6 +1558,7 @@ fn test_setup_task_worktree_passes_init_config() {
         "implement feature",
         Some("CLAUDE.md,.env".to_string()),
         Some("./setup.sh".to_string()),
+        &config,
         &mock_tmux,
         &mock_git,
     );

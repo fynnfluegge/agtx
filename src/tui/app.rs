@@ -2247,42 +2247,22 @@ impl App {
                     &prompt,
                     self.state.config.copy_files.clone(),
                     self.state.config.init_script.clone(),
+                    &self.state.config,
                     self.state.tmux_ops.as_ref(),
                     self.state.git_ops.as_ref(),
                 )?;
 
-                // Wait for agent to show the bypass warning prompt, then accept it and rename session
-                // Poll until we see "Yes, I accept" option or timeout after 5 seconds
-                let target_clone = target.clone();
-                let task_id_clone = task.id.clone();
-                let tmux_ops = Arc::clone(&self.state.tmux_ops);
-                std::thread::spawn(move || {
-                    let mut accepted = false;
-                    for _ in 0..50 {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-
-                        // Check pane content for the bypass prompt
-                        if let Ok(content) = tmux_ops.capture_pane(&target_clone) {
-                            // Look for the bypass warning prompt options
-                            if content.contains("Yes, I accept") || content.contains("I accept the risk") {
-                                // Found the prompt, send "2" and Enter
-                                let _ = tmux_ops.send_keys_literal(&target_clone, "2");
-                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                let _ = tmux_ops.send_keys_literal(&target_clone, "Enter");
-                                accepted = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    // After accepting, wait for agent to be ready and rename the session
-                    if accepted {
-                        std::thread::sleep(std::time::Duration::from_millis(1000));
-                        // Send /rename command to name the session with task ID for later resume
-                        let rename_cmd = format!("/rename {}", task_id_clone);
-                        let _ = tmux_ops.send_keys(&target_clone, &rename_cmd);
-                    }
-                });
+                // Auto-accept bypass prompt (if applicable) and rename session
+                let agent_name = &self.state.config.default_agent;
+                let flags = self.state.config.agent_flags.get(agent_name).cloned().unwrap_or_default();
+                let skip = flags.contains(&"--dangerously-skip-permissions".to_string());
+                maybe_auto_accept_and_rename(
+                    target,
+                    task.id.clone(),
+                    Arc::clone(&self.state.tmux_ops),
+                    skip,
+                    agent_name == "claude",
+                );
             }
 
             // When moving from Planning to Running, tell agent to start implementing
@@ -2417,36 +2397,22 @@ impl App {
             &prompt,
             self.state.config.copy_files.clone(),
             self.state.config.init_script.clone(),
+            &self.state.config,
             self.state.tmux_ops.as_ref(),
             self.state.git_ops.as_ref(),
         )?;
 
-        // Wait for agent to show the bypass warning prompt, then accept it and rename session
-        let target_clone = target.clone();
-        let task_id_clone = task.id.clone();
-        let tmux_ops = Arc::clone(&self.state.tmux_ops);
-        std::thread::spawn(move || {
-            let mut accepted = false;
-            for _ in 0..50 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-
-                if let Ok(content) = tmux_ops.capture_pane(&target_clone) {
-                    if content.contains("Yes, I accept") || content.contains("I accept the risk") {
-                        let _ = tmux_ops.send_keys_literal(&target_clone, "2");
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                        let _ = tmux_ops.send_keys_literal(&target_clone, "Enter");
-                        accepted = true;
-                        break;
-                    }
-                }
-            }
-
-            if accepted {
-                std::thread::sleep(std::time::Duration::from_millis(1000));
-                let rename_cmd = format!("/rename {}", task_id_clone);
-                let _ = tmux_ops.send_keys(&target_clone, &rename_cmd);
-            }
-        });
+        // Auto-accept bypass prompt (if applicable) and rename session
+        let agent_name = &self.state.config.default_agent;
+        let flags = self.state.config.agent_flags.get(agent_name).cloned().unwrap_or_default();
+        let skip = flags.contains(&"--dangerously-skip-permissions".to_string());
+        maybe_auto_accept_and_rename(
+            target,
+            task.id.clone(),
+            Arc::clone(&self.state.tmux_ops),
+            skip,
+            agent_name == "claude",
+        );
 
         task.status = TaskStatus::Running;
         task.updated_at = chrono::Utc::now();
@@ -2666,6 +2632,7 @@ fn setup_task_worktree(
     prompt: &str,
     copy_files: Option<String>,
     init_script: Option<String>,
+    config: &crate::config::MergedConfig,
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
 ) -> Result<String> {
@@ -2695,9 +2662,12 @@ fn setup_task_worktree(
         eprintln!("Worktree init: {}", warning);
     }
 
-    // Get the default agent and build the interactive command
-    let agent = agent::default_agent().unwrap_or_else(|| agent::get_agent("claude").unwrap());
-    let agent_cmd = agent.build_interactive_command(prompt);
+    // Get the configured agent and build the interactive command
+    let agent = agent::get_agent(&config.default_agent)
+        .or_else(|| agent::default_agent())
+        .unwrap_or_else(|| agent::get_agent("claude").unwrap());
+    let flags = config.agent_flags.get(&agent.name).cloned().unwrap_or_default();
+    let agent_cmd = agent.build_interactive_command(prompt, &flags);
 
     // Ensure project tmux session exists
     ensure_project_tmux_session(project_name, project_path, tmux_ops);
@@ -2714,6 +2684,45 @@ fn setup_task_worktree(
     task.branch_name = Some(format!("task/{}", unique_slug));
 
     Ok(target)
+}
+
+/// Optionally auto-accept the bypass warning prompt and rename the Claude session.
+/// Runs in a background thread. If `skip_permissions` is true, polls for the
+/// "Yes, I accept" prompt and sends the acceptance keystrokes. If `is_claude` is
+/// true, sends a `/rename` command after the agent is ready.
+fn maybe_auto_accept_and_rename(
+    target: String,
+    task_id: String,
+    tmux_ops: std::sync::Arc<dyn TmuxOperations>,
+    skip_permissions: bool,
+    is_claude: bool,
+) {
+    std::thread::spawn(move || {
+        if skip_permissions {
+            let mut accepted = false;
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if let Ok(content) = tmux_ops.capture_pane(&target) {
+                    if content.contains("Yes, I accept") || content.contains("I accept the risk") {
+                        let _ = tmux_ops.send_keys_literal(&target, "2");
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        let _ = tmux_ops.send_keys_literal(&target, "Enter");
+                        accepted = true;
+                        break;
+                    }
+                }
+            }
+            if !accepted {
+                return;
+            }
+        }
+
+        if is_claude {
+            std::thread::sleep(std::time::Duration::from_millis(if skip_permissions { 1000 } else { 3000 }));
+            let rename_cmd = format!("/rename {}", task_id);
+            let _ = tmux_ops.send_keys(&target, &rename_cmd);
+        }
+    });
 }
 
 /// Delete task resources: kill tmux window, remove worktree, delete branch
