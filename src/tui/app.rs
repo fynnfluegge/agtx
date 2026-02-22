@@ -123,6 +123,8 @@ struct AppState {
     pending_hook_action: Option<PendingHookAction>,
     // Agent status cache: session_name -> (status, last_checked)
     status_cache: HashMap<String, (super::status::SessionStatus, Instant)>,
+    // Spinner animation tick (incremented every event loop cycle)
+    spinner_tick: usize,
 }
 
 /// State for confirming move to Done
@@ -340,6 +342,7 @@ impl App {
                 hook_result_rx: None,
                 pending_hook_action: None,
                 status_cache: HashMap::new(),
+                spinner_tick: 0,
             },
         };
 
@@ -443,6 +446,8 @@ impl App {
 
             // Periodically refresh session status
             self.refresh_sessions()?;
+
+            self.state.spinner_tick = self.state.spinner_tick.wrapping_add(1);
         }
 
         Ok(())
@@ -591,7 +596,7 @@ impl App {
                 let task_status = task.session_name.as_ref()
                     .and_then(|s| state.status_cache.get(s))
                     .map(|(status, _)| *status);
-                Self::draw_task_card(frame, task, card_area, is_selected, &state.config.theme, task_status);
+                Self::draw_task_card(frame, task, card_area, is_selected, &state.config.theme, task_status, state.spinner_tick);
             }
 
             // Draw scrollbar if needed
@@ -1167,7 +1172,7 @@ impl App {
         shell_popup::render_shell_popup(popup, frame, popup_area, styled_lines, &colors);
     }
 
-    fn draw_task_card(frame: &mut Frame, task: &Task, area: Rect, is_selected: bool, theme: &ThemeConfig, status: Option<super::status::SessionStatus>) {
+    fn draw_task_card(frame: &mut Frame, task: &Task, area: Rect, is_selected: bool, theme: &ThemeConfig, status: Option<super::status::SessionStatus>, spinner_tick: usize) {
         let border_style = if is_selected {
             Style::default().fg(hex_to_color(&theme.color_selected))
         } else {
@@ -1198,11 +1203,14 @@ impl App {
         // Prepend status indicator for tasks with agent sessions
         let title = if let Some(status) = status {
             use super::status::SessionStatus;
-            let indicator = match status {
-                SessionStatus::Active => "● ",
-                SessionStatus::Idle => "○ ",
-                SessionStatus::Exited => "✗ ",
-                SessionStatus::Unknown => "",
+            let indicator: String = match status {
+                SessionStatus::Active => {
+                    let frame_char = super::status::SPINNER_FRAMES[spinner_tick % super::status::SPINNER_FRAMES.len()];
+                    format!("{} ", frame_char)
+                }
+                SessionStatus::Idle => "○ ".to_string(),
+                SessionStatus::Exited => "✗ ".to_string(),
+                SessionStatus::Unknown => String::new(),
             };
             if indicator.is_empty() {
                 title

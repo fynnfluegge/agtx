@@ -1,5 +1,7 @@
 use crate::tmux::TmuxOperations;
 
+pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 /// Live status of a coding agent's tmux session.
 /// Distinct from db::models::AgentStatus which is for persistence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
