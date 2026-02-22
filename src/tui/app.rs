@@ -113,6 +113,12 @@ struct AppState {
     delete_confirm_popup: Option<DeleteConfirmPopup>,
     // Confirmation popup for asking if user wants to create PR when moving to Review
     review_confirm_popup: Option<ReviewConfirmPopup>,
+    // Hook execution status popup
+    hook_status_popup: Option<HookStatusPopup>,
+    // Channel for receiving hook execution results
+    hook_result_rx: Option<mpsc::Receiver<Result<(), String>>>,
+    // Pending action to perform after hook succeeds
+    pending_hook_action: Option<PendingHookAction>,
 }
 
 /// State for confirming move to Done
@@ -202,6 +208,26 @@ struct DeleteConfirmPopup {
 struct ReviewConfirmPopup {
     task_id: String,
     task_title: String,
+}
+
+/// State for hook execution status popup
+#[derive(Debug, Clone)]
+struct HookStatusPopup {
+    message: String,
+    status: HookStatus,
+    error_output: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum HookStatus {
+    Running,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+enum PendingHookAction {
+    MoveToReview { task_id: String },
+    MoveToDone { task_id: String },
 }
 
 pub struct App {
@@ -306,6 +332,9 @@ impl App {
                 done_confirm_popup: None,
                 delete_confirm_popup: None,
                 review_confirm_popup: None,
+                hook_status_popup: None,
+                hook_result_rx: None,
+                pending_hook_action: None,
             },
         };
 
@@ -354,6 +383,43 @@ impl App {
                     }
                     self.state.pr_creation_rx = None;
                     self.refresh_tasks()?;
+                }
+            }
+
+            // Check for hook execution results
+            if let Some(rx) = &self.state.hook_result_rx {
+                if let Ok(result) = rx.try_recv() {
+                    self.state.hook_result_rx = None;
+                    match result {
+                        Ok(()) => {
+                            self.state.hook_status_popup = None;
+                            if let Some(action) = self.state.pending_hook_action.take() {
+                                match action {
+                                    PendingHookAction::MoveToReview { task_id } => {
+                                        if let Some(db) = &self.state.db {
+                                            if let Ok(Some(mut task)) = db.get_task(&task_id) {
+                                                task.status = TaskStatus::Review;
+                                                task.updated_at = chrono::Utc::now();
+                                                let _ = db.update_task(&task);
+                                            }
+                                        }
+                                        self.refresh_tasks()?;
+                                    }
+                                    PendingHookAction::MoveToDone { task_id } => {
+                                        self.force_move_to_done(&task_id)?;
+                                    }
+                                }
+                            }
+                        }
+                        Err(error_msg) => {
+                            self.state.hook_status_popup = Some(HookStatusPopup {
+                                message: "Hook failed".to_string(),
+                                status: HookStatus::Failed,
+                                error_output: Some(error_msg),
+                            });
+                            self.state.pending_hook_action = None;
+                        }
+                    }
                 }
             }
 
@@ -904,6 +970,30 @@ impl App {
             }
         }
 
+        // Hook status popup
+        if let Some(ref popup) = state.hook_status_popup {
+            let popup_area = centered_rect(50, 20, area);
+            frame.render_widget(Clear, popup_area);
+
+            let (title, border_color) = match popup.status {
+                HookStatus::Running => (" Running Hook ", hex_to_color(&state.config.theme.color_selected)),
+                HookStatus::Failed => (" Hook Failed ", Color::Red),
+            };
+
+            let main_block = Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color));
+            frame.render_widget(main_block, popup_area);
+
+            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
+            let text = match &popup.error_output {
+                Some(err) => format!("{}\n\n{}\n\nPress Esc to dismiss", popup.message, err),
+                None => popup.message.clone(),
+            };
+            frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
+        }
+
         // Done confirmation popup
         if let Some(ref popup) = state.done_confirm_popup {
             let popup_area = centered_rect(50, 25, area);
@@ -1256,6 +1346,17 @@ impl App {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        // Handle hook status popup (takes priority when shown)
+        if let Some(ref popup) = self.state.hook_status_popup {
+            if matches!(popup.status, HookStatus::Failed) {
+                if matches!(key.code, KeyCode::Esc) {
+                    self.state.hook_status_popup = None;
+                    return Ok(());
+                }
+            }
+            return Ok(()); // Swallow all keys while hook is running/shown
+        }
+
         // Handle PR status popup if open (loading/success/error)
         if let Some(ref popup) = self.state.pr_status_popup {
             // Only allow closing if not in Creating/Pushing state
@@ -1388,6 +1489,56 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn run_hook_async(&mut self, hook: &str, task: &Task, action: PendingHookAction) {
+        let hook_cmd = hook.to_string();
+        let working_dir = task.worktree_path.clone()
+            .or_else(|| self.state.project_path.as_ref().map(|p| p.to_string_lossy().to_string()))
+            .unwrap_or_else(|| ".".to_string());
+
+        let env_vars: Vec<(String, String)> = vec![
+            ("AGTX_TASK_ID".to_string(), task.id.clone()),
+            ("AGTX_TASK_TITLE".to_string(), task.title.clone()),
+            ("AGTX_BRANCH_NAME".to_string(), task.branch_name.clone().unwrap_or_default()),
+            ("AGTX_WORKTREE_PATH".to_string(), task.worktree_path.clone().unwrap_or_default()),
+            ("AGTX_PROJECT_PATH".to_string(), self.state.project_path.as_ref()
+                .map(|p| p.to_string_lossy().to_string()).unwrap_or_default()),
+        ];
+
+        self.state.hook_status_popup = Some(HookStatusPopup {
+            message: format!("Running: {}", hook_cmd),
+            status: HookStatus::Running,
+            error_output: None,
+        });
+        self.state.pending_hook_action = Some(action);
+
+        let (tx, rx) = mpsc::channel();
+        self.state.hook_result_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let result = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&hook_cmd)
+                .current_dir(&working_dir)
+                .envs(env_vars)
+                .output();
+
+            match result {
+                Ok(output) if output.status.success() => {
+                    let _ = tx.send(Ok(()));
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let msg = if stderr.is_empty() { stdout } else { stderr };
+                    let _ = tx.send(Err(msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e.to_string()));
+                }
+            }
+        });
     }
 
     fn move_running_to_review_with_pr(&mut self, task_id: &str) -> Result<()> {
@@ -2275,83 +2426,114 @@ impl App {
 
             // When moving from Running to Review: Ask if user wants to create PR
             if current_status == TaskStatus::Running && new_status == TaskStatus::Review {
-                // Check if PR already exists (task was resumed from Review)
-                if task.pr_number.is_some() {
-                    // PR already exists - just commit and push the new changes
-                    self.state.pr_status_popup = Some(PrStatusPopup {
-                        status: PrCreationStatus::Pushing,
-                        pr_url: None,
-                        error_message: None,
-                    });
-
-                    let task_clone = task.clone();
-                    let project_path_clone = project_path.clone();
-                    let git_ops = Arc::clone(&self.state.git_ops);
-                    let agent_ops = Arc::clone(&self.state.agent_ops);
-
-                    let (tx, rx) = mpsc::channel();
-                    self.state.pr_creation_rx = Some(rx);
-
-                    std::thread::spawn(move || {
-                        let result = push_changes_to_existing_pr(&task_clone, git_ops.as_ref(), agent_ops.as_ref());
-                        match result {
-                            Ok(pr_url) => {
-                                // Update task in database
-                                // Keep session_name so popup can still be opened in Review
-                                if let Ok(db) = crate::db::Database::open_project(&project_path_clone) {
-                                    let mut updated_task = task_clone;
-                                    updated_task.status = TaskStatus::Review;
-                                    updated_task.updated_at = chrono::Utc::now();
-                                    let _ = db.update_task(&updated_task);
-                                }
-                                let _ = tx.send(Ok((0, pr_url)));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(Err(e.to_string()));
-                            }
+                match &self.state.config.on_review {
+                    Some(hook) if hook == "skip" => {
+                        task.status = TaskStatus::Review;
+                        task.updated_at = chrono::Utc::now();
+                        if let Some(db) = &self.state.db {
+                            db.update_task(&task)?;
                         }
-                    });
+                        self.refresh_tasks()?;
+                        return Ok(());
+                    }
+                    Some(hook) => {
+                        let hook = hook.clone();
+                        self.run_hook_async(&hook, &task, PendingHookAction::MoveToReview { task_id: task.id.clone() });
+                        return Ok(());
+                    }
+                    None => {
+                        // Check if PR already exists (task was resumed from Review)
+                        if task.pr_number.is_some() {
+                            // PR already exists - just commit and push the new changes
+                            self.state.pr_status_popup = Some(PrStatusPopup {
+                                status: PrCreationStatus::Pushing,
+                                pr_url: None,
+                                error_message: None,
+                            });
 
-                    // Keep tmux window open - session_name stays set for resume
+                            let task_clone = task.clone();
+                            let project_path_clone = project_path.clone();
+                            let git_ops = Arc::clone(&self.state.git_ops);
+                            let agent_ops = Arc::clone(&self.state.agent_ops);
 
-                    return Ok(());
+                            let (tx, rx) = mpsc::channel();
+                            self.state.pr_creation_rx = Some(rx);
+
+                            std::thread::spawn(move || {
+                                let result = push_changes_to_existing_pr(&task_clone, git_ops.as_ref(), agent_ops.as_ref());
+                                match result {
+                                    Ok(pr_url) => {
+                                        // Update task in database
+                                        // Keep session_name so popup can still be opened in Review
+                                        if let Ok(db) = crate::db::Database::open_project(&project_path_clone) {
+                                            let mut updated_task = task_clone;
+                                            updated_task.status = TaskStatus::Review;
+                                            updated_task.updated_at = chrono::Utc::now();
+                                            let _ = db.update_task(&updated_task);
+                                        }
+                                        let _ = tx.send(Ok((0, pr_url)));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(Err(e.to_string()));
+                                    }
+                                }
+                            });
+
+                            // Keep tmux window open - session_name stays set for resume
+
+                            return Ok(());
+                        }
+
+                        // No PR yet - show confirmation popup asking if user wants to create PR
+                        self.state.review_confirm_popup = Some(ReviewConfirmPopup {
+                            task_id: task.id.clone(),
+                            task_title: task.title.clone(),
+                        });
+                        return Ok(());
+                    }
                 }
-
-                // No PR yet - show confirmation popup asking if user wants to create PR
-                self.state.review_confirm_popup = Some(ReviewConfirmPopup {
-                    task_id: task.id.clone(),
-                    task_title: task.title.clone(),
-                });
-                return Ok(());
             }
 
             // When moving from Review to Done: Show confirmation with PR state
             if current_status == TaskStatus::Review && new_status == TaskStatus::Done {
-                if let Some(pr_number) = task.pr_number {
-                    let pr_state = self.state.git_provider_ops.get_pr_state(&project_path, pr_number)?;
+                match &self.state.config.on_done {
+                    Some(hook) if hook == "skip" => {
+                        self.force_move_to_done(&task.id)?;
+                        return Ok(());
+                    }
+                    Some(hook) => {
+                        let hook = hook.clone();
+                        self.run_hook_async(&hook, &task, PendingHookAction::MoveToDone { task_id: task.id.clone() });
+                        return Ok(());
+                    }
+                    None => {
+                        if let Some(pr_number) = task.pr_number {
+                            let pr_state = self.state.git_provider_ops.get_pr_state(&project_path, pr_number)?;
 
-                    let confirm_state = match pr_state {
-                        PullRequestState::Merged => DoneConfirmPrState::Merged,
-                        PullRequestState::Closed => DoneConfirmPrState::Closed,
-                        PullRequestState::Open => DoneConfirmPrState::Open,
-                        PullRequestState::Unknown => DoneConfirmPrState::Unknown,
-                    };
+                            let confirm_state = match pr_state {
+                                PullRequestState::Merged => DoneConfirmPrState::Merged,
+                                PullRequestState::Closed => DoneConfirmPrState::Closed,
+                                PullRequestState::Open => DoneConfirmPrState::Open,
+                                PullRequestState::Unknown => DoneConfirmPrState::Unknown,
+                            };
 
-                    self.state.done_confirm_popup = Some(DoneConfirmPopup {
-                        task_id: task.id.clone(),
-                        pr_number,
-                        pr_state: confirm_state,
-                    });
-                    return Ok(());
+                            self.state.done_confirm_popup = Some(DoneConfirmPopup {
+                                task_id: task.id.clone(),
+                                pr_number,
+                                pr_state: confirm_state,
+                            });
+                            return Ok(());
+                        }
+                        // No PR - allow moving to Done directly (task might have been abandoned early)
+                        // Cleanup resources (but don't set status yet - that's done below)
+                        cleanup_task_for_done(
+                            &mut task,
+                            &project_path,
+                            self.state.tmux_ops.as_ref(),
+                            self.state.git_ops.as_ref(),
+                        );
+                    }
                 }
-                // No PR - allow moving to Done directly (task might have been abandoned early)
-                // Cleanup resources (but don't set status yet - that's done below)
-                cleanup_task_for_done(
-                    &mut task,
-                    &project_path,
-                    self.state.tmux_ops.as_ref(),
-                    self.state.git_ops.as_ref(),
-                );
             }
 
             task.status = new_status;
