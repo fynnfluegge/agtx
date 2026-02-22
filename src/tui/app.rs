@@ -588,7 +588,10 @@ impl App {
                     break;
                 }
 
-                Self::draw_task_card(frame, task, card_area, is_selected, &state.config.theme);
+                let task_status = task.session_name.as_ref()
+                    .and_then(|s| state.status_cache.get(s))
+                    .map(|(status, _)| *status);
+                Self::draw_task_card(frame, task, card_area, is_selected, &state.config.theme, task_status);
             }
 
             // Draw scrollbar if needed
@@ -1164,7 +1167,7 @@ impl App {
         shell_popup::render_shell_popup(popup, frame, popup_area, styled_lines, &colors);
     }
 
-    fn draw_task_card(frame: &mut Frame, task: &Task, area: Rect, is_selected: bool, theme: &ThemeConfig) {
+    fn draw_task_card(frame: &mut Frame, task: &Task, area: Rect, is_selected: bool, theme: &ThemeConfig, status: Option<super::status::SessionStatus>) {
         let border_style = if is_selected {
             Style::default().fg(hex_to_color(&theme.color_selected))
         } else {
@@ -1177,13 +1180,37 @@ impl App {
             Style::default().fg(hex_to_color(&theme.color_text)).bold()
         };
 
+        // Calculate indicator width for title truncation
+        let indicator_width: usize = match status {
+            Some(super::status::SessionStatus::Unknown) | None => 0,
+            Some(_) => 2, // "● " is 2 display columns
+        };
+
         // Truncate title to fit (char-safe for UTF-8)
-        let max_title_len = area.width.saturating_sub(4) as usize;
+        let max_title_len = (area.width.saturating_sub(4) as usize).saturating_sub(indicator_width);
         let title: String = if task.title.chars().count() > max_title_len {
             let truncated: String = task.title.chars().take(max_title_len.saturating_sub(3)).collect();
             format!("{}...", truncated)
         } else {
             task.title.clone()
+        };
+
+        // Prepend status indicator for tasks with agent sessions
+        let title = if let Some(status) = status {
+            use super::status::SessionStatus;
+            let indicator = match status {
+                SessionStatus::Active => "● ",
+                SessionStatus::Idle => "○ ",
+                SessionStatus::Exited => "✗ ",
+                SessionStatus::Unknown => "",
+            };
+            if indicator.is_empty() {
+                title
+            } else {
+                format!("{}{}", indicator, title)
+            }
+        } else {
+            title
         };
 
         let border_type = if is_selected {
