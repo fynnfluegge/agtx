@@ -2760,7 +2760,63 @@ impl App {
     }
 
     fn refresh_sessions(&mut self) -> Result<()> {
-        // TODO: Periodically check tmux sessions and update task status
+        use super::status::{detect_session_status, SessionStatus};
+
+        let now = Instant::now();
+        let ttl = std::time::Duration::from_secs(2);
+
+        // Collect running tasks with session names
+        let running_tasks: Vec<(String, String)> = self.state.board.tasks.iter()
+            .filter(|t| t.status == TaskStatus::Running)
+            .filter_map(|t| {
+                t.session_name.as_ref().map(|s| (t.id.clone(), s.clone()))
+            })
+            .collect();
+
+        let mut tasks_to_review = Vec::new();
+
+        for (task_id, session_name) in &running_tasks {
+            // Check cache TTL
+            if let Some((cached_status, checked_at)) = self.state.status_cache.get(session_name) {
+                if now.duration_since(*checked_at) < ttl {
+                    // Cache still fresh — but still check for auto-move
+                    if *cached_status == SessionStatus::Idle {
+                        tasks_to_review.push(task_id.clone());
+                    }
+                    continue;
+                }
+            }
+
+            let status = detect_session_status(session_name, self.state.tmux_ops.as_ref());
+            self.state.status_cache.insert(session_name.clone(), (status, now));
+
+            if status == SessionStatus::Idle {
+                tasks_to_review.push(task_id.clone());
+            }
+        }
+
+        // Prune stale cache entries (sessions no longer in running tasks)
+        let active_sessions: std::collections::HashSet<&String> = running_tasks.iter().map(|(_, s)| s).collect();
+        self.state.status_cache.retain(|k, _| active_sessions.contains(k));
+
+        // Auto-move idle tasks to Review
+        for task_id in tasks_to_review {
+            if let Some(db) = &self.state.db {
+                if let Ok(Some(mut task)) = db.get_task(&task_id) {
+                    if task.status == TaskStatus::Running {
+                        task.status = TaskStatus::Review;
+                        task.updated_at = chrono::Utc::now();
+                        let _ = db.update_task(&task);
+                    }
+                }
+            }
+        }
+
+        // Refresh tasks if any were moved
+        if !running_tasks.is_empty() {
+            self.refresh_tasks()?;
+        }
+
         Ok(())
     }
 
