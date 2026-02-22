@@ -5,10 +5,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, widgets::*};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
+use std::time::Instant;
 
 use crate::agent::{self, AgentOperations, CodingAgent};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig};
@@ -120,6 +121,8 @@ struct AppState {
     hook_result_rx: Option<mpsc::Receiver<Result<(), String>>>,
     // Pending action to perform after hook succeeds
     pending_hook_action: Option<PendingHookAction>,
+    // Agent status cache: session_name -> (status, last_checked)
+    status_cache: HashMap<String, (super::status::SessionStatus, Instant)>,
 }
 
 /// State for confirming move to Done
@@ -336,6 +339,7 @@ impl App {
                 hook_status_popup: None,
                 hook_result_rx: None,
                 pending_hook_action: None,
+                status_cache: HashMap::new(),
             },
         };
 
