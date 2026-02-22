@@ -766,28 +766,6 @@ fn test_centered_rect() {
     assert!(popup.height < 50);
 }
 
-/// Test centered_rect_fixed_width creates correct dimensions
-#[test]
-fn test_centered_rect_fixed_width() {
-    let area = Rect::new(0, 0, 100, 50);
-    let popup = centered_rect_fixed_width(40, 50, area);
-
-    // Width should be fixed at 40
-    assert_eq!(popup.width, 40);
-    // Should be centered
-    assert_eq!(popup.x, 30); // (100 - 40) / 2
-}
-
-/// Test centered_rect_fixed_width caps width to terminal size
-#[test]
-fn test_centered_rect_fixed_width_capped() {
-    let area = Rect::new(0, 0, 30, 50); // Small terminal
-    let popup = centered_rect_fixed_width(100, 50, area); // Request large width
-
-    // Width should be capped
-    assert!(popup.width <= 30);
-}
-
 // =============================================================================
 // Tests for hex_to_color
 // =============================================================================

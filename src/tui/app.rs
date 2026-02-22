@@ -51,9 +51,8 @@ fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_colu
 type Terminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
 
 /// Shell popup dimensions - used for both rendering and tmux window sizing
-const SHELL_POPUP_WIDTH: u16 = 82;          // Total width including borders
-const SHELL_POPUP_CONTENT_WIDTH: u16 = 80;  // Content width (SHELL_POPUP_WIDTH - 2 for borders)
-const SHELL_POPUP_HEIGHT_PERCENT: u16 = 75; // Percentage of terminal height
+const SHELL_POPUP_WIDTH_PERCENT: u16 = 95;
+const SHELL_POPUP_HEIGHT_PERCENT: u16 = 90;
 
 /// Application state (separate from terminal for borrow checker)
 struct AppState {
@@ -1051,7 +1050,7 @@ impl App {
     }
 
     fn draw_shell_popup(popup: &ShellPopup, frame: &mut Frame, area: Rect, theme: &ThemeConfig) {
-        let popup_area = centered_rect_fixed_width(SHELL_POPUP_WIDTH, SHELL_POPUP_HEIGHT_PERCENT, area);
+        let popup_area = centered_rect(SHELL_POPUP_WIDTH_PERCENT, SHELL_POPUP_HEIGHT_PERCENT, area);
 
         // Parse ANSI escape sequences for colors
         let styled_lines = parse_ansi_to_lines(&popup.cached_content);
@@ -2501,10 +2500,11 @@ impl App {
                 let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
 
                 // Resize tmux window to match popup dimensions (uses same constants as draw_shell_popup)
-                if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
-                    let pane_width = SHELL_POPUP_CONTENT_WIDTH;
+                if let Ok((term_width, term_height)) = crossterm::terminal::size() {
+                    let pane_width = (term_width as u32 * SHELL_POPUP_WIDTH_PERCENT as u32 / 100) as u16;
+                    let pane_width = pane_width.saturating_sub(2); // subtract borders
                     let popup_height = (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
-                    let pane_height = popup_height.saturating_sub(4); // -4 for borders + header/footer
+                    let pane_height = popup_height.saturating_sub(4); // subtract borders + header/footer
 
                     let target = format!("{}:{}", self.state.project_name, window_name);
                     // TODO the resize should be done on target which is
@@ -2802,31 +2802,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}
-
-/// Create a centered popup with fixed width and percentage height
-fn centered_rect_fixed_width(fixed_width: u16, percent_y: u16, r: Rect) -> Rect {
-    // Cap width to terminal width minus some margin
-    let width = fixed_width.min(r.width.saturating_sub(4));
-
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    // Calculate horizontal centering
-    let horizontal_margin = r.width.saturating_sub(width) / 2;
-
-    Rect {
-        x: r.x + horizontal_margin,
-        y: popup_layout[1].y,
-        width,
-        height: popup_layout[1].height,
-    }
 }
 
 /// Capture content from a tmux pane with history (with ANSI escape sequences)
