@@ -2460,10 +2460,70 @@ impl App {
         Ok(())
     }
 
+    fn respawn_agent_session(&mut self, task: &Task) -> Result<()> {
+        let worktree_path = task.worktree_path.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No worktree path for task"))?;
+        let project_path = self.state.project_path.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No project path"))?;
+
+        let agent = agent::get_agent(&task.agent)
+            .or_else(|| agent::get_agent(&self.state.config.default_agent))
+            .unwrap_or_else(|| agent::get_agent("claude").unwrap());
+
+        let flags = self.state.config.agent_flags.get(&agent.name).cloned().unwrap_or_default();
+
+        let cmd = if agent.name == "claude" {
+            let mut parts = vec!["claude".to_string()];
+            parts.extend(flags.iter().cloned());
+            parts.extend(["--resume".to_string(), task.id.clone()]);
+            parts.join(" ")
+        } else {
+            let prompt = format!(
+                "Resuming task: {}\n\nPlease continue working on this task. \
+                 Check the git log and diff to understand what's been done so far.",
+                task.title
+            );
+            agent.build_interactive_command(&prompt, &flags)
+        };
+
+        let session_name = task.session_name.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No session name for task"))?;
+        let window_name = session_name.split(':').nth(1).unwrap_or(session_name);
+
+        ensure_project_tmux_session(&self.state.project_name, project_path, self.state.tmux_ops.as_ref());
+
+        self.state.tmux_ops.create_window(
+            &self.state.project_name,
+            window_name,
+            worktree_path,
+            Some(cmd),
+        )?;
+
+        Ok(())
+    }
+
     fn open_selected_task(&mut self) -> Result<()> {
-        if let Some(task) = self.state.board.selected_task() {
-            if let Some(window_name) = &task.session_name.clone() {
-                let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
+        if let Some(task) = self.state.board.selected_task().cloned() {
+            if let Some(ref session_name) = task.session_name {
+                let window_alive = self.state.tmux_ops.window_exists(session_name).unwrap_or(false);
+
+                if !window_alive {
+                    if task.worktree_path.is_some() {
+                        self.respawn_agent_session(&task)?;
+                    } else {
+                        if let Some(db) = &self.state.db {
+                            let mut updated = task.clone();
+                            updated.session_name = None;
+                            updated.updated_at = chrono::Utc::now();
+                            db.update_task(&updated)?;
+                        }
+                        self.refresh_tasks()?;
+                        return Ok(());
+                    }
+                }
+
+                let window_name = session_name.split(':').nth(1).unwrap_or(session_name);
+                let mut popup = ShellPopup::new(task.title.clone(), window_name.to_string());
 
                 // Resize tmux window to match popup dimensions (uses same constants as draw_shell_popup)
                 if let Ok((term_width, term_height)) = crossterm::terminal::size() {
@@ -2472,11 +2532,7 @@ impl App {
                     let popup_height = (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
                     let pane_height = popup_height.saturating_sub(4); // subtract borders + header/footer
 
-                    let target = format!("{}:{}", self.state.project_name, window_name);
-                    // TODO the resize should be done on target which is
-                    // session_name:window_name, but for some reason that doesn't work
-                    // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
-                    let _ = self.state.tmux_ops.resize_window(&window_name, pane_width, pane_height);
+                    let _ = self.state.tmux_ops.resize_window(window_name, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
                 }
 
