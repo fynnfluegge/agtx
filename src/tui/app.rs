@@ -2814,13 +2814,9 @@ impl App {
         let mut tasks_to_review = Vec::new();
 
         for (task_id, session_name) in &running_tasks {
-            // Check cache TTL
-            if let Some((cached_status, checked_at)) = self.state.status_cache.get(session_name) {
+            // Check cache TTL — skip detection if still fresh
+            if let Some((_cached_status, checked_at)) = self.state.status_cache.get(session_name) {
                 if now.duration_since(*checked_at) < ttl {
-                    // Cache still fresh — but still check for auto-move
-                    if *cached_status == SessionStatus::Idle {
-                        tasks_to_review.push(task_id.clone());
-                    }
                     continue;
                 }
             }
@@ -2838,9 +2834,9 @@ impl App {
         self.state.status_cache.retain(|k, _| active_sessions.contains(k));
 
         // Auto-move idle tasks to Review
-        for task_id in tasks_to_review {
+        for task_id in &tasks_to_review {
             if let Some(db) = &self.state.db {
-                if let Ok(Some(mut task)) = db.get_task(&task_id) {
+                if let Ok(Some(mut task)) = db.get_task(task_id) {
                     if task.status == TaskStatus::Running {
                         task.status = TaskStatus::Review;
                         task.updated_at = chrono::Utc::now();
@@ -2850,8 +2846,8 @@ impl App {
             }
         }
 
-        // Refresh tasks if any were moved
-        if !running_tasks.is_empty() {
+        // Refresh board only if tasks were actually moved
+        if !tasks_to_review.is_empty() {
             self.refresh_tasks()?;
         }
 
