@@ -46,6 +46,9 @@ pub trait TmuxOperations: Send + Sync {
 
     /// Create a new detached session
     fn create_session(&self, session: &str, working_dir: &str) -> Result<()>;
+
+    /// Check if the pane's process is still alive (not dead/exited)
+    fn is_pane_alive(&self, target: &str) -> bool;
 }
 
 /// Real implementation using actual tmux commands
@@ -177,5 +180,17 @@ impl TmuxOperations for RealTmuxOps {
             .args(["-c", working_dir])
             .output()?;
         Ok(())
+    }
+
+    fn is_pane_alive(&self, target: &str) -> bool {
+        std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["list-panes", "-t", target, "-F", "#{pane_dead}"])
+            .output()
+            .map(|o| {
+                o.status.success()
+                    && String::from_utf8_lossy(&o.stdout).trim() == "0"
+            })
+            .unwrap_or(false)
     }
 }
