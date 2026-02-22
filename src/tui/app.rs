@@ -14,7 +14,7 @@ use crate::agent::{self, AgentOperations, CodingAgent};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig};
 use crate::db::{Database, Task, TaskStatus};
 use crate::git::{self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps};
-use crate::tmux::{self, RealTmuxOps, TmuxOperations};
+use crate::tmux::{RealTmuxOps, TmuxOperations};
 use crate::AppMode;
 
 use super::board::BoardState;
@@ -73,7 +73,7 @@ struct AppState {
     config: MergedConfig,
     project_path: Option<PathBuf>,
     project_name: String,
-    available_agents: Vec<agent::Agent>,
+    _available_agents: Vec<agent::Agent>,
     // Tmux operations (injectable for testing)
     tmux_ops: Arc<dyn TmuxOperations>,
     // Git operations (injectable for testing)
@@ -99,8 +99,7 @@ struct AppState {
     task_search: Option<TaskSearchState>,
     // PR creation confirmation popup
     pr_confirm_popup: Option<PrConfirmPopup>,
-    // Moving Review back to Running
-    review_to_running_task_id: Option<String>,
+    _review_to_running_task_id: Option<String>,
     // Git diff popup
     diff_popup: Option<DiffPopup>,
     // Channel for receiving PR description generation results
@@ -195,7 +194,7 @@ struct FileSearchState {
     matches: Vec<String>,
     selected: usize,
     start_pos: usize,   // Position in input_buffer where trigger was typed
-    trigger_char: char,  // The character that triggered the search (# or @)
+    _trigger_char: char,
 }
 
 /// State for delete confirmation popup
@@ -311,7 +310,7 @@ impl App {
                 config,
                 project_path,
                 project_name: project_name.clone(),
-                available_agents,
+                _available_agents: available_agents,
                 tmux_ops,
                 git_ops,
                 git_provider_ops,
@@ -326,7 +325,7 @@ impl App {
                 highlighted_file_paths: HashSet::new(),
                 task_search: None,
                 pr_confirm_popup: None,
-                review_to_running_task_id: None,
+                _review_to_running_task_id: None,
                 diff_popup: None,
                 pr_generation_rx: None,
                 pr_status_popup: None,
@@ -553,8 +552,8 @@ impl App {
 
             // Check if we need a scrollbar
             let needs_scrollbar = tasks.len() > max_visible_cards;
-            let content_width = if needs_scrollbar {
-                columns[i].width.saturating_sub(3) // Leave room for scrollbar
+            let _content_width = if needs_scrollbar {
+                columns[i].width.saturating_sub(3)
             } else {
                 columns[i].width.saturating_sub(2)
             };
@@ -1648,7 +1647,7 @@ impl App {
 
     fn create_pr_and_move_to_review_with_content(&mut self, task_id: &str, pr_title: &str, pr_body: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, self.state.project_path.clone()) {
-            if let Some(mut task) = db.get_task(task_id)? {
+            if let Some(task) = db.get_task(task_id)? {
                 // Keep tmux window open - session_name stays set for resume
 
                 // Show loading popup
@@ -2280,7 +2279,7 @@ impl App {
                     matches: vec![],
                     selected: 0,
                     start_pos,
-                    trigger_char: trigger,
+                    _trigger_char: trigger,
                 });
                 self.update_file_search_matches();
             }
@@ -2800,13 +2799,6 @@ impl App {
 
     fn refresh_sessions(&mut self) -> Result<()> {
         // TODO: Periodically check tmux sessions and update task status
-        Ok(())
-    }
-
-    fn switch_to_project(&mut self, project: &ProjectInfo) -> Result<()> {
-        self.switch_to_project_keep_sidebar(project)?;
-        // Unfocus sidebar
-        self.state.sidebar_focused = false;
         Ok(())
     }
 
