@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use agtx::agent::{AgentOperations, MockAgentOperations};
+use agtx::agent::{AgentOperations, AgentRegistry, MockAgentOperations, MockAgentRegistry};
 use agtx::git::{GitOperations, GitProviderOperations, MockGitOperations, MockGitProviderOperations};
 use agtx::tmux::{MockTmuxOperations, TmuxOperations};
 
@@ -162,4 +162,29 @@ fn test_mocks_can_be_arc_wrapped() {
 
     let files = arc_git_clone.list_files(Path::new("/tmp"));
     assert_eq!(files.len(), 1);
+}
+
+/// Test agent registry mock returns different agents by name
+#[test]
+fn test_agent_registry_mock() {
+    let mut mock_agent = MockAgentOperations::new();
+    mock_agent.expect_co_author_string()
+        .return_const("Claude <noreply@anthropic.com>".to_string());
+    mock_agent.expect_build_interactive_command()
+        .returning(|prompt| format!("claude '{}'", prompt));
+
+    let agent_arc: Arc<dyn AgentOperations> = Arc::new(mock_agent);
+
+    let mut mock_registry = MockAgentRegistry::new();
+    mock_registry.expect_get()
+        .return_const(agent_arc);
+
+    // Registry returns the mock agent for any name
+    let agent = mock_registry.get("claude");
+    assert_eq!(agent.co_author_string(), "Claude <noreply@anthropic.com>");
+    assert!(agent.build_interactive_command("test").contains("claude"));
+
+    // Same agent returned for unknown names (fallback behavior)
+    let agent2 = mock_registry.get("unknown");
+    assert_eq!(agent2.co_author_string(), "Claude <noreply@anthropic.com>");
 }

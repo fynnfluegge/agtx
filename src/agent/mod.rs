@@ -1,9 +1,9 @@
 mod operations;
 
-pub use operations::{AgentOperations, CodingAgent};
+pub use operations::{AgentOperations, AgentRegistry, CodingAgent, RealAgentRegistry};
 
 #[cfg(feature = "test-mocks")]
-pub use operations::MockAgentOperations;
+pub use operations::{MockAgentOperations, MockAgentRegistry};
 
 use serde::{Deserialize, Serialize};
 

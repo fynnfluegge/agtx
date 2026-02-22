@@ -1323,6 +1323,7 @@ fn test_setup_task_worktree_success() {
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
+    let mut mock_agent = MockAgentOperations::new();
 
     // Expect worktree creation
     mock_git
@@ -1333,6 +1334,11 @@ fn test_setup_task_worktree_success() {
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _| vec![]);
+
+    // Expect agent command building
+    mock_agent
+        .expect_build_interactive_command()
+        .returning(|prompt| format!("claude --dangerously-skip-permissions '{}'", prompt));
 
     // Expect tmux session check and window creation
     mock_tmux
@@ -1355,6 +1361,7 @@ fn test_setup_task_worktree_success() {
         None,
         &mock_tmux,
         &mock_git,
+        &mock_agent,
     );
 
     assert!(result.is_ok());
@@ -1374,6 +1381,7 @@ fn test_setup_task_worktree_sets_task_fields() {
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
+    let mut mock_agent = MockAgentOperations::new();
 
     mock_git
         .expect_create_worktree()
@@ -1381,6 +1389,9 @@ fn test_setup_task_worktree_sets_task_fields() {
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _| vec![]);
+    mock_agent
+        .expect_build_interactive_command()
+        .returning(|prompt| format!("claude '{}'", prompt));
     mock_tmux.expect_has_session().returning(|_| true);
     mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
 
@@ -1395,6 +1406,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         Some("./init.sh".to_string()),
         &mock_tmux,
         &mock_git,
+        &mock_agent,
     ).unwrap();
 
     // session_name should be the returned target
@@ -1414,6 +1426,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
+    let mut mock_agent = MockAgentOperations::new();
 
     // Worktree creation fails
     mock_git
@@ -1424,6 +1437,9 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _| vec![]);
+    mock_agent
+        .expect_build_interactive_command()
+        .returning(|prompt| format!("claude '{}'", prompt));
     mock_tmux.expect_has_session().returning(|_| true);
     mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
 
@@ -1438,6 +1454,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         None,
         &mock_tmux,
         &mock_git,
+        &mock_agent,
     );
 
     // Should succeed despite worktree creation failure (uses fallback path)
@@ -1454,6 +1471,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
+    let mut mock_agent = MockAgentOperations::new();
 
     mock_git
         .expect_create_worktree()
@@ -1461,6 +1479,9 @@ fn test_setup_task_worktree_tmux_window_fails() {
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _| vec![]);
+    mock_agent
+        .expect_build_interactive_command()
+        .returning(|prompt| format!("claude '{}'", prompt));
     mock_tmux.expect_has_session().returning(|_| true);
 
     // Tmux window creation fails
@@ -1479,6 +1500,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         None,
         &mock_tmux,
         &mock_git,
+        &mock_agent,
     );
 
     // Should propagate the error
@@ -1494,6 +1516,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
+    let mut mock_agent = MockAgentOperations::new();
 
     mock_git
         .expect_create_worktree()
@@ -1501,6 +1524,9 @@ fn test_setup_task_worktree_creates_session_when_missing() {
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _| vec![]);
+    mock_agent
+        .expect_build_interactive_command()
+        .returning(|prompt| format!("claude '{}'", prompt));
 
     // Session doesn't exist yet
     mock_tmux
@@ -1524,6 +1550,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         None,
         &mock_tmux,
         &mock_git,
+        &mock_agent,
     );
 
     assert!(result.is_ok());
@@ -1537,6 +1564,7 @@ fn test_setup_task_worktree_passes_init_config() {
 
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
+    let mut mock_agent = MockAgentOperations::new();
 
     mock_git
         .expect_create_worktree()
@@ -1551,6 +1579,9 @@ fn test_setup_task_worktree_passes_init_config() {
         })
         .returning(|_, _, _, _| vec!["warning: .env not found".to_string()]);
 
+    mock_agent
+        .expect_build_interactive_command()
+        .returning(|prompt| format!("claude '{}'", prompt));
     mock_tmux.expect_has_session().returning(|_| true);
     mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
 
@@ -1565,6 +1596,7 @@ fn test_setup_task_worktree_passes_init_config() {
         Some("./setup.sh".to_string()),
         &mock_tmux,
         &mock_git,
+        &mock_agent,
     );
 
     assert!(result.is_ok());

@@ -10,7 +10,7 @@ use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 
-use crate::agent::{self, AgentOperations, CodingAgent};
+use crate::agent::{self, AgentOperations};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig};
 use crate::db::{Database, Task, TaskStatus};
 use crate::git::{self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps};
@@ -79,8 +79,8 @@ struct AppState {
     git_ops: Arc<dyn git::GitOperations>,
     // Git provider operations (injectable for testing)
     git_provider_ops: Arc<dyn GitProviderOperations>,
-    // Agent operations (injectable for testing)
-    agent_ops: Arc<dyn AgentOperations>,
+    // Agent registry (injectable for testing)
+    agent_registry: Arc<dyn agent::AgentRegistry>,
     // Sidebar
     sidebar_visible: bool,
     sidebar_focused: bool,
@@ -217,7 +217,7 @@ impl App {
             Arc::new(RealTmuxOps),
             Arc::new(RealGitOps),
             Arc::new(RealGitHubOps),
-            Arc::new(CodingAgent::default()),
+            Arc::new(agent::RealAgentRegistry::new("claude")),
         )
     }
 
@@ -226,7 +226,7 @@ impl App {
         tmux_ops: Arc<dyn TmuxOperations>,
         git_ops: Arc<dyn GitOperations>,
         git_provider_ops: Arc<dyn GitProviderOperations>,
-        agent_ops: Arc<dyn AgentOperations>,
+        agent_registry: Arc<dyn agent::AgentRegistry>,
     ) -> Result<Self> {
         // Setup terminal
         enable_raw_mode()?;
@@ -288,7 +288,7 @@ impl App {
                 tmux_ops,
                 git_ops,
                 git_provider_ops,
-                agent_ops,
+                agent_registry,
                 sidebar_visible: true,
                 sidebar_focused: false,
                 projects: vec![],
@@ -749,7 +749,7 @@ impl App {
                     .as_millis() / 100) as usize % spinner_chars.len();
                 let spinner = spinner_chars[spinner_idx];
 
-                let agent_name = agent::default_agent().map(|a| a.name).unwrap_or_else(|| "agent".to_string());
+                let agent_name = state.config.default_agent.clone();
                 let loading_text = format!("{} Generating PR description with {}...", spinner, agent_name);
                 let loading = Paragraph::new(loading_text)
                     .style(Style::default().fg(Color::Cyan))
@@ -1413,7 +1413,7 @@ impl App {
                 let title_for_thread = task_title.clone();
                 let worktree_for_thread = worktree_path.clone();
                 let git_ops = Arc::clone(&self.state.git_ops);
-                let agent_ops = Arc::clone(&self.state.agent_ops);
+                let agent_ops = self.state.agent_registry.get(&self.state.config.default_agent);
                 std::thread::spawn(move || {
                     let (pr_title, pr_body) = generate_pr_description(
                         &title_for_thread,
@@ -1511,7 +1511,7 @@ impl App {
                 let pr_body_clone = pr_body.to_string();
                 let git_ops = Arc::clone(&self.state.git_ops);
                 let git_provider_ops = Arc::clone(&self.state.git_provider_ops);
-                let agent_ops = Arc::clone(&self.state.agent_ops);
+                let agent_ops = self.state.agent_registry.get(&self.state.config.default_agent);
 
                 // Create channel for result
                 let (tx, rx) = mpsc::channel();
@@ -2250,6 +2250,7 @@ impl App {
                     self.state.config.init_script.clone(),
                     self.state.tmux_ops.as_ref(),
                     self.state.git_ops.as_ref(),
+                    self.state.agent_registry.get(&self.state.config.default_agent).as_ref(),
                 )?;
 
                 // Wait for agent to show the bypass warning prompt, then accept it and rename session
@@ -2308,7 +2309,7 @@ impl App {
                     let task_clone = task.clone();
                     let project_path_clone = project_path.clone();
                     let git_ops = Arc::clone(&self.state.git_ops);
-                    let agent_ops = Arc::clone(&self.state.agent_ops);
+                    let agent_ops = self.state.agent_registry.get(&self.state.config.default_agent);
 
                     let (tx, rx) = mpsc::channel();
                     self.state.pr_creation_rx = Some(rx);
@@ -2420,6 +2421,7 @@ impl App {
             self.state.config.init_script.clone(),
             self.state.tmux_ops.as_ref(),
             self.state.git_ops.as_ref(),
+            self.state.agent_registry.get(&self.state.config.default_agent).as_ref(),
         )?;
 
         // Wait for agent to show the bypass warning prompt, then accept it and rename session
@@ -2668,6 +2670,7 @@ fn setup_task_worktree(
     init_script: Option<String>,
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
+    agent_ops: &dyn AgentOperations,
 ) -> Result<String> {
     let unique_slug = generate_task_slug(&task.id, &task.title);
     let window_name = format!("task-{}", unique_slug);
@@ -2695,9 +2698,8 @@ fn setup_task_worktree(
         eprintln!("Worktree init: {}", warning);
     }
 
-    // Get the default agent and build the interactive command
-    let agent = agent::default_agent().unwrap_or_else(|| agent::get_agent("claude").unwrap());
-    let agent_cmd = agent.build_interactive_command(prompt);
+    // Build the interactive command using injected agent ops
+    let agent_cmd = agent_ops.build_interactive_command(prompt);
 
     // Ensure project tmux session exists
     ensure_project_tmux_session(project_name, project_path, tmux_ops);
