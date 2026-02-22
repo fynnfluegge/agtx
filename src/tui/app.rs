@@ -1200,25 +1200,28 @@ impl App {
             task.title.clone()
         };
 
-        // Prepend status indicator for tasks with agent sessions
-        let title = if let Some(status) = status {
+        // Build title line with optional colored status indicator
+        let title_spans: Line = if let Some(status) = status {
             use super::status::SessionStatus;
-            let indicator: String = match status {
+            let (indicator, color): (String, Option<Color>) = match status {
                 SessionStatus::Active => {
                     let frame_char = super::status::SPINNER_FRAMES[spinner_tick % super::status::SPINNER_FRAMES.len()];
-                    format!("{} ", frame_char)
+                    (format!("{} ", frame_char), Some(Color::Green))
                 }
-                SessionStatus::Idle => "○ ".to_string(),
-                SessionStatus::Exited => "✗ ".to_string(),
-                SessionStatus::Unknown => String::new(),
+                SessionStatus::Idle => ("○ ".to_string(), Some(Color::Yellow)),
+                SessionStatus::Exited => ("✗ ".to_string(), Some(Color::Red)),
+                SessionStatus::Unknown => (String::new(), None),
             };
-            if indicator.is_empty() {
-                title
+            if let Some(color) = color {
+                Line::from(vec![
+                    Span::styled(indicator, Style::default().fg(color)),
+                    Span::styled(title, title_style),
+                ])
             } else {
-                format!("{}{}", indicator, title)
+                Line::from(Span::styled(title, title_style))
             }
         } else {
-            title
+            Line::from(Span::styled(title, title_style))
         };
 
         let border_type = if is_selected {
@@ -1235,7 +1238,7 @@ impl App {
         frame.render_widget(card_block, area);
 
         // Title line
-        let title_line = Paragraph::new(title).style(title_style);
+        let title_line = Paragraph::new(title_spans);
         let title_area = Rect {
             x: inner.x,
             y: inner.y,
