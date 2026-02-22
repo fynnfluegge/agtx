@@ -502,15 +502,16 @@ impl App {
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(header, chunks[0]);
 
-        // Board columns (5 columns: Backlog, Planning, Running, Review, Done)
+        // Board columns (6 columns: Backlog, Explore, Planning, Running, Review, Done)
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
+                Constraint::Percentage(17),
+                Constraint::Percentage(17),
+                Constraint::Percentage(17),
+                Constraint::Percentage(17),
+                Constraint::Percentage(16),
+                Constraint::Percentage(16),
             ])
             .split(chunks[1]);
 
@@ -2007,7 +2008,7 @@ impl App {
             KeyCode::Char('x') => self.delete_selected_task()?,
             KeyCode::Char('d') => self.show_task_diff()?,
             KeyCode::Char('m') => self.move_task_right()?,
-            KeyCode::Char('M') => self.move_backlog_to_running()?,
+            KeyCode::Char('M') => self.move_backlog_to_planning()?,
             KeyCode::Char('r') => {
                 if let Some(task) = self.state.board.selected_task() {
                     let task_id = task.id.clone();
@@ -2016,6 +2017,23 @@ impl App {
                         TaskStatus::Review => self.move_review_to_running(&task_id)?,
                         // Move Running task back to Planning
                         TaskStatus::Running => self.move_running_to_planning(&task_id)?,
+                        // Move Planning task back to Explore
+                        TaskStatus::Planning => {
+                            if let Some(session_name) = &task.session_name {
+                                let _ = self.state.tmux_ops.send_keys(
+                                    session_name,
+                                    "Let's go back to exploring. Continue investigating the codebase and discussing approaches."
+                                );
+                            }
+                            if let Some(db) = &self.state.db {
+                                if let Ok(Some(mut t)) = db.get_task(&task_id) {
+                                    t.status = TaskStatus::Explore;
+                                    t.updated_at = chrono::Utc::now();
+                                    let _ = db.update_task(&t);
+                                }
+                            }
+                            self.refresh_tasks()?;
+                        }
                         _ => {}
                     }
                 }
@@ -2377,19 +2395,19 @@ impl App {
         };
 
         if let Some(new_status) = next_status {
-            // Create worktree and tmux window when moving from Backlog to Planning
-            if current_status == TaskStatus::Backlog && new_status == TaskStatus::Planning {
+            // Create worktree and tmux window when moving from Backlog to Explore
+            if current_status == TaskStatus::Backlog && new_status == TaskStatus::Explore {
                 // Build the prompt from task title and description
-                // Instruct agent to plan first and wait for approval
+                // Instruct agent to explore codebase first
                 let task_content = if let Some(desc) = &task.description {
                     format!("{}\n\n{}", task.title, desc)
                 } else {
                     task.title.clone()
                 };
                 let prompt = format!(
-                    "Task: {}\n\nPlease analyze this task and create a detailed implementation plan. \
-                    List the files you'll need to modify and the changes you'll make. \
-                    Wait for my approval before making any changes.",
+                    "Explore the codebase for this task: {}\n\n\
+                     Understand the problem space, look at relevant files, and discuss potential approaches. \
+                     Don't make any changes yet — we'll plan next.",
                     task_content
                 );
 
@@ -2416,6 +2434,18 @@ impl App {
                     skip,
                     agent_name == "claude",
                 );
+            }
+
+            // When moving from Explore to Planning, send planning prompt
+            if current_status == TaskStatus::Explore && new_status == TaskStatus::Planning {
+                if let Some(session_name) = &task.session_name {
+                    let _ = self.state.tmux_ops.send_keys(
+                        session_name,
+                        "Based on your exploration, please create a detailed implementation plan. \
+                         List the files you'll need to modify and the changes you'll make. \
+                         Wait for my approval before making any changes."
+                    );
+                }
             }
 
             // When moving from Planning to Running, tell agent to start implementing
@@ -2549,8 +2579,8 @@ impl App {
         Ok(())
     }
 
-    /// Move task directly from Backlog to Running (skip Planning)
-    fn move_backlog_to_running(&mut self) -> Result<()> {
+    /// Move task from Backlog to Planning (skip Explore)
+    fn move_backlog_to_planning(&mut self) -> Result<()> {
         let (mut task, project_path) = match (
             self.state.board.selected_task().cloned(),
             self.state.project_path.clone(),
@@ -2563,14 +2593,16 @@ impl App {
             return Ok(());
         }
 
-        // Build prompt - skip planning, go straight to implementation
+        // Build prompt - skip Explore, go straight to planning
         let task_content = if let Some(desc) = &task.description {
             format!("{}\n\n{}", task.title, desc)
         } else {
             task.title.clone()
         };
         let prompt = format!(
-            "Task: {}\n\nPlease implement this task directly. No need to plan first - go ahead and make the changes.",
+            "Task: {}\n\nPlease analyze this task and create a detailed implementation plan. \
+             List the files you'll need to modify and the changes you'll make. \
+             Wait for my approval before making any changes.",
             task_content
         );
 
@@ -2598,7 +2630,7 @@ impl App {
             agent_name == "claude",
         );
 
-        task.status = TaskStatus::Running;
+        task.status = TaskStatus::Planning;
         task.updated_at = chrono::Utc::now();
 
         if let Some(db) = &self.state.db {
