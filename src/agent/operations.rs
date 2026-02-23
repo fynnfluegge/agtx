@@ -37,13 +37,6 @@ impl CodingAgent {
     pub fn new(agent: Agent) -> Self {
         Self { agent }
     }
-
-    /// Create a CodingAgent for the default available agent
-    pub fn default() -> Self {
-        let agent = super::default_agent()
-            .unwrap_or_else(|| super::get_agent("claude").unwrap());
-        Self::new(agent)
-    }
 }
 
 impl AgentOperations for CodingAgent {
@@ -51,12 +44,9 @@ impl AgentOperations for CodingAgent {
         // Build the command based on agent type
         let (cmd, args) = match self.agent.name.as_str() {
             "claude" => ("claude", vec!["--print", prompt]),
-            "aider" => ("aider", vec!["--message", prompt, "--no-auto-commits"]),
-            "codex" => ("codex", vec!["--print", prompt]),
-            "gh-copilot" => ("gh", vec!["copilot", "explain", prompt]),
-            "opencode" => ("opencode", vec!["--print", prompt]),
-            "cline" => ("cline", vec!["--print", prompt]),
-            "q" => ("q", vec!["chat", "--no-interactive", prompt]),
+            "codex" => ("codex", vec!["-q", prompt]),
+            "copilot" => ("copilot", vec!["-p", prompt]),
+            "gemini" => ("gemini", vec!["-p", prompt]),
             _ => (self.agent.command.as_str(), vec![prompt]),
         };
 

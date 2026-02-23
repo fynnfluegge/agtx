@@ -32,7 +32,11 @@ cp target/release/agtx ~/.local/bin/
 
 - **tmux** - Agent sessions run in a dedicated tmux server
 - **gh** - GitHub CLI for PR operations
-- **claude** - Claude Code CLI
+- Supported coding agents:
+  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+  - [Codex](https://github.com/openai/codex)
+  - [Copilot](https://github.com/github/copilot-cli)
+  - [Gemini](https://github.com/google-gemini/gemini-cli)
 
 ## Quick Start
 
@@ -179,7 +183,7 @@ tmux -L agtx attach
 
 ### Data Storage
 
-- **Database**: `~/.config/agtx/` (stores task metadata per project)
+- **Database**: `~/Library/Application Support/agtx/` (macOS) or `~/.local/share/agtx/` (Linux)
 - **Worktrees**: `.agtx/worktrees/` in each project
 - **Tmux**: Dedicated server `agtx` with per-project sessions
 

@@ -220,10 +220,10 @@ impl GlobalConfig {
     }
 
     /// Get the path to the global config file
+    /// Always uses ~/.config/agtx/ on all platforms
     pub fn config_path() -> Result<PathBuf> {
-        let dirs = directories::ProjectDirs::from("", "", "agtx")
-            .context("Could not determine config directory")?;
-        Ok(dirs.config_dir().join("config.toml"))
+        let home = std::env::var("HOME").context("Could not determine home directory")?;
+        Ok(PathBuf::from(home).join(".config").join("agtx").join("config.toml"))
     }
 
     /// Get the path to the global data directory
@@ -261,6 +261,38 @@ impl ProjectConfig {
 
         Ok(())
     }
+}
+
+/// Action to take on first run based on config/data state.
+#[derive(Debug, PartialEq)]
+pub enum FirstRunAction {
+    /// Config file already exists — nothing to do
+    ConfigExists,
+    /// Old config was found and migrated to new location
+    Migrated,
+    /// Existing user (has database) but no config file — save defaults silently
+    ExistingUserSaveDefaults,
+    /// New user — prompt for agent selection
+    NewUserPrompt,
+}
+
+/// Determine what first-run action to take.
+/// Pure logic — no side effects — so it's easily testable.
+pub fn determine_first_run_action(
+    config_exists: bool,
+    migrated: bool,
+    db_exists: bool,
+) -> FirstRunAction {
+    if config_exists {
+        return FirstRunAction::ConfigExists;
+    }
+    if migrated {
+        return FirstRunAction::Migrated;
+    }
+    if db_exists {
+        return FirstRunAction::ExistingUserSaveDefaults;
+    }
+    FirstRunAction::NewUserPrompt
 }
 
 /// Merged configuration (global + project)

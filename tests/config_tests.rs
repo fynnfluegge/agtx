@@ -1,4 +1,7 @@
-use agtx::config::{GlobalConfig, ProjectConfig, WorktreeConfig, ThemeConfig, MergedConfig};
+use agtx::config::{
+    determine_first_run_action, FirstRunAction, GlobalConfig, MergedConfig, ProjectConfig,
+    ThemeConfig, WorktreeConfig,
+};
 
 // === ThemeConfig Tests ===
 
@@ -113,4 +116,56 @@ fn test_merged_config_project_overrides() {
     assert_eq!(merged.github_url, Some("https://github.com/user/repo".to_string()));
     assert_eq!(merged.copy_files, Some(".env, .env.local".to_string()));
     assert_eq!(merged.init_script, Some("npm install".to_string()));
+}
+
+// === FirstRunAction Tests ===
+
+#[test]
+fn test_first_run_config_exists() {
+    assert_eq!(
+        determine_first_run_action(true, false, false),
+        FirstRunAction::ConfigExists,
+    );
+}
+
+#[test]
+fn test_first_run_config_exists_ignores_other_flags() {
+    // Config exists takes priority over everything
+    assert_eq!(
+        determine_first_run_action(true, true, true),
+        FirstRunAction::ConfigExists,
+    );
+}
+
+#[test]
+fn test_first_run_migrated() {
+    assert_eq!(
+        determine_first_run_action(false, true, false),
+        FirstRunAction::Migrated,
+    );
+}
+
+#[test]
+fn test_first_run_migrated_with_db() {
+    // Migration takes priority over DB existence
+    assert_eq!(
+        determine_first_run_action(false, true, true),
+        FirstRunAction::Migrated,
+    );
+}
+
+#[test]
+fn test_first_run_existing_user_save_defaults() {
+    assert_eq!(
+        determine_first_run_action(false, false, true),
+        FirstRunAction::ExistingUserSaveDefaults,
+    );
+}
+
+#[test]
+fn test_first_run_new_user_prompt() {
+    assert_eq!(
+        determine_first_run_action(false, false, false),
+        FirstRunAction::NewUserPrompt,
+    );
 }

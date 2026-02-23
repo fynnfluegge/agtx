@@ -42,23 +42,14 @@ impl Agent {
             "claude" => {
                 format!("claude --dangerously-skip-permissions '{}'", escaped_prompt)
             }
-            "aider" => {
-                format!("aider --message '{}'", escaped_prompt)
-            }
             "codex" => {
-                format!("codex '{}'", escaped_prompt)
+                format!("codex --approval-mode full-auto '{}'", escaped_prompt)
             }
-            "gh-copilot" => {
-                format!("gh copilot suggest '{}'", escaped_prompt)
+            "copilot" => {
+                format!("copilot --allow-all-tools -p '{}'", escaped_prompt)
             }
-            "opencode" => {
-                format!("opencode '{}'", escaped_prompt)
-            }
-            "cline" => {
-                format!("cline '{}'", escaped_prompt)
-            }
-            "q" => {
-                format!("q chat '{}'", escaped_prompt)
+            "gemini" => {
+                format!("gemini -p '{}'", escaped_prompt)
             }
             _ => {
                 format!("{} '{}'", self.command, escaped_prompt)
@@ -71,12 +62,13 @@ impl Agent {
 pub fn known_agents() -> Vec<Agent> {
     vec![
         Agent::new("claude", "claude", "Anthropic's Claude Code CLI", "Claude <noreply@anthropic.com>"),
-        Agent::new("aider", "aider", "AI pair programming in your terminal", "Aider <noreply@aider.chat>"),
         Agent::new("codex", "codex", "OpenAI's Codex CLI", "Codex <noreply@openai.com>"),
-        Agent::new("gh-copilot", "gh", "GitHub Copilot CLI", "GitHub Copilot <noreply@github.com>"),
-        Agent::new("opencode", "opencode", "AI-powered coding assistant", "OpenCode <noreply@opencode.ai>"),
-        Agent::new("cline", "cline", "AI coding assistant for VS Code", "Cline <noreply@cline.bot>"),
-        Agent::new("q", "q", "Amazon Q Developer CLI", "Amazon Q <noreply@amazon.com>"),
+        Agent::new("copilot", "copilot", "GitHub Copilot CLI", "GitHub Copilot <noreply@github.com>"),
+        Agent::new("gemini", "gemini", "Google Gemini CLI", "Gemini <noreply@google.com>"),
+        // TODO: investigate CLI usage before enabling
+        // Agent::new("aider", "aider", "AI pair programming in your terminal", "Aider <noreply@aider.chat>"),
+        // Agent::new("opencode", "opencode", "AI-powered coding assistant", "OpenCode <noreply@opencode.ai>"),
+        // Agent::new("cline", "cline", "AI coding assistant for VS Code", "Cline <noreply@cline.bot>"),
     ]
 }
 
@@ -91,21 +83,6 @@ pub fn detect_available_agents() -> Vec<Agent> {
 /// Get a specific agent by name
 pub fn get_agent(name: &str) -> Option<Agent> {
     known_agents().into_iter().find(|a| a.name == name)
-}
-
-/// Find the default agent (first available from preference order)
-pub fn default_agent() -> Option<Agent> {
-    let preference_order = ["claude", "aider", "codex", "gh-copilot", "opencode", "cline", "q"];
-
-    for name in preference_order {
-        if let Some(agent) = get_agent(name) {
-            if agent.is_available() {
-                return Some(agent);
-            }
-        }
-    }
-
-    None
 }
 
 /// Agent availability status for display
@@ -126,6 +103,23 @@ pub fn all_agent_status() -> Vec<AgentStatus> {
         .collect()
 }
 
+/// Parse user input for agent selection.
+/// Returns the index (0-based) of the selected agent, or None for invalid input.
+/// Empty input returns Some(0) (first agent as default).
+pub fn parse_agent_selection(input: &str, agent_count: usize) -> Option<usize> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Some(0);
+    }
+    if let Ok(num) = input.parse::<usize>() {
+        if num >= 1 && num <= agent_count {
+            return Some(num - 1);
+        }
+    }
+    None
+}
+
+
 /// Build the command arguments for spawning an agent
 pub fn build_spawn_args(agent: &Agent, prompt: &str, task_id: &str) -> Vec<String> {
     let mut args = agent.args.clone();
@@ -136,14 +130,8 @@ pub fn build_spawn_args(agent: &Agent, prompt: &str, task_id: &str) -> Vec<Strin
             args.extend(["--session".to_string(), task_id.to_string()]);
             args.push(prompt.to_string());
         }
-        "aider" => {
-            // Aider uses --message for the initial prompt
-            args.extend(["--message".to_string(), prompt.to_string()]);
-        }
-        "gh-copilot" => {
-            // GitHub Copilot needs subcommand
-            args.extend(["copilot".to_string(), "suggest".to_string()]);
-            args.push(prompt.to_string());
+        "copilot" => {
+            args.extend(["-p".to_string(), prompt.to_string()]);
         }
         _ => {
             // Default: just pass the prompt
