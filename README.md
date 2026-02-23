@@ -157,6 +157,7 @@ and before the agent session starts.
             │   Git Worktrees           │
             │  .agtx/worktrees/task2/   │
             │  .agtx/worktrees/task3/   │
+            │  .agtx/worktrees/task4/   │
             └───────────────────────────┘
 ```
 
