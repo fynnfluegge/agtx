@@ -1760,9 +1760,57 @@ impl App {
     }
 
     fn handle_dashboard_key(&mut self, key: KeyCode) -> Result<()> {
-        match key {
-            KeyCode::Char('q') => self.state.should_quit = true,
-            _ => {}
+        if self.state.show_project_list {
+            match key {
+                KeyCode::Char('q') => self.state.should_quit = true,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if self.state.selected_project < self.state.projects.len().saturating_sub(1) {
+                        self.state.selected_project += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if self.state.selected_project > 0 {
+                        self.state.selected_project -= 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(project) = self.state.projects.get(self.state.selected_project).cloned() {
+                        self.switch_to_project(&project)?;
+                        self.state.mode = AppMode::Project(PathBuf::from(&project.path));
+                        self.state.sidebar_visible = false;
+                    }
+                }
+                KeyCode::Esc => {
+                    self.state.show_project_list = false;
+                }
+                _ => {}
+            }
+        } else {
+            match key {
+                KeyCode::Char('q') => self.state.should_quit = true,
+                KeyCode::Char('p') => {
+                    self.state.show_project_list = true;
+                }
+                KeyCode::Char('n') => {
+                    let current_dir = std::env::current_dir()?;
+                    if crate::git::is_git_repo(&current_dir) {
+                        let canonical = current_dir.canonicalize().unwrap_or(current_dir);
+                        let name = canonical
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let project = ProjectInfo {
+                            name: name.clone(),
+                            path: canonical.to_string_lossy().to_string(),
+                        };
+                        self.switch_to_project(&project)?;
+                        self.state.mode = AppMode::Project(canonical);
+                        self.state.sidebar_visible = false;
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
