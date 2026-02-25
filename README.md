@@ -11,6 +11,7 @@
 - **Coding Agent integrations**: Automatic session management for Claude Code, Codex, Gemini and Copilot CLI
 - **PR workflow**: Generate descriptions with AI, create PRs directly from the TUI
 - **Multi-project dashboard**: Manage tasks across all your projects
+- **Workflow plugins**: Swap between built-in, GSD, spec-kit, or void workflows per project
 - **Customizable themes**: Configure colors via config file
 
 ## Installation
@@ -63,6 +64,7 @@ agtx -g
 | `d` | Show git diff |
 | `x` | Delete task |
 | `/` | Search tasks |
+| `P` | Select workflow plugin |
 | `e` | Toggle project sidebar |
 | `q` | Quit |
 
@@ -117,6 +119,130 @@ init_script = "scripts/init_worktree.sh"
 
 Both options run during the Backlog → Planning transition, after `git worktree add`
 and before the agent session starts.
+
+### Workflow Plugins
+
+Press `P` to select a workflow plugin for the current project. The active plugin is shown in the header bar.
+
+| Plugin | Description |
+|--------|-------------|
+| **agtx** (default) | Built-in workflow with skills and prompts for each phase |
+| **gsd** | Get Shit Done - structured spec-driven development with interactive planning |
+| **spec-kit** | Spec-Driven Development by GitHub - specifications become executable artifacts |
+| **void** | Plain agent session - no prompting or skills, task description prefilled in input |
+
+Each task remembers the plugin it was started with. Switching plugins only affects new tasks — existing tasks continue using their original plugin throughout their lifecycle.
+
+#### Agent Compatibility
+
+|  | Claude | Codex | Gemini | Copilot | OpenCode |
+|--|:------:|:-----:|:------:|:-------:|:--------:|
+| **agtx** | ✅ | ✅ | ✅ | 🟡 | ✅ |
+| **gsd** | ✅ | ✅ | ✅ | ❌ | ✅ |
+| **spec-kit** | ✅ | ✅ | ✅ | 🟡 | ✅ |
+| **void** | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
+
+#### Creating a Plugin
+
+Plugins are TOML files that customize the task workflow — the commands sent to the agent, the prompts, and the artifact files that signal phase completion.
+
+**Location:** Place your plugin at `.agtx/plugins/<name>/plugin.toml` in your project root (or `~/.config/agtx/plugins/<name>/plugin.toml` for global use). It will appear in the plugin selector (`P`).
+
+**Minimal example** — a plugin that uses custom slash commands:
+
+```toml
+name = "my-plugin"
+description = "My custom workflow"
+
+[commands]
+planning = "/my-plugin:plan"
+running = "/my-plugin:execute"
+review = "/my-plugin:review"
+
+[prompts]
+planning = "Task: {task}"
+running = ""
+review = ""
+```
+
+**Full reference** with all available fields:
+
+```toml
+name = "my-plugin"
+description = "My custom workflow"
+
+# Shell command to run in the worktree after creation, before the agent starts.
+# {agent} is replaced with the agent name (claude, codex, gemini, etc.)
+init_script = "npm install --prefix .my-plugin --{agent}"
+
+# Restrict to specific agents (empty or omitted = all agents supported)
+supported_agents = ["claude", "codex", "gemini", "opencode"]
+
+# Extra directories to copy from project root into each worktree.
+# Agent config dirs (.claude, .gemini, .codex, .github/agents, .config/opencode)
+# are always copied automatically.
+copy_dirs = [".my-plugin"]
+
+# Artifact files that signal phase completion.
+# When detected, the task shows a ✓ checkmark instead of the spinner.
+# Supports * wildcard for one directory level (e.g. "specs/*/plan.md").
+# Omitted phases fall back to agtx defaults (.agtx/plan.md, .agtx/execute.md, .agtx/review.md).
+[artifacts]
+research = ".my-plugin/research.md"
+planning = ".my-plugin/plan.md"
+running = ".my-plugin/summary.md"
+review = ".my-plugin/review.md"
+
+# Slash commands sent to the agent via tmux for each phase.
+# Written in canonical format (Claude/Gemini style): /namespace:command
+# Automatically transformed per agent:
+#   Claude/Gemini: /my-plugin:plan (unchanged)
+#   OpenCode:      /my-plugin-plan (colon → hyphen)
+#   Codex:         $my-plugin-plan (slash → dollar, colon → hyphen)
+# Set to "" to skip sending a command for that phase.
+[commands]
+research = "/my-plugin:research {task}"
+planning = "/my-plugin:plan {task}"
+running = "/my-plugin:execute"
+review = "/my-plugin:review"
+
+# Prompt templates sent as task content after the command.
+# {task} = task title + description, {task_id} = unique task ID.
+# Set to "" to skip sending a prompt for that phase.
+[prompts]
+research = "Task: {task}"
+planning = ""
+running = ""
+review = ""
+
+# Text patterns to wait for in the tmux pane before sending the prompt.
+# Useful when a command triggers an interactive prompt that must appear first.
+# Polls every 500ms, times out after 5 minutes.
+[prompt_triggers]
+research = "What do you want to build?"
+```
+
+**How it works at each phase transition:**
+
+1. The **command** is sent to the agent via tmux (e.g., `/my-plugin:plan`)
+2. If a **prompt_trigger** is set, agtx waits for that text to appear in the tmux pane
+3. The **prompt** is sent with `{task}` and `{task_id}` replaced
+4. agtx polls for the **artifact** file — when found, the spinner becomes a checkmark
+
+**Custom skills:** If your plugin provides its own skill files, place them in the plugin directory:
+
+```
+.agtx/plugins/my-plugin/
+├── plugin.toml
+└── skills/
+    ├── agtx-plan/SKILL.md
+    ├── agtx-execute/SKILL.md
+    └── agtx-review/SKILL.md
+```
+
+These override the built-in agtx skills and are deployed to agent-native paths (`.claude/commands/`, `.codex/skills/`, etc.) in each worktree.
 
 ## How It Works
 

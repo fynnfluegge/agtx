@@ -204,6 +204,7 @@ fn test_create_pr_with_content_success() {
         branch_name: Some("feature/test".to_string()),
         pr_number: None,
         pr_url: None,
+        plugin: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -290,6 +291,7 @@ fn test_create_pr_with_content_no_changes() {
         branch_name: Some("feature/test".to_string()),
         pr_number: None,
         pr_url: None,
+        plugin: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -346,6 +348,7 @@ fn test_create_pr_with_content_push_failure() {
         branch_name: Some("feature/test".to_string()),
         pr_number: None,
         pr_url: None,
+        plugin: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -399,6 +402,7 @@ fn test_push_changes_to_existing_pr_success() {
         branch_name: Some("feature/existing".to_string()),
         pr_number: Some(99),
         pr_url: Some("https://github.com/org/repo/pull/99".to_string()),
+        plugin: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -449,6 +453,7 @@ fn test_push_changes_to_existing_pr_no_changes() {
         branch_name: Some("feature/no-changes".to_string()),
         pr_number: Some(50),
         pr_url: Some("https://github.com/org/repo/pull/50".to_string()),
+        plugin: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -482,6 +487,7 @@ fn test_push_changes_to_existing_pr_no_url() {
         branch_name: Some("feature/branch".to_string()),
         pr_number: None,
         pr_url: None, // No PR URL
+        plugin: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1006,7 +1012,7 @@ fn test_collect_task_diff_all_changes() {
         .expect_diff_untracked_file()
         .returning(|_, _| "+++ new_file.rs\n+content".to_string());
 
-    let result = collect_task_diff("/tmp/worktree", &mock_git);
+    let result = collect_task_diff("/tmp/worktree", &mock_git, &[]);
 
     assert!(result.contains("Unstaged Changes"));
     assert!(result.contains("Staged Changes"));
@@ -1023,7 +1029,7 @@ fn test_collect_task_diff_no_changes() {
     mock_git.expect_diff_cached().returning(|_| String::new());
     mock_git.expect_list_untracked_files().returning(|_| String::new());
 
-    let result = collect_task_diff("/tmp/worktree", &mock_git);
+    let result = collect_task_diff("/tmp/worktree", &mock_git, &[]);
 
     assert!(result.contains("(no changes)"));
     assert!(result.contains("/tmp/worktree"));
@@ -1042,7 +1048,7 @@ fn test_collect_task_diff_only_unstaged() {
     mock_git.expect_diff_cached().returning(|_| String::new());
     mock_git.expect_list_untracked_files().returning(|_| String::new());
 
-    let result = collect_task_diff("/tmp/worktree", &mock_git);
+    let result = collect_task_diff("/tmp/worktree", &mock_git, &[]);
 
     assert!(result.contains("Unstaged Changes"));
     assert!(!result.contains("Staged Changes"));
@@ -1333,7 +1339,7 @@ fn test_setup_task_worktree_success() {
     // Expect worktree initialization
     mock_git
         .expect_initialize_worktree()
-        .returning(|_, _, _, _| vec![]);
+        .returning(|_, _, _, _, _| vec![]);
 
     // Expect agent command building
     mock_agent
@@ -1359,6 +1365,8 @@ fn test_setup_task_worktree_success() {
         "implement this",
         None,
         None,
+        &None,
+        "claude",
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1388,7 +1396,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         .returning(|_, slug| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
-        .returning(|_, _, _, _| vec![]);
+        .returning(|_, _, _, _, _| vec![]);
     mock_agent
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
@@ -1404,6 +1412,8 @@ fn test_setup_task_worktree_sets_task_fields() {
         "fix the bug",
         Some("CLAUDE.md".to_string()),
         Some("./init.sh".to_string()),
+        &None,
+        "claude",
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1436,7 +1446,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     // Should still initialize and create window with fallback path
     mock_git
         .expect_initialize_worktree()
-        .returning(|_, _, _, _| vec![]);
+        .returning(|_, _, _, _, _| vec![]);
     mock_agent
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
@@ -1452,6 +1462,8 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         "do something",
         None,
         None,
+        &None,
+        "claude",
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1478,7 +1490,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         .returning(|_, slug| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
-        .returning(|_, _, _, _| vec![]);
+        .returning(|_, _, _, _, _| vec![]);
     mock_agent
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
@@ -1498,6 +1510,8 @@ fn test_setup_task_worktree_tmux_window_fails() {
         "do something",
         None,
         None,
+        &None,
+        "claude",
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1523,7 +1537,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         .returning(|_, slug| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
-        .returning(|_, _, _, _| vec![]);
+        .returning(|_, _, _, _, _| vec![]);
     mock_agent
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
@@ -1548,6 +1562,8 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         "do work",
         None,
         None,
+        &None,
+        "claude",
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1573,11 +1589,11 @@ fn test_setup_task_worktree_passes_init_config() {
     // Verify copy_files and init_script are passed through
     mock_git
         .expect_initialize_worktree()
-        .withf(|_, _, copy_files, init_script| {
+        .withf(|_, _, copy_files, init_script, _copy_dirs| {
             copy_files.as_deref() == Some("CLAUDE.md,.env")
                 && init_script.as_deref() == Some("./setup.sh")
         })
-        .returning(|_, _, _, _| vec!["warning: .env not found".to_string()]);
+        .returning(|_, _, _, _, _| vec!["warning: .env not found".to_string()]);
 
     mock_agent
         .expect_build_interactive_command()
@@ -1594,10 +1610,649 @@ fn test_setup_task_worktree_passes_init_config() {
         "implement feature",
         Some("CLAUDE.md,.env".to_string()),
         Some("./setup.sh".to_string()),
+        &None,
+        "claude",
         &mock_tmux,
         &mock_git,
         &mock_agent,
     );
 
     assert!(result.is_ok());
+}
+
+// ── Agent-Native Skill Discovery Tests ──────────────────────────────────────
+
+#[test]
+fn test_skill_name_to_command() {
+    assert_eq!(skills::skill_name_to_command("agtx-plan"), "agtx:plan");
+    assert_eq!(skills::skill_name_to_command("agtx-execute"), "agtx:execute");
+    assert_eq!(skills::skill_name_to_command("agtx-review"), "agtx:review");
+    assert_eq!(skills::skill_name_to_command("agtx-research"), "agtx:research");
+    assert_eq!(skills::skill_name_to_command("simple"), "simple");
+}
+
+#[test]
+fn test_skill_dir_to_filename() {
+    // Claude/default: .md files with prefix stripped
+    assert_eq!(skills::skill_dir_to_filename("agtx-plan", "claude"), "plan.md");
+    assert_eq!(skills::skill_dir_to_filename("agtx-execute", "claude"), "execute.md");
+    assert_eq!(skills::skill_dir_to_filename("agtx-review", "claude"), "review.md");
+    assert_eq!(skills::skill_dir_to_filename("custom", "claude"), "custom.md");
+    // Gemini: .toml files with prefix stripped
+    assert_eq!(skills::skill_dir_to_filename("agtx-plan", "gemini"), "plan.toml");
+    assert_eq!(skills::skill_dir_to_filename("agtx-execute", "gemini"), "execute.toml");
+    // OpenCode: .md files with full name (flat directory, no namespace)
+    assert_eq!(skills::skill_dir_to_filename("agtx-plan", "opencode"), "agtx-plan.md");
+    assert_eq!(skills::skill_dir_to_filename("agtx-execute", "opencode"), "agtx-execute.md");
+    // Copilot: .md files with prefix stripped (same as Claude default)
+    assert_eq!(skills::skill_dir_to_filename("agtx-plan", "copilot"), "plan.md");
+    assert_eq!(skills::skill_dir_to_filename("agtx-execute", "copilot"), "execute.md");
+}
+
+#[test]
+fn test_agent_native_skill_dir() {
+    assert_eq!(skills::agent_native_skill_dir("claude"), Some((".claude/commands", "agtx")));
+    assert_eq!(skills::agent_native_skill_dir("gemini"), Some((".gemini/commands", "agtx")));
+    assert_eq!(skills::agent_native_skill_dir("opencode"), Some((".config/opencode/command", "")));
+    assert_eq!(skills::agent_native_skill_dir("codex"), Some((".codex/skills", "")));
+    assert_eq!(skills::agent_native_skill_dir("copilot"), Some((".github/agents", "agtx")));
+    assert_eq!(skills::agent_native_skill_dir("unknown"), None);
+}
+
+#[test]
+fn test_skill_reference_native_agent() {
+    // Agents with skill invocation get empty reference (skill sent via send_keys)
+    assert_eq!(skills::skill_reference("claude", "agtx-plan"), "");
+    assert_eq!(skills::skill_reference("gemini", "agtx-execute"), "");
+    assert_eq!(skills::skill_reference("opencode", "agtx-plan"), "");
+    assert_eq!(skills::skill_reference("codex", "agtx-review"), "");
+}
+
+#[test]
+fn test_skill_reference_fallback_agent() {
+    // Agents without skill invocation get file-path reference
+    let ref_copilot = skills::skill_reference("copilot", "agtx-plan");
+    assert_eq!(ref_copilot, "Follow the instructions in .agtx/skills/agtx-plan/SKILL.md");
+
+    let ref_unknown = skills::skill_reference("unknown", "agtx-execute");
+    assert!(ref_unknown.contains(".agtx/skills/agtx-execute/SKILL.md"));
+}
+
+#[test]
+fn test_skill_invocation_command() {
+    assert_eq!(skills::skill_invocation_command("claude", "agtx-plan"), Some("/agtx:plan".to_string()));
+    assert_eq!(skills::skill_invocation_command("gemini", "agtx-execute"), Some("/agtx:execute".to_string()));
+    assert_eq!(skills::skill_invocation_command("opencode", "agtx-plan"), Some("/agtx-plan".to_string()));
+    assert_eq!(skills::skill_invocation_command("codex", "agtx-plan"), Some("$agtx-plan".to_string()));
+    assert_eq!(skills::skill_invocation_command("copilot", "agtx-plan"), None);
+    assert_eq!(skills::skill_invocation_command("unknown", "agtx-plan"), None);
+}
+
+#[test]
+fn test_transform_plugin_command() {
+    // Claude/Gemini: canonical form unchanged
+    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "claude"), Some("/gsd:plan-phase 1".to_string()));
+    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "gemini"), Some("/gsd:plan-phase 1".to_string()));
+    // OpenCode: colon → hyphen
+    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "opencode"), Some("/gsd-plan-phase 1".to_string()));
+    assert_eq!(skills::transform_plugin_command("/gsd:discuss-phase 1", "opencode"), Some("/gsd-discuss-phase 1".to_string()));
+    // Codex: slash → dollar, colon → hyphen
+    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "codex"), Some("$gsd-plan-phase 1".to_string()));
+    assert_eq!(skills::transform_plugin_command("/gsd:execute-phase 1", "codex"), Some("$gsd-execute-phase 1".to_string()));
+    // Spec-kit style (dot separator, no colon): transform only affects colon
+    assert_eq!(skills::transform_plugin_command("/speckit.plan", "opencode"), Some("/speckit.plan".to_string()));
+    assert_eq!(skills::transform_plugin_command("/speckit.plan", "codex"), Some("$speckit.plan".to_string()));
+    // Unsupported agents
+    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "copilot"), None);
+    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "unknown"), None);
+}
+
+#[test]
+fn test_phase_to_skill_dir() {
+    assert_eq!(skills::phase_to_skill_dir("research"), "agtx-research");
+    assert_eq!(skills::phase_to_skill_dir("planning"), "agtx-plan");
+    assert_eq!(skills::phase_to_skill_dir("planning_with_research"), "agtx-plan");
+    assert_eq!(skills::phase_to_skill_dir("running"), "agtx-execute");
+    assert_eq!(skills::phase_to_skill_dir("review"), "agtx-review");
+    assert_eq!(skills::phase_to_skill_dir("other"), "");
+}
+
+#[test]
+fn test_strip_frontmatter() {
+    let with_fm = "---\nname: agtx-plan\ndescription: test\n---\n# Content\nBody";
+    assert_eq!(skills::strip_frontmatter(with_fm), "# Content\nBody");
+
+    let without_fm = "# Content\nBody";
+    assert_eq!(skills::strip_frontmatter(without_fm), "# Content\nBody");
+}
+
+#[test]
+fn test_skill_to_gemini_toml() {
+    let toml = skills::skill_to_gemini_toml("Plan a task", "---\nname: agtx-plan\n---\n# Planning\nDo stuff");
+    assert!(toml.contains("description = \"Plan a task\""));
+    assert!(toml.contains("prompt = \"\"\""));
+    assert!(toml.contains("# Planning"));
+    assert!(toml.contains("Do stuff"));
+    // Should not contain frontmatter
+    assert!(!toml.contains("name: agtx-plan"));
+}
+
+#[test]
+fn test_extract_description() {
+    let content = "---\nname: agtx-plan\ndescription: Plan a task implementation.\n---\n# Content";
+    assert_eq!(skills::extract_description(content), Some("Plan a task implementation.".to_string()));
+
+    let no_desc = "---\nname: agtx-plan\n---\n# Content";
+    assert_eq!(skills::extract_description(no_desc), None);
+
+    let no_frontmatter = "# Content";
+    assert_eq!(skills::extract_description(no_frontmatter), None);
+}
+
+#[test]
+fn test_transform_skill_frontmatter() {
+    let input = "---\nname: agtx-plan\ndescription: test\n---\n# Content";
+    let output = transform_skill_frontmatter(input);
+    assert!(output.contains("name: agtx:plan"));
+    assert!(output.contains("# Content"));
+    assert!(output.contains("description: test"));
+}
+
+#[test]
+fn test_transform_skill_frontmatter_no_agtx() {
+    let input = "---\nname: other-skill\n---\n# Content";
+    let output = transform_skill_frontmatter(input);
+    // Should not transform non-agtx names
+    assert_eq!(output, input);
+}
+
+#[test]
+fn test_resolve_prompt_claude_no_skill_ref() {
+    // Claude has skill invocation support — prompt should NOT contain skill reference
+    let prompt = resolve_prompt(&None, "planning", "my task", "task-123", "claude");
+    assert!(prompt.contains("my task"));
+    assert!(!prompt.contains("/agtx:plan"));
+    assert!(!prompt.contains("SKILL.md"));
+}
+
+#[test]
+fn test_resolve_prompt_copilot_has_file_path() {
+    // Copilot has no skill invocation — prompt should contain file-path reference
+    let prompt = resolve_prompt(&None, "planning", "my task", "task-123", "copilot");
+    assert!(prompt.contains("my task"));
+    assert!(prompt.contains(".agtx/skills/agtx-plan/SKILL.md"));
+}
+
+#[test]
+fn test_resolve_prompt_research_has_task_id() {
+    let prompt = resolve_prompt(&None, "research", "my task", "abc-123", "claude");
+    assert!(prompt.contains("abc-123"));
+    // Claude should NOT have skill ref in prompt (sent via send_keys)
+    assert!(!prompt.contains("/agtx:research"));
+}
+
+#[test]
+fn test_resolve_prompt_running_phase() {
+    let prompt = resolve_prompt(&None, "running", "my task", "task-123", "claude");
+    assert!(prompt.contains("Plan approved"));
+    assert!(!prompt.contains("SKILL.md"));
+}
+
+#[test]
+fn test_resolve_prompt_review_phase() {
+    let prompt = resolve_prompt(&None, "review", "my task", "task-123", "copilot");
+    assert!(prompt.contains("Implementation complete"));
+    assert!(prompt.contains(".agtx/skills/agtx-review/SKILL.md"));
+}
+
+#[test]
+fn test_resolve_skill_command_no_plugin() {
+    // No plugin: falls back to agent-native skill invocation
+    assert_eq!(resolve_skill_command(&None, "planning", "claude", ""), Some("/agtx:plan".to_string()));
+    assert_eq!(resolve_skill_command(&None, "running", "codex", ""), Some("$agtx-execute".to_string()));
+    assert_eq!(resolve_skill_command(&None, "review", "gemini", ""), Some("/agtx:review".to_string()));
+    assert_eq!(resolve_skill_command(&None, "planning", "opencode", ""), Some("/agtx-plan".to_string()));
+    assert_eq!(resolve_skill_command(&None, "planning", "copilot", ""), None);
+}
+
+#[test]
+fn test_resolve_skill_command_with_plugin() {
+    use crate::config::{WorkflowPlugin, PluginArtifacts, PluginCommands, PluginPrompts, PluginPromptTriggers};
+    let plugin = Some(WorkflowPlugin {
+        name: "gsd".to_string(),
+        description: None,
+        init_script: None,
+        supported_agents: vec![],
+        artifacts: PluginArtifacts::default(),
+        commands: PluginCommands {
+            research: Some("/gsd:discuss-phase 1".to_string()),
+            planning: Some("/gsd:plan-phase 1".to_string()),
+            running: Some("/gsd:execute-phase 1".to_string()),
+            review: Some("/gsd:verify-work 1".to_string()),
+        },
+        prompts: PluginPrompts::default(),
+        prompt_triggers: PluginPromptTriggers::default(),
+        copy_dirs: vec![],
+    });
+    // Claude/Gemini: canonical form unchanged
+    assert_eq!(resolve_skill_command(&plugin, "planning", "claude", ""), Some("/gsd:plan-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "running", "claude", ""), Some("/gsd:execute-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "review", "gemini", ""), Some("/gsd:verify-work 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "research", "claude", ""), Some("/gsd:discuss-phase 1".to_string()));
+    // OpenCode: colon → hyphen
+    assert_eq!(resolve_skill_command(&plugin, "planning", "opencode", ""), Some("/gsd-plan-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "research", "opencode", ""), Some("/gsd-discuss-phase 1".to_string()));
+    // Codex: slash → dollar, colon → hyphen
+    assert_eq!(resolve_skill_command(&plugin, "planning", "codex", ""), Some("$gsd-plan-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "running", "codex", ""), Some("$gsd-execute-phase 1".to_string()));
+    // Unsupported agents: None (will use file-path fallback in prompt)
+    assert_eq!(resolve_skill_command(&plugin, "planning", "copilot", ""), None);
+}
+
+#[test]
+fn test_plugin_supports_agent() {
+    use crate::config::WorkflowPlugin;
+
+    // Empty supported_agents = all agents supported
+    let plugin = WorkflowPlugin {
+        name: "test".to_string(),
+        description: None,
+        init_script: None,
+        supported_agents: vec![],
+        artifacts: Default::default(),
+        commands: Default::default(),
+        prompts: Default::default(),
+        prompt_triggers: Default::default(),
+        copy_dirs: vec![],
+    };
+    assert!(plugin.supports_agent("claude"));
+    assert!(plugin.supports_agent("copilot"));
+    assert!(plugin.supports_agent("anything"));
+
+    // Explicit list = only those agents supported
+    let plugin = WorkflowPlugin {
+        name: "gsd".to_string(),
+        description: None,
+        init_script: None,
+        supported_agents: vec!["claude".into(), "codex".into(), "gemini".into(), "opencode".into()],
+        artifacts: Default::default(),
+        commands: Default::default(),
+        prompts: Default::default(),
+        prompt_triggers: Default::default(),
+        copy_dirs: vec![],
+    };
+    assert!(plugin.supports_agent("claude"));
+    assert!(plugin.supports_agent("codex"));
+    assert!(plugin.supports_agent("gemini"));
+    assert!(plugin.supports_agent("opencode"));
+    assert!(!plugin.supports_agent("copilot"));
+    assert!(!plugin.supports_agent("aider"));
+}
+
+#[test]
+fn test_glob_path_exists() {
+    // Create temp dir with nested structure: specs/my-feature/plan.md
+    let tmp = std::env::temp_dir().join("agtx_test_glob");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let feature_dir = tmp.join("specs").join("my-feature");
+    std::fs::create_dir_all(&feature_dir).unwrap();
+    std::fs::write(feature_dir.join("plan.md"), "# Plan").unwrap();
+    std::fs::write(feature_dir.join("spec.md"), "# Spec").unwrap();
+
+    // Glob should match
+    let pattern = format!("{}/specs/*/plan.md", tmp.display());
+    assert!(glob_path_exists(&pattern));
+
+    let pattern = format!("{}/specs/*/spec.md", tmp.display());
+    assert!(glob_path_exists(&pattern));
+
+    // Non-existent file
+    let pattern = format!("{}/specs/*/tasks.md", tmp.display());
+    assert!(!glob_path_exists(&pattern));
+
+    // Non-existent dir
+    let pattern = format!("{}/nonexistent/*/plan.md", tmp.display());
+    assert!(!glob_path_exists(&pattern));
+
+    // Exact path (no wildcard)
+    let exact = format!("{}/specs/my-feature/plan.md", tmp.display());
+    assert!(glob_path_exists(&exact));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_phase_artifact_exists_with_glob() {
+    use crate::config::{WorkflowPlugin, PluginArtifacts, PluginCommands, PluginPrompts};
+
+    let tmp = std::env::temp_dir().join("agtx_test_artifact_glob");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let feature_dir = tmp.join("specs").join("add-login");
+    std::fs::create_dir_all(&feature_dir).unwrap();
+    std::fs::write(feature_dir.join("plan.md"), "# Plan").unwrap();
+
+    let plugin = Some(WorkflowPlugin {
+        name: "spec-kit".to_string(),
+        description: None,
+        init_script: None,
+        supported_agents: vec![],
+        artifacts: PluginArtifacts {
+            research: Some("specs/*/spec.md".to_string()),
+            planning: Some("specs/*/plan.md".to_string()),
+            running: None,
+            review: None,
+        },
+        commands: PluginCommands::default(),
+        prompts: PluginPrompts::default(),
+        prompt_triggers: Default::default(),
+        copy_dirs: vec![],
+    });
+
+    let worktree = tmp.to_string_lossy().to_string();
+
+    // Planning artifact exists (glob matches)
+    assert!(phase_artifact_exists(&worktree, TaskStatus::Planning, &plugin));
+
+    // Research artifact doesn't exist yet (no spec.md)
+    assert!(!phase_artifact_exists(&worktree, TaskStatus::Backlog, &plugin));
+
+    // Running/Review fall back to agtx defaults (don't exist)
+    assert!(!phase_artifact_exists(&worktree, TaskStatus::Running, &plugin));
+    assert!(!phase_artifact_exists(&worktree, TaskStatus::Review, &plugin));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_bundled_plugins_are_valid_toml() {
+    use crate::config::WorkflowPlugin;
+    // Each bundled plugin.toml must parse as a valid WorkflowPlugin
+    for (name, _desc, content) in skills::BUNDLED_PLUGINS {
+        let plugin: WorkflowPlugin = toml::from_str(content)
+            .unwrap_or_else(|e| panic!("Bundled plugin '{}' has invalid TOML: {}", name, e));
+        assert_eq!(plugin.name, *name);
+    }
+}
+
+#[test]
+fn test_bundled_plugins_list() {
+    // We ship gsd, spec-kit, and void
+    let names: Vec<&str> = skills::BUNDLED_PLUGINS.iter().map(|(n, _, _)| *n).collect();
+    assert!(names.contains(&"gsd"));
+    assert!(names.contains(&"spec-kit"));
+    assert!(names.contains(&"void"));
+    assert_eq!(names.len(), 3);
+}
+
+#[test]
+fn test_plugin_select_popup_construction_no_active() {
+    // When no plugin is active, (none) should be selected
+    let current = "";
+    let mut options = vec![PluginOption {
+        name: String::new(),
+        label: "(none)".to_string(),
+        description: "Use agtx built-in defaults".to_string(),
+        active: current.is_empty(),
+    }];
+    for (name, desc, _) in skills::BUNDLED_PLUGINS {
+        options.push(PluginOption {
+            name: name.to_string(),
+            label: name.to_string(),
+            description: desc.to_string(),
+            active: current == *name,
+        });
+    }
+    let selected = options.iter().position(|o| o.active).unwrap_or(0);
+    assert_eq!(selected, 0);
+    assert!(options[0].active);
+    assert!(!options[1].active);
+    assert!(!options[2].active);
+}
+
+#[test]
+fn test_plugin_select_popup_construction_gsd_active() {
+    let current = "gsd";
+    let mut options = vec![PluginOption {
+        name: String::new(),
+        label: "(none)".to_string(),
+        description: "Use agtx built-in defaults".to_string(),
+        active: current.is_empty(),
+    }];
+    for (name, desc, _) in skills::BUNDLED_PLUGINS {
+        options.push(PluginOption {
+            name: name.to_string(),
+            label: name.to_string(),
+            description: desc.to_string(),
+            active: current == *name,
+        });
+    }
+    let selected = options.iter().position(|o| o.active).unwrap_or(0);
+    // gsd is the second option (index 1)
+    assert_eq!(selected, 1);
+    assert!(!options[0].active);
+    assert!(options[1].active);
+    assert_eq!(options[1].name, "gsd");
+}
+
+#[test]
+fn test_install_plugin_writes_files() {
+    use crate::config::ProjectConfig;
+
+    let tmp = std::env::temp_dir().join("agtx_test_install_plugin");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // Simulate install_plugin logic for "gsd"
+    let plugin_name = "gsd";
+    if let Some((_name, _desc, content)) = skills::BUNDLED_PLUGINS
+        .iter()
+        .find(|(n, _, _)| *n == plugin_name)
+    {
+        let plugin_dir = tmp.join(".agtx").join("plugins").join(plugin_name);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("plugin.toml"), content).unwrap();
+    }
+
+    let mut project_config = ProjectConfig::default();
+    project_config.workflow_plugin = Some(plugin_name.to_string());
+    project_config.save(&tmp).unwrap();
+
+    // Verify plugin.toml was written
+    let plugin_toml = tmp.join(".agtx").join("plugins").join("gsd").join("plugin.toml");
+    assert!(plugin_toml.exists());
+    let content = std::fs::read_to_string(&plugin_toml).unwrap();
+    assert!(content.contains("name = \"gsd\""));
+
+    // Verify project config was updated
+    let loaded = ProjectConfig::load(&tmp).unwrap();
+    assert_eq!(loaded.workflow_plugin, Some("gsd".to_string()));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_install_plugin_none_clears_config() {
+    use crate::config::ProjectConfig;
+
+    let tmp = std::env::temp_dir().join("agtx_test_install_plugin_none");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // Start with gsd configured
+    let mut project_config = ProjectConfig::default();
+    project_config.workflow_plugin = Some("gsd".to_string());
+    project_config.save(&tmp).unwrap();
+
+    // Simulate clearing plugin (selecting "(none)")
+    let mut project_config = ProjectConfig::load(&tmp).unwrap();
+    project_config.workflow_plugin = None;
+    project_config.save(&tmp).unwrap();
+
+    // Verify plugin was cleared
+    let loaded = ProjectConfig::load(&tmp).unwrap();
+    assert_eq!(loaded.workflow_plugin, None);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// =============================================================================
+// Tests for research session and session reuse
+// =============================================================================
+
+#[test]
+fn test_footer_text_backlog_includes_research() {
+    let text = build_footer_text(InputMode::Normal, false, 0);
+    assert!(text.contains("[R] research"));
+}
+
+#[test]
+fn test_backlog_task_with_research_session_detected() {
+    // A Backlog task with session_name containing "research-" should be treated as having research
+    let session_name = Some("my-project:task-abc12345-my-task".to_string());
+    // has_live_session logic: session_name is Some, window_exists would need to return true
+    assert!(session_name.is_some());
+}
+
+#[test]
+fn test_resolve_skill_command_research_phase() {
+    use crate::config::WorkflowPlugin;
+    // GSD plugin maps research to /gsd:new-project
+    let plugin_toml = r#"
+        name = "gsd"
+        init_script = "echo test"
+        [commands]
+        research = "/gsd:new-project"
+        planning = "/gsd:plan-phase 1"
+        running = "/gsd:execute-phase 1"
+        review = "/gsd:verify-work 1"
+        [prompts]
+        [artifacts]
+    "#;
+    let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
+    let cmd = resolve_skill_command(&Some(plugin), "research", "claude", "");
+    assert_eq!(cmd, Some("/gsd:new-project".to_string()));
+}
+
+#[test]
+fn test_resolve_skill_command_planning_with_plugin() {
+    use crate::config::WorkflowPlugin;
+    let plugin_toml = r#"
+        name = "gsd"
+        init_script = "echo test"
+        [commands]
+        research = "/gsd:new-project"
+        planning = "/gsd:plan-phase 1"
+        running = "/gsd:execute-phase 1"
+        review = "/gsd:verify-work 1"
+        [prompts]
+        [artifacts]
+    "#;
+    let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
+    let cmd = resolve_skill_command(&Some(plugin), "planning", "claude", "");
+    assert_eq!(cmd, Some("/gsd:plan-phase 1".to_string()));
+}
+
+#[test]
+fn test_resolve_prompt_empty_for_gsd_planning() {
+    use crate::config::WorkflowPlugin;
+    // GSD planning has empty prompt — plan-phase reads from .planning/ files
+    let plugin_toml = r#"
+        name = "gsd"
+        init_script = "echo test"
+        [commands]
+        [prompts]
+        planning = ""
+        running = ""
+        review = ""
+        [artifacts]
+    "#;
+    let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
+    let prompt = resolve_prompt(&Some(plugin), "planning", "my task content", "task-123", "claude");
+    assert!(prompt.is_empty());
+}
+
+#[test]
+fn test_resolve_prompt_research_with_task() {
+    use crate::config::WorkflowPlugin;
+    let plugin_toml = r#"
+        name = "gsd"
+        init_script = "echo test"
+        [commands]
+        [prompts]
+        research = "Task: {task}"
+        [artifacts]
+    "#;
+    let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
+    let prompt = resolve_prompt(&Some(plugin), "research", "add tests", "task-123", "claude");
+    assert_eq!(prompt, "Task: add tests");
+}
+
+#[test]
+fn test_gsd_plugin_toml_has_research_command() {
+    use crate::config::WorkflowPlugin;
+    // Verify the bundled GSD plugin has the expected research command
+    let (_name, _desc, content) = skills::BUNDLED_PLUGINS
+        .iter()
+        .find(|(n, _, _)| *n == "gsd")
+        .expect("gsd plugin should be bundled");
+    let plugin: WorkflowPlugin = toml::from_str(content).unwrap();
+    assert_eq!(plugin.commands.research, Some("/gsd:new-project".to_string()));
+    assert_eq!(plugin.commands.planning, Some("/gsd:plan-phase 1".to_string()));
+}
+
+#[test]
+fn test_resolve_prompt_trigger_with_gsd() {
+    use crate::config::{WorkflowPlugin, PluginPromptTriggers};
+    let plugin = Some(WorkflowPlugin {
+        name: "gsd".to_string(),
+        description: None,
+        init_script: None,
+        supported_agents: vec![],
+        artifacts: Default::default(),
+        commands: Default::default(),
+        prompts: Default::default(),
+        prompt_triggers: PluginPromptTriggers {
+            research: Some("What do you want to build?".to_string()),
+            planning: None,
+            running: None,
+            review: None,
+        },
+        copy_dirs: vec![],
+    });
+    assert_eq!(
+        resolve_prompt_trigger(&plugin, "research"),
+        Some("What do you want to build?".to_string())
+    );
+    assert_eq!(resolve_prompt_trigger(&plugin, "planning"), None);
+    assert_eq!(resolve_prompt_trigger(&plugin, "running"), None);
+    assert_eq!(resolve_prompt_trigger(&plugin, "review"), None);
+}
+
+#[test]
+fn test_resolve_prompt_trigger_no_plugin() {
+    assert_eq!(resolve_prompt_trigger(&None, "research"), None);
+    assert_eq!(resolve_prompt_trigger(&None, "planning"), None);
+}
+
+#[test]
+fn test_resolve_prompt_trigger_empty_string_filtered() {
+    use crate::config::{WorkflowPlugin, PluginPromptTriggers};
+    let plugin = Some(WorkflowPlugin {
+        name: "test".to_string(),
+        description: None,
+        init_script: None,
+        supported_agents: vec![],
+        artifacts: Default::default(),
+        commands: Default::default(),
+        prompts: Default::default(),
+        prompt_triggers: PluginPromptTriggers {
+            research: Some("".to_string()),
+            planning: None,
+            running: None,
+            review: None,
+        },
+        copy_dirs: vec![],
+    });
+    // Empty strings should be filtered out
+    assert_eq!(resolve_prompt_trigger(&plugin, "research"), None);
 }

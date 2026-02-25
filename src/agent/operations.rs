@@ -24,7 +24,8 @@ pub trait AgentOperations: Send + Sync {
     /// e.g., "Claude <noreply@anthropic.com>"
     fn co_author_string(&self) -> &str;
 
-    /// Build the shell command to start the agent interactively with a prompt
+    /// Build the shell command to start the agent interactively.
+    /// When prompt is empty, the agent starts with no initial message.
     fn build_interactive_command(&self, prompt: &str) -> String;
 }
 

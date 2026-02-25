@@ -56,7 +56,17 @@ pub fn create_worktree(project_path: &Path, task_slug: &str) -> Result<PathBuf> 
     Ok(worktree_path)
 }
 
-/// Initialize a worktree by copying files and running an init script.
+/// Agent config directories that are always copied from project root to worktrees.
+/// These contain commands, skills, and configuration that agents need.
+pub const AGENT_CONFIG_DIRS: &[&str] = &[
+    ".claude",
+    ".gemini",
+    ".codex",
+    ".github/agents",
+    ".config/opencode",
+];
+
+/// Initialize a worktree by copying agent config dirs, user-specified files, and running an init script.
 ///
 /// Returns a Vec of warning messages for any issues encountered.
 /// Does not fail fatally — errors are collected and returned for the caller to display.
@@ -65,9 +75,33 @@ pub fn initialize_worktree(
     worktree_path: &Path,
     copy_files: Option<&str>,
     init_script: Option<&str>,
+    copy_dirs: &[String],
 ) -> Vec<String> {
     let mut warnings = Vec::new();
 
+    // Always copy agent config directories
+    for dir_name in AGENT_CONFIG_DIRS {
+        let src = project_path.join(dir_name);
+        if src.is_dir() {
+            let dst = worktree_path.join(dir_name);
+            if let Err(e) = copy_dir_recursive(&src, &dst) {
+                warnings.push(format!("Failed to copy '{}' to worktree: {}", dir_name, e));
+            }
+        }
+    }
+
+    // Copy plugin-specific extra directories
+    for dir_name in copy_dirs {
+        let src = project_path.join(dir_name);
+        if src.is_dir() {
+            let dst = worktree_path.join(dir_name);
+            if let Err(e) = copy_dir_recursive(&src, &dst) {
+                warnings.push(format!("Failed to copy '{}' to worktree: {}", dir_name, e));
+            }
+        }
+    }
+
+    // Copy user-specified files/directories
     if let Some(files_str) = copy_files {
         for entry in files_str.split(',') {
             let file_name = entry.trim();
@@ -76,18 +110,6 @@ pub fn initialize_worktree(
             }
             let src = project_path.join(file_name);
             let dst = worktree_path.join(file_name);
-
-            if let Some(parent) = dst.parent() {
-                if !parent.exists() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        warnings.push(format!(
-                            "Failed to create directory for '{}': {}",
-                            file_name, e
-                        ));
-                        continue;
-                    }
-                }
-            }
 
             if !src.exists() {
                 warnings.push(format!(
@@ -98,15 +120,24 @@ pub fn initialize_worktree(
             }
 
             if src.is_dir() {
-                warnings.push(format!(
-                    "copy_files: '{}' is a directory, only individual files are supported",
-                    file_name
-                ));
-                continue;
-            }
-
-            if let Err(e) = std::fs::copy(&src, &dst) {
-                warnings.push(format!("Failed to copy '{}' to worktree: {}", file_name, e));
+                if let Err(e) = copy_dir_recursive(&src, &dst) {
+                    warnings.push(format!("Failed to copy directory '{}' to worktree: {}", file_name, e));
+                }
+            } else {
+                if let Some(parent) = dst.parent() {
+                    if !parent.exists() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            warnings.push(format!(
+                                "Failed to create directory for '{}': {}",
+                                file_name, e
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                if let Err(e) = std::fs::copy(&src, &dst) {
+                    warnings.push(format!("Failed to copy '{}' to worktree: {}", file_name, e));
+                }
             }
         }
     }
@@ -133,6 +164,22 @@ pub fn initialize_worktree(
     }
 
     warnings
+}
+
+/// Recursively copy a directory and its contents.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Detect the main branch name (main or master)

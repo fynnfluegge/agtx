@@ -312,7 +312,7 @@ fn test_initialize_worktree_no_config() {
     let temp_dir = setup_git_repo();
     let worktree_path = git::create_worktree(temp_dir.path(), "init-none").unwrap();
 
-    let warnings = git::initialize_worktree(temp_dir.path(), &worktree_path, None, None);
+    let warnings = git::initialize_worktree(temp_dir.path(), &worktree_path, None, None, &[]);
     assert!(warnings.is_empty());
 }
 
@@ -329,6 +329,7 @@ fn test_initialize_worktree_copy_files() {
         &worktree_path,
         Some(".env, .env.local"),
         None,
+        &[],
     );
     assert!(warnings.is_empty());
     assert_eq!(
@@ -351,6 +352,7 @@ fn test_initialize_worktree_copy_missing_file() {
         &worktree_path,
         Some(".nonexistent"),
         None,
+        &[],
     );
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains(".nonexistent"));
@@ -366,6 +368,7 @@ fn test_initialize_worktree_init_script_success() {
         &worktree_path,
         None,
         Some("touch initialized.marker"),
+        &[],
     );
     assert!(warnings.is_empty());
     assert!(worktree_path.join("initialized.marker").exists());
@@ -381,6 +384,7 @@ fn test_initialize_worktree_init_script_failure() {
         &worktree_path,
         None,
         Some("exit 1"),
+        &[],
     );
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("init_script"));
@@ -398,6 +402,7 @@ fn test_initialize_worktree_copy_then_script() {
         &worktree_path,
         Some(".env"),
         Some("cat .env > verified.txt"),
+        &[],
     );
     assert!(warnings.is_empty());
     assert_eq!(
@@ -420,6 +425,7 @@ fn test_initialize_worktree_copy_nested_path() {
         &worktree_path,
         Some("web/.env.local"),
         None,
+        &[],
     );
     assert!(warnings.is_empty());
     assert_eq!(
@@ -438,12 +444,13 @@ fn test_initialize_worktree_empty_copy_files() {
         &worktree_path,
         Some(", , "),
         None,
+        &[],
     );
     assert!(warnings.is_empty());
 }
 
 #[test]
-fn test_initialize_worktree_copy_directory_rejected() {
+fn test_initialize_worktree_copy_directory_supported() {
     let temp_dir = setup_git_repo();
     let config_dir = temp_dir.path().join("config");
     std::fs::create_dir_all(&config_dir).unwrap();
@@ -456,7 +463,11 @@ fn test_initialize_worktree_copy_directory_rejected() {
         &worktree_path,
         Some("config"),
         None,
+        &[],
     );
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("directory"));
+    assert_eq!(warnings.len(), 0);
+    // Directory and its contents should be copied
+    assert!(worktree_path.join("config").join("app.toml").exists());
+    let content = std::fs::read_to_string(worktree_path.join("config").join("app.toml")).unwrap();
+    assert_eq!(content, "key = 1");
 }

@@ -33,27 +33,29 @@ impl Agent {
         which::which(&self.command).is_ok()
     }
 
-    /// Build the shell command to start the agent interactively with a prompt
+    /// Build the shell command to start the agent interactively.
+    /// When prompt is empty, the agent starts with no initial message
+    /// (task content and skill commands are sent later via tmux send_keys).
     pub fn build_interactive_command(&self, prompt: &str) -> String {
-        // Escape single quotes in prompt for shell
-        let escaped_prompt = prompt.replace('\'', "'\"'\"'");
+        if prompt.is_empty() {
+            return match self.name.as_str() {
+                "claude" => "claude --dangerously-skip-permissions".to_string(),
+                "codex" => "codex --approval-mode full-auto".to_string(),
+                "copilot" => "copilot --allow-all-tools".to_string(),
+                "gemini" => "gemini --approval-mode yolo".to_string(),
+                "opencode" => "opencode".to_string(),
+                _ => self.command.clone(),
+            };
+        }
 
+        let escaped_prompt = prompt.replace('\'', "'\"'\"'");
         match self.name.as_str() {
-            "claude" => {
-                format!("claude --dangerously-skip-permissions '{}'", escaped_prompt)
-            }
-            "codex" => {
-                format!("codex --approval-mode full-auto '{}'", escaped_prompt)
-            }
-            "copilot" => {
-                format!("copilot --allow-all-tools -p '{}'", escaped_prompt)
-            }
-            "gemini" => {
-                format!("gemini -p '{}'", escaped_prompt)
-            }
-            _ => {
-                format!("{} '{}'", self.command, escaped_prompt)
-            }
+            "claude" => format!("claude --dangerously-skip-permissions '{}'", escaped_prompt),
+            "codex" => format!("codex --approval-mode full-auto '{}'", escaped_prompt),
+            "copilot" => format!("copilot --allow-all-tools -p '{}'", escaped_prompt),
+            "gemini" => format!("gemini --approval-mode yolo -i '{}'", escaped_prompt),
+            "opencode" => format!("opencode -p '{}'", escaped_prompt),
+            _ => format!("{} '{}'", self.command, escaped_prompt),
         }
     }
 }
@@ -65,9 +67,9 @@ pub fn known_agents() -> Vec<Agent> {
         Agent::new("codex", "codex", "OpenAI's Codex CLI", "Codex <noreply@openai.com>"),
         Agent::new("copilot", "copilot", "GitHub Copilot CLI", "GitHub Copilot <noreply@github.com>"),
         Agent::new("gemini", "gemini", "Google Gemini CLI", "Gemini <noreply@google.com>"),
+        Agent::new("opencode", "opencode", "AI-powered coding assistant", "OpenCode <noreply@opencode.ai>"),
         // TODO: investigate CLI usage before enabling
         // Agent::new("aider", "aider", "AI pair programming in your terminal", "Aider <noreply@aider.chat>"),
-        // Agent::new("opencode", "opencode", "AI-powered coding assistant", "OpenCode <noreply@opencode.ai>"),
         // Agent::new("cline", "cline", "AI coding assistant for VS Code", "Cline <noreply@cline.bot>"),
     ]
 }

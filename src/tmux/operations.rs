@@ -65,7 +65,9 @@ impl TmuxOperations for RealTmuxOps {
             .args(["-c", working_dir]);
 
         if let Some(ref shell_cmd) = command {
-            cmd.args(["sh", "-c", shell_cmd]);
+            // Wrap command so it drops to a shell after the agent exits
+            let wrapped = format!("{}; exec $SHELL", shell_cmd);
+            cmd.args(["sh", "-c", &wrapped]);
         }
 
         let output = cmd.output()?;

@@ -107,6 +107,7 @@ fn test_merged_config_project_overrides() {
         github_url: Some("https://github.com/user/repo".to_string()),
         copy_files: Some(".env, .env.local".to_string()),
         init_script: Some("npm install".to_string()),
+        workflow_plugin: None,
     };
 
     let merged = MergedConfig::merge(&global, &project);

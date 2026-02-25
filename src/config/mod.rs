@@ -189,6 +189,9 @@ pub struct ProjectConfig {
 
     /// Shell command to run inside the worktree after creation and file copying
     pub init_script: Option<String>,
+
+    /// Workflow plugin name (e.g. "gsd", "spec-kit")
+    pub workflow_plugin: Option<String>,
 }
 
 impl GlobalConfig {
@@ -306,6 +309,7 @@ pub struct MergedConfig {
     pub theme: ThemeConfig,
     pub copy_files: Option<String>,
     pub init_script: Option<String>,
+    pub workflow_plugin: Option<String>,
 }
 
 impl MergedConfig {
@@ -326,6 +330,124 @@ impl MergedConfig {
             theme: global.theme.clone(),
             copy_files: project.copy_files.clone(),
             init_script: project.init_script.clone(),
+            workflow_plugin: project.workflow_plugin.clone(),
         }
+    }
+}
+
+/// Workflow plugin configuration loaded from plugin.toml
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowPlugin {
+    pub name: String,
+    pub description: Option<String>,
+    pub init_script: Option<String>,
+    /// List of supported agent names (e.g. ["claude", "codex", "gemini", "opencode"]).
+    /// If empty or omitted, all agents are assumed supported.
+    #[serde(default)]
+    pub supported_agents: Vec<String>,
+    #[serde(default)]
+    pub artifacts: PluginArtifacts,
+    #[serde(default)]
+    pub commands: PluginCommands,
+    #[serde(default)]
+    pub prompts: PluginPrompts,
+    #[serde(default)]
+    pub prompt_triggers: PluginPromptTriggers,
+    /// Extra directories to copy from project root to worktrees (e.g. [".specify"]).
+    #[serde(default)]
+    pub copy_dirs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginArtifacts {
+    pub research: Option<String>,
+    pub planning: Option<String>,
+    pub running: Option<String>,
+    pub review: Option<String>,
+}
+
+/// Slash commands to invoke per phase (sent via tmux send_keys as real interactive commands).
+/// e.g. "/gsd:plan-phase 1" or "/speckit.plan"
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginCommands {
+    pub research: Option<String>,
+    pub planning: Option<String>,
+    pub running: Option<String>,
+    pub review: Option<String>,
+}
+
+/// Task content prompts per phase (sent after the command).
+/// Should contain just the task description, not slash commands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginPrompts {
+    pub research: Option<String>,
+    pub planning: Option<String>,
+    pub running: Option<String>,
+    pub review: Option<String>,
+}
+
+/// Text patterns to wait for before sending the prompt for each phase.
+/// When set, the system polls the tmux pane for this text before sending the prompt.
+/// Useful for interactive commands like /gsd:new-project that ask questions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginPromptTriggers {
+    pub research: Option<String>,
+    pub planning: Option<String>,
+    pub running: Option<String>,
+    pub review: Option<String>,
+}
+
+impl WorkflowPlugin {
+    /// Check if the given agent is supported by this plugin.
+    /// Returns true if supported_agents is empty (all agents allowed) or contains the agent.
+    pub fn supports_agent(&self, agent_name: &str) -> bool {
+        self.supported_agents.is_empty()
+            || self.supported_agents.iter().any(|a| a == agent_name)
+    }
+
+    /// Load a plugin by name, checking project-local then global directories
+    pub fn load(name: &str, project_path: Option<&Path>) -> Result<Self> {
+        // 1. Check project-local
+        if let Some(pp) = project_path {
+            let local_path = pp.join(".agtx").join("plugins").join(name).join("plugin.toml");
+            if local_path.exists() {
+                let content = std::fs::read_to_string(&local_path)?;
+                return toml::from_str(&content).context("Failed to parse plugin.toml");
+            }
+        }
+        // 2. Check global
+        let home = std::env::var("HOME").context("Could not determine home directory")?;
+        let global_path = PathBuf::from(home)
+            .join(".config")
+            .join("agtx")
+            .join("plugins")
+            .join(name)
+            .join("plugin.toml");
+        if global_path.exists() {
+            let content = std::fs::read_to_string(&global_path)?;
+            return toml::from_str(&content).context("Failed to parse plugin.toml");
+        }
+        anyhow::bail!("Plugin '{}' not found", name)
+    }
+
+    /// Get the plugin directory path (for reading skill files)
+    pub fn plugin_dir(name: &str, project_path: Option<&Path>) -> Option<PathBuf> {
+        // Same lookup order: project-local first, then global
+        if let Some(pp) = project_path {
+            let local = pp.join(".agtx").join("plugins").join(name);
+            if local.join("plugin.toml").exists() {
+                return Some(local);
+            }
+        }
+        let home = std::env::var("HOME").ok()?;
+        let global = PathBuf::from(home)
+            .join(".config")
+            .join("agtx")
+            .join("plugins")
+            .join(name);
+        if global.join("plugin.toml").exists() {
+            return Some(global);
+        }
+        None
     }
 }

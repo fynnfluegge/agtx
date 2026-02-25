@@ -58,6 +58,7 @@ pub struct Task {
     pub branch_name: Option<String>,
     pub pr_number: Option<i32>,
     pub pr_url: Option<String>,
+    pub plugin: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -78,6 +79,7 @@ impl Task {
             branch_name: None,
             pr_number: None,
             pr_url: None,
+            plugin: None,
             created_at: now,
             updated_at: now,
         }
@@ -148,4 +150,15 @@ impl AgentStatus {
             AgentStatus::Completed => "completed",
         }
     }
+}
+
+/// Phase completion status (runtime-only, not persisted to DB)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseStatus {
+    /// Agent is still working, no artifact yet
+    Working,
+    /// Phase artifact detected, ready to advance
+    Ready,
+    /// Tmux window gone (process exited)
+    Exited,
 }

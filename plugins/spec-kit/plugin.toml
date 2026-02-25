@@ -1,0 +1,24 @@
+name = "spec-kit"
+description = "Spec-Driven Development by GitHub - specifications become executable artifacts"
+# No init_script — spec-kit must be installed in the project root first (specify init).
+# The .claude/ directory (containing spec-kit commands) is copied to worktrees automatically.
+copy_dirs = [".specify"]
+
+# Artifact files that signal phase completion.
+# Paths with * match any single directory level (e.g. specs/{branch-name}/plan.md).
+# Omitted phases fall back to agtx defaults (.agtx/execute.md, .agtx/review.md).
+[artifacts]
+research = "specs/*/spec.md"
+planning = "specs/*/plan.md"
+
+[commands]
+research = "/speckit.specify {task}"
+planning = "/speckit.plan {task}"
+running = "/speckit.implement"
+review = "/speckit.analyze"
+
+[prompts]
+research = ""
+planning = ""
+running = ""
+review = ""

@@ -1,0 +1,25 @@
+name = "gsd"
+description = "Get Shit Done - structured spec-driven development framework"
+init_script = "npx get-shit-done-cc@latest --{agent} --local --non-interactive"
+supported_agents = ["claude", "codex", "gemini", "opencode"]
+
+[artifacts]
+research = ".planning/ROADMAP.md"
+planning = ".planning/1/1-PLAN.md"
+running = ".planning/1/1-SUMMARY.md"
+review = ".planning/1/UAT.md"
+
+[commands]
+research = "/gsd:new-project"
+planning = "/gsd:plan-phase 1"
+running = "/gsd:execute-phase 1"
+review = "/gsd:verify-work 1"
+
+[prompts]
+research = "Task: {task}"
+planning = ""
+running = ""
+review = ""
+
+[prompt_triggers]
+research = "What do you want to build?"
