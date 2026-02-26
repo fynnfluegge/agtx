@@ -2,7 +2,7 @@
 
 # agtx
 
-**Terminal-native kanban board for managing spec-driven coding agent sessions. Plugin any existing spec-driven development framework or specify your own workflow with per-phase skills, prompts and artifact tracking.**
+**Terminal-native kanban board for managing spec-driven coding agent sessions. Plugin any existing spec-driven development framework or specify your own workflow with per-phase skills, prompts, artifact tracking and automatic execution.**
 
 </div>
 
