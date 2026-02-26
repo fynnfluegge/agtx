@@ -2256,3 +2256,104 @@ fn test_resolve_prompt_trigger_empty_string_filtered() {
     // Empty strings should be filtered out
     assert_eq!(resolve_prompt_trigger(&plugin, "research"), None);
 }
+
+#[test]
+fn test_scan_agent_skills_claude() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    // Create .claude/commands/agtx/plan.md with frontmatter
+    let cmd_dir = base.join(".claude/commands/agtx");
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    std::fs::write(
+        cmd_dir.join("plan.md"),
+        "---\nname: agtx-plan\ndescription: Plan a task implementation\n---\nBody here\n",
+    ).unwrap();
+    std::fs::write(
+        cmd_dir.join("execute.md"),
+        "---\nname: agtx-execute\ndescription: Execute the plan\n---\nBody\n",
+    ).unwrap();
+
+    let results = crate::skills::scan_agent_skills("claude", base);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, "/agtx:execute");
+    assert_eq!(results[0].1, "Execute the plan");
+    assert_eq!(results[1].0, "/agtx:plan");
+    assert_eq!(results[1].1, "Plan a task implementation");
+}
+
+#[test]
+fn test_scan_agent_skills_codex() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    // Create .codex/skills/agtx-plan/SKILL.md
+    let skill_dir = base.join(".codex/skills/agtx-plan");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: agtx-plan\ndescription: Plan implementation\n---\nContent\n",
+    ).unwrap();
+
+    let results = crate::skills::scan_agent_skills("codex", base);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "$agtx-plan");
+    assert_eq!(results[0].1, "Plan implementation");
+}
+
+#[test]
+fn test_scan_agent_skills_gemini() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    let cmd_dir = base.join(".gemini/commands/agtx");
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    std::fs::write(
+        cmd_dir.join("plan.toml"),
+        "description = \"Plan a task\"\n\nprompt = \"\"\"Do the planning\"\"\"\n",
+    ).unwrap();
+
+    let results = crate::skills::scan_agent_skills("gemini", base);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "/agtx:plan");
+    assert_eq!(results[0].1, "Plan a task");
+}
+
+#[test]
+fn test_scan_agent_skills_opencode() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    let cmd_dir = base.join(".config/opencode/command");
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    std::fs::write(cmd_dir.join("agtx-plan.md"), "Plan content\n").unwrap();
+
+    let results = crate::skills::scan_agent_skills("opencode", base);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "/agtx-plan");
+    assert_eq!(results[0].1, "agtx plan"); // humanized stem
+}
+
+#[test]
+fn test_scan_agent_skills_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    // No command directories exist
+    let results = crate::skills::scan_agent_skills("claude", dir.path());
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_scan_agent_skills_unknown_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let results = crate::skills::scan_agent_skills("unknown-agent", dir.path());
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_skill_fuzzy_matching() {
+    // Test that fuzzy_score works for skill matching
+    let score_plan = fuzzy_score("/agtx:plan", "plan");
+    let score_exec = fuzzy_score("/agtx:execute", "plan");
+    assert!(score_plan > 0);
+    assert!(score_plan > score_exec);
+
+    // Matching on description
+    let score_desc = fuzzy_score("plan a task implementation", "plan");
+    assert!(score_desc > 0);
+}

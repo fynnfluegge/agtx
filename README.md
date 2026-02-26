@@ -8,10 +8,10 @@
 
 - **Kanban workflow**: Backlog → Planning → Running → Review → Done
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
-- **Coding Agent integrations**: Automatic session management for Claude Code, Codex, Gemini and Copilot CLI
+- **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, Copilot and OpenCode
+- **Workflow plugins**: Plug in any development framework — define commands, prompts, artifacts and skills per phase, with automatic cross-agent translation
 - **PR workflow**: Generate descriptions with AI, create PRs directly from the TUI
 - **Multi-project dashboard**: Manage tasks across all your projects
-- **Workflow plugins**: Swap between built-in, GSD, spec-kit, or void workflows per project
 - **Customizable themes**: Configure colors via config file
 
 ## Installation
@@ -33,7 +33,7 @@ cp target/release/agtx ~/.local/bin/
 
 - **tmux** - Agent sessions run in a dedicated tmux server
 - **gh** - GitHub CLI for PR operations
-- Supported coding agents: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [Copilot](https://github.com/github/copilot-cli)
+- Supported coding agents: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [Copilot](https://github.com/github/copilot-cli), [OpenCode](https://github.com/sst/opencode)
 
 ## Quick Start
 
@@ -58,7 +58,7 @@ agtx -g
 | `h/l` or `←/→` | Move between columns |
 | `j/k` or `↑/↓` | Move between tasks |
 | `o` | Create new task |
-| `↩` | Open task (view Claude session) |
+| `↩` | Open task (view agent session) |
 | `m` | Move task forward in workflow |
 | `r` | Resume task (Review → Running) |
 | `d` | Show git diff |
@@ -68,19 +68,39 @@ agtx -g
 | `e` | Toggle project sidebar |
 | `q` | Quit |
 
+### Task Description Editor
+
+When writing a task description, you can reference files and agent skills inline:
+
+| Key | Action |
+|-----|--------|
+| `#` or `@` | Fuzzy search and insert a file path |
+| `!` | Fuzzy search and insert an agent skill/command |
+| `\` + `Enter` | Line continuation (multi-line input) |
+| `Alt+←/→` | Word-by-word cursor navigation |
+| `Alt+Delete` | Delete word backward |
+
+**Skill references** (`!`) discover commands from your active agent's native command directory (e.g., `.claude/commands/` for Claude, `.codex/skills/` for Codex). The dropdown shows all available slash commands with descriptions, and inserts them in the agent's native invocation format:
+
+```
+/agtx:research the authentication module, then /agtx:plan a fix for the session timeout bug
+```
+
+This includes agtx built-in skills, plugin commands, and any custom user-defined commands.
+
 ### Task Workflow
 
 1. **Create a task** (`o`): Enter title and description
-2. **Move to Planning** (`m`): Creates worktree, starts Claude in planning mode
-3. **Move to Running** (`m`): Claude implements the plan
+2. **Move to Planning** (`m`): Creates worktree, starts agent in planning mode
+3. **Move to Running** (`m`): Agent implements the plan
 4. **Move to Review** (`m`): Opens PR with AI-generated description
 5. **Move to Done** (`m`): Cleans up worktree and tmux after PR is merged
 
-### Claude Session Features
+### Agent Session Features
 
 - Sessions automatically resume when moving Review → Running
 - Full conversation context is preserved across the task lifecycle
-- View live Claude output in the task popup
+- View live agent output in the task popup
 
 ## Configuration
 
@@ -120,20 +140,28 @@ init_script = "scripts/init_worktree.sh"
 Both options run during the Backlog → Planning transition, after `git worktree add`
 and before the agent session starts.
 
-### Workflow Plugins
+## Workflow Plugins
+
+agtx ships with a plugin system that lets any development framework hook into the task lifecycle. A plugin is a single TOML file that defines what happens at each phase transition — the commands sent to the agent, the prompts, the artifact files that signal completion, and optional setup scripts. Write a command once in canonical format and agtx translates it automatically for every supported agent.
 
 Press `P` to select a workflow plugin for the current project. The active plugin is shown in the header bar.
 
 | Plugin | Description |
 |--------|-------------|
 | **agtx** (default) | Built-in workflow with skills and prompts for each phase |
-| **gsd** | Get Shit Done - structured spec-driven development with interactive planning |
-| **spec-kit** | Spec-Driven Development by GitHub - specifications become executable artifacts |
+| **gsd** | [Get Shit Done](https://github.com/fynnfluegge/get-shit-done-cc) - structured spec-driven development with interactive planning |
+| **spec-kit** | [Spec-Driven Development](https://github.com/github/spec-kit) by GitHub - specifications become executable artifacts |
 | **void** | Plain agent session - no prompting or skills, task description prefilled in input |
 
 Each task remembers the plugin it was started with. Switching plugins only affects new tasks — existing tasks continue using their original plugin throughout their lifecycle.
 
-#### Agent Compatibility
+### Agent Compatibility
+
+Commands are written once in canonical format and automatically translated per agent:
+
+| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode |
+|--------------------------|-----------------|-------|----------|
+| `/ns:command` | `/ns:command` | `$ns-command` | `/ns-command` |
 
 |  | Claude | Codex | Gemini | Copilot | OpenCode |
 |--|:------:|:-----:|:------:|:-------:|:--------:|
@@ -144,11 +172,9 @@ Each task remembers the plugin it was started with. Switching plugins only affec
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
 
-#### Creating a Plugin
+### Creating a Plugin
 
-Plugins are TOML files that customize the task workflow — the commands sent to the agent, the prompts, and the artifact files that signal phase completion.
-
-**Location:** Place your plugin at `.agtx/plugins/<name>/plugin.toml` in your project root (or `~/.config/agtx/plugins/<name>/plugin.toml` for global use). It will appear in the plugin selector (`P`).
+Place your plugin at `.agtx/plugins/<name>/plugin.toml` in your project root (or `~/.config/agtx/plugins/<name>/plugin.toml` for global use). It will appear in the plugin selector automatically.
 
 **Minimal example** — a plugin that uses custom slash commands:
 
@@ -186,7 +212,7 @@ supported_agents = ["claude", "codex", "gemini", "opencode"]
 copy_dirs = [".my-plugin"]
 
 # Artifact files that signal phase completion.
-# When detected, the task shows a ✓ checkmark instead of the spinner.
+# When detected, the task shows a checkmark instead of the spinner.
 # Supports * wildcard for one directory level (e.g. "specs/*/plan.md").
 # Omitted phases fall back to agtx defaults (.agtx/plan.md, .agtx/execute.md, .agtx/review.md).
 [artifacts]
@@ -199,8 +225,8 @@ review = ".my-plugin/review.md"
 # Written in canonical format (Claude/Gemini style): /namespace:command
 # Automatically transformed per agent:
 #   Claude/Gemini: /my-plugin:plan (unchanged)
-#   OpenCode:      /my-plugin-plan (colon → hyphen)
-#   Codex:         $my-plugin-plan (slash → dollar, colon → hyphen)
+#   OpenCode:      /my-plugin-plan (colon -> hyphen)
+#   Codex:         $my-plugin-plan (slash -> dollar, colon -> hyphen)
 # Set to "" to skip sending a command for that phase.
 [commands]
 research = "/my-plugin:research {task}"
@@ -242,7 +268,7 @@ research = "What do you want to build?"
     └── agtx-review/SKILL.md
 ```
 
-These override the built-in agtx skills and are deployed to agent-native paths (`.claude/commands/`, `.codex/skills/`, etc.) in each worktree.
+These override the built-in agtx skills and are automatically deployed to each agent's native discovery path (`.claude/commands/`, `.codex/skills/`, `.gemini/commands/`, etc.) in every worktree.
 
 ## How It Works
 

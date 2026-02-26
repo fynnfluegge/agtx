@@ -1,6 +1,6 @@
 # AGTX - Terminal Kanban for Coding Agents
 
-A terminal-native kanban board for managing multiple coding agent sessions (Claude Code, Codex, etc.) with isolated git worktrees.
+A terminal-native kanban board for managing multiple coding agent sessions (Claude Code, Codex, Gemini, Copilot, OpenCode) with isolated git worktrees.
 
 ## Quick Start
 
@@ -21,6 +21,7 @@ cargo build --release
 src/
 ├── main.rs           # Entry point, CLI arg parsing, AppMode enum
 ├── lib.rs            # Module exports for integration tests
+├── skills.rs         # Skill constants, agent-native paths, plugin command translation
 ├── tui/
 │   ├── mod.rs        # Re-exports
 │   ├── app.rs        # Main App struct, event loop, rendering (largest file)
@@ -44,13 +45,25 @@ src/
 │   ├── mod.rs        # Agent definitions, detection, spawn args
 │   └── operations.rs # AgentOperations/CodingAgent traits (mockable)
 └── config/
-    └── mod.rs        # GlobalConfig, ProjectConfig, ThemeConfig
+    └── mod.rs        # GlobalConfig, ProjectConfig, ThemeConfig, WorkflowPlugin
+
+skills/                # Built-in skill files (embedded at compile time)
+├── plan.md            # Planning phase instructions
+├── execute.md         # Execution phase instructions
+├── review.md          # Review phase instructions
+└── research.md        # Research phase instructions
+
+plugins/               # Bundled plugin configs (embedded at compile time)
+├── gsd/plugin.toml    # Get Shit Done workflow
+├── spec-kit/plugin.toml # GitHub spec-kit workflow
+└── void/plugin.toml   # Plain agent session, no prompting
 
 tests/
-├── db_tests.rs       # Database and model tests
-├── config_tests.rs   # Configuration tests
-├── board_tests.rs    # Board navigation tests
-├── git_tests.rs      # Git worktree tests
+├── db_tests.rs        # Database and model tests
+├── config_tests.rs    # Configuration tests
+├── board_tests.rs     # Board navigation tests
+├── git_tests.rs       # Git worktree tests
+├── agent_tests.rs     # Agent detection and spawn args tests
 ├── mock_infrastructure_tests.rs # Mock infrastructure tests
 └── shell_popup_tests.rs         # Shell popup logic tests
 ```
@@ -61,21 +74,51 @@ tests/
 ```
 Backlog → Planning → Running → Review → Done
             ↓           ↓         ↓        ↓
-         worktree    Claude    optional  cleanup
-         + Claude    working   PR        (keep
-         planning             (resume)   branch)
+         worktree    agent      optional  cleanup
+         + agent     working    PR        (keep
+         planning              (resume)   branch)
 ```
 
 - **Backlog**: Task ideas, not started
-- **Planning**: Creates git worktree at `.agtx/worktrees/{slug}`, copies configured files, runs init script, starts Claude Code in planning mode
-- **Running**: Claude is implementing (sends "proceed with implementation")
+- **Planning**: Creates git worktree at `.agtx/worktrees/{slug}`, copies configured files, runs init script, deploys skills, starts agent in planning mode
+- **Running**: Agent is implementing (sends execute command/prompt)
 - **Review**: Optionally create PR. Tmux window stays open. Can resume to address feedback
 - **Done**: Cleanup worktree + tmux window (branch kept locally)
+
+### Workflow Plugins
+Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin.toml`) that defines:
+- **commands**: Slash commands sent to the agent at each phase (auto-translated per agent)
+- **prompts**: Task content templates with `{task}` and `{task_id}` placeholders
+- **artifacts**: File paths that signal phase completion (supports `*` wildcards)
+- **prompt_triggers**: Text patterns to wait for in tmux before sending prompts
+- **init_script**: Shell command run in worktree before agent starts (`{agent}` placeholder)
+- **copy_dirs**: Extra directories to copy from project root into worktrees
+- **supported_agents**: Agent whitelist (empty = all supported)
+
+Plugin resolution: project-local `.agtx/plugins/{name}/` → global `~/.config/agtx/plugins/{name}/` → bundled.
+
+Each task stores its plugin name in the database at creation time. Switching the project plugin only affects new tasks.
+
+### Skill System
+Skills are markdown files with YAML frontmatter deployed to agent-native discovery paths in worktrees:
+- Claude: `.claude/commands/agtx/plan.md`
+- Gemini: `.gemini/commands/agtx/plan.toml` (converted to TOML format)
+- Codex: `.codex/skills/agtx-plan/SKILL.md`
+- OpenCode: `.config/opencode/command/agtx-plan.md` (frontmatter stripped)
+- Copilot: `.github/agents/agtx/plan.md`
+
+Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
+
+Commands are written once in canonical format (`/ns:command`) and auto-translated:
+- Claude/Gemini: `/ns:command` (unchanged)
+- OpenCode: `/ns-command` (colon → hyphen)
+- Codex: `$ns-command` (slash → dollar, colon → hyphen)
+- Copilot: no interactive skill invocation (falls back to file-path reference in prompt)
 
 ### Session Persistence
 - Tmux window stays open when moving Running → Review
 - Resume from Review simply changes status back to Running (window already exists)
-- No special Claude resume logic needed - the session just stays alive in tmux
+- No special resume logic needed - the session just stays alive in tmux
 
 ### Database Storage
 All databases stored centrally (not in project directories):
@@ -144,6 +187,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `m` | Move task forward (advance workflow) |
 | `r` | Resume task (Review → Running) |
 | `/` | Search tasks (jumps to and opens task) |
+| `P` | Select workflow plugin |
 | `e` | Toggle project sidebar |
 | `q` | Quit |
 
@@ -154,7 +198,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `Ctrl+d/u` | Page down/up |
 | `Ctrl+g` | Jump to bottom |
 | `Ctrl+q` or `Esc` | Close popup |
-| Other keys | Forwarded to tmux/Claude |
+| Other keys | Forwarded to tmux/agent |
 
 ### PR Creation Popup
 | Key | Action |
@@ -196,9 +240,17 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 - Uses `mpsc` channels to communicate results back to main thread
 - Loading spinners shown during async operations
 
-### Claude Integration
-- Uses `--dangerously-skip-permissions` flag
-- Polls tmux pane for "Yes, I accept" prompt before sending acceptance
+### Phase Status Polling
+- `refresh_sessions()` runs every 100ms, checks artifact files with 2-second cache TTL
+- Three states: Working (spinner), Ready (checkmark), Exited (no window)
+- Phase artifact paths come from the task's plugin or agtx defaults
+- Plugin instances cached per task in `HashMap<Option<String>, Option<WorkflowPlugin>>` to avoid repeated disk reads
+
+### Agent Integration
+- Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
+- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--approval-mode full-auto`), Gemini (`--approval-mode yolo`), Copilot (`--allow-all-tools`)
+- Skills deployed to agent-native paths via `write_skills_to_worktree()` in app.rs
+- Commands and prompts resolved per-task via `resolve_skill_command()` and `resolve_prompt()`
 
 ## Building & Testing
 
@@ -219,7 +271,6 @@ Dependencies require:
 - tmux (runtime dependency)
 - git (runtime dependency)
 - gh CLI (for PR operations)
-- claude CLI (Claude Code)
 
 ## Common Tasks
 
@@ -236,8 +287,10 @@ Dependencies require:
 
 ### Adding a new agent
 1. Add to `known_agents()` in `src/agent/mod.rs`
-2. Add spawn args handling in `build_spawn_args()`
-3. Add resume args if supported in `build_resume_args()`
+2. Add `build_interactive_command()` match arm in `src/agent/mod.rs`
+3. Add agent-native skill dir in `agent_native_skill_dir()` in `src/skills.rs`
+4. Add skill invocation format in `skill_invocation_command()` in `src/skills.rs`
+5. Add plugin command transform in `transform_plugin_command()` in `src/skills.rs`
 
 ### Adding a keyboard shortcut
 1. Find the appropriate `handle_*_key` function in `src/tui/app.rs`
@@ -252,18 +305,25 @@ Dependencies require:
 5. Add key handler function `handle_my_popup_key()`
 6. Add check in `handle_key()` to route to handler
 
+### Adding a new bundled plugin
+1. Create `plugins/<name>/plugin.toml` with commands, prompts, artifacts
+2. Add entry to `BUNDLED_PLUGINS` in `src/skills.rs`
+3. Optionally add `supported_agents` to restrict agent compatibility
+
+### Adding custom skills to a plugin
+1. Create `plugins/<name>/skills/agtx-{phase}/SKILL.md` files
+2. Skills use YAML frontmatter: `name: agtx-{phase}`, `description: ...`
+3. Skills are auto-deployed to agent-native paths during worktree setup
+
 ## Supported Agents
 
 Detected automatically via `known_agents()` in order of preference:
 1. **claude** - Anthropic's Claude Code CLI
-2. **aider** - AI pair programming in your terminal
-3. **codex** - OpenAI's Codex CLI
-4. **gh-copilot** - GitHub Copilot CLI
+2. **codex** - OpenAI's Codex CLI
+3. **copilot** - GitHub Copilot CLI
+4. **gemini** - Google Gemini CLI
 5. **opencode** - AI-powered coding assistant
-6. **cline** - AI coding assistant for VS Code
-7. **q** - Amazon Q Developer CLI
 
 ## Future Enhancements
-- Auto-detect Claude idle status (show spinner when working)
 - Reopen Done tasks (recreate worktree from preserved branch)
-- Notification when Claude finishes work
+- Notification when agent finishes work

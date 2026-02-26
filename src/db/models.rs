@@ -22,6 +22,16 @@ impl TaskStatus {
         }
     }
 
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            TaskStatus::Backlog => "backlog/research",
+            TaskStatus::Planning => "planning",
+            TaskStatus::Running => "running",
+            TaskStatus::Review => "review",
+            TaskStatus::Done => "done",
+        }
+    }
+
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "backlog" => Some(TaskStatus::Backlog),

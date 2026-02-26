@@ -46,7 +46,7 @@ fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_colu
             }
         }
         InputMode::InputTitle => " Enter task title... [Esc] cancel [Enter] next ".to_string(),
-        InputMode::InputDescription => " Enter prompt for agent... [#] file search [Esc] cancel [\\+Enter] newline [Enter] save ".to_string(),
+        InputMode::InputDescription => " Enter prompt for agent... [#] file search [!] skills [Esc] cancel [\\+Enter] newline [Enter] save ".to_string(),
     }
 }
 
@@ -94,8 +94,10 @@ struct AppState {
     shell_popup: Option<ShellPopup>,
     // File search dropdown
     file_search: Option<FileSearchState>,
-    // File paths inserted via file search (for highlighting)
-    highlighted_file_paths: HashSet<String>,
+    // Skill search dropdown
+    skill_search: Option<SkillSearchState>,
+    // References inserted via file search or skill search (for highlighting)
+    highlighted_references: HashSet<String>,
     // Task search popup
     task_search: Option<TaskSearchState>,
     // PR creation confirmation popup
@@ -199,6 +201,23 @@ struct FileSearchState {
     selected: usize,
     start_pos: usize,   // Position in input_buffer where trigger was typed
     trigger_char: char,  // The character that triggered the search (# or @)
+}
+
+/// A discovered skill command from an agent's native directory
+#[derive(Debug, Clone)]
+struct SkillEntry {
+    command: String,      // agent-native: "/agtx:plan" or "$agtx-plan"
+    description: String,  // from frontmatter or file stem
+}
+
+/// State for skill search dropdown (triggered by `!`)
+#[derive(Debug, Clone)]
+struct SkillSearchState {
+    pattern: String,
+    matches: Vec<SkillEntry>,
+    all_skills: Vec<SkillEntry>, // cached full list for re-filtering
+    selected: usize,
+    start_pos: usize, // cursor position where `!` was typed
 }
 
 /// State for delete confirmation popup
@@ -321,7 +340,8 @@ impl App {
                 show_project_list: false,
                 shell_popup: None,
                 file_search: None,
-                highlighted_file_paths: HashSet::new(),
+                skill_search: None,
+                highlighted_references: HashSet::new(),
                 task_search: None,
                 pr_confirm_popup: None,
                 review_to_running_task_id: None,
@@ -508,7 +528,7 @@ impl App {
 
             let is_selected_column = state.board.selected_column == i;
 
-            let title = format!(" {} ({}) ", status.as_str(), tasks.len());
+            let title = format!(" {} ({}) ", status.display_name(), tasks.len());
             let (border_style, title_style) = if is_selected_column {
                 (
                     Style::default().fg(hex_to_color(&state.config.theme.color_selected)),
@@ -661,8 +681,8 @@ impl App {
                 format!("{}{}█{}", label, before_cursor, after_cursor)
             };
 
-            let styled_text = if state.input_mode == InputMode::InputDescription && !state.highlighted_file_paths.is_empty() {
-                build_highlighted_text(&full_text, &state.highlighted_file_paths, text_color, highlight_color)
+            let styled_text = if state.input_mode == InputMode::InputDescription && !state.highlighted_references.is_empty() {
+                build_highlighted_text(&full_text, &state.highlighted_references, text_color, highlight_color)
             } else {
                 Text::raw(full_text)
             };
@@ -719,6 +739,71 @@ impl App {
                         .block(
                             Block::default()
                                 .title(" Files [↑↓] select [Tab/Enter] insert [Esc] cancel ")
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(Color::Cyan)),
+                        );
+                    frame.render_widget(list, dropdown_area);
+                }
+            }
+
+            // Skill search dropdown
+            if let Some(ref search) = state.skill_search {
+                if !search.matches.is_empty() {
+                    let dropdown_height = (search.matches.len() as u16 + 2).min(12);
+                    let dropdown_area = Rect {
+                        x: input_area.x + 2,
+                        y: input_area.y + input_area.height,
+                        width: input_area.width.saturating_sub(4),
+                        height: dropdown_height,
+                    };
+
+                    let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height {
+                        Rect {
+                            y: input_area.y.saturating_sub(dropdown_height),
+                            ..dropdown_area
+                        }
+                    } else {
+                        dropdown_area
+                    };
+
+                    frame.render_widget(Clear, dropdown_area);
+
+                    let skill_selected_color = hex_to_color(&state.config.theme.color_selected);
+                    let accent_color = hex_to_color(&state.config.theme.color_accent);
+                    let dimmed_color = hex_to_color(&state.config.theme.color_dimmed);
+                    let items: Vec<ListItem> = search.matches
+                        .iter()
+                        .enumerate()
+                        .map(|(i, entry)| {
+                            let style = if i == search.selected {
+                                Style::default().bg(skill_selected_color).fg(Color::Black)
+                            } else {
+                                Style::default()
+                            };
+                            let cmd_style = if i == search.selected {
+                                Style::default().bg(skill_selected_color).fg(Color::Black)
+                            } else {
+                                Style::default().fg(accent_color)
+                            };
+                            let desc_style = if i == search.selected {
+                                Style::default().bg(skill_selected_color).fg(Color::Black)
+                            } else {
+                                Style::default().fg(dimmed_color)
+                            };
+                            // Pad command to align descriptions
+                            let cmd_padded = format!(" {:<24}", entry.command);
+                            let line = Line::from(vec![
+                                Span::styled(cmd_padded, cmd_style),
+                                Span::styled(&entry.description, desc_style),
+                            ]);
+                            ListItem::new(line).style(style)
+                        })
+                        .collect();
+
+                    let list = List::new(items)
+                        .block(
+                            Block::default()
+                                .title(" Skills [↑↓] select [Tab/Enter] insert [Esc] cancel ")
                                 .borders(Borders::ALL)
                                 .border_style(Style::default().fg(Color::Cyan)),
                         );
@@ -2219,6 +2304,12 @@ impl App {
             KeyCode::Char('f') if has_alt => {
                 self.state.input_cursor = word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
             }
+            // Alt+Backspace: delete word backward (macOS Option+Delete)
+            KeyCode::Backspace if has_alt => {
+                let new_pos = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+                self.state.input_buffer.drain(new_pos..self.state.input_cursor);
+                self.state.input_cursor = new_pos;
+            }
             KeyCode::Left => {
                 if self.state.input_cursor > 0 {
                     self.state.input_cursor -= 1;
@@ -2256,6 +2347,75 @@ impl App {
     }
 
     fn handle_description_input(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        // Handle skill search mode if active
+        if let Some(ref mut search) = self.state.skill_search {
+            match key.code {
+                KeyCode::Esc => {
+                    // Cancel skill search, remove `!` + pattern from buffer
+                    let remove_end = search.start_pos + 1 + search.pattern.len();
+                    let suffix = self.state.input_buffer[remove_end..].to_string();
+                    self.state.input_buffer.truncate(search.start_pos);
+                    self.state.input_buffer.push_str(&suffix);
+                    self.state.input_cursor = search.start_pos;
+                    self.state.skill_search = None;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    if let Some(entry) = search.matches.get(search.selected).cloned() {
+                        // Replace `!` + pattern with the full command
+                        let pattern_end = search.start_pos + 1 + search.pattern.len();
+                        let suffix = self.state.input_buffer[pattern_end..].to_string();
+                        self.state.input_buffer.truncate(search.start_pos);
+                        self.state.input_buffer.push_str(&entry.command);
+                        self.state.input_cursor = self.state.input_buffer.len();
+                        self.state.input_buffer.push_str(&suffix);
+                        self.state.highlighted_references.insert(entry.command);
+                    }
+                    self.state.skill_search = None;
+                }
+                KeyCode::Up => {
+                    if search.selected > 0 {
+                        search.selected -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if search.selected < search.matches.len().saturating_sub(1) {
+                        search.selected += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Char('p') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                    if search.selected > 0 {
+                        search.selected -= 1;
+                    }
+                }
+                KeyCode::Char('j') | KeyCode::Char('n') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                    if search.selected < search.matches.len().saturating_sub(1) {
+                        search.selected += 1;
+                    }
+                }
+                KeyCode::Backspace => {
+                    if search.pattern.is_empty() {
+                        // Cancel search if pattern is empty
+                        self.state.input_buffer.remove(search.start_pos); // Remove the `!`
+                        self.state.input_cursor = search.start_pos;
+                        self.state.skill_search = None;
+                    } else {
+                        search.pattern.pop();
+                        self.state.input_cursor = self.state.input_cursor.saturating_sub(1);
+                        self.state.input_buffer.remove(self.state.input_cursor);
+                        self.update_skill_search_matches();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    search.pattern.push(c);
+                    self.state.input_buffer.insert(self.state.input_cursor, c);
+                    self.state.input_cursor += 1;
+                    self.update_skill_search_matches();
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // Handle file search mode if active
         if let Some(ref mut search) = self.state.file_search {
             match key.code {
@@ -2273,7 +2433,7 @@ impl App {
                         self.state.input_buffer.push_str(&selected_file);
                         self.state.input_cursor = self.state.input_buffer.len();
                         self.state.input_buffer.push_str(&suffix);
-                        self.state.highlighted_file_paths.insert(selected_file);
+                        self.state.highlighted_references.insert(selected_file);
                     }
                     self.state.file_search = None;
                 }
@@ -2328,7 +2488,8 @@ impl App {
                 self.state.input_cursor = 0;
                 self.state.pending_task_title.clear();
                 self.state.editing_task_id = None;
-                self.state.highlighted_file_paths.clear();
+                self.state.highlighted_references.clear();
+                self.state.skill_search = None;
             }
             KeyCode::Enter => {
                 // Check if line ends with backslash for line continuation
@@ -2345,7 +2506,8 @@ impl App {
                     self.state.input_cursor = 0;
                     self.state.pending_task_title.clear();
                     self.state.editing_task_id = None;
-                    self.state.highlighted_file_paths.clear();
+                    self.state.highlighted_references.clear();
+                    self.state.skill_search = None;
                 }
             }
             KeyCode::Left if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
@@ -2360,6 +2522,12 @@ impl App {
             }
             KeyCode::Char('f') if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
                 self.state.input_cursor = word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+            }
+            // Alt+Backspace: delete word backward (macOS Option+Delete)
+            KeyCode::Backspace if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
+                let new_pos = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+                self.state.input_buffer.drain(new_pos..self.state.input_cursor);
+                self.state.input_cursor = new_pos;
             }
             KeyCode::Left => {
                 if self.state.input_cursor > 0 {
@@ -2403,6 +2571,29 @@ impl App {
                 });
                 self.update_file_search_matches();
             }
+            KeyCode::Char('!') => {
+                // Start skill search at cursor position
+                let start_pos = self.state.input_cursor;
+                self.state.input_buffer.insert(self.state.input_cursor, '!');
+                self.state.input_cursor += 1;
+
+                let all_skills = if let Some(ref project_path) = self.state.project_path {
+                    skills::scan_agent_skills(&self.state.config.default_agent, project_path)
+                        .into_iter()
+                        .map(|(command, description)| SkillEntry { command, description })
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                self.state.skill_search = Some(SkillSearchState {
+                    pattern: String::new(),
+                    matches: all_skills.clone(),
+                    all_skills,
+                    selected: 0,
+                    start_pos,
+                });
+            }
             KeyCode::Char(c) => {
                 self.state.input_buffer.insert(self.state.input_cursor, c);
                 self.state.input_cursor += 1;
@@ -2416,6 +2607,27 @@ impl App {
         if let (Some(ref mut search), Some(ref project_path)) = (&mut self.state.file_search, &self.state.project_path) {
             let pattern = &search.pattern;
             search.matches = fuzzy_find_files(project_path, pattern, 10, self.state.git_ops.as_ref());
+            search.selected = 0;
+        }
+    }
+
+    fn update_skill_search_matches(&mut self) {
+        if let Some(ref mut search) = self.state.skill_search {
+            let pattern = search.pattern.to_lowercase();
+            if pattern.is_empty() {
+                search.matches = search.all_skills.clone();
+            } else {
+                let mut scored: Vec<_> = search.all_skills.iter()
+                    .filter_map(|entry| {
+                        let cmd_score = fuzzy_score(&entry.command.to_lowercase(), &pattern);
+                        let desc_score = fuzzy_score(&entry.description.to_lowercase(), &pattern);
+                        let score = std::cmp::max(cmd_score, desc_score);
+                        if score > 0 { Some((entry.clone(), score)) } else { None }
+                    })
+                    .collect();
+                scored.sort_by(|a, b| b.1.cmp(&a.1));
+                search.matches = scored.into_iter().take(10).map(|(e, _)| e).collect();
+            }
             search.selected = 0;
         }
     }
