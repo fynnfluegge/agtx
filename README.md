@@ -1,17 +1,21 @@
+<div align="center">
+
 # agtx
 
-#### A terminal-native kanban board for managing coding agent sessions.
+**Terminal-native kanban board for managing spec-driven coding agent sessions. Plugin any existing spec-driven development framework.**
+
+</div>
 
 ![Xnapper-2026-02-14-09 36 33 (1)](https://github.com/user-attachments/assets/fce21a9c-2fe1-4b14-8f24-55e058531370)
 
 ## Features
 
-- **Kanban workflow**: Backlog → Planning → Running → Review → Done
+- **Kanban workflow**: Backlog/Research → Planning → Running → Review → Done
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
 - **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, Copilot and OpenCode
-- **Workflow plugins**: Plug in any development framework — define commands, prompts, artifacts and skills per phase, with automatic cross-agent translation
-- **PR workflow**: Generate descriptions with AI, create PRs directly from the TUI
+- **Spec-driven workflow plugins**: Plug in any spec-driven development framework — define commands, prompts, artifacts and skills per phase, with automatic cross-agent translation
 - **Multi-project dashboard**: Manage tasks across all your projects
+- **PR workflow**: Generate descriptions with AI, create PRs directly from the TUI
 - **Customizable themes**: Configure colors via config file
 
 ## Installation
@@ -76,9 +80,6 @@ When writing a task description, you can reference files and agent skills inline
 |-----|--------|
 | `#` or `@` | Fuzzy search and insert a file path |
 | `!` | Fuzzy search and insert an agent skill/command |
-| `\` + `Enter` | Line continuation (multi-line input) |
-| `Alt+←/→` | Word-by-word cursor navigation |
-| `Alt+Delete` | Delete word backward |
 
 **Skill references** (`!`) discover commands from your active agent's native command directory (e.g., `.claude/commands/` for Claude, `.codex/skills/` for Codex). The dropdown shows all available slash commands with descriptions, and inserts them in the agent's native invocation format:
 
@@ -87,14 +88,6 @@ When writing a task description, you can reference files and agent skills inline
 ```
 
 This includes agtx built-in skills, plugin commands, and any custom user-defined commands.
-
-### Task Workflow
-
-1. **Create a task** (`o`): Enter title and description
-2. **Move to Planning** (`m`): Creates worktree, starts agent in planning mode
-3. **Move to Running** (`m`): Agent implements the plan
-4. **Move to Review** (`m`): Opens PR with AI-generated description
-5. **Move to Done** (`m`): Cleans up worktree and tmux after PR is merged
 
 ### Agent Session Features
 
