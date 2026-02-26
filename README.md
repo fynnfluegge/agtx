@@ -2,7 +2,7 @@
 
 # agtx
 
-**Terminal-native kanban board for managing spec-driven coding agent sessions. Plugin any existing spec-driven development framework.**
+**Terminal-native kanban board for managing spec-driven coding agent sessions. Plugin any existing spec-driven development framework or specify your own workflow with per-phase skills, prompts and artifact tracking.**
 
 </div>
 
@@ -13,7 +13,7 @@
 - **Kanban workflow**: Backlog/Research → Planning → Running → Review → Done
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
 - **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, Copilot and OpenCode
-- **Spec-driven workflow plugins**: Plug in any spec-driven development framework — define commands, prompts, artifacts and skills per phase, with automatic cross-agent translation
+- **Spec-driven workflow plugins**: Plug in and select any spec-driven development framework per task — or define individual skills, prompts and artifacts - with automatic execution and tracking at each phase
 - **Multi-project dashboard**: Manage tasks across all your projects
 - **PR workflow**: Generate descriptions with AI, create PRs directly from the TUI
 - **Customizable themes**: Configure colors via config file
