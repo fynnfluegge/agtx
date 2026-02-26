@@ -212,3 +212,161 @@ pub fn extract_description(content: &str) -> Option<String> {
     }
     None
 }
+
+/// Extract description from a markdown file with YAML frontmatter on disk.
+fn extract_description_from_file(path: &std::path::Path) -> Option<String> {
+    let mut buf = vec![0u8; 512];
+    let mut file = std::fs::File::open(path).ok()?;
+    let n = std::io::Read::read(&mut file, &mut buf).ok()?;
+    let content = std::str::from_utf8(&buf[..n]).ok()?;
+    extract_description(content)
+}
+
+/// Extract description from a Gemini TOML command file on disk.
+fn extract_description_from_toml(path: &std::path::Path) -> Option<String> {
+    let mut buf = vec![0u8; 512];
+    let mut file = std::fs::File::open(path).ok()?;
+    let n = std::io::Read::read(&mut file, &mut buf).ok()?;
+    let content = std::str::from_utf8(&buf[..n]).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("description") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim();
+                let rest = rest.trim_start_matches('"').trim_end_matches('"');
+                if !rest.is_empty() {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Scan the active agent's native command directory for available skills.
+/// Returns `(command, description)` tuples in agent-native invocation format.
+pub fn scan_agent_skills(agent_name: &str, project_path: &std::path::Path) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+
+    match agent_name {
+        "claude" | "copilot" => {
+            // Namespaced subdirectories with .md files
+            let (base_dir, _) = match agent_native_skill_dir(agent_name) {
+                Some(v) => v,
+                None => return results,
+            };
+            let base = project_path.join(base_dir);
+            let entries = match std::fs::read_dir(&base) {
+                Ok(e) => e,
+                Err(_) => return results,
+            };
+            for ns_entry in entries.flatten() {
+                if !ns_entry.path().is_dir() {
+                    continue;
+                }
+                let namespace = ns_entry.file_name().to_string_lossy().to_string();
+                let files = match std::fs::read_dir(ns_entry.path()) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for file_entry in files.flatten() {
+                    let path = file_entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                        continue;
+                    }
+                    let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                        Some(s) => s.to_string(),
+                        None => continue,
+                    };
+                    let command = format!("/{}:{}", namespace, stem);
+                    let description = extract_description_from_file(&path)
+                        .unwrap_or_else(|| stem.replace('-', " "));
+                    results.push((command, description));
+                }
+            }
+        }
+        "gemini" => {
+            // Namespaced subdirectories with .toml files
+            let (base_dir, _) = match agent_native_skill_dir(agent_name) {
+                Some(v) => v,
+                None => return results,
+            };
+            let base = project_path.join(base_dir);
+            let entries = match std::fs::read_dir(&base) {
+                Ok(e) => e,
+                Err(_) => return results,
+            };
+            for ns_entry in entries.flatten() {
+                if !ns_entry.path().is_dir() {
+                    continue;
+                }
+                let namespace = ns_entry.file_name().to_string_lossy().to_string();
+                let files = match std::fs::read_dir(ns_entry.path()) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for file_entry in files.flatten() {
+                    let path = file_entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                        continue;
+                    }
+                    let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                        Some(s) => s.to_string(),
+                        None => continue,
+                    };
+                    let command = format!("/{}:{}", namespace, stem);
+                    let description = extract_description_from_toml(&path)
+                        .unwrap_or_else(|| stem.replace('-', " "));
+                    results.push((command, description));
+                }
+            }
+        }
+        "codex" => {
+            // Skill subdirectories with SKILL.md
+            let base = project_path.join(".codex/skills");
+            let entries = match std::fs::read_dir(&base) {
+                Ok(e) => e,
+                Err(_) => return results,
+            };
+            for dir_entry in entries.flatten() {
+                if !dir_entry.path().is_dir() {
+                    continue;
+                }
+                let dirname = dir_entry.file_name().to_string_lossy().to_string();
+                let skill_file = dir_entry.path().join("SKILL.md");
+                if skill_file.exists() {
+                    let command = format!("${}", dirname);
+                    let description = extract_description_from_file(&skill_file)
+                        .unwrap_or_else(|| dirname.replace('-', " "));
+                    results.push((command, description));
+                }
+            }
+        }
+        "opencode" => {
+            // Flat directory with .md files
+            let base = project_path.join(".config/opencode/command");
+            let entries = match std::fs::read_dir(&base) {
+                Ok(e) => e,
+                Err(_) => return results,
+            };
+            for file_entry in entries.flatten() {
+                let path = file_entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                let command = format!("/{}", stem);
+                let description = stem.replace('-', " ");
+                results.push((command, description));
+            }
+        }
+        _ => {} // Copilot has no interactive invocation, unknown agents skipped
+    }
+
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}

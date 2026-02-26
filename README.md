@@ -1,17 +1,21 @@
+<div align="center">
+
 # agtx
 
-#### A terminal-native kanban board for managing coding agent sessions.
+**Terminal-native kanban board for managing spec-driven coding agent sessions. Plugin any existing spec-driven development framework or specify your own workflow with per-phase skills, prompts, artifact tracking and automatic execution.**
+
+</div>
 
 ![Xnapper-2026-02-14-09 36 33 (1)](https://github.com/user-attachments/assets/fce21a9c-2fe1-4b14-8f24-55e058531370)
 
 ## Features
 
-- **Kanban workflow**: Backlog → Planning → Running → Review → Done
+- **Kanban workflow**: Backlog/Research → Planning → Running → Review → Done
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
-- **Coding Agent integrations**: Automatic session management for Claude Code, Codex, Gemini and Copilot CLI
-- **PR workflow**: Generate descriptions with AI, create PRs directly from the TUI
+- **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, Copilot and OpenCode
+- **Spec-driven workflow plugins**: Plug in and select any spec-driven development framework per task — or define individual skills, prompts and artifacts - with automatic execution and tracking at each phase
 - **Multi-project dashboard**: Manage tasks across all your projects
-- **Workflow plugins**: Swap between built-in, GSD, spec-kit, or void workflows per project
+- **PR workflow**: Generate descriptions with AI, create PRs directly from the TUI
 - **Customizable themes**: Configure colors via config file
 
 ## Installation
@@ -33,7 +37,7 @@ cp target/release/agtx ~/.local/bin/
 
 - **tmux** - Agent sessions run in a dedicated tmux server
 - **gh** - GitHub CLI for PR operations
-- Supported coding agents: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [Copilot](https://github.com/github/copilot-cli)
+- Supported coding agents: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [Copilot](https://github.com/github/copilot-cli), [OpenCode](https://github.com/sst/opencode)
 
 ## Quick Start
 
@@ -58,7 +62,7 @@ agtx -g
 | `h/l` or `←/→` | Move between columns |
 | `j/k` or `↑/↓` | Move between tasks |
 | `o` | Create new task |
-| `↩` | Open task (view Claude session) |
+| `↩` | Open task (view agent session) |
 | `m` | Move task forward in workflow |
 | `r` | Resume task (Review → Running) |
 | `d` | Show git diff |
@@ -68,41 +72,32 @@ agtx -g
 | `e` | Toggle project sidebar |
 | `q` | Quit |
 
-### Task Workflow
+### Task Description Editor
 
-1. **Create a task** (`o`): Enter title and description
-2. **Move to Planning** (`m`): Creates worktree, starts Claude in planning mode
-3. **Move to Running** (`m`): Claude implements the plan
-4. **Move to Review** (`m`): Opens PR with AI-generated description
-5. **Move to Done** (`m`): Cleans up worktree and tmux after PR is merged
+When writing a task description, you can reference files and agent skills inline:
 
-### Claude Session Features
+| Key | Action |
+|-----|--------|
+| `#` or `@` | Fuzzy search and insert a file path |
+| `!` | Fuzzy search and insert an agent skill/command |
+
+**Skill references** (`!`) discover commands from your active agent's native command directory (e.g., `.claude/commands/` for Claude, `.codex/skills/` for Codex). The dropdown shows all available slash commands with descriptions, and inserts them in the agent's native invocation format:
+
+```
+/agtx:research the authentication module, then /agtx:plan a fix for the session timeout bug
+```
+
+This includes agtx built-in skills, plugin commands, and any custom user-defined commands.
+
+### Agent Session Features
 
 - Sessions automatically resume when moving Review → Running
 - Full conversation context is preserved across the task lifecycle
-- View live Claude output in the task popup
+- View live agent output in the task popup
 
 ## Configuration
 
 Config file location: `~/.config/agtx/config.toml`
-
-```toml
-# Default agent for new tasks
-default_agent = "claude"
-
-[worktree]
-enabled = true
-auto_cleanup = true
-base_branch = "main"
-
-[theme]
-color_selected = "#FFFF99"
-color_normal = "#00FFFF"
-color_dimmed = "#666666"
-color_text = "#FFFFFF"
-color_accent = "#00FFFF"
-color_description = "#E8909C"
-```
 
 ### Project Configuration
 
@@ -117,23 +112,31 @@ copy_files = ".env, .env.local, web/.env.local"
 init_script = "scripts/init_worktree.sh"
 ```
 
-Both options run during the Backlog → Planning transition, after `git worktree add`
+Both options run during the Backlog → Research/Planning/Running transition, after worktree creation
 and before the agent session starts.
 
-### Workflow Plugins
+## Spec-driven Development Plugins
 
-Press `P` to select a workflow plugin for the current project. The active plugin is shown in the header bar.
+agtx ships with a plugin system that lets any spec-driven development framework hook into the task lifecycle. A plugin is a single TOML file that defines what happens at each phase transition — the commands sent to the agent, the prompts, the artifact files that signal completion, and optional setup scripts. Write a command once in canonical format and agtx translates it automatically for every supported agent.
+
+Press `P` to select a plugin for the current project. The active plugin is shown in the header bar.
 
 | Plugin | Description |
 |--------|-------------|
 | **agtx** (default) | Built-in workflow with skills and prompts for each phase |
-| **gsd** | Get Shit Done - structured spec-driven development with interactive planning |
-| **spec-kit** | Spec-Driven Development by GitHub - specifications become executable artifacts |
+| **gsd** | [Get Shit Done](https://github.com/fynnfluegge/get-shit-done-cc) - structured spec-driven development with interactive planning |
+| **spec-kit** | [Spec-Driven Development](https://github.com/github/spec-kit) by GitHub - specifications become executable artifacts |
 | **void** | Plain agent session - no prompting or skills, task description prefilled in input |
 
 Each task remembers the plugin it was started with. Switching plugins only affects new tasks — existing tasks continue using their original plugin throughout their lifecycle.
 
-#### Agent Compatibility
+### Agent Compatibility
+
+Commands are written once in canonical format and automatically translated per agent:
+
+| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode |
+|--------------------------|-----------------|-------|----------|
+| `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` |
 
 |  | Claude | Codex | Gemini | Copilot | OpenCode |
 |--|:------:|:-----:|:------:|:-------:|:--------:|
@@ -144,11 +147,9 @@ Each task remembers the plugin it was started with. Switching plugins only affec
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
 
-#### Creating a Plugin
+### Creating a Plugin
 
-Plugins are TOML files that customize the task workflow — the commands sent to the agent, the prompts, and the artifact files that signal phase completion.
-
-**Location:** Place your plugin at `.agtx/plugins/<name>/plugin.toml` in your project root (or `~/.config/agtx/plugins/<name>/plugin.toml` for global use). It will appear in the plugin selector (`P`).
+Place your plugin at `.agtx/plugins/<name>/plugin.toml` in your project root (or `~/.config/agtx/plugins/<name>/plugin.toml` for global use). It will appear in the plugin selector automatically.
 
 **Minimal example** — a plugin that uses custom slash commands:
 
@@ -186,7 +187,7 @@ supported_agents = ["claude", "codex", "gemini", "opencode"]
 copy_dirs = [".my-plugin"]
 
 # Artifact files that signal phase completion.
-# When detected, the task shows a ✓ checkmark instead of the spinner.
+# When detected, the task shows a checkmark instead of the spinner.
 # Supports * wildcard for one directory level (e.g. "specs/*/plan.md").
 # Omitted phases fall back to agtx defaults (.agtx/plan.md, .agtx/execute.md, .agtx/review.md).
 [artifacts]
@@ -199,8 +200,8 @@ review = ".my-plugin/review.md"
 # Written in canonical format (Claude/Gemini style): /namespace:command
 # Automatically transformed per agent:
 #   Claude/Gemini: /my-plugin:plan (unchanged)
-#   OpenCode:      /my-plugin-plan (colon → hyphen)
-#   Codex:         $my-plugin-plan (slash → dollar, colon → hyphen)
+#   OpenCode:      /my-plugin-plan (colon -> hyphen)
+#   Codex:         $my-plugin-plan (slash -> dollar, colon -> hyphen)
 # Set to "" to skip sending a command for that phase.
 [commands]
 research = "/my-plugin:research {task}"
@@ -242,7 +243,7 @@ research = "What do you want to build?"
     └── agtx-review/SKILL.md
 ```
 
-These override the built-in agtx skills and are deployed to agent-native paths (`.claude/commands/`, `.codex/skills/`, etc.) in each worktree.
+These override the built-in agtx skills and are automatically deployed to each agent's native discovery path (`.claude/commands/`, `.codex/skills/`, `.gemini/commands/`, etc.) in every worktree.
 
 ## How It Works
 
@@ -307,6 +308,7 @@ tmux -L agtx attach
 ### Data Storage
 
 - **Database**: `~/Library/Application Support/agtx/` (macOS) or `~/.local/share/agtx/` (Linux)
+- Config: `~/.config/agtx/config.toml`
 - **Worktrees**: `.agtx/worktrees/` in each project
 - **Tmux**: Dedicated server `agtx` with per-project sessions
 
