@@ -99,24 +99,6 @@ This includes agtx built-in skills, plugin commands, and any custom user-defined
 
 Config file location: `~/.config/agtx/config.toml`
 
-```toml
-# Default agent for new tasks
-default_agent = "claude"
-
-[worktree]
-enabled = true
-auto_cleanup = true
-base_branch = "main"
-
-[theme]
-color_selected = "#FFFF99"
-color_normal = "#00FFFF"
-color_dimmed = "#666666"
-color_text = "#FFFFFF"
-color_accent = "#00FFFF"
-color_description = "#E8909C"
-```
-
 ### Project Configuration
 
 Per-project settings can be placed in `.agtx/config.toml` at the project root:
@@ -130,14 +112,14 @@ copy_files = ".env, .env.local, web/.env.local"
 init_script = "scripts/init_worktree.sh"
 ```
 
-Both options run during the Backlog → Planning transition, after `git worktree add`
+Both options run during the Backlog → Research/Planning/Running transition, after worktree creation
 and before the agent session starts.
 
-## Workflow Plugins
+## Spec-driven Development Plugins
 
-agtx ships with a plugin system that lets any development framework hook into the task lifecycle. A plugin is a single TOML file that defines what happens at each phase transition — the commands sent to the agent, the prompts, the artifact files that signal completion, and optional setup scripts. Write a command once in canonical format and agtx translates it automatically for every supported agent.
+agtx ships with a plugin system that lets any spec-driven development framework hook into the task lifecycle. A plugin is a single TOML file that defines what happens at each phase transition — the commands sent to the agent, the prompts, the artifact files that signal completion, and optional setup scripts. Write a command once in canonical format and agtx translates it automatically for every supported agent.
 
-Press `P` to select a workflow plugin for the current project. The active plugin is shown in the header bar.
+Press `P` to select a plugin for the current project. The active plugin is shown in the header bar.
 
 | Plugin | Description |
 |--------|-------------|
@@ -154,7 +136,7 @@ Commands are written once in canonical format and automatically translated per a
 
 | Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode |
 |--------------------------|-----------------|-------|----------|
-| `/ns:command` | `/ns:command` | `$ns-command` | `/ns-command` |
+| `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` |
 
 |  | Claude | Codex | Gemini | Copilot | OpenCode |
 |--|:------:|:-----:|:------:|:-------:|:--------:|
@@ -326,6 +308,7 @@ tmux -L agtx attach
 ### Data Storage
 
 - **Database**: `~/Library/Application Support/agtx/` (macOS) or `~/.local/share/agtx/` (Linux)
+- Config: `~/.config/agtx/config.toml`
 - **Worktrees**: `.agtx/worktrees/` in each project
 - **Tmux**: Dedicated server `agtx` with per-project sessions
 
