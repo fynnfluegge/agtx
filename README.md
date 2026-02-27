@@ -4,7 +4,7 @@
 
 **Terminal-native kanban board for managing spec-driven AI coding agent sessions.**
 
-Plug in any existing spec-driven development framework or specify your own spec-driven workflow as a custom plugin with per-phase skills, prompts, artifact tracking and automatic execution.
+Plug in any existing spec-driven development framework or specify your own spec-driven workflow as a custom plugin with per-phase skills, prompts, artifact tracking and autonomous execution.
 
 </div>
 
@@ -15,7 +15,7 @@ Plug in any existing spec-driven development framework or specify your own spec-
 - **Kanban workflow**: Backlog/Research → Planning → Running → Review → Done
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
 - **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, Copilot and OpenCode
-- **Multi-agent per task**: Configure different agents per workflow phase — e.g. Claude for planning, Codex for implementation — with automatic agent switching in the same tmux window
+- **Multi-agent per task**: Configure different agents per workflow phase — e.g. Gemini for planning, Claude for implementation, Codex for review — with automatic agent switching in the same tmux window
 - **Spec-driven development plugins**: Plug in any spec-driven development framework or select from a predefined set of plugins like GSD or Spec-kit — or define custom skills, prompts and artifact tracking - with automatic execution and tracking at each phase
 - **Multi-project dashboard**: Manage tasks across all your projects
 - **PR workflow**: Generate descriptions with AI, create PRs directly from the TUI
