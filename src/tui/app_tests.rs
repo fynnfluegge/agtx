@@ -2450,3 +2450,168 @@ fn test_collect_phase_agents_mixed() {
     let agents = collect_phase_agents(&config);
     assert_eq!(agents, vec!["claude".to_string(), "codex".to_string(), "gemini".to_string()]);
 }
+
+// === is_pane_at_shell tests ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_true_for_bash() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("bash".to_string()));
+
+    assert!(is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_true_for_zsh() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("zsh".to_string()));
+
+    assert!(is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_true_for_fish() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("fish".to_string()));
+
+    assert!(is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_false_for_claude() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("claude".to_string()));
+
+    assert!(!is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_false_for_node() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("node".to_string()));
+
+    assert!(!is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_false_for_codex() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("codex".to_string()));
+
+    assert!(!is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_false_when_none() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| None);
+
+    assert!(!is_pane_at_shell(&mock, "sess:win"));
+}
+
+// === switch_agent_in_tmux tests ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_switch_agent_sends_exit_sequence_and_starts_new_agent() {
+    use mockall::Sequence;
+
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = Sequence::new();
+
+    // 1. Ctrl+C to interrupt
+    mock.expect_send_keys_literal()
+        .withf(|t, k| t == "sess:win" && k == "C-c")
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_, _| Ok(()));
+
+    // 2. /exit command
+    mock.expect_send_keys()
+        .withf(|t, k| t == "sess:win" && k == "/exit")
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_, _| Ok(()));
+
+    // 3. First poll returns agent still running, second returns shell
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Some("claude".to_string()));
+
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Some("bash".to_string()));
+
+    // 4. Start the new agent
+    mock.expect_send_keys()
+        .withf(|t, k| t == "sess:win" && k == "codex")
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_, _| Ok(()));
+
+    switch_agent_in_tmux(&mock, "sess:win", "codex");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_switch_agent_immediate_shell_starts_new_agent() {
+    use mockall::Sequence;
+
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = Sequence::new();
+
+    // 1. Ctrl+C
+    mock.expect_send_keys_literal()
+        .withf(|t, k| t == "sess:win" && k == "C-c")
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_, _| Ok(()));
+
+    // 2. /exit
+    mock.expect_send_keys()
+        .withf(|t, k| t == "sess:win" && k == "/exit")
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_, _| Ok(()));
+
+    // 3. Immediately at shell
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Some("zsh".to_string()));
+
+    // 4. Start new agent
+    mock.expect_send_keys()
+        .withf(|t, k| t == "sess:win" && k == "gemini")
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_, _| Ok(()));
+
+    switch_agent_in_tmux(&mock, "sess:win", "gemini");
+}
