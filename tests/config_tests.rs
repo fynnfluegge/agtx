@@ -1,6 +1,6 @@
 use agtx::config::{
-    determine_first_run_action, FirstRunAction, GlobalConfig, MergedConfig, ProjectConfig,
-    ThemeConfig, WorktreeConfig,
+    determine_first_run_action, FirstRunAction, GlobalConfig, MergedConfig, PhaseAgentsConfig,
+    ProjectConfig, ThemeConfig, WorktreeConfig,
 };
 
 // === ThemeConfig Tests ===
@@ -103,6 +103,7 @@ fn test_merged_config_project_overrides() {
     let global = GlobalConfig::default();
     let project = ProjectConfig {
         default_agent: Some("codex".to_string()),
+        agents: None,
         base_branch: Some("develop".to_string()),
         github_url: Some("https://github.com/user/repo".to_string()),
         copy_files: Some(".env, .env.local".to_string()),
@@ -169,4 +170,124 @@ fn test_first_run_new_user_prompt() {
         determine_first_run_action(false, false, false),
         FirstRunAction::NewUserPrompt,
     );
+}
+
+// === PhaseAgentsConfig Tests ===
+
+#[test]
+fn test_agent_for_phase_all_defaults() {
+    let config = MergedConfig::merge(
+        &GlobalConfig::default(),
+        &ProjectConfig::default(),
+    );
+    assert_eq!(config.agent_for_phase("research"), "claude");
+    assert_eq!(config.agent_for_phase("planning"), "claude");
+    assert_eq!(config.agent_for_phase("running"), "claude");
+    assert_eq!(config.agent_for_phase("review"), "claude");
+    assert_eq!(config.agent_for_phase("unknown"), "claude");
+}
+
+#[test]
+fn test_agent_for_phase_global_overrides() {
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+    global.agents.review = Some("gemini".to_string());
+
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    assert_eq!(config.agent_for_phase("research"), "claude");
+    assert_eq!(config.agent_for_phase("planning"), "claude");
+    assert_eq!(config.agent_for_phase("running"), "codex");
+    assert_eq!(config.agent_for_phase("review"), "gemini");
+}
+
+#[test]
+fn test_agent_for_phase_project_overrides_global() {
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+
+    let project = ProjectConfig {
+        agents: Some(PhaseAgentsConfig {
+            running: Some("gemini".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let config = MergedConfig::merge(&global, &project);
+    // Project override wins
+    assert_eq!(config.agent_for_phase("running"), "gemini");
+    // Unset phases fall back to default_agent
+    assert_eq!(config.agent_for_phase("planning"), "claude");
+}
+
+#[test]
+fn test_agent_for_phase_project_default_agent() {
+    let project = ProjectConfig {
+        default_agent: Some("codex".to_string()),
+        ..Default::default()
+    };
+
+    let config = MergedConfig::merge(&GlobalConfig::default(), &project);
+    // All phases fall back to project's default_agent
+    assert_eq!(config.agent_for_phase("research"), "codex");
+    assert_eq!(config.agent_for_phase("running"), "codex");
+}
+
+#[test]
+fn test_agent_for_phase_planning_with_research() {
+    let mut global = GlobalConfig::default();
+    global.agents.planning = Some("gemini".to_string());
+
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    // "planning_with_research" maps to the planning agent
+    assert_eq!(config.agent_for_phase("planning_with_research"), "gemini");
+}
+
+#[test]
+fn test_explicit_agent_for_phase_returns_none_when_unset() {
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
+    // No [agents] section — all phases return None
+    assert_eq!(config.explicit_agent_for_phase("research"), None);
+    assert_eq!(config.explicit_agent_for_phase("planning"), None);
+    assert_eq!(config.explicit_agent_for_phase("running"), None);
+    assert_eq!(config.explicit_agent_for_phase("review"), None);
+}
+
+#[test]
+fn test_explicit_agent_for_phase_returns_some_when_set() {
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    assert_eq!(config.explicit_agent_for_phase("running"), Some("codex"));
+    assert_eq!(config.explicit_agent_for_phase("review"), None);
+}
+
+#[test]
+fn test_phase_agents_config_serde_roundtrip() {
+    let toml_str = r#"
+default_agent = "claude"
+
+[agents]
+running = "codex"
+review = "gemini"
+"#;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.agents.running, Some("codex".to_string()));
+    assert_eq!(config.agents.review, Some("gemini".to_string()));
+    assert_eq!(config.agents.research, None);
+    assert_eq!(config.agents.planning, None);
+}
+
+#[test]
+fn test_phase_agents_config_backwards_compatible() {
+    // Config without [agents] section should parse fine
+    let toml_str = r#"
+default_agent = "claude"
+"#;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.agents.research, None);
+    assert_eq!(config.agents.planning, None);
+    assert_eq!(config.agents.running, None);
+    assert_eq!(config.agents.review, None);
 }

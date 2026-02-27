@@ -1367,6 +1367,7 @@ fn test_setup_task_worktree_success() {
         None,
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1414,6 +1415,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         Some("./init.sh".to_string()),
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1464,6 +1466,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         None,
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1512,6 +1515,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         None,
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1564,6 +1568,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         None,
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1612,6 +1617,7 @@ fn test_setup_task_worktree_passes_init_config() {
         Some("./setup.sh".to_string()),
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -2356,4 +2362,91 @@ fn test_skill_fuzzy_matching() {
     // Matching on description
     let score_desc = fuzzy_score("plan a task implementation", "plan");
     assert!(score_desc > 0);
+}
+
+// ── Per-Phase Agent Configuration Tests ─────────────────────────────────────
+
+#[test]
+fn test_needs_agent_switch_no_config_keeps_current() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::db::Task;
+
+    // No [agents] section — should keep whatever agent is running
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
+    let task = Task::new("Test", "claude", "project-1");
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "running");
+    assert_eq!(agent, "claude");
+    assert!(!switch);
+}
+
+#[test]
+fn test_needs_agent_switch_no_config_keeps_non_default_agent() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::db::Task;
+
+    // No review agent configured, but task is running codex (set by explicit running override).
+    // Moving to review should NOT switch back to default — keep codex.
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let mut task = Task::new("Test", "claude", "project-1");
+    task.agent = "codex".to_string(); // was switched to codex for running phase
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "review");
+    assert_eq!(agent, "codex"); // keeps codex, not fallback to claude
+    assert!(!switch);
+}
+
+#[test]
+fn test_needs_agent_switch_explicit_override() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::db::Task;
+
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let task = Task::new("Test", "claude", "project-1");
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "running");
+    assert_eq!(agent, "codex");
+    assert!(switch);
+}
+
+#[test]
+fn test_needs_agent_switch_explicit_same_as_current() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::db::Task;
+
+    // Explicit override exists but matches current agent — no switch needed
+    let mut global = GlobalConfig::default();
+    global.agents.review = Some("codex".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let mut task = Task::new("Test", "claude", "project-1");
+    task.agent = "codex".to_string();
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "review");
+    assert_eq!(agent, "codex");
+    assert!(!switch);
+}
+
+#[test]
+fn test_collect_phase_agents_all_same() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
+    let agents = collect_phase_agents(&config);
+    assert_eq!(agents, vec!["claude".to_string()]);
+}
+
+#[test]
+fn test_collect_phase_agents_mixed() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+    global.agents.review = Some("gemini".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let agents = collect_phase_agents(&config);
+    assert_eq!(agents, vec!["claude".to_string(), "codex".to_string(), "gemini".to_string()]);
 }

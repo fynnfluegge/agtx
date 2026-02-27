@@ -41,6 +41,9 @@ pub trait TmuxOperations: Send + Sync {
     /// Resize a tmux window
     fn resize_window(&self, target: &str, width: u16, height: u16) -> Result<()>;
 
+    /// Get the current command running in a pane (e.g. "claude", "bash", "zsh")
+    fn pane_current_command(&self, target: &str) -> Option<String>;
+
     /// Check if a session exists
     fn has_session(&self, session: &str) -> bool;
 
@@ -161,6 +164,20 @@ impl TmuxOperations for RealTmuxOps {
             .args(["-y", &height.to_string()])
             .output()?;
         Ok(())
+    }
+
+    fn pane_current_command(&self, target: &str) -> Option<String> {
+        let output = std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["display", "-p", "-t", target, "#{pane_current_command}"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !cmd.is_empty() { Some(cmd) } else { None }
+        } else {
+            None
+        }
     }
 
     fn has_session(&self, session: &str) -> bool {
