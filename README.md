@@ -4,7 +4,7 @@
 
 ### **Terminal-native kanban board for managing spec-driven AI coding agent sessions.**
 
-Plug in any existing spec-driven development framework or specify your own spec-driven workflow as a custom plugin with per-phase skills, prompts, artifact tracking and autonomous execution.
+Let different coding agents collaborate on the same task. Plug in any existing spec-driven development framework or specify your own workflow as a custom plugin with per-phase skills, prompts, artifact tracking and autonomous execution.
 
 <img width="960" height="645" alt="Screenshot 2026-02-28 at 18 32 06" src="https://github.com/user-attachments/assets/442965f4-d2c4-435f-a065-df56dc483ab7" />
 
