@@ -53,8 +53,8 @@ fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_colu
 type Terminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
 
 /// Shell popup dimensions - used for both rendering and tmux window sizing
-const SHELL_POPUP_WIDTH: u16 = 82;          // Total width including borders
-const SHELL_POPUP_CONTENT_WIDTH: u16 = 80;  // Content width (SHELL_POPUP_WIDTH - 2 for borders)
+const SHELL_POPUP_WIDTH: u16 = 128;          // Total width including borders
+const SHELL_POPUP_CONTENT_WIDTH: u16 = 126;  // Content width (SHELL_POPUP_WIDTH - 2 for borders)
 const SHELL_POPUP_HEIGHT_PERCENT: u16 = 75; // Percentage of terminal height
 
 /// Application state (separate from terminal for borrow checker)
@@ -147,6 +147,7 @@ enum DoneConfirmPrState {
     Open,
     Merged,
     Closed,
+    UncommittedChanges,
     Unknown,
 }
 
@@ -1139,6 +1140,9 @@ impl App {
                     "PR #{} state unknown.\n\nAre you sure you want to move this task to Done?\n\nWorktree will be deleted, tmux coding session killed.\nBranch kept locally.\n\n[y] Yes, move to Done    [n/Esc] Cancel",
                     popup.pr_number
                 ),
+                DoneConfirmPrState::UncommittedChanges => String::from(
+                    "There are uncommitted changes in the worktree.\n\nAre you sure you want to move this task to Done?\n\nUncommitted changes will be lost.\nWorktree will be deleted, tmux coding session killed.\nBranch kept locally.\n\n[y] Yes, move to Done    [n/Esc] Cancel"
+                ),
             };
             let content = Paragraph::new(text)
                 .style(Style::default().fg(Color::White))
@@ -1418,13 +1422,17 @@ impl App {
             frame.render_widget(title_line, title_area);
         }
 
+        // Footer line with agent name (for active tasks)
+        let show_agent = task.status != TaskStatus::Backlog || task.session_name.is_some();
+        let footer_height = if show_agent && inner.height > 2 { 1u16 } else { 0u16 };
+
         // Preview area (below title) - always show description
-        if inner.height > 1 {
+        if inner.height > 1 + footer_height {
             let preview_area = Rect {
                 x: inner.x,
                 y: inner.y + 1,
                 width: inner.width,
-                height: inner.height.saturating_sub(1),
+                height: inner.height.saturating_sub(1 + footer_height),
             };
 
             // Show description or placeholder
@@ -1442,6 +1450,27 @@ impl App {
                 .style(Style::default().fg(hex_to_color(&theme.color_description)).italic())
                 .wrap(Wrap { trim: true });
             frame.render_widget(preview, preview_area);
+        }
+
+        // Agent footer
+        if footer_height > 0 {
+            let footer_area = Rect {
+                x: inner.x,
+                y: inner.y + inner.height.saturating_sub(1),
+                width: inner.width,
+                height: 1,
+            };
+            let agent_style = match task.agent.as_str() {
+                "claude" => Style::default().fg(Color::Rgb(227, 148, 62)),  // orange
+                "gemini" => Style::default().fg(Color::Rgb(234, 130, 180)), // pink
+                "opencode" => Style::default().fg(Color::White).bg(Color::Rgb(80, 80, 80)), // white on grey
+                "codex" => Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 20)),   // white on black
+                _ => Style::default().fg(Color::White),
+            };
+            let agent_label = Paragraph::new(format!(" {} ", task.agent))
+                .style(agent_style)
+                .alignment(Alignment::Right);
+            frame.render_widget(agent_label, footer_area);
         }
     }
 
@@ -1799,14 +1828,28 @@ impl App {
     fn force_move_to_done(&mut self, task_id: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, self.state.project_path.clone()) {
             if let Some(mut task) = db.get_task(task_id)? {
-                cleanup_task_for_done(
-                    &mut task,
-                    &project_path,
-                    self.state.tmux_ops.as_ref(),
-                    self.state.git_ops.as_ref(),
-                );
+                let session_name = task.session_name.clone();
+                let worktree_path = task.worktree_path.clone();
+                let branch_name = task.branch_name.clone();
+
+                // Update task status immediately
+                task.session_name = None;
+                task.worktree_path = None;
+                task.status = TaskStatus::Done;
+                task.updated_at = chrono::Utc::now();
                 db.update_task(&task)?;
                 self.refresh_tasks()?;
+
+                // Cleanup in background (archive, kill tmux, remove worktree)
+                let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                let git_ops = Arc::clone(&self.state.git_ops);
+                let task_id = task.id.clone();
+                std::thread::spawn(move || {
+                    cleanup_task_resources(
+                        &task_id, &branch_name, &session_name, &worktree_path,
+                        &project_path, tmux_ops.as_ref(), git_ops.as_ref(),
+                    );
+                });
             }
         }
         Ok(())
@@ -3140,14 +3183,36 @@ impl App {
                     });
                     return Ok(());
                 }
-                // No PR - allow moving to Done directly (task might have been abandoned early)
-                // Cleanup resources (but don't set status yet - that's done below)
-                cleanup_task_for_done(
-                    &mut task,
-                    &project_path,
-                    self.state.tmux_ops.as_ref(),
-                    self.state.git_ops.as_ref(),
-                );
+                // No PR - check for uncommitted changes before allowing move to Done
+                let has_uncommitted = task.worktree_path.as_ref().map_or(false, |wt| {
+                    self.state.git_ops.has_changes(Path::new(wt))
+                });
+                if has_uncommitted {
+                    self.state.done_confirm_popup = Some(DoneConfirmPopup {
+                        task_id: task.id.clone(),
+                        pr_number: 0,
+                        pr_state: DoneConfirmPrState::UncommittedChanges,
+                    });
+                    return Ok(());
+                }
+
+                // Cleanup resources in background (archive, kill tmux, remove worktree)
+                let session_name = task.session_name.clone();
+                let worktree_path = task.worktree_path.clone();
+                let branch_name = task.branch_name.clone();
+                task.session_name = None;
+                task.worktree_path = None;
+
+                let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                let git_ops = Arc::clone(&self.state.git_ops);
+                let task_id_clone = task.id.clone();
+                let project_path_clone = project_path.clone();
+                std::thread::spawn(move || {
+                    cleanup_task_resources(
+                        &task_id_clone, &branch_name, &session_name, &worktree_path,
+                        &project_path_clone, tmux_ops.as_ref(), git_ops.as_ref(),
+                    );
+                });
             }
 
             task.status = new_status;
@@ -3698,6 +3763,46 @@ fn cleanup_task_for_done(
     task.worktree_path = None;
     task.status = TaskStatus::Done;
     task.updated_at = chrono::Utc::now();
+}
+
+/// Background-safe cleanup: archive artifacts, kill tmux window, remove worktree.
+/// Takes owned/cloned values so it can run in a spawned thread.
+fn cleanup_task_resources(
+    task_id: &str,
+    branch_name: &Option<String>,
+    session_name: &Option<String>,
+    worktree_path: &Option<String>,
+    project_path: &Path,
+    tmux_ops: &dyn TmuxOperations,
+    git_ops: &dyn GitOperations,
+) {
+    // Archive artifacts before removing worktree
+    if let Some(worktree) = worktree_path {
+        let artifacts_dir = Path::new(worktree).join(".agtx");
+        if artifacts_dir.exists() {
+            let slug = branch_name.as_deref()
+                .and_then(|b| b.strip_prefix("task/"))
+                .unwrap_or(task_id);
+            let archive_dir = project_path.join(".agtx").join("archive").join(slug);
+            if let Ok(()) = std::fs::create_dir_all(&archive_dir) {
+                if let Ok(entries) = std::fs::read_dir(&artifacts_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() && path.extension().map_or(false, |ext| ext == "md") {
+                            let _ = std::fs::copy(&path, archive_dir.join(entry.file_name()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(session_name) = session_name {
+        let _ = tmux_ops.kill_window(session_name);
+    }
+    if let Some(worktree) = worktree_path {
+        let _ = git_ops.remove_worktree(project_path, worktree);
+    }
 }
 
 /// Set up a worktree and tmux window for a task.
