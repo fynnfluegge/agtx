@@ -122,6 +122,8 @@ struct AppState {
     delete_confirm_popup: Option<DeleteConfirmPopup>,
     // Confirmation popup for asking if user wants to create PR when moving to Review
     review_confirm_popup: Option<ReviewConfirmPopup>,
+    // Channel for receiving background worktree setup results
+    setup_rx: Option<mpsc::Receiver<SetupResult>>,
     // Phase detection
     phase_status_cache: HashMap<String, (PhaseStatus, Instant)>,
     spinner_frame: usize,
@@ -154,6 +156,18 @@ struct MoveConfirmPopup {
     task_id: String,
     from_status: TaskStatus,
     to_status: TaskStatus,
+}
+
+/// Result from background worktree setup (research, planning, move-to-running)
+struct SetupResult {
+    task_id: String,
+    session_name: String,
+    worktree_path: String,
+    branch_name: String,
+    new_status: Option<TaskStatus>,
+    agent: String,
+    plugin: Option<String>,
+    error: Option<String>,
 }
 
 /// State for PR creation status popup (loading/success/error)
@@ -361,6 +375,7 @@ impl App {
                 pr_generation_rx: None,
                 pr_status_popup: None,
                 pr_creation_rx: None,
+                setup_rx: None,
                 done_confirm_popup: None,
                 move_confirm_popup: None,
                 skip_move_confirm: false,
@@ -425,6 +440,33 @@ impl App {
                     }
                     self.state.pr_creation_rx = None;
                     self.refresh_tasks()?;
+                }
+            }
+
+            // Check for worktree setup completion
+            if let Some(ref rx) = self.state.setup_rx {
+                if let Ok(result) = rx.try_recv() {
+                    self.state.setup_rx = None;
+                    if let Some(err) = result.error {
+                        self.state.warning_message = Some((err, Instant::now()));
+                    } else {
+                        // Update task with worktree info from background setup
+                        if let Some(db) = &self.state.db {
+                            if let Ok(Some(mut task)) = db.get_task(&result.task_id) {
+                                task.session_name = Some(result.session_name);
+                                task.worktree_path = Some(result.worktree_path);
+                                task.branch_name = Some(result.branch_name);
+                                task.agent = result.agent;
+                                task.plugin = result.plugin;
+                                if let Some(status) = result.new_status {
+                                    task.status = status;
+                                }
+                                task.updated_at = chrono::Utc::now();
+                                let _ = db.update_task(&task);
+                            }
+                        }
+                        self.refresh_tasks()?;
+                    }
                 }
             }
 
@@ -2861,44 +2903,87 @@ impl App {
                         }
                         send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &planning_agent_clone);
                     });
+                } else if self.state.setup_rx.is_some() {
+                    // Setup already in progress, skip
+                    return Ok(());
                 } else {
-                    // No research session — create worktree + tmux window from scratch
+                    // No research session — create worktree + tmux window from scratch (non-blocking)
                     let task_content = if let Some(desc) = &task.description {
                         format!("{}\n\n{}", task.title, desc)
                     } else {
                         task.title.clone()
                     };
                     let prompt = resolve_prompt(&plugin, "planning", &task_content, &task.id, &planning_agent);
-
-                    let all_agents = collect_phase_agents(&self.state.config);
-                    let target = setup_task_worktree(
-                        &mut task,
-                        &project_path,
-                        &self.state.project_name,
-                        &prompt,
-                        self.state.config.copy_files.clone(),
-                        self.state.config.init_script.clone(),
-                        &plugin,
-                        &planning_agent,
-                        &all_agents,
-                        self.state.tmux_ops.as_ref(),
-                        self.state.git_ops.as_ref(),
-                        self.state.agent_registry.get(&planning_agent).as_ref(),
-                    )?;
-
-                    // Wait for agent to be ready, then send skill command and task content
-                    let target_clone = target.clone();
-                    let tmux_ops = Arc::clone(&self.state.tmux_ops);
                     let skill_cmd = resolve_skill_command(&plugin, "planning", &planning_agent, &task_content);
-                    let prompt_clone = prompt.clone();
                     let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
-                    let task_content_clone = task_content.clone();
+                    let all_agents = collect_phase_agents(&self.state.config);
+                    let project_name = self.state.project_name.clone();
+                    let copy_files = self.state.config.copy_files.clone();
+                    let init_script = self.state.config.init_script.clone();
+                    let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                    let git_ops = Arc::clone(&self.state.git_ops);
+                    let agent_ops = self.state.agent_registry.get(&planning_agent);
+                    let task_id = task.id.clone();
+                    let task_title = task.title.clone();
+                    let plugin_name = task.plugin.clone();
                     let planning_agent_clone = planning_agent.clone();
+
+                    let (tx, rx) = mpsc::channel();
+                    self.state.setup_rx = Some(rx);
+
                     std::thread::spawn(move || {
-                        if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                            send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone, &planning_agent_clone);
+                        let mut tmp_task = Task::new(&task_title, &planning_agent_clone, &project_name);
+                        tmp_task.id = task_id.clone();
+                        tmp_task.plugin = plugin_name.clone();
+
+                        let result = setup_task_worktree(
+                            &mut tmp_task,
+                            &project_path,
+                            &project_name,
+                            &prompt,
+                            copy_files,
+                            init_script,
+                            &plugin,
+                            &planning_agent_clone,
+                            &all_agents,
+                            tmux_ops.as_ref(),
+                            git_ops.as_ref(),
+                            agent_ops.as_ref(),
+                        );
+
+                        match result {
+                            Ok(target) => {
+                                let _ = tx.send(SetupResult {
+                                    task_id: task_id.clone(),
+                                    session_name: tmp_task.session_name.unwrap_or_default(),
+                                    worktree_path: tmp_task.worktree_path.unwrap_or_default(),
+                                    branch_name: tmp_task.branch_name.unwrap_or_default(),
+                                    new_status: Some(TaskStatus::Planning),
+                                    agent: planning_agent_clone.clone(),
+                                    plugin: plugin_name,
+                                    error: None,
+                                });
+
+                                if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                                    send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &planning_agent_clone);
+                                }
+                            }
+                            Err(e) => {
+                                let _ = tx.send(SetupResult {
+                                    task_id,
+                                    session_name: String::new(),
+                                    worktree_path: String::new(),
+                                    branch_name: String::new(),
+                                    new_status: None,
+                                    agent: planning_agent_clone,
+                                    plugin: plugin_name,
+                                    error: Some(format!("Planning setup failed: {}", e)),
+                                });
+                            }
                         }
                     });
+
+                    return Ok(());
                 }
                 task.agent = planning_agent;
             }
@@ -3058,17 +3143,21 @@ impl App {
 
     /// Start a research session for a Backlog task (creates worktree, reused in planning)
     fn start_research(&mut self, task_id: &str) -> Result<()> {
+        // Don't start if a setup is already in progress
+        if self.state.setup_rx.is_some() { return Ok(()) }
+
         let mut task = {
             let Some(db) = &self.state.db else { return Ok(()) };
             let Some(task) = db.get_task(task_id)? else { return Ok(()) };
             task
         };
         let Some(project_path) = self.state.project_path.clone() else { return Ok(()) };
+
         // Stamp plugin on task for research
         task.plugin = self.state.config.workflow_plugin.clone();
+        let plugin_name = task.plugin.clone();
         let plugin = self.load_task_plugin(&task);
         let agent_name = self.state.config.agent_for_phase("research").to_string();
-        task.agent = agent_name.clone();
 
         let task_content = if let Some(desc) = &task.description {
             format!("{}\n\n{}", task.title, desc)
@@ -3077,50 +3166,85 @@ impl App {
         };
 
         let prompt = resolve_prompt(&plugin, "research", &task_content, &task.id, &agent_name);
-
-        // Create worktree + tmux window (same as planning, so it can be reused)
-        let all_agents = collect_phase_agents(&self.state.config);
-        let target = setup_task_worktree(
-            &mut task,
-            &project_path,
-            &self.state.project_name,
-            &prompt,
-            self.state.config.copy_files.clone(),
-            self.state.config.init_script.clone(),
-            &plugin,
-            &agent_name,
-            &all_agents,
-            self.state.tmux_ops.as_ref(),
-            self.state.git_ops.as_ref(),
-            self.state.agent_registry.get(&agent_name).as_ref(),
-        )?;
-
-        // Send research skill command + task prompt (with optional trigger polling)
-        let target_clone = target.clone();
-        let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let skill_cmd = resolve_skill_command(&plugin, "research", &agent_name, &task_content);
-        let prompt_clone = prompt.clone();
         let prompt_trigger = resolve_prompt_trigger(&plugin, "research");
-        let task_content_clone = task_content.clone();
-        let agent_name_clone = agent_name.clone();
+        let all_agents = collect_phase_agents(&self.state.config);
+        let project_name = self.state.project_name.clone();
+        let copy_files = self.state.config.copy_files.clone();
+        let init_script = self.state.config.init_script.clone();
+
+        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+        let git_ops = Arc::clone(&self.state.git_ops);
+        let agent_ops = self.state.agent_registry.get(&agent_name);
+
+        let task_id = task.id.clone();
+        let task_title = task.title.clone();
+
+        let (tx, rx) = mpsc::channel();
+        self.state.setup_rx = Some(rx);
+
         std::thread::spawn(move || {
-            if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone, &agent_name_clone);
+            // Create a temporary task to pass to setup_task_worktree
+            let mut tmp_task = Task::new(&task_title, &agent_name, &project_name);
+            tmp_task.id = task_id.clone();
+            tmp_task.plugin = plugin_name.clone();
+
+            let result = setup_task_worktree(
+                &mut tmp_task,
+                &project_path,
+                &project_name,
+                &prompt,
+                copy_files,
+                init_script,
+                &plugin,
+                &agent_name,
+                &all_agents,
+                tmux_ops.as_ref(),
+                git_ops.as_ref(),
+                agent_ops.as_ref(),
+            );
+
+            match result {
+                Ok(target) => {
+                    let _ = tx.send(SetupResult {
+                        task_id: task_id.clone(),
+                        session_name: tmp_task.session_name.unwrap_or_default(),
+                        worktree_path: tmp_task.worktree_path.unwrap_or_default(),
+                        branch_name: tmp_task.branch_name.unwrap_or_default(),
+                        new_status: None, // stays in Backlog
+                        agent: agent_name.clone(),
+                        plugin: plugin_name,
+                        error: None,
+                    });
+
+                    // Wait for agent ready and send skill+prompt
+                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &agent_name);
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(SetupResult {
+                        task_id,
+                        session_name: String::new(),
+                        worktree_path: String::new(),
+                        branch_name: String::new(),
+                        new_status: None,
+                        agent: agent_name,
+                        plugin: plugin_name,
+                        error: Some(format!("Research setup failed: {}", e)),
+                    });
+                }
             }
         });
-
-        // Store session name — task stays in Backlog
-        task.updated_at = chrono::Utc::now();
-        if let Some(db) = &self.state.db {
-            db.update_task(&task)?;
-        }
-        self.refresh_tasks()?;
 
         Ok(())
     }
 
     /// Move task directly from Backlog to Running (skip Planning)
     fn move_backlog_to_running(&mut self) -> Result<()> {
+        // Don't start if a setup is already in progress
+        if self.state.setup_rx.is_some() { return Ok(()) }
+
         let (mut task, project_path) = match (
             self.state.board.selected_task().cloned(),
             self.state.project_path.clone(),
@@ -3146,46 +3270,77 @@ impl App {
 
         // Stamp plugin on task
         task.plugin = self.state.config.workflow_plugin.clone();
+        let plugin_name = task.plugin.clone();
         let plugin = self.load_task_plugin(&task);
         let running_agent = self.state.config.agent_for_phase("running").to_string();
         let all_agents = collect_phase_agents(&self.state.config);
-        let target = setup_task_worktree(
-            &mut task,
-            &project_path,
-            &self.state.project_name,
-            &prompt,
-            self.state.config.copy_files.clone(),
-            self.state.config.init_script.clone(),
-            &plugin,
-            &running_agent,
-            &all_agents,
-            self.state.tmux_ops.as_ref(),
-            self.state.git_ops.as_ref(),
-            self.state.agent_registry.get(&running_agent).as_ref(),
-        )?;
-
-        // Wait for agent to be ready, then send execute skill command and task content
-        let target_clone = target.clone();
-        let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content);
-        let prompt_clone = prompt.clone();
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
-        let task_content_clone = task_content.clone();
+        let project_name = self.state.project_name.clone();
+        let copy_files = self.state.config.copy_files.clone();
+        let init_script = self.state.config.init_script.clone();
+        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+        let git_ops = Arc::clone(&self.state.git_ops);
+        let agent_ops = self.state.agent_registry.get(&running_agent);
+        let task_id = task.id.clone();
+        let task_title = task.title.clone();
         let running_agent_clone = running_agent.clone();
+
+        let (tx, rx) = mpsc::channel();
+        self.state.setup_rx = Some(rx);
+
         std::thread::spawn(move || {
-            if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone, &running_agent_clone);
+            let mut tmp_task = Task::new(&task_title, &running_agent_clone, &project_name);
+            tmp_task.id = task_id.clone();
+            tmp_task.plugin = plugin_name.clone();
+
+            let result = setup_task_worktree(
+                &mut tmp_task,
+                &project_path,
+                &project_name,
+                &prompt,
+                copy_files,
+                init_script,
+                &plugin,
+                &running_agent_clone,
+                &all_agents,
+                tmux_ops.as_ref(),
+                git_ops.as_ref(),
+                agent_ops.as_ref(),
+            );
+
+            match result {
+                Ok(target) => {
+                    let _ = tx.send(SetupResult {
+                        task_id: task_id.clone(),
+                        session_name: tmp_task.session_name.unwrap_or_default(),
+                        worktree_path: tmp_task.worktree_path.unwrap_or_default(),
+                        branch_name: tmp_task.branch_name.unwrap_or_default(),
+                        new_status: Some(TaskStatus::Running),
+                        agent: running_agent_clone.clone(),
+                        plugin: plugin_name,
+                        error: None,
+                    });
+
+                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &running_agent_clone);
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(SetupResult {
+                        task_id,
+                        session_name: String::new(),
+                        worktree_path: String::new(),
+                        branch_name: String::new(),
+                        new_status: None,
+                        agent: running_agent_clone,
+                        plugin: plugin_name,
+                        error: Some(format!("Running setup failed: {}", e)),
+                    });
+                }
             }
         });
 
-        task.agent = running_agent;
-        task.status = TaskStatus::Running;
-        task.updated_at = chrono::Utc::now();
-
-        if let Some(db) = &self.state.db {
-            db.update_task(&task)?;
-        }
-        self.refresh_tasks()?;
         Ok(())
     }
 
@@ -4281,6 +4436,36 @@ fn send_skill_and_prompt(
     task_content: &str,
     agent_name: &str,
 ) {
+    // Gemini & Codex: always combine skill+prompt into a single message.
+    // Gemini: sending separately causes it to execute the skill and queue the
+    //   prompt, which gets lost or arrives too late.
+    // Codex: skill mentions ($skill-name) are inline references that must be
+    //   part of a message — sending just "$skill" standalone does nothing.
+    if matches!(agent_name, "gemini" | "codex") {
+        if let Some(cmd) = skill_cmd {
+            if !prompt.is_empty() {
+                let combined = format!("{}\n\n{}", cmd, prompt);
+                let _ = tmux_ops.send_keys_literal(target, &combined);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let _ = tmux_ops.send_keys_literal(target, "Enter");
+            } else {
+                let _ = tmux_ops.send_keys_literal(target, cmd);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let _ = tmux_ops.send_keys_literal(target, "Enter");
+            }
+        } else if !prompt.is_empty() {
+            let _ = tmux_ops.send_keys_literal(target, prompt);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = tmux_ops.send_keys_literal(target, "Enter");
+        } else {
+            let oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+            if !oneline.is_empty() {
+                let _ = tmux_ops.send_keys_literal(target, &oneline);
+            }
+        }
+        return;
+    }
+
     match (skill_cmd, prompt_trigger) {
         // Skill + prompt trigger: must send separately, wait for trigger between them
         (Some(cmd), Some(trigger)) => {
@@ -4292,43 +4477,29 @@ fn send_skill_and_prompt(
                 }
             }
         }
-        // Skill + prompt, no trigger: agent-specific handling
+        // Skill + prompt, no trigger: send separately, wait for pane to stabilize
         (Some(cmd), None) => {
-            if agent_name == "gemini" && !prompt.is_empty() {
-                // Gemini: combine skill and prompt into a single message.
-                // Sending separately causes Gemini to execute the skill and queue
-                // the prompt, which gets lost or arrives too late.
-                let combined = format!("{}\n\n{}", cmd, prompt);
-                let _ = tmux_ops.send_keys_literal(target, &combined);
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
-            } else {
-                let _ = tmux_ops.send_keys(target, cmd);
-                if !prompt.is_empty() {
-                    // Wait for agent to finish processing the skill command before sending the prompt.
-                    // Poll pane content until it stabilizes (agent re-rendered its UI after the command).
-                    let mut last_content = String::new();
-                    let mut stable_ticks = 0u32;
-                    for _ in 0..50 { // 10s max
-                        std::thread::sleep(std::time::Duration::from_millis(200));
-                        if let Ok(content) = tmux_ops.capture_pane(target) {
-                            if content == last_content {
-                                stable_ticks += 1;
-                                if stable_ticks >= 10 { // 2s of no changes
-                                    break;
-                                }
-                            } else {
-                                stable_ticks = 0;
-                                last_content = content;
+            let _ = tmux_ops.send_keys(target, cmd);
+            if !prompt.is_empty() {
+                // Wait for agent to finish processing the skill command before sending the prompt.
+                // Poll pane content until it stabilizes (agent re-rendered its UI after the command).
+                let mut last_content = String::new();
+                let mut stable_ticks = 0u32;
+                for _ in 0..50 { // 10s max
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    if let Ok(content) = tmux_ops.capture_pane(target) {
+                        if content == last_content {
+                            stable_ticks += 1;
+                            if stable_ticks >= 10 { // 2s of no changes
+                                break;
                             }
+                        } else {
+                            stable_ticks = 0;
+                            last_content = content;
                         }
                     }
-                    // Send text first, then Enter with a delay so Gemini's Ink TUI
-                    // can finish rendering the input before processing Enter.
-                    let _ = tmux_ops.send_keys_literal(target, prompt);
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    let _ = tmux_ops.send_keys_literal(target, "Enter");
                 }
+                let _ = tmux_ops.send_keys(target, prompt);
             }
         }
         // No skill command, just prompt
@@ -4373,6 +4544,22 @@ fn wait_for_prompt_trigger(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, tri
                 stable_ticks = 0;
                 last_content = content.clone();
             }
+
+            // Auto-dismiss known interactive prompts that block the trigger.
+            // GSD's "Map codebase first?" prompt: select "Skip mapping" (option 2).
+            if stable_ticks >= 4
+                && content.contains("Map codebase")
+                && content.contains("Skip mapping")
+                && content.contains("Enter to select")
+            {
+                let _ = tmux_ops.send_keys_literal(target, "2");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let _ = tmux_ops.send_keys_literal(target, "Enter");
+                stable_ticks = 0;
+                last_content.clear();
+                continue;
+            }
+
             // Trigger when the text is present AND pane has been stable for ~2s.
             // While the agent is reading files / generating output, content keeps
             // changing. Once it asks the question and waits for input, it settles.
