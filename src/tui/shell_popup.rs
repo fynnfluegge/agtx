@@ -145,9 +145,17 @@ pub fn trim_content_to_cursor(content: Vec<u8>, cursor_info: Option<(usize, usiz
             // cursor position in capture = visible_pane_start + cursor_y
             let visible_pane_start = total_lines.saturating_sub(pane_height);
             let cursor_line_in_capture = visible_pane_start + cursor_y;
+            let trim_at = (cursor_line_in_capture + 1).min(total_lines);
 
-            // Keep lines up to and including the cursor line
-            (cursor_line_in_capture + 1).min(total_lines)
+            // Only trim at cursor if everything below it is blank.
+            // TUI apps (OpenCode, Gemini) place the cursor mid-screen with
+            // real content below — trimming there would cut the UI in half.
+            let has_content_below = lines[trim_at..].iter().any(|l| !l.trim().is_empty());
+            if has_content_below {
+                total_lines
+            } else {
+                trim_at
+            }
         } else {
             total_lines
         }

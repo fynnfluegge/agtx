@@ -38,7 +38,7 @@ pub fn agent_native_skill_dir(agent_name: &str) -> Option<(&'static str, &'stati
     match agent_name {
         "claude" => Some((".claude/commands", "agtx")),
         "gemini" => Some((".gemini/commands", "agtx")),
-        "opencode" => Some((".config/opencode/command", "")),
+        "opencode" => Some((".opencode/commands", "")),
         "codex" => Some((".codex/skills", "")),
         "copilot" => Some((".github/agents", "agtx")),
         _ => None,

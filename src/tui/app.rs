@@ -3466,6 +3466,8 @@ impl App {
                     // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
                     let _ = self.state.tmux_ops.resize_window(&window_name, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
+                    // Give TUI apps (OpenCode, Gemini Ink) time to re-render after resize
+                    std::thread::sleep(std::time::Duration::from_millis(200));
                 }
 
                 // Capture initial content
@@ -5008,10 +5010,11 @@ fn write_skills_to_worktree(worktree_path: &str, project_path: &Path, plugin: &O
                         let _ = std::fs::write(skill_subdir.join("SKILL.md"), &content);
                     }
                     "opencode" => {
-                        // OpenCode uses flat .md files: command/agtx-plan.md (invoked as /agtx-plan)
-                        let content = transform_skill_for_opencode(&content);
+                        // OpenCode uses flat .md command files: .opencode/commands/agtx-research.md
+                        // Commands have description frontmatter + prompt template
+                        let oc_content = transform_skill_for_opencode(&content);
                         let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
-                        let _ = std::fs::write(native_dir.join(&filename), content);
+                        let _ = std::fs::write(native_dir.join(&filename), oc_content);
                     }
                     _ => {
                         // Claude and others: .md files with transformed frontmatter
@@ -5045,8 +5048,11 @@ fn transform_skill_frontmatter(content: &str) -> String {
 /// Transform skill content for OpenCode: strip frontmatter, keep as .md
 /// OpenCode uses flat command files and hyphen-separated names (no colon namespace)
 fn transform_skill_for_opencode(content: &str) -> String {
-    // OpenCode doesn't use YAML frontmatter in commands — just the markdown body
-    skills::strip_frontmatter(content).to_string()
+    // OpenCode commands use description frontmatter + prompt body
+    let description = skills::extract_description(content)
+        .unwrap_or_else(|| "agtx skill".to_string());
+    let body = skills::strip_frontmatter(content);
+    format!("---\ndescription: \"{}\"\n---\n{}", description, body)
 }
 
 /// Resolve skill content: check plugin override, then fall back to default

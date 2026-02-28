@@ -1659,7 +1659,7 @@ fn test_skill_dir_to_filename() {
 fn test_agent_native_skill_dir() {
     assert_eq!(skills::agent_native_skill_dir("claude"), Some((".claude/commands", "agtx")));
     assert_eq!(skills::agent_native_skill_dir("gemini"), Some((".gemini/commands", "agtx")));
-    assert_eq!(skills::agent_native_skill_dir("opencode"), Some((".config/opencode/command", "")));
+    assert_eq!(skills::agent_native_skill_dir("opencode"), Some((".opencode/commands", "")));
     assert_eq!(skills::agent_native_skill_dir("codex"), Some((".codex/skills", "")));
     assert_eq!(skills::agent_native_skill_dir("copilot"), Some((".github/agents", "agtx")));
     assert_eq!(skills::agent_native_skill_dir("unknown"), None);
