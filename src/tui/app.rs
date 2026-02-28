@@ -2871,6 +2871,21 @@ impl App {
                     task.plugin = self.state.config.workflow_plugin.clone();
                 }
                 let plugin = self.load_task_plugin(&task);
+
+                // Block if plugin requires research and it hasn't been completed
+                if plugin.as_ref().map_or(false, |p| p.research_required) {
+                    let has_research = task.worktree_path.as_ref().map_or(false, |wt| {
+                        research_artifact_exists(wt, &task.id, &plugin)
+                    });
+                    if !has_research {
+                        self.state.warning_message = Some((
+                            format!("Research phase required first — press R to start research"),
+                            std::time::Instant::now(),
+                        ));
+                        return Ok(());
+                    }
+                }
+
                 let (planning_agent, agent_switch) = needs_agent_switch(&self.state.config, &task, "planning");
 
                 let has_live_session = task.session_name.as_ref().map_or(false, |s| {
@@ -3260,6 +3275,21 @@ impl App {
 
         if task.status != TaskStatus::Backlog {
             return Ok(());
+        }
+
+        // Block if plugin requires research and it hasn't been completed
+        let plugin_check = self.load_task_plugin(&task);
+        if plugin_check.as_ref().map_or(false, |p| p.research_required) {
+            let has_research = task.worktree_path.as_ref().map_or(false, |wt| {
+                research_artifact_exists(wt, &task.id, &plugin_check)
+            });
+            if !has_research {
+                self.state.warning_message = Some((
+                    format!("Research phase required first — press R to start research"),
+                    std::time::Instant::now(),
+                ));
+                return Ok(());
+            }
         }
 
         // Build prompt - skip planning, go straight to implementation

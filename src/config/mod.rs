@@ -397,6 +397,10 @@ pub struct WorkflowPlugin {
     pub prompts: PluginPrompts,
     #[serde(default)]
     pub prompt_triggers: PluginPromptTriggers,
+    /// When true, research phase must be completed before planning or running.
+    /// Prevents skipping research for plugins that depend on it (e.g. GSD creates .planning/ during research).
+    #[serde(default)]
+    pub research_required: bool,
     /// Extra directories to copy from project root to worktrees (e.g. [".specify"]).
     #[serde(default)]
     pub copy_dirs: Vec<String>,

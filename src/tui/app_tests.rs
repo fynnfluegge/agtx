@@ -1838,6 +1838,7 @@ fn test_resolve_skill_command_with_plugin() {
         },
         prompts: PluginPrompts::default(),
         prompt_triggers: PluginPromptTriggers::default(),
+        research_required: false,
         copy_dirs: vec![],
     });
     // Claude/Gemini: canonical form unchanged
@@ -1869,6 +1870,7 @@ fn test_plugin_supports_agent() {
         commands: Default::default(),
         prompts: Default::default(),
         prompt_triggers: Default::default(),
+        research_required: false,
         copy_dirs: vec![],
     };
     assert!(plugin.supports_agent("claude"));
@@ -1885,6 +1887,7 @@ fn test_plugin_supports_agent() {
         commands: Default::default(),
         prompts: Default::default(),
         prompt_triggers: Default::default(),
+        research_required: false,
         copy_dirs: vec![],
     };
     assert!(plugin.supports_agent("claude"));
@@ -1951,6 +1954,7 @@ fn test_phase_artifact_exists_with_glob() {
         commands: PluginCommands::default(),
         prompts: PluginPrompts::default(),
         prompt_triggers: Default::default(),
+        research_required: false,
         copy_dirs: vec![],
     });
 
@@ -2223,6 +2227,7 @@ fn test_resolve_prompt_trigger_with_gsd() {
             running: None,
             review: None,
         },
+        research_required: false,
         copy_dirs: vec![],
     });
     assert_eq!(
@@ -2257,6 +2262,7 @@ fn test_resolve_prompt_trigger_empty_string_filtered() {
             running: None,
             review: None,
         },
+        research_required: false,
         copy_dirs: vec![],
     });
     // Empty strings should be filtered out
