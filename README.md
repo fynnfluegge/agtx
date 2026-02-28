@@ -16,7 +16,7 @@ Let different coding agents collaborate on the same task. Plug in any existing s
 
 - **Kanban workflow**: Backlog/Research → Planning → Running → Review → Done
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
-- **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, Copilot and OpenCode
+- **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, OpenCode and Copilot
 - **Multi-agent per task**: Configure different agents per workflow phase — e.g. Gemini for planning, Claude for implementation, Codex for review — with automatic agent switching in the same tmux window
 - **Spec-driven development plugins**: Plug in any spec-driven development framework or select from a predefined set of plugins like GSD or Spec-kit — or define custom skills, prompts and artifact tracking - with automatic execution and tracking at each phase
 - **Multi-project dashboard**: Manage tasks across all your projects
@@ -42,7 +42,7 @@ cp target/release/agtx ~/.local/bin/
 
 - **tmux** - Agent sessions run in a dedicated tmux server
 - **gh** - GitHub CLI for PR operations
-- Supported coding agents: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [Copilot](https://github.com/github/copilot-cli), [OpenCode](https://github.com/sst/opencode)
+- Supported coding agents: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/sst/opencode), [Copilot](https://github.com/github/copilot-cli)
 
 ## Quick Start
 
