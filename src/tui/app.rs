@@ -53,8 +53,8 @@ fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_colu
 type Terminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
 
 /// Shell popup dimensions - used for both rendering and tmux window sizing
-const SHELL_POPUP_WIDTH: u16 = 82;          // Total width including borders
-const SHELL_POPUP_CONTENT_WIDTH: u16 = 80;  // Content width (SHELL_POPUP_WIDTH - 2 for borders)
+const SHELL_POPUP_WIDTH: u16 = 128;          // Total width including borders
+const SHELL_POPUP_CONTENT_WIDTH: u16 = 126;  // Content width (SHELL_POPUP_WIDTH - 2 for borders)
 const SHELL_POPUP_HEIGHT_PERCENT: u16 = 75; // Percentage of terminal height
 
 /// Application state (separate from terminal for borrow checker)
@@ -114,10 +114,16 @@ struct AppState {
     pr_creation_rx: Option<mpsc::Receiver<Result<(i32, String), String>>>,
     // Confirmation popup for moving to Done with open PR
     done_confirm_popup: Option<DoneConfirmPopup>,
+    // Confirmation popup for moving task when phase is incomplete
+    move_confirm_popup: Option<MoveConfirmPopup>,
+    // Flag to skip move confirmation (set after user confirms popup)
+    skip_move_confirm: bool,
     // Confirmation popup for deleting a task
     delete_confirm_popup: Option<DeleteConfirmPopup>,
     // Confirmation popup for asking if user wants to create PR when moving to Review
     review_confirm_popup: Option<ReviewConfirmPopup>,
+    // Channel for receiving background worktree setup results
+    setup_rx: Option<mpsc::Receiver<SetupResult>>,
     // Phase detection
     phase_status_cache: HashMap<String, (PhaseStatus, Instant)>,
     spinner_frame: usize,
@@ -141,7 +147,28 @@ enum DoneConfirmPrState {
     Open,
     Merged,
     Closed,
+    UncommittedChanges,
     Unknown,
+}
+
+/// State for confirming move when phase is incomplete (agent still working)
+#[derive(Debug, Clone)]
+struct MoveConfirmPopup {
+    task_id: String,
+    from_status: TaskStatus,
+    to_status: TaskStatus,
+}
+
+/// Result from background worktree setup (research, planning, move-to-running)
+struct SetupResult {
+    task_id: String,
+    session_name: String,
+    worktree_path: String,
+    branch_name: String,
+    new_status: Option<TaskStatus>,
+    agent: String,
+    plugin: Option<String>,
+    error: Option<String>,
 }
 
 /// State for PR creation status popup (loading/success/error)
@@ -349,7 +376,10 @@ impl App {
                 pr_generation_rx: None,
                 pr_status_popup: None,
                 pr_creation_rx: None,
+                setup_rx: None,
                 done_confirm_popup: None,
+                move_confirm_popup: None,
+                skip_move_confirm: false,
                 delete_confirm_popup: None,
                 review_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
@@ -411,6 +441,33 @@ impl App {
                     }
                     self.state.pr_creation_rx = None;
                     self.refresh_tasks()?;
+                }
+            }
+
+            // Check for worktree setup completion
+            if let Some(ref rx) = self.state.setup_rx {
+                if let Ok(result) = rx.try_recv() {
+                    self.state.setup_rx = None;
+                    if let Some(err) = result.error {
+                        self.state.warning_message = Some((err, Instant::now()));
+                    } else {
+                        // Update task with worktree info from background setup
+                        if let Some(db) = &self.state.db {
+                            if let Ok(Some(mut task)) = db.get_task(&result.task_id) {
+                                task.session_name = Some(result.session_name);
+                                task.worktree_path = Some(result.worktree_path);
+                                task.branch_name = Some(result.branch_name);
+                                task.agent = result.agent;
+                                task.plugin = result.plugin;
+                                if let Some(status) = result.new_status {
+                                    task.status = status;
+                                }
+                                task.updated_at = chrono::Utc::now();
+                                let _ = db.update_task(&task);
+                            }
+                        }
+                        self.refresh_tasks()?;
+                    }
                 }
             }
 
@@ -1083,7 +1140,39 @@ impl App {
                     "PR #{} state unknown.\n\nAre you sure you want to move this task to Done?\n\nWorktree will be deleted, tmux coding session killed.\nBranch kept locally.\n\n[y] Yes, move to Done    [n/Esc] Cancel",
                     popup.pr_number
                 ),
+                DoneConfirmPrState::UncommittedChanges => String::from(
+                    "There are uncommitted changes in the worktree.\n\nAre you sure you want to move this task to Done?\n\nUncommitted changes will be lost.\nWorktree will be deleted, tmux coding session killed.\nBranch kept locally.\n\n[y] Yes, move to Done    [n/Esc] Cancel"
+                ),
             };
+            let content = Paragraph::new(text)
+                .style(Style::default().fg(Color::White))
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(content, inner);
+        }
+
+        // Move confirmation popup (phase incomplete)
+        if let Some(ref popup) = state.move_confirm_popup {
+            let popup_area = centered_rect(50, 20, area);
+            frame.render_widget(Clear, popup_area);
+
+            let phase_name = match popup.from_status {
+                TaskStatus::Planning => "Planning",
+                TaskStatus::Running => "Running",
+                TaskStatus::Review => "Review",
+                _ => "Current",
+            };
+            let main_block = Block::default()
+                .title(format!(" {} Phase Incomplete ", phase_name))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_selected)));
+            frame.render_widget(main_block, popup_area);
+
+            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
+            let text = format!(
+                "The agent is still working and the {} artifact\nhas not been created yet.\n\nAre you sure you want to move this task forward?\n\n[y] Yes, move    [n/Esc] Cancel",
+                phase_name.to_lowercase()
+            );
             let content = Paragraph::new(text)
                 .style(Style::default().fg(Color::White))
                 .alignment(ratatui::layout::Alignment::Center)
@@ -1333,13 +1422,17 @@ impl App {
             frame.render_widget(title_line, title_area);
         }
 
+        // Footer line with agent name (for active tasks)
+        let show_agent = task.status != TaskStatus::Backlog || task.session_name.is_some();
+        let footer_height = if show_agent && inner.height > 2 { 1u16 } else { 0u16 };
+
         // Preview area (below title) - always show description
-        if inner.height > 1 {
+        if inner.height > 1 + footer_height {
             let preview_area = Rect {
                 x: inner.x,
                 y: inner.y + 1,
                 width: inner.width,
-                height: inner.height.saturating_sub(1),
+                height: inner.height.saturating_sub(1 + footer_height),
             };
 
             // Show description or placeholder
@@ -1357,6 +1450,27 @@ impl App {
                 .style(Style::default().fg(hex_to_color(&theme.color_description)).italic())
                 .wrap(Wrap { trim: true });
             frame.render_widget(preview, preview_area);
+        }
+
+        // Agent footer
+        if footer_height > 0 {
+            let footer_area = Rect {
+                x: inner.x,
+                y: inner.y + inner.height.saturating_sub(1),
+                width: inner.width,
+                height: 1,
+            };
+            let agent_style = match task.agent.as_str() {
+                "claude" => Style::default().fg(Color::Rgb(227, 148, 62)),  // orange
+                "gemini" => Style::default().fg(Color::Rgb(234, 130, 180)), // pink
+                "opencode" => Style::default().fg(Color::White).bg(Color::Rgb(80, 80, 80)), // white on grey
+                "codex" => Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 20)),   // white on black
+                _ => Style::default().fg(Color::White),
+            };
+            let agent_label = Paragraph::new(format!(" {} ", task.agent))
+                .style(agent_style)
+                .alignment(Alignment::Right);
+            frame.render_widget(agent_label, footer_area);
         }
     }
 
@@ -1402,42 +1516,37 @@ impl App {
     }
 
     fn draw_dashboard(state: &AppState, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-            ])
-            .split(area);
-
-        // Header
-        let header = Paragraph::new(" agtx Dashboard ")
-            .style(Style::default().fg(Color::Cyan).bold())
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(header, chunks[0]);
-
-        // Content area split: message + options/project list
-        let content_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(5), // Message
-                Constraint::Min(0),    // Project list or options
-            ])
-            .split(chunks[1]);
-
         let dimmed_color = hex_to_color(&state.config.theme.color_dimmed);
         let selected_color = hex_to_color(&state.config.theme.color_selected);
 
-        // Message
-        let message = Paragraph::new("\n  No project found in current directory.\n")
-            .style(Style::default().fg(selected_color))
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(dimmed_color)));
-        frame.render_widget(message, content_chunks[0]);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10), // Logo + subtitle
+                Constraint::Min(0),    // Project list or options
+                Constraint::Length(3), // Footer
+            ])
+            .split(area);
+
+        // ASCII art logo — hardcoded gold to match docs/banner.svg
+        let logo_color = Color::Rgb(234, 212, 154); // #ead49a
+        let logo = vec![
+            Line::from(""),
+            Line::from(Span::styled(" █████╗  ██████╗████████╗██╗  ██╗", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled("██╔══██╗██╔════╝╚══██╔══╝╚██╗██╔╝", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled("███████║██║  ███╗  ██║    ╚███╔╝ ", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled("██╔══██║██║   ██║  ██║    ██╔██╗ ", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled("██║  ██║╚██████╔╝  ██║   ██╔╝ ██╗", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled("╚═╝  ╚═╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝", Style::default().fg(logo_color).bold())),
+            Line::from(""),
+            Line::from(Span::styled("Autonomous multi-session spec-driven AI coding orchestration in the terminal", Style::default().fg(dimmed_color))),
+        ];
+        let logo_widget = Paragraph::new(logo)
+            .alignment(Alignment::Center);
+        frame.render_widget(logo_widget, chunks[0]);
 
         // Project list or options
         if state.show_project_list && !state.projects.is_empty() {
-            // Show project list
             let items: Vec<ListItem> = state
                 .projects
                 .iter()
@@ -1459,14 +1568,13 @@ impl App {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(selected_color)),
             );
-            frame.render_widget(list, content_chunks[1]);
+            frame.render_widget(list, chunks[1]);
         } else {
-            // Show options
             let options = Paragraph::new(
                 "\n  [p] Open existing project\n  [n] Create new project in current directory\n",
             )
             .block(Block::default().title(" Options ").borders(Borders::ALL).border_style(Style::default().fg(dimmed_color)));
-            frame.render_widget(options, content_chunks[1]);
+            frame.render_widget(options, chunks[1]);
         }
 
         // Footer
@@ -1486,6 +1594,11 @@ impl App {
                 }
             }
             return Ok(());
+        }
+
+        // Handle Move confirmation popup if open (phase incomplete)
+        if self.state.move_confirm_popup.is_some() {
+            return self.handle_move_confirm_key(key);
         }
 
         // Handle Done confirmation popup if open
@@ -1552,6 +1665,24 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     // Cancelled
                     self.state.done_confirm_popup = None;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_move_confirm_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        if self.state.move_confirm_popup.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.state.move_confirm_popup = None;
+                    self.state.skip_move_confirm = true;
+                    self.move_task_right()?;
+                    self.state.skip_move_confirm = false;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.state.move_confirm_popup = None;
                 }
                 _ => {}
             }
@@ -1691,14 +1822,28 @@ impl App {
     fn force_move_to_done(&mut self, task_id: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, self.state.project_path.clone()) {
             if let Some(mut task) = db.get_task(task_id)? {
-                cleanup_task_for_done(
-                    &mut task,
-                    &project_path,
-                    self.state.tmux_ops.as_ref(),
-                    self.state.git_ops.as_ref(),
-                );
+                let session_name = task.session_name.clone();
+                let worktree_path = task.worktree_path.clone();
+                let branch_name = task.branch_name.clone();
+
+                // Update task status immediately
+                task.session_name = None;
+                task.worktree_path = None;
+                task.status = TaskStatus::Done;
+                task.updated_at = chrono::Utc::now();
                 db.update_task(&task)?;
                 self.refresh_tasks()?;
+
+                // Cleanup in background (archive, kill tmux, remove worktree)
+                let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                let git_ops = Arc::clone(&self.state.git_ops);
+                let task_id = task.id.clone();
+                std::thread::spawn(move || {
+                    cleanup_task_resources(
+                        &task_id, &branch_name, &session_name, &worktree_path,
+                        &project_path, tmux_ops.as_ref(), git_ops.as_ref(),
+                    );
+                });
             }
         }
         Ok(())
@@ -2732,6 +2877,30 @@ impl App {
         };
 
         if let Some(new_status) = next_status {
+            // Check if phase is incomplete and agent is still working
+            if !self.state.skip_move_confirm
+                && matches!(current_status, TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review)
+            {
+                let plugin = self.load_task_plugin(&task);
+                if let Some(ref wt_path) = task.worktree_path {
+                    if !phase_artifact_exists(wt_path, current_status, &plugin) {
+                        // Check if agent is still running in the tmux pane
+                        let agent_running = task.session_name.as_ref().map_or(false, |target| {
+                            self.state.tmux_ops.window_exists(target).unwrap_or(false)
+                                && is_agent_active(&*self.state.tmux_ops, target)
+                        });
+                        if agent_running {
+                            self.state.move_confirm_popup = Some(MoveConfirmPopup {
+                                task_id: task.id.clone(),
+                                from_status: current_status,
+                                to_status: new_status,
+                            });
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
             // Create worktree and tmux window when moving from Backlog to Planning
             if current_status == TaskStatus::Backlog && new_status == TaskStatus::Planning {
                 // Stamp plugin on task if not already set (may be set from research)
@@ -2740,136 +2909,205 @@ impl App {
                 }
                 let plugin = self.load_task_plugin(&task);
 
+                // Block if plugin requires research and it hasn't been completed
+                if plugin.as_ref().map_or(false, |p| p.research_required) {
+                    let has_research = task.worktree_path.as_ref().map_or(false, |wt| {
+                        research_artifact_exists(wt, &task.id, &plugin)
+                    });
+                    if !has_research {
+                        self.state.warning_message = Some((
+                            format!("Research phase required first — press R to start research"),
+                            std::time::Instant::now(),
+                        ));
+                        return Ok(());
+                    }
+                }
+
+                let (planning_agent, agent_switch) = needs_agent_switch(&self.state.config, &task, "planning");
+
                 let has_live_session = task.session_name.as_ref().map_or(false, |s| {
                     self.state.tmux_ops.window_exists(s).unwrap_or(false)
                 });
 
                 if has_live_session {
-                    // Reuse existing session from research — just send planning command
+                    // Reuse existing session from research — switch agent if needed, then send planning command
                     let target = task.session_name.clone().unwrap();
                     let task_content = if let Some(desc) = &task.description {
-                        format!("{}\n\n{}", task.title, desc)
+                        desc.clone()
                     } else {
                         task.title.clone()
                     };
-                    let skill_cmd = resolve_skill_command(&plugin, "planning", &self.state.config.default_agent, &task_content);
-                    let prompt = resolve_prompt(&plugin, "planning", &task_content, &task.id, &self.state.config.default_agent);
+                    // If research artifact exists, agent already has context — don't resend task description
+                    let has_research = task.worktree_path.as_ref().map_or(false, |wt| {
+                        research_artifact_exists(wt, &task.id, &plugin)
+                    });
+                    let planning_phase = if has_research { "planning_with_research" } else { "planning" };
+                    let skill_cmd = resolve_skill_command(&plugin, planning_phase, &planning_agent, &task_content);
+                    let prompt = resolve_prompt(&plugin, planning_phase, &task_content, &task.id, &planning_agent);
+                    let prompt_trigger = resolve_prompt_trigger(&plugin, planning_phase);
 
                     let tmux_ops = Arc::clone(&self.state.tmux_ops);
                     let task_content_clone = task_content.clone();
+                    let agent_registry = Arc::clone(&self.state.agent_registry);
+                    let planning_agent_clone = planning_agent.clone();
+                    let current_agent_clone = task.agent.clone();
                     std::thread::spawn(move || {
-                        if let Some(ref cmd) = skill_cmd {
-                            let _ = tmux_ops.send_keys(&target, cmd);
-                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        if agent_switch {
+                            let agent_ops = agent_registry.get(&planning_agent_clone);
+                            let new_cmd = agent_ops.build_interactive_command("");
+                            switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_agent_clone, &new_cmd);
+                            let _ = wait_for_agent_ready(&tmux_ops, &target);
                         }
-                        if !prompt.is_empty() {
-                            let _ = tmux_ops.send_keys(&target, &prompt);
-                        } else if skill_cmd.is_none() {
-                            // No command and no prompt (e.g. void plugin): prefill task in input
-                            let oneline = task_content_clone.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-                            if !oneline.is_empty() {
-                                let _ = tmux_ops.send_keys_literal(&target, &oneline);
-                            }
-                        }
+                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &planning_agent_clone);
                     });
+                } else if self.state.setup_rx.is_some() {
+                    // Setup already in progress, skip
+                    return Ok(());
                 } else {
-                    // No research session — create worktree + tmux window from scratch
+                    // No research session — create worktree + tmux window from scratch (non-blocking)
                     let task_content = if let Some(desc) = &task.description {
-                        format!("{}\n\n{}", task.title, desc)
+                        desc.clone()
                     } else {
                         task.title.clone()
                     };
-                    let prompt = resolve_prompt(&plugin, "planning", &task_content, &task.id, &self.state.config.default_agent);
-
-                    let target = setup_task_worktree(
-                        &mut task,
-                        &project_path,
-                        &self.state.project_name,
-                        &prompt,
-                        self.state.config.copy_files.clone(),
-                        self.state.config.init_script.clone(),
-                        &plugin,
-                        &self.state.config.default_agent,
-                        self.state.tmux_ops.as_ref(),
-                        self.state.git_ops.as_ref(),
-                        self.state.agent_registry.get(&self.state.config.default_agent).as_ref(),
-                    )?;
-
-                    // Wait for agent to be ready, then send skill command and task content
-                    let target_clone = target.clone();
-                    let tmux_ops = Arc::clone(&self.state.tmux_ops);
-                    let skill_cmd = resolve_skill_command(&plugin, "planning", &self.state.config.default_agent, &task_content);
-                    let prompt_clone = prompt.clone();
+                    let prompt = resolve_prompt(&plugin, "planning", &task_content, &task.id, &planning_agent);
+                    let skill_cmd = resolve_skill_command(&plugin, "planning", &planning_agent, &task_content);
                     let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
-                    let task_content_clone = task_content.clone();
+                    let all_agents = collect_phase_agents(&self.state.config);
+                    let project_name = self.state.project_name.clone();
+                    let copy_files = self.state.config.copy_files.clone();
+                    let init_script = self.state.config.init_script.clone();
+                    let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                    let git_ops = Arc::clone(&self.state.git_ops);
+                    let agent_ops = self.state.agent_registry.get(&planning_agent);
+                    let task_id = task.id.clone();
+                    let task_title = task.title.clone();
+                    let plugin_name = task.plugin.clone();
+                    let planning_agent_clone = planning_agent.clone();
+
+                    let (tx, rx) = mpsc::channel();
+                    self.state.setup_rx = Some(rx);
+
                     std::thread::spawn(move || {
-                        if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                            if let Some(ref cmd) = skill_cmd {
-                                let _ = tmux_ops.send_keys(&target, cmd);
-                                std::thread::sleep(std::time::Duration::from_millis(500));
+                        let mut tmp_task = Task::new(&task_title, &planning_agent_clone, &project_name);
+                        tmp_task.id = task_id.clone();
+                        tmp_task.plugin = plugin_name.clone();
+
+                        let result = setup_task_worktree(
+                            &mut tmp_task,
+                            &project_path,
+                            &project_name,
+                            &prompt,
+                            copy_files,
+                            init_script,
+                            &plugin,
+                            &planning_agent_clone,
+                            &all_agents,
+                            tmux_ops.as_ref(),
+                            git_ops.as_ref(),
+                            agent_ops.as_ref(),
+                        );
+
+                        match result {
+                            Ok(target) => {
+                                let _ = tx.send(SetupResult {
+                                    task_id: task_id.clone(),
+                                    session_name: tmp_task.session_name.unwrap_or_default(),
+                                    worktree_path: tmp_task.worktree_path.unwrap_or_default(),
+                                    branch_name: tmp_task.branch_name.unwrap_or_default(),
+                                    new_status: Some(TaskStatus::Planning),
+                                    agent: planning_agent_clone.clone(),
+                                    plugin: plugin_name,
+                                    error: None,
+                                });
+
+                                if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                                    send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &planning_agent_clone);
+                                }
                             }
-                            if !prompt_clone.is_empty() {
-                                if let Some(ref trigger) = prompt_trigger {
-                                    if wait_for_prompt_trigger(&tmux_ops, &target, trigger) {
-                                        std::thread::sleep(std::time::Duration::from_millis(500));
-                                        let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                                    }
-                                } else {
-                                    let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                                }
-                            } else if skill_cmd.is_none() {
-                                // No command and no prompt (e.g. void plugin): prefill task in input
-                                let oneline = task_content_clone.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-                                if !oneline.is_empty() {
-                                    let _ = tmux_ops.send_keys_literal(&target, &oneline);
-                                }
+                            Err(e) => {
+                                let _ = tx.send(SetupResult {
+                                    task_id,
+                                    session_name: String::new(),
+                                    worktree_path: String::new(),
+                                    branch_name: String::new(),
+                                    new_status: None,
+                                    agent: planning_agent_clone,
+                                    plugin: plugin_name,
+                                    error: Some(format!("Planning setup failed: {}", e)),
+                                });
                             }
                         }
                     });
+
+                    return Ok(());
                 }
+                task.agent = planning_agent;
             }
 
             // When moving from Planning to Running, send skill command to agent
             if current_status == TaskStatus::Planning && new_status == TaskStatus::Running {
                 if let Some(session_name) = &task.session_name {
                     let plugin = self.load_task_plugin(&task);
+                    let (running_agent, agent_switch) = needs_agent_switch(&self.state.config, &task, "running");
                     let task_content = if let Some(desc) = &task.description {
-                        format!("{}\n\n{}", task.title, desc)
+                        desc.clone()
                     } else {
                         task.title.clone()
                     };
-                    let skill_cmd = resolve_skill_command(&plugin, "running", &self.state.config.default_agent, &task_content);
-                    if let Some(cmd) = skill_cmd {
-                        let _ = self.state.tmux_ops.send_keys(session_name, &cmd);
-                    } else {
-                        let msg = resolve_prompt(&plugin, "running", &task_content, &task.id, &self.state.config.default_agent);
-                        if !msg.is_empty() {
-                            let _ = self.state.tmux_ops.send_keys(session_name, &msg);
+                    let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content);
+                    let prompt = resolve_prompt(&plugin, "running", &task_content, &task.id, &running_agent);
+                    let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
+                    let session_clone = session_name.clone();
+                    let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                    let agent_registry = Arc::clone(&self.state.agent_registry);
+                    let running_agent_clone = running_agent.clone();
+                    let current_agent_clone = task.agent.clone();
+                    let task_content_clone = task_content.clone();
+                    std::thread::spawn(move || {
+                        if agent_switch {
+                            let agent_ops = agent_registry.get(&running_agent_clone);
+                            let new_cmd = agent_ops.build_interactive_command("");
+                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
+                            let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
                         }
-                    }
+                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &running_agent_clone);
+                    });
+                    task.agent = running_agent;
                 }
             }
 
             // When moving from Running to Review: send skill command, then ask about PR
             if current_status == TaskStatus::Running && new_status == TaskStatus::Review {
-                // Send review skill command to agent
+                // Send review skill command to agent (with optional agent switch)
+                let (review_agent, agent_switch) = needs_agent_switch(&self.state.config, &task, "review");
                 if let Some(session_name) = &task.session_name {
                     let plugin = self.load_task_plugin(&task);
                     let task_content = if let Some(desc) = &task.description {
-                        format!("{}\n\n{}", task.title, desc)
+                        desc.clone()
                     } else {
                         task.title.clone()
                     };
-                    let skill_cmd = resolve_skill_command(&plugin, "review", &self.state.config.default_agent, &task_content);
-                    if let Some(cmd) = skill_cmd {
-                        let _ = self.state.tmux_ops.send_keys(session_name, &cmd);
-                    } else {
-                        let msg = resolve_prompt(&plugin, "review", &task_content, &task.id, &self.state.config.default_agent);
-                        if !msg.is_empty() {
-                            let _ = self.state.tmux_ops.send_keys(session_name, &msg);
+                    let skill_cmd = resolve_skill_command(&plugin, "review", &review_agent, &task_content);
+                    let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, &review_agent);
+                    let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
+                    let session_clone = session_name.clone();
+                    let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                    let agent_registry = Arc::clone(&self.state.agent_registry);
+                    let review_agent_clone = review_agent.clone();
+                    let current_agent_clone = task.agent.clone();
+                    let task_content_clone = task_content.clone();
+                    std::thread::spawn(move || {
+                        if agent_switch {
+                            let agent_ops = agent_registry.get(&review_agent_clone);
+                            let new_cmd = agent_ops.build_interactive_command("");
+                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
+                            let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
                         }
-                    }
+                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &review_agent_clone);
+                    });
                 }
+                task.agent = review_agent.clone();
                 // Check if PR already exists (task was resumed from Review)
                 if task.pr_number.is_some() {
                     // PR already exists - just commit and push the new changes
@@ -2882,7 +3120,7 @@ impl App {
                     let task_clone = task.clone();
                     let project_path_clone = project_path.clone();
                     let git_ops = Arc::clone(&self.state.git_ops);
-                    let agent_ops = self.state.agent_registry.get(&self.state.config.default_agent);
+                    let agent_ops = self.state.agent_registry.get(&review_agent);
 
                     let (tx, rx) = mpsc::channel();
                     self.state.pr_creation_rx = Some(rx);
@@ -2939,14 +3177,36 @@ impl App {
                     });
                     return Ok(());
                 }
-                // No PR - allow moving to Done directly (task might have been abandoned early)
-                // Cleanup resources (but don't set status yet - that's done below)
-                cleanup_task_for_done(
-                    &mut task,
-                    &project_path,
-                    self.state.tmux_ops.as_ref(),
-                    self.state.git_ops.as_ref(),
-                );
+                // No PR - check for uncommitted changes before allowing move to Done
+                let has_uncommitted = task.worktree_path.as_ref().map_or(false, |wt| {
+                    self.state.git_ops.has_changes(Path::new(wt))
+                });
+                if has_uncommitted {
+                    self.state.done_confirm_popup = Some(DoneConfirmPopup {
+                        task_id: task.id.clone(),
+                        pr_number: 0,
+                        pr_state: DoneConfirmPrState::UncommittedChanges,
+                    });
+                    return Ok(());
+                }
+
+                // Cleanup resources in background (archive, kill tmux, remove worktree)
+                let session_name = task.session_name.clone();
+                let worktree_path = task.worktree_path.clone();
+                let branch_name = task.branch_name.clone();
+                task.session_name = None;
+                task.worktree_path = None;
+
+                let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                let git_ops = Arc::clone(&self.state.git_ops);
+                let task_id_clone = task.id.clone();
+                let project_path_clone = project_path.clone();
+                std::thread::spawn(move || {
+                    cleanup_task_resources(
+                        &task_id_clone, &branch_name, &session_name, &worktree_path,
+                        &project_path_clone, tmux_ops.as_ref(), git_ops.as_ref(),
+                    );
+                });
             }
 
             task.status = new_status;
@@ -2962,85 +3222,108 @@ impl App {
 
     /// Start a research session for a Backlog task (creates worktree, reused in planning)
     fn start_research(&mut self, task_id: &str) -> Result<()> {
+        // Don't start if a setup is already in progress
+        if self.state.setup_rx.is_some() { return Ok(()) }
+
         let mut task = {
             let Some(db) = &self.state.db else { return Ok(()) };
             let Some(task) = db.get_task(task_id)? else { return Ok(()) };
             task
         };
         let Some(project_path) = self.state.project_path.clone() else { return Ok(()) };
+
         // Stamp plugin on task for research
         task.plugin = self.state.config.workflow_plugin.clone();
+        let plugin_name = task.plugin.clone();
         let plugin = self.load_task_plugin(&task);
-        let agent_name = self.state.config.default_agent.clone();
+        let agent_name = self.state.config.agent_for_phase("research").to_string();
 
         let task_content = if let Some(desc) = &task.description {
-            format!("{}\n\n{}", task.title, desc)
+            desc.clone()
         } else {
             task.title.clone()
         };
 
         let prompt = resolve_prompt(&plugin, "research", &task_content, &task.id, &agent_name);
-
-        // Create worktree + tmux window (same as planning, so it can be reused)
-        let target = setup_task_worktree(
-            &mut task,
-            &project_path,
-            &self.state.project_name,
-            &prompt,
-            self.state.config.copy_files.clone(),
-            self.state.config.init_script.clone(),
-            &plugin,
-            &agent_name,
-            self.state.tmux_ops.as_ref(),
-            self.state.git_ops.as_ref(),
-            self.state.agent_registry.get(&agent_name).as_ref(),
-        )?;
-
-        // Send research skill command + task prompt (with optional trigger polling)
-        let target_clone = target.clone();
-        let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let skill_cmd = resolve_skill_command(&plugin, "research", &agent_name, &task_content);
-        let prompt_clone = prompt.clone();
         let prompt_trigger = resolve_prompt_trigger(&plugin, "research");
-        let task_content_clone = task_content.clone();
+        let all_agents = collect_phase_agents(&self.state.config);
+        let project_name = self.state.project_name.clone();
+        let copy_files = self.state.config.copy_files.clone();
+        let init_script = self.state.config.init_script.clone();
+
+        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+        let git_ops = Arc::clone(&self.state.git_ops);
+        let agent_ops = self.state.agent_registry.get(&agent_name);
+
+        let task_id = task.id.clone();
+        let task_title = task.title.clone();
+
+        let (tx, rx) = mpsc::channel();
+        self.state.setup_rx = Some(rx);
+
         std::thread::spawn(move || {
-            if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                if let Some(ref cmd) = skill_cmd {
-                    let _ = tmux_ops.send_keys(&target, cmd);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+            // Create a temporary task to pass to setup_task_worktree
+            let mut tmp_task = Task::new(&task_title, &agent_name, &project_name);
+            tmp_task.id = task_id.clone();
+            tmp_task.plugin = plugin_name.clone();
+
+            let result = setup_task_worktree(
+                &mut tmp_task,
+                &project_path,
+                &project_name,
+                &prompt,
+                copy_files,
+                init_script,
+                &plugin,
+                &agent_name,
+                &all_agents,
+                tmux_ops.as_ref(),
+                git_ops.as_ref(),
+                agent_ops.as_ref(),
+            );
+
+            match result {
+                Ok(target) => {
+                    let _ = tx.send(SetupResult {
+                        task_id: task_id.clone(),
+                        session_name: tmp_task.session_name.unwrap_or_default(),
+                        worktree_path: tmp_task.worktree_path.unwrap_or_default(),
+                        branch_name: tmp_task.branch_name.unwrap_or_default(),
+                        new_status: None, // stays in Backlog
+                        agent: agent_name.clone(),
+                        plugin: plugin_name,
+                        error: None,
+                    });
+
+                    // Wait for agent ready and send skill+prompt
+                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &agent_name);
+                    }
                 }
-                if !prompt_clone.is_empty() {
-                    if let Some(ref trigger) = prompt_trigger {
-                        // Wait for the trigger text before sending the prompt
-                        if wait_for_prompt_trigger(&tmux_ops, &target, trigger) {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                        }
-                    } else {
-                        let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                    }
-                } else if skill_cmd.is_none() {
-                    // No command and no prompt (e.g. void plugin): prefill task in input
-                    let oneline = task_content_clone.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-                    if !oneline.is_empty() {
-                        let _ = tmux_ops.send_keys_literal(&target, &oneline);
-                    }
+                Err(e) => {
+                    let _ = tx.send(SetupResult {
+                        task_id,
+                        session_name: String::new(),
+                        worktree_path: String::new(),
+                        branch_name: String::new(),
+                        new_status: None,
+                        agent: agent_name,
+                        plugin: plugin_name,
+                        error: Some(format!("Research setup failed: {}", e)),
+                    });
                 }
             }
         });
-
-        // Store session name — task stays in Backlog
-        task.updated_at = chrono::Utc::now();
-        if let Some(db) = &self.state.db {
-            db.update_task(&task)?;
-        }
-        self.refresh_tasks()?;
 
         Ok(())
     }
 
     /// Move task directly from Backlog to Running (skip Planning)
     fn move_backlog_to_running(&mut self) -> Result<()> {
+        // Don't start if a setup is already in progress
+        if self.state.setup_rx.is_some() { return Ok(()) }
+
         let (mut task, project_path) = match (
             self.state.board.selected_task().cloned(),
             self.state.project_path.clone(),
@@ -3053,9 +3336,24 @@ impl App {
             return Ok(());
         }
 
+        // Block if plugin requires research and it hasn't been completed
+        let plugin_check = self.load_task_plugin(&task);
+        if plugin_check.as_ref().map_or(false, |p| p.research_required) {
+            let has_research = task.worktree_path.as_ref().map_or(false, |wt| {
+                research_artifact_exists(wt, &task.id, &plugin_check)
+            });
+            if !has_research {
+                self.state.warning_message = Some((
+                    format!("Research phase required first — press R to start research"),
+                    std::time::Instant::now(),
+                ));
+                return Ok(());
+            }
+        }
+
         // Build prompt - skip planning, go straight to implementation
         let task_content = if let Some(desc) = &task.description {
-            format!("{}\n\n{}", task.title, desc)
+            desc.clone()
         } else {
             task.title.clone()
         };
@@ -3066,53 +3364,77 @@ impl App {
 
         // Stamp plugin on task
         task.plugin = self.state.config.workflow_plugin.clone();
+        let plugin_name = task.plugin.clone();
         let plugin = self.load_task_plugin(&task);
-        let target = setup_task_worktree(
-            &mut task,
-            &project_path,
-            &self.state.project_name,
-            &prompt,
-            self.state.config.copy_files.clone(),
-            self.state.config.init_script.clone(),
-            &plugin,
-            &self.state.config.default_agent,
-            self.state.tmux_ops.as_ref(),
-            self.state.git_ops.as_ref(),
-            self.state.agent_registry.get(&self.state.config.default_agent).as_ref(),
-        )?;
-
-        // Wait for agent to be ready, then send execute skill command and task content
-        let target_clone = target.clone();
-        let tmux_ops = Arc::clone(&self.state.tmux_ops);
-        let skill_cmd = resolve_skill_command(&plugin, "running", &self.state.config.default_agent, &task_content);
-        let prompt_clone = prompt.clone();
+        let running_agent = self.state.config.agent_for_phase("running").to_string();
+        let all_agents = collect_phase_agents(&self.state.config);
+        let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content);
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
+        let project_name = self.state.project_name.clone();
+        let copy_files = self.state.config.copy_files.clone();
+        let init_script = self.state.config.init_script.clone();
+        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+        let git_ops = Arc::clone(&self.state.git_ops);
+        let agent_ops = self.state.agent_registry.get(&running_agent);
+        let task_id = task.id.clone();
+        let task_title = task.title.clone();
+        let running_agent_clone = running_agent.clone();
+
+        let (tx, rx) = mpsc::channel();
+        self.state.setup_rx = Some(rx);
+
         std::thread::spawn(move || {
-            if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                if let Some(ref cmd) = skill_cmd {
-                    let _ = tmux_ops.send_keys(&target, cmd);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-                if !prompt_clone.is_empty() {
-                    if let Some(ref trigger) = prompt_trigger {
-                        if wait_for_prompt_trigger(&tmux_ops, &target, trigger) {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                        }
-                    } else {
-                        let _ = tmux_ops.send_keys(&target, &prompt_clone);
+            let mut tmp_task = Task::new(&task_title, &running_agent_clone, &project_name);
+            tmp_task.id = task_id.clone();
+            tmp_task.plugin = plugin_name.clone();
+
+            let result = setup_task_worktree(
+                &mut tmp_task,
+                &project_path,
+                &project_name,
+                &prompt,
+                copy_files,
+                init_script,
+                &plugin,
+                &running_agent_clone,
+                &all_agents,
+                tmux_ops.as_ref(),
+                git_ops.as_ref(),
+                agent_ops.as_ref(),
+            );
+
+            match result {
+                Ok(target) => {
+                    let _ = tx.send(SetupResult {
+                        task_id: task_id.clone(),
+                        session_name: tmp_task.session_name.unwrap_or_default(),
+                        worktree_path: tmp_task.worktree_path.unwrap_or_default(),
+                        branch_name: tmp_task.branch_name.unwrap_or_default(),
+                        new_status: Some(TaskStatus::Running),
+                        agent: running_agent_clone.clone(),
+                        plugin: plugin_name,
+                        error: None,
+                    });
+
+                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &running_agent_clone);
                     }
+                }
+                Err(e) => {
+                    let _ = tx.send(SetupResult {
+                        task_id,
+                        session_name: String::new(),
+                        worktree_path: String::new(),
+                        branch_name: String::new(),
+                        new_status: None,
+                        agent: running_agent_clone,
+                        plugin: plugin_name,
+                        error: Some(format!("Running setup failed: {}", e)),
+                    });
                 }
             }
         });
 
-        task.status = TaskStatus::Running;
-        task.updated_at = chrono::Utc::now();
-
-        if let Some(db) = &self.state.db {
-            db.update_task(&task)?;
-        }
-        self.refresh_tasks()?;
         Ok(())
     }
 
@@ -3125,7 +3447,24 @@ impl App {
                     return Ok(());
                 }
 
-                // Just move the task back to Running - the tmux window should still be open
+                // Switch agent if running phase uses a different agent than review
+                let (running_agent, agent_switch) = needs_agent_switch(&self.state.config, &task, "running");
+                if agent_switch {
+                    if let Some(session_name) = &task.session_name {
+                        let session_clone = session_name.clone();
+                        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                        let agent_registry = Arc::clone(&self.state.agent_registry);
+                        let running_agent_clone = running_agent.clone();
+                        let current_agent_clone = task.agent.clone();
+                        std::thread::spawn(move || {
+                            let agent_ops = agent_registry.get(&running_agent_clone);
+                            let new_cmd = agent_ops.build_interactive_command("");
+                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
+                        });
+                    }
+                }
+
+                task.agent = running_agent;
                 task.status = TaskStatus::Running;
                 task.updated_at = chrono::Utc::now();
                 db.update_task(&task)?;
@@ -3142,7 +3481,24 @@ impl App {
                     return Ok(());
                 }
 
-                // Just move the task back to Planning - the tmux window should still be open
+                // Switch agent if planning phase uses a different agent than running
+                let (planning_agent, agent_switch) = needs_agent_switch(&self.state.config, &task, "planning");
+                if agent_switch {
+                    if let Some(session_name) = &task.session_name {
+                        let session_clone = session_name.clone();
+                        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                        let agent_registry = Arc::clone(&self.state.agent_registry);
+                        let planning_agent_clone = planning_agent.clone();
+                        let current_agent_clone = task.agent.clone();
+                        std::thread::spawn(move || {
+                            let agent_ops = agent_registry.get(&planning_agent_clone);
+                            let new_cmd = agent_ops.build_interactive_command("");
+                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
+                        });
+                    }
+                }
+
+                task.agent = planning_agent;
                 task.status = TaskStatus::Planning;
                 task.updated_at = chrono::Utc::now();
                 db.update_task(&task)?;
@@ -3169,6 +3525,8 @@ impl App {
                     // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
                     let _ = self.state.tmux_ops.resize_window(&window_name, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
+                    // Give TUI apps (OpenCode, Gemini Ink) time to re-render after resize
+                    std::thread::sleep(std::time::Duration::from_millis(200));
                 }
 
                 // Capture initial content
@@ -3401,6 +3759,46 @@ fn cleanup_task_for_done(
     task.updated_at = chrono::Utc::now();
 }
 
+/// Background-safe cleanup: archive artifacts, kill tmux window, remove worktree.
+/// Takes owned/cloned values so it can run in a spawned thread.
+fn cleanup_task_resources(
+    task_id: &str,
+    branch_name: &Option<String>,
+    session_name: &Option<String>,
+    worktree_path: &Option<String>,
+    project_path: &Path,
+    tmux_ops: &dyn TmuxOperations,
+    git_ops: &dyn GitOperations,
+) {
+    // Archive artifacts before removing worktree
+    if let Some(worktree) = worktree_path {
+        let artifacts_dir = Path::new(worktree).join(".agtx");
+        if artifacts_dir.exists() {
+            let slug = branch_name.as_deref()
+                .and_then(|b| b.strip_prefix("task/"))
+                .unwrap_or(task_id);
+            let archive_dir = project_path.join(".agtx").join("archive").join(slug);
+            if let Ok(()) = std::fs::create_dir_all(&archive_dir) {
+                if let Ok(entries) = std::fs::read_dir(&artifacts_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() && path.extension().map_or(false, |ext| ext == "md") {
+                            let _ = std::fs::copy(&path, archive_dir.join(entry.file_name()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(session_name) = session_name {
+        let _ = tmux_ops.kill_window(session_name);
+    }
+    if let Some(worktree) = worktree_path {
+        let _ = git_ops.remove_worktree(project_path, worktree);
+    }
+}
+
 /// Set up a worktree and tmux window for a task.
 /// Creates worktree, initializes it (copy files + init script), creates tmux window with agent.
 /// Updates task fields (session_name, worktree_path, branch_name) in place.
@@ -3418,6 +3816,7 @@ fn setup_task_worktree(
     init_script: Option<String>,
     plugin: &Option<WorkflowPlugin>,
     agent_name: &str,
+    all_phase_agents: &[String],
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
     agent_ops: &dyn AgentOperations,
@@ -3451,7 +3850,9 @@ fn setup_task_worktree(
     }
 
     // Write skills to worktree .agtx/skills/ and agent-native discovery paths
-    write_skills_to_worktree(&worktree_path_str, project_path, plugin, agent_name);
+    // Deploy for all unique agents configured across phases
+    let agent_refs: Vec<&str> = all_phase_agents.iter().map(|s| s.as_str()).collect();
+    write_skills_to_worktree(&worktree_path_str, project_path, plugin, &agent_refs);
 
     // Copy research artifact into worktree if it exists
     let research_path = project_path.join(".agtx").join("research")
@@ -4144,9 +4545,14 @@ fn resolve_skill_command(plugin: &Option<WorkflowPlugin>, phase: &str, agent_nam
                 // Explicit empty command means "no command" (e.g., void plugin)
                 return None;
             }
-            // Collapse task content to single line for commands (newlines → spaces)
-            let task_oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-            let expanded = c.replace("{task}", &task_oneline);
+            // When research was already done, strip {task} — agent already has context
+            let expanded = if phase == "planning_with_research" {
+                c.replace("{task}", "").trim().to_string()
+            } else {
+                // Collapse task content to single line for commands (newlines → spaces)
+                let task_oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+                c.replace("{task}", &task_oneline)
+            };
             return skills::transform_plugin_command(&expanded, agent_name);
         }
     }
@@ -4158,6 +4564,107 @@ fn resolve_skill_command(plugin: &Option<WorkflowPlugin>, phase: &str, agent_nam
 
 /// Resolve the prompt trigger text for a given phase.
 /// When set, the system polls the tmux pane for this text before sending the prompt.
+/// Send skill command and prompt to the agent via tmux.
+/// When there is no prompt_trigger, combines skill command + prompt into a single message
+/// (separated by a newline). When a prompt_trigger is set, sends them as two separate messages
+/// with the prompt sent only after the trigger text appears in the pane.
+fn send_skill_and_prompt(
+    tmux_ops: &Arc<dyn TmuxOperations>,
+    target: &str,
+    skill_cmd: &Option<String>,
+    prompt: &str,
+    prompt_trigger: &Option<String>,
+    task_content: &str,
+    agent_name: &str,
+) {
+    // Gemini & Codex: always combine skill+prompt into a single message.
+    // Gemini: sending separately causes it to execute the skill and queue the
+    //   prompt, which gets lost or arrives too late.
+    // Codex: skill mentions ($skill-name) are inline references that must be
+    //   part of a message — sending just "$skill" standalone does nothing.
+    if matches!(agent_name, "gemini" | "codex") {
+        let text_to_send = if let Some(cmd) = skill_cmd {
+            if !prompt.is_empty() {
+                Some(format!("{}\n\n{}", cmd, prompt))
+            } else {
+                Some(cmd.clone())
+            }
+        } else if !prompt.is_empty() {
+            Some(prompt.to_string())
+        } else {
+            let oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+            if !oneline.is_empty() { Some(oneline) } else { None }
+        };
+
+        if let Some(text) = text_to_send {
+            let _ = tmux_ops.send_keys_literal(target, &text);
+            // Wait for text to appear in pane before sending Enter (Ink TUIs need time to render)
+            let check_str = text.lines().next().unwrap_or(&text);
+            for _ in 0..20 { // up to 4s
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = tmux_ops.capture_pane(target) {
+                    if content.contains(check_str) {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = tmux_ops.send_keys_literal(target, "Enter");
+        }
+        return;
+    }
+
+    match (skill_cmd, prompt_trigger) {
+        // Skill + prompt trigger: must send separately, wait for trigger between them
+        (Some(cmd), Some(trigger)) => {
+            let _ = tmux_ops.send_keys(target, cmd);
+            if !prompt.is_empty() {
+                if wait_for_prompt_trigger(tmux_ops, target, trigger) {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let _ = tmux_ops.send_keys(target, prompt);
+                }
+            }
+        }
+        // Skill + prompt, no trigger: send separately, wait for pane to stabilize
+        (Some(cmd), None) => {
+            let _ = tmux_ops.send_keys(target, cmd);
+            if !prompt.is_empty() {
+                // Wait for agent to finish processing the skill command before sending the prompt.
+                // Poll pane content until it stabilizes (agent re-rendered its UI after the command).
+                let mut last_content = String::new();
+                let mut stable_ticks = 0u32;
+                for _ in 0..50 { // 10s max
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    if let Ok(content) = tmux_ops.capture_pane(target) {
+                        if content == last_content {
+                            stable_ticks += 1;
+                            if stable_ticks >= 10 { // 2s of no changes
+                                break;
+                            }
+                        } else {
+                            stable_ticks = 0;
+                            last_content = content;
+                        }
+                    }
+                }
+                let _ = tmux_ops.send_keys(target, prompt);
+            }
+        }
+        // No skill command, just prompt
+        (None, _) => {
+            if !prompt.is_empty() {
+                let _ = tmux_ops.send_keys(target, prompt);
+            } else {
+                // No command and no prompt (e.g. void plugin): prefill task in input
+                let oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+                if !oneline.is_empty() {
+                    let _ = tmux_ops.send_keys_literal(target, &oneline);
+                }
+            }
+        }
+    }
+}
+
 fn resolve_prompt_trigger(plugin: &Option<WorkflowPlugin>, phase: &str) -> Option<String> {
     plugin.as_ref().and_then(|p| {
         match phase {
@@ -4185,6 +4692,22 @@ fn wait_for_prompt_trigger(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, tri
                 stable_ticks = 0;
                 last_content = content.clone();
             }
+
+            // Auto-dismiss known interactive prompts that block the trigger.
+            // GSD's "Map codebase first?" prompt: select "Skip mapping" (option 2).
+            if stable_ticks >= 4
+                && content.contains("Map codebase")
+                && content.contains("Skip mapping")
+                && content.contains("Enter to select")
+            {
+                let _ = tmux_ops.send_keys_literal(target, "2");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let _ = tmux_ops.send_keys_literal(target, "Enter");
+                stable_ticks = 0;
+                last_content.clear();
+                continue;
+            }
+
             // Trigger when the text is present AND pane has been stable for ~2s.
             // While the agent is reading files / generating output, content keeps
             // changing. Once it asks the question and waits for input, it settles.
@@ -4226,6 +4749,23 @@ fn phase_artifact_exists(worktree_path: &str, status: TaskStatus, plugin: &Optio
     full_path.exists()
 }
 
+/// Check if the research artifact exists for a task.
+/// Uses plugin-configured artifact path or defaults to `.agtx/research/{task_id}.md`.
+fn research_artifact_exists(worktree_path: &str, task_id: &str, plugin: &Option<WorkflowPlugin>) -> bool {
+    let rel_path = plugin.as_ref()
+        .and_then(|p| p.artifacts.research.as_deref())
+        .unwrap_or(".agtx/research/{task_id}.md")
+        .replace("{task_id}", task_id);
+
+    let full_path = Path::new(worktree_path).join(&rel_path);
+
+    if rel_path.contains('*') {
+        return glob_path_exists(&full_path.to_string_lossy());
+    }
+
+    full_path.exists()
+}
+
 /// Simple glob matching for paths with a single `*` wildcard (one directory level).
 /// e.g. "/path/to/specs/*/plan.md" matches "/path/to/specs/my-feature/plan.md"
 fn glob_path_exists(pattern: &str) -> bool {
@@ -4258,15 +4798,206 @@ fn glob_path_exists(pattern: &str) -> bool {
     false
 }
 
-/// Wait for an agent in a tmux pane to be ready for input.
-/// Handles both the bypass warning prompt (sends acceptance) and agents that skip it.
-/// Returns the target string if the agent became ready, None on timeout.
-fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Option<String> {
-    for _ in 0..50 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+/// Check if a phase transition requires switching to a different agent.
+/// Returns (target_agent_name, needs_switch).
+/// Only switches when an explicit phase-specific agent is configured.
+/// When no override exists, the current agent is kept (no switch).
+fn needs_agent_switch(config: &MergedConfig, task: &Task, phase: &str) -> (String, bool) {
+    match config.explicit_agent_for_phase(phase) {
+        Some(target) => {
+            let switch = task.agent != target;
+            (target.to_string(), switch)
+        }
+        None => {
+            // No explicit agent for this phase — keep the current session
+            (task.agent.clone(), false)
+        }
+    }
+}
 
+/// Collect all unique agent names configured across phases.
+/// Used to deploy skills for all agents that might be used during a task's lifecycle.
+fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
+    let mut agents: Vec<String> = vec![config.default_agent.clone()];
+    for phase in &["research", "planning", "running", "review"] {
+        let agent = config.agent_for_phase(phase).to_string();
+        if !agents.contains(&agent) {
+            agents.push(agent);
+        }
+    }
+    agents
+}
+
+/// Known agent binary names as they appear in `pane_current_command`.
+const AGENT_COMMANDS: &[&str] = &["claude", "codex", "gemini", "copilot", "opencode", "node", "python3", "python"];
+
+/// Strings in pane content that indicate an agent TUI is active.
+/// Used by `is_agent_active` to detect agents like Gemini that run inside
+/// bash and don't change `pane_current_command`.
+const AGENT_ACTIVE_INDICATORS: &[&str] = &[
+    "Type your message",   // Gemini
+];
+
+/// Check if the pane is running a shell (i.e. the agent has exited).
+/// Returns true when `pane_current_command` reports a shell (bash, zsh, sh, fish)
+/// rather than an agent process.
+fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
+    if let Some(cmd) = tmux_ops.pane_current_command(target) {
+        !AGENT_COMMANDS.iter().any(|a| cmd.contains(a))
+    } else {
+        false
+    }
+}
+
+/// Check if an agent is actively running in the pane.
+/// Uses both `pane_current_command` (works for Claude, Codex, Copilot) and
+/// pane content indicators (works for Gemini which runs inside bash).
+fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
+    // Check 1: agent process visible in pane_current_command
+    if !is_pane_at_shell(tmux_ops, target) {
+        return true;
+    }
+    // Check 2: check the bottom of the visible pane for agent UI indicators.
+    // Only the last few lines are checked to avoid false positives from
+    // indicator strings appearing in conversation output higher up.
+    if let Ok(content) = tmux_ops.capture_pane(target) {
+        let lines: Vec<&str> = content.lines().collect();
+        let bottom = lines.len().saturating_sub(5);
+        let tail = &lines[bottom..];
+        let tail_text = tail.join("\n");
+        if AGENT_ACTIVE_INDICATORS.iter().any(|s| tail_text.contains(s)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Gracefully switch the agent running in a tmux window.
+/// Terminates the current agent, waits for the shell prompt,
+/// then starts the new agent.
+///
+/// Exit commands per agent:
+///   - Claude, OpenCode: `/exit`
+///   - Gemini, Codex: `/quit`
+///   - Fallback: Ctrl+C + Ctrl+D as last resort
+///
+/// Detection uses `tmux display -p #{pane_current_command}` which reports
+/// the actual process name (e.g. "claude", "node", "bash"), avoiding
+/// false positives from parsing pane text content.
+fn switch_agent_in_tmux(
+    tmux_ops: &dyn TmuxOperations,
+    target: &str,
+    current_agent: &str,
+    new_agent_cmd: &str,
+) {
+    // 1. Send the graceful exit command for the current agent.
+    let exit_cmd = match current_agent {
+        "codex" => None,   // Codex has no exit command — Ctrl+C is the only way
+        "gemini" => Some("/quit"),
+        _ => Some("/exit"), // claude, opencode, and others
+    };
+
+    if let Some(cmd) = exit_cmd {
+        let _ = tmux_ops.send_keys(target, cmd);
+    } else {
+        let _ = tmux_ops.send_keys_literal(target, "C-c");
+    }
+
+    // 2. Poll for shell (agent exited). If the agent was busy, the exit command
+    //    may have been queued — so we wait up to 3s for it to take effect.
+    let mut found_shell = false;
+    for _ in 0..30 { // 3s
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if is_pane_at_shell(tmux_ops, target) {
+            found_shell = true;
+            break;
+        }
+    }
+
+    // 3. If still running, the agent was likely busy. Ctrl+C to cancel, then retry exit.
+    if !found_shell {
+        let _ = tmux_ops.send_keys_literal(target, "C-c");
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+
+        if let Some(cmd) = exit_cmd {
+            let _ = tmux_ops.send_keys(target, cmd);
+        }
+
+        // Wait for shell after retry
+        for _ in 0..50 { // 5s
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if is_pane_at_shell(tmux_ops, target) {
+                found_shell = true;
+                break;
+            }
+        }
+    }
+
+    // 4. Last resort: Ctrl+D to force exit
+    if !found_shell {
+        let _ = tmux_ops.send_keys_literal(target, "C-d");
+        for _ in 0..20 { // 2s
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if is_pane_at_shell(tmux_ops, target) {
+                break;
+            }
+        }
+    }
+
+    // 4. Let the shell fully initialize before sending the new agent command
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+
+    // 5. Start the new agent
+    let _ = tmux_ops.send_keys(target, new_agent_cmd);
+
+    // 6. Wait for the new agent process to actually start (pane_current_command != shell).
+    //    Without this, wait_for_agent_ready may see stale ">" from old pane content
+    //    and return before the new agent has even launched.
+    for _ in 0..100 { // 10s max
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if !is_pane_at_shell(tmux_ops, target) {
+            break;
+        }
+    }
+}
+
+/// Wait for an agent in a tmux pane to be ready for input.
+/// First waits for the agent process to start (pane_current_command != shell),
+/// then waits a fixed delay for the agent to fully initialize.
+/// Handles the bypass warning prompt (sends acceptance) during the wait.
+/// Always returns Some — the prompt is always sent (better late than never).
+/// Strings that indicate an agent's TUI is ready for input.
+const AGENT_READY_INDICATORS: &[&str] = &[
+    "Type your message",   // Gemini
+    "Yes, I accept",       // Claude bypass prompt
+    "I accept the risk",   // Claude bypass prompt (alt)
+];
+
+/// Number of consecutive stable polls (200ms each) before considering the agent ready.
+/// 3s of no pane content changes = agent has finished loading its TUI.
+const CONTENT_STABLE_THRESHOLD: u32 = 15;
+
+fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Option<String> {
+    // Poll until the agent is ready (up to 30s).
+    // Three detection methods, whichever fires first:
+    //   1. Agent process detected via pane_current_command (Claude, Codex, Copilot)
+    //   2. Known ready indicator in pane content (Gemini's "Type your message")
+    //   3. Content stabilization: pane unchanged for 3s (universal fallback)
+    let mut last_content = String::new();
+    let mut stable_ticks: u32 = 0;
+    let mut change_count: u32 = 0;
+
+    for _ in 0..150 { // 30s (150 * 200ms)
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Check 1: agent process detected via pane_current_command
+        if !is_pane_at_shell(tmux_ops.as_ref(), target) {
+            break;
+        }
+
+        // Check 2 & 3: pane content checks
         if let Ok(content) = tmux_ops.capture_pane(target) {
-            // Check for bypass warning prompt (needs acceptance)
+            // Handle Claude bypass prompt immediately
             if content.contains("Yes, I accept") || content.contains("I accept the risk") {
                 let _ = tmux_ops.send_keys_literal(target, "2");
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -4274,14 +5005,33 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
                 std::thread::sleep(std::time::Duration::from_millis(1000));
                 return Some(target.to_string());
             }
-            // Agent started without acceptance prompt (e.g. --dangerously-skip-permissions)
-            if content.contains(">") || content.contains("❯") || content.contains("$") {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                return Some(target.to_string());
+
+            // Check 2: known ready indicator
+            if AGENT_READY_INDICATORS.iter().any(|s| content.contains(s)) {
+                break;
+            }
+
+            // Check 3: content stabilization (unchanged for 3s)
+            // Only count after content has changed multiple times (>=3), so we
+            // don't false-positive on shell init output (e.g. asdf notice prints
+            // once, then shell pauses while loading profiles/launching agent).
+            if content != last_content {
+                change_count += 1;
+                stable_ticks = 0;
+                last_content = content;
+            } else if change_count >= 3 {
+                stable_ticks += 1;
+                if stable_ticks >= CONTENT_STABLE_THRESHOLD {
+                    break;
+                }
             }
         }
     }
-    None
+
+    // Short settle delay for the TUI to be fully interactive
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    Some(target.to_string())
 }
 
 /// Load workflow plugin if configured
@@ -4291,8 +5041,9 @@ fn load_plugin_if_configured(config: &MergedConfig, project_path: Option<&Path>)
 }
 
 /// Write skill files to a worktree's .agtx/skills/ directory and agent-native discovery paths.
-/// `agent_name` determines which native path to use (e.g. `.claude/commands/agtx/` for Claude).
-fn write_skills_to_worktree(worktree_path: &str, project_path: &Path, plugin: &Option<WorkflowPlugin>, agent_name: &str) {
+/// `agent_names` determines which native paths to use (e.g. `.claude/commands/agtx/` for Claude).
+/// When multiple agents are configured for different phases, skills are deployed for all of them.
+fn write_skills_to_worktree(worktree_path: &str, project_path: &Path, plugin: &Option<WorkflowPlugin>, agent_names: &[&str]) {
     let agtx_dir = Path::new(worktree_path).join(".agtx");
     let _ = std::fs::create_dir_all(&agtx_dir);
 
@@ -4328,44 +5079,48 @@ fn write_skills_to_worktree(worktree_path: &str, project_path: &Path, plugin: &O
         }
     }
 
-    // Write to agent-native discovery path (e.g. .claude/commands/agtx/)
-    if let Some((base_dir, namespace)) = skills::agent_native_skill_dir(agent_name) {
-        let native_dir = if namespace.is_empty() {
-            Path::new(worktree_path).join(base_dir)
-        } else {
-            Path::new(worktree_path).join(base_dir).join(namespace)
-        };
-        let _ = std::fs::create_dir_all(&native_dir);
+    // Write to agent-native discovery paths (e.g. .claude/commands/agtx/)
+    // Deploy for all configured agents so skills are available across phase transitions
+    for agent_name in agent_names {
+        if let Some((base_dir, namespace)) = skills::agent_native_skill_dir(agent_name) {
+            let native_dir = if namespace.is_empty() {
+                Path::new(worktree_path).join(base_dir)
+            } else {
+                Path::new(worktree_path).join(base_dir).join(namespace)
+            };
+            let _ = std::fs::create_dir_all(&native_dir);
 
-        for (skill_dir_name, default_content) in skills::DEFAULT_SKILLS {
-            let content = resolve_skill_content(plugin, skill_dir_name, project_path, default_content);
+            for (skill_dir_name, default_content) in skills::DEFAULT_SKILLS {
+                let content = resolve_skill_content(plugin, skill_dir_name, project_path, default_content);
 
-            match agent_name {
-                "gemini" => {
-                    // Gemini uses .toml command files with description + prompt fields
-                    let description = skills::extract_description(&content)
-                        .unwrap_or_else(|| format!("agtx {} phase skill", skill_dir_name));
-                    let toml_content = skills::skill_to_gemini_toml(&description, &content);
-                    let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
-                    let _ = std::fs::write(native_dir.join(&filename), toml_content);
-                }
-                "codex" => {
-                    // Codex uses SKILL.md in skill-name/ subdirectories
-                    let skill_subdir = native_dir.join(skill_dir_name);
-                    let _ = std::fs::create_dir_all(&skill_subdir);
-                    let _ = std::fs::write(skill_subdir.join("SKILL.md"), &content);
-                }
-                "opencode" => {
-                    // OpenCode uses flat .md files: command/agtx-plan.md (invoked as /agtx-plan)
-                    let content = transform_skill_for_opencode(&content);
-                    let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
-                    let _ = std::fs::write(native_dir.join(&filename), content);
-                }
-                _ => {
-                    // Claude and others: .md files with transformed frontmatter
-                    let content = transform_skill_frontmatter(&content);
-                    let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
-                    let _ = std::fs::write(native_dir.join(&filename), content);
+                match *agent_name {
+                    "gemini" => {
+                        // Gemini uses .toml command files with description + prompt fields
+                        let description = skills::extract_description(&content)
+                            .unwrap_or_else(|| format!("agtx {} phase skill", skill_dir_name));
+                        let toml_content = skills::skill_to_gemini_toml(&description, &content);
+                        let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
+                        let _ = std::fs::write(native_dir.join(&filename), toml_content);
+                    }
+                    "codex" => {
+                        // Codex uses SKILL.md in skill-name/ subdirectories
+                        let skill_subdir = native_dir.join(skill_dir_name);
+                        let _ = std::fs::create_dir_all(&skill_subdir);
+                        let _ = std::fs::write(skill_subdir.join("SKILL.md"), &content);
+                    }
+                    "opencode" => {
+                        // OpenCode uses flat .md command files: .opencode/commands/agtx-research.md
+                        // Commands have description frontmatter + prompt template
+                        let oc_content = transform_skill_for_opencode(&content);
+                        let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
+                        let _ = std::fs::write(native_dir.join(&filename), oc_content);
+                    }
+                    _ => {
+                        // Claude and others: .md files with transformed frontmatter
+                        let content = transform_skill_frontmatter(&content);
+                        let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
+                        let _ = std::fs::write(native_dir.join(&filename), content);
+                    }
                 }
             }
         }
@@ -4392,8 +5147,11 @@ fn transform_skill_frontmatter(content: &str) -> String {
 /// Transform skill content for OpenCode: strip frontmatter, keep as .md
 /// OpenCode uses flat command files and hyphen-separated names (no colon namespace)
 fn transform_skill_for_opencode(content: &str) -> String {
-    // OpenCode doesn't use YAML frontmatter in commands — just the markdown body
-    skills::strip_frontmatter(content).to_string()
+    // OpenCode commands use description frontmatter + prompt body
+    let description = skills::extract_description(content)
+        .unwrap_or_else(|| "agtx skill".to_string());
+    let body = skills::strip_frontmatter(content);
+    format!("---\ndescription: \"{}\"\n---\n{}", description, body)
 }
 
 /// Resolve skill content: check plugin override, then fall back to default

@@ -1,19 +1,24 @@
 <div align="center">
 
-# agtx
+<img src="https://github.com/user-attachments/assets/f8d3f9b6-712b-49d0-a84e-2a2c9400bacc" width="680" />
 
-**Terminal-native kanban board for managing spec-driven coding agent sessions. Plugin any existing spec-driven development framework or specify your own workflow with per-phase skills, prompts, artifact tracking and automatic execution.**
+### **Terminal-native kanban board for managing spec-driven AI coding agent sessions.**
+
+Let different coding agents collaborate on the same task. Plug in any existing spec-driven development framework or specify your own workflow as a custom plugin with per-phase skills, prompts, artifact tracking and autonomous execution.
+
+<img width="960" height="645" alt="Screenshot 2026-02-28 at 18 32 06" src="https://github.com/user-attachments/assets/442965f4-d2c4-435f-a065-df56dc483ab7" />
 
 </div>
 
-![Xnapper-2026-02-14-09 36 33 (1)](https://github.com/user-attachments/assets/fce21a9c-2fe1-4b14-8f24-55e058531370)
+[//]: <![Xnapper-2026-02-14-09 36 33 (1)](https://github.com/user-attachments/assets/fce21a9c-2fe1-4b14-8f24-55e058531370)>
 
 ## Features
 
 - **Kanban workflow**: Backlog/Research → Planning → Running → Review → Done
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
-- **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, Copilot and OpenCode
-- **Spec-driven workflow plugins**: Plug in and select any spec-driven development framework per task — or define individual skills, prompts and artifacts - with automatic execution and tracking at each phase
+- **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, OpenCode and Copilot
+- **Multi-agent per task**: Configure different agents per workflow phase — e.g. Gemini for planning, Claude for implementation, Codex for review — with automatic agent switching in the same tmux window
+- **Spec-driven development plugins**: Plug in any spec-driven development framework or select from a predefined set of plugins like GSD or Spec-kit — or define custom skills, prompts and artifact tracking - with automatic execution and tracking at each phase
 - **Multi-project dashboard**: Manage tasks across all your projects
 - **PR workflow**: Generate descriptions with AI, create PRs directly from the TUI
 - **Customizable themes**: Configure colors via config file
@@ -37,7 +42,7 @@ cp target/release/agtx ~/.local/bin/
 
 - **tmux** - Agent sessions run in a dedicated tmux server
 - **gh** - GitHub CLI for PR operations
-- Supported coding agents: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [Copilot](https://github.com/github/copilot-cli), [OpenCode](https://github.com/sst/opencode)
+- Supported coding agents: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/sst/opencode), [Copilot](https://github.com/github/copilot-cli)
 
 ## Quick Start
 
@@ -62,13 +67,14 @@ agtx -g
 | `h/l` or `←/→` | Move between columns |
 | `j/k` or `↑/↓` | Move between tasks |
 | `o` | Create new task |
+| `R` | Enter research mode |
 | `↩` | Open task (view agent session) |
 | `m` | Move task forward in workflow |
 | `r` | Resume task (Review → Running) |
 | `d` | Show git diff |
 | `x` | Delete task |
 | `/` | Search tasks |
-| `P` | Select workflow plugin |
+| `P` | Select spec-driven workflow plugin |
 | `e` | Toggle project sidebar |
 | `q` | Quit |
 
@@ -115,6 +121,31 @@ init_script = "scripts/init_worktree.sh"
 Both options run during the Backlog → Research/Planning/Running transition, after worktree creation
 and before the agent session starts.
 
+### Per-Phase Agent Configuration
+
+By default, all phases use `default_agent`. You can override the agent for specific phases globally or per project:
+
+```toml
+# ~/.config/agtx/config.toml
+default_agent = "claude"
+
+[agents]
+research = "claude"
+planning = "claude"
+running = "codex"
+review = "claude"
+```
+
+```toml
+# .agtx/config.toml (project override — takes precedence over global)
+[agents]
+running = "gemini"
+```
+
+When a task moves to a phase with a different agent configured, the current agent session is terminated and the new agent starts automatically in the same tmux window. The worktree, git state, and all file changes are preserved across the switch.
+
+Phases without an explicit agent override keep whatever agent is currently running — no unnecessary switching occurs.
+
 ## Spec-driven Development Plugins
 
 agtx ships with a plugin system that lets any spec-driven development framework hook into the task lifecycle. A plugin is a single TOML file that defines what happens at each phase transition — the commands sent to the agent, the prompts, the artifact files that signal completion, and optional setup scripts. Write a command once in canonical format and agtx translates it automatically for every supported agent.
@@ -123,12 +154,10 @@ Press `P` to select a plugin for the current project. The active plugin is shown
 
 | Plugin | Description |
 |--------|-------------|
+| **void** | Plain agent session - no prompting or skills, task description prefilled in input |
 | **agtx** (default) | Built-in workflow with skills and prompts for each phase |
 | **gsd** | [Get Shit Done](https://github.com/fynnfluegge/get-shit-done-cc) - structured spec-driven development with interactive planning |
 | **spec-kit** | [Spec-Driven Development](https://github.com/github/spec-kit) by GitHub - specifications become executable artifacts |
-| **void** | Plain agent session - no prompting or skills, task description prefilled in input |
-
-Each task remembers the plugin it was started with. Switching plugins only affects new tasks — existing tasks continue using their original plugin throughout their lifecycle.
 
 ### Agent Compatibility
 
@@ -158,6 +187,7 @@ name = "my-plugin"
 description = "My custom workflow"
 
 [commands]
+research = "/my-plugin:research {task}"
 planning = "/my-plugin:plan"
 running = "/my-plugin:execute"
 review = "/my-plugin:review"
@@ -225,12 +255,12 @@ review = ""
 research = "What do you want to build?"
 ```
 
-**How it works at each phase transition:**
+**What happens at each phase transition:**
 
 1. The **command** is sent to the agent via tmux (e.g., `/my-plugin:plan`)
-2. If a **prompt_trigger** is set, agtx waits for that text to appear in the tmux pane
+2. If a **prompt_trigger** is set, agtx waits for that prompt trigger to appear in the tmux pane
 3. The **prompt** is sent with `{task}` and `{task_id}` replaced
-4. agtx polls for the **artifact** file — when found, the spinner becomes a checkmark
+4. agtx polls for the **artifact** file — when found, the spinner becomes a checkmark to indicate task phase completion
 
 **Custom skills:** If your plugin provides its own skill files, place them in the plugin directory:
 

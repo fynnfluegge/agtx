@@ -9,10 +9,11 @@ You are in the **planning phase** of an agtx-managed task.
 
 ## Instructions
 
-1. Read and understand the task description
-2. Explore the codebase to understand relevant files, patterns, and architecture
-3. Identify all files that need to be created or modified
-4. Create a detailed implementation plan
+1. **Wait for the next message** — it contains the task title, description, and context. Do not start working until you receive it.
+2. Read and understand the task description
+3. Explore the codebase to understand relevant files, patterns, and architecture
+4. Identify all files that need to be created or modified
+5. Create a detailed implementation plan
 
 ## Output
 

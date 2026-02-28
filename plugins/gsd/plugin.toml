@@ -2,6 +2,8 @@ name = "gsd"
 description = "Get Shit Done - structured spec-driven development framework"
 init_script = "npx get-shit-done-cc@latest --{agent} --local --non-interactive"
 supported_agents = ["claude", "codex", "gemini", "opencode"]
+research_required = true
+copy_dirs = [".planning"]
 
 [artifacts]
 research = ".planning/ROADMAP.md"

@@ -1367,6 +1367,7 @@ fn test_setup_task_worktree_success() {
         None,
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1414,6 +1415,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         Some("./init.sh".to_string()),
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1464,6 +1466,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         None,
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1512,6 +1515,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         None,
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1564,6 +1568,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         None,
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1612,6 +1617,7 @@ fn test_setup_task_worktree_passes_init_config() {
         Some("./setup.sh".to_string()),
         &None,
         "claude",
+        &vec!["claude".to_string()],
         &mock_tmux,
         &mock_git,
         &mock_agent,
@@ -1653,7 +1659,7 @@ fn test_skill_dir_to_filename() {
 fn test_agent_native_skill_dir() {
     assert_eq!(skills::agent_native_skill_dir("claude"), Some((".claude/commands", "agtx")));
     assert_eq!(skills::agent_native_skill_dir("gemini"), Some((".gemini/commands", "agtx")));
-    assert_eq!(skills::agent_native_skill_dir("opencode"), Some((".config/opencode/command", "")));
+    assert_eq!(skills::agent_native_skill_dir("opencode"), Some((".opencode/commands", "")));
     assert_eq!(skills::agent_native_skill_dir("codex"), Some((".codex/skills", "")));
     assert_eq!(skills::agent_native_skill_dir("copilot"), Some((".github/agents", "agtx")));
     assert_eq!(skills::agent_native_skill_dir("unknown"), None);
@@ -1832,6 +1838,7 @@ fn test_resolve_skill_command_with_plugin() {
         },
         prompts: PluginPrompts::default(),
         prompt_triggers: PluginPromptTriggers::default(),
+        research_required: false,
         copy_dirs: vec![],
     });
     // Claude/Gemini: canonical form unchanged
@@ -1863,6 +1870,7 @@ fn test_plugin_supports_agent() {
         commands: Default::default(),
         prompts: Default::default(),
         prompt_triggers: Default::default(),
+        research_required: false,
         copy_dirs: vec![],
     };
     assert!(plugin.supports_agent("claude"));
@@ -1879,6 +1887,7 @@ fn test_plugin_supports_agent() {
         commands: Default::default(),
         prompts: Default::default(),
         prompt_triggers: Default::default(),
+        research_required: false,
         copy_dirs: vec![],
     };
     assert!(plugin.supports_agent("claude"));
@@ -1945,6 +1954,7 @@ fn test_phase_artifact_exists_with_glob() {
         commands: PluginCommands::default(),
         prompts: PluginPrompts::default(),
         prompt_triggers: Default::default(),
+        research_required: false,
         copy_dirs: vec![],
     });
 
@@ -2217,6 +2227,7 @@ fn test_resolve_prompt_trigger_with_gsd() {
             running: None,
             review: None,
         },
+        research_required: false,
         copy_dirs: vec![],
     });
     assert_eq!(
@@ -2251,6 +2262,7 @@ fn test_resolve_prompt_trigger_empty_string_filtered() {
             running: None,
             review: None,
         },
+        research_required: false,
         copy_dirs: vec![],
     });
     // Empty strings should be filtered out
@@ -2356,4 +2368,256 @@ fn test_skill_fuzzy_matching() {
     // Matching on description
     let score_desc = fuzzy_score("plan a task implementation", "plan");
     assert!(score_desc > 0);
+}
+
+// ── Per-Phase Agent Configuration Tests ─────────────────────────────────────
+
+#[test]
+fn test_needs_agent_switch_no_config_keeps_current() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::db::Task;
+
+    // No [agents] section — should keep whatever agent is running
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
+    let task = Task::new("Test", "claude", "project-1");
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "running");
+    assert_eq!(agent, "claude");
+    assert!(!switch);
+}
+
+#[test]
+fn test_needs_agent_switch_no_config_keeps_non_default_agent() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::db::Task;
+
+    // No review agent configured, but task is running codex (set by explicit running override).
+    // Moving to review should NOT switch back to default — keep codex.
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let mut task = Task::new("Test", "claude", "project-1");
+    task.agent = "codex".to_string(); // was switched to codex for running phase
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "review");
+    assert_eq!(agent, "codex"); // keeps codex, not fallback to claude
+    assert!(!switch);
+}
+
+#[test]
+fn test_needs_agent_switch_explicit_override() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::db::Task;
+
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let task = Task::new("Test", "claude", "project-1");
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "running");
+    assert_eq!(agent, "codex");
+    assert!(switch);
+}
+
+#[test]
+fn test_needs_agent_switch_explicit_same_as_current() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::db::Task;
+
+    // Explicit override exists but matches current agent — no switch needed
+    let mut global = GlobalConfig::default();
+    global.agents.review = Some("codex".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let mut task = Task::new("Test", "claude", "project-1");
+    task.agent = "codex".to_string();
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "review");
+    assert_eq!(agent, "codex");
+    assert!(!switch);
+}
+
+#[test]
+fn test_collect_phase_agents_all_same() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
+    let agents = collect_phase_agents(&config);
+    assert_eq!(agents, vec!["claude".to_string()]);
+}
+
+#[test]
+fn test_collect_phase_agents_mixed() {
+    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+    global.agents.review = Some("gemini".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let agents = collect_phase_agents(&config);
+    assert_eq!(agents, vec!["claude".to_string(), "codex".to_string(), "gemini".to_string()]);
+}
+
+// === is_pane_at_shell tests ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_true_for_bash() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("bash".to_string()));
+
+    assert!(is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_true_for_zsh() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("zsh".to_string()));
+
+    assert!(is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_true_for_fish() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("fish".to_string()));
+
+    assert!(is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_false_for_claude() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("claude".to_string()));
+
+    assert!(!is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_false_for_node() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("node".to_string()));
+
+    assert!(!is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_false_for_codex() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| Some("codex".to_string()));
+
+    assert!(!is_pane_at_shell(&mock, "sess:win"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_false_when_none() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .withf(|t| t == "sess:win")
+        .returning(|_| None);
+
+    assert!(!is_pane_at_shell(&mock, "sess:win"));
+}
+
+// === switch_agent_in_tmux tests ===
+
+/// Test that switch_agent_in_tmux sends the correct exit command per agent
+/// and starts the new agent. Uses relaxed mocking since the function has
+/// multiple polling loops with retries.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_switch_agent_claude_sends_exit() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let mut mock = MockTmuxOperations::new();
+    let exit_sent = Arc::new(AtomicBool::new(false));
+    let new_agent_sent = Arc::new(AtomicBool::new(false));
+    let exit_sent_c = exit_sent.clone();
+    let new_agent_sent_c = new_agent_sent.clone();
+
+    // Claude uses /exit
+    mock.expect_send_keys()
+        .returning(move |_, k| {
+            if k == "/exit" { exit_sent_c.store(true, Ordering::SeqCst); }
+            if k == "codex" { new_agent_sent_c.store(true, Ordering::SeqCst); }
+            Ok(())
+        });
+    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    // Return shell immediately so polling exits fast
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok(String::new()));
+
+    switch_agent_in_tmux(&mock, "sess:win", "claude", "codex");
+    assert!(exit_sent.load(Ordering::SeqCst), "/exit should be sent for claude");
+    assert!(new_agent_sent.load(Ordering::SeqCst), "new agent command should be sent");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_switch_agent_gemini_sends_quit() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let mut mock = MockTmuxOperations::new();
+    let quit_sent = Arc::new(AtomicBool::new(false));
+    let quit_sent_c = quit_sent.clone();
+
+    mock.expect_send_keys()
+        .returning(move |_, k| {
+            if k == "/quit" { quit_sent_c.store(true, Ordering::SeqCst); }
+            Ok(())
+        });
+    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_pane_current_command()
+        .returning(|_| Some("zsh".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok(String::new()));
+
+    switch_agent_in_tmux(&mock, "sess:win", "gemini", "claude");
+    assert!(quit_sent.load(Ordering::SeqCst), "/quit should be sent for gemini");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_switch_agent_codex_sends_ctrl_c() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let mut mock = MockTmuxOperations::new();
+    let ctrl_c_sent = Arc::new(AtomicBool::new(false));
+    let ctrl_c_sent_c = ctrl_c_sent.clone();
+
+    mock.expect_send_keys().returning(|_, _| Ok(()));
+    mock.expect_send_keys_literal()
+        .returning(move |_, k| {
+            if k == "C-c" { ctrl_c_sent_c.store(true, Ordering::SeqCst); }
+            Ok(())
+        });
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok(String::new()));
+
+    switch_agent_in_tmux(&mock, "sess:win", "codex", "claude");
+    assert!(ctrl_c_sent.load(Ordering::SeqCst), "Ctrl+C should be sent for codex");
 }

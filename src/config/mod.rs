@@ -9,6 +9,10 @@ pub struct GlobalConfig {
     #[serde(default = "default_agent")]
     pub default_agent: String,
 
+    /// Per-phase agent overrides
+    #[serde(default)]
+    pub agents: PhaseAgentsConfig,
+
     /// Worktree settings
     #[serde(default)]
     pub worktree: WorktreeConfig,
@@ -22,6 +26,7 @@ impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
             default_agent: default_agent(),
+            agents: PhaseAgentsConfig::default(),
             worktree: WorktreeConfig::default(),
             theme: ThemeConfig::default(),
         }
@@ -138,6 +143,15 @@ fn default_agent() -> String {
     "claude".to_string()
 }
 
+/// Per-phase agent overrides
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PhaseAgentsConfig {
+    pub research: Option<String>,
+    pub planning: Option<String>,
+    pub running: Option<String>,
+    pub review: Option<String>,
+}
+
 /// Worktree configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeConfig {
@@ -177,6 +191,9 @@ fn default_base_branch() -> String {
 pub struct ProjectConfig {
     /// Override default agent for this project
     pub default_agent: Option<String>,
+
+    /// Per-phase agent overrides for this project
+    pub agents: Option<PhaseAgentsConfig>,
 
     /// Override base branch for this project
     pub base_branch: Option<String>,
@@ -302,6 +319,7 @@ pub fn determine_first_run_action(
 #[derive(Debug, Clone)]
 pub struct MergedConfig {
     pub default_agent: String,
+    pub phase_agents: PhaseAgentsConfig,
     pub worktree_enabled: bool,
     pub auto_cleanup: bool,
     pub base_branch: String,
@@ -315,11 +333,18 @@ pub struct MergedConfig {
 impl MergedConfig {
     /// Create merged config from global and project configs
     pub fn merge(global: &GlobalConfig, project: &ProjectConfig) -> Self {
+        let project_agents = project.agents.clone().unwrap_or_default();
         Self {
             default_agent: project
                 .default_agent
                 .clone()
                 .unwrap_or_else(|| global.default_agent.clone()),
+            phase_agents: PhaseAgentsConfig {
+                research: project_agents.research.or(global.agents.research.clone()),
+                planning: project_agents.planning.or(global.agents.planning.clone()),
+                running: project_agents.running.or(global.agents.running.clone()),
+                review: project_agents.review.or(global.agents.review.clone()),
+            },
             worktree_enabled: global.worktree.enabled,
             auto_cleanup: global.worktree.auto_cleanup,
             base_branch: project
@@ -331,6 +356,25 @@ impl MergedConfig {
             copy_files: project.copy_files.clone(),
             init_script: project.init_script.clone(),
             workflow_plugin: project.workflow_plugin.clone(),
+        }
+    }
+
+    /// Get the agent name for a given phase.
+    /// Falls back to default_agent if no phase-specific override is set.
+    pub fn agent_for_phase(&self, phase: &str) -> &str {
+        self.explicit_agent_for_phase(phase)
+            .unwrap_or(&self.default_agent)
+    }
+
+    /// Get the explicitly configured agent for a phase, if any.
+    /// Returns None when no phase-specific override is set (no fallback).
+    pub fn explicit_agent_for_phase(&self, phase: &str) -> Option<&str> {
+        match phase {
+            "research" => self.phase_agents.research.as_deref(),
+            "planning" | "planning_with_research" => self.phase_agents.planning.as_deref(),
+            "running" => self.phase_agents.running.as_deref(),
+            "review" => self.phase_agents.review.as_deref(),
+            _ => None,
         }
     }
 }
@@ -353,6 +397,10 @@ pub struct WorkflowPlugin {
     pub prompts: PluginPrompts,
     #[serde(default)]
     pub prompt_triggers: PluginPromptTriggers,
+    /// When true, research phase must be completed before planning or running.
+    /// Prevents skipping research for plugins that depend on it (e.g. GSD creates .planning/ during research).
+    #[serde(default)]
+    pub research_required: bool,
     /// Extra directories to copy from project root to worktrees (e.g. [".specify"]).
     #[serde(default)]
     pub copy_dirs: Vec<String>,
