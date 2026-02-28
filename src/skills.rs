@@ -24,7 +24,7 @@ pub const DEFAULT_PROMPT_RESEARCH: &str =
 pub const DEFAULT_PROMPT_PLANNING: &str =
     "Task: {task}";
 pub const DEFAULT_PROMPT_PLANNING_WITH_RESEARCH: &str =
-    "Task: {task}\n\nResearch findings are available in .agtx/research.md — use them as context.";
+    "Task: {task}\n\nIf research was done, findings are available in .agtx/research/{task_id}.md — use them as context if present.";
 pub const DEFAULT_PROMPT_RUNNING: &str =
     "Plan approved. Implement the changes described in .agtx/plan.md";
 pub const DEFAULT_PROMPT_REVIEW: &str =
