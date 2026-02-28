@@ -2881,13 +2881,18 @@ impl App {
                     // Reuse existing session from research — switch agent if needed, then send planning command
                     let target = task.session_name.clone().unwrap();
                     let task_content = if let Some(desc) = &task.description {
-                        format!("{}\n\n{}", task.title, desc)
+                        desc.clone()
                     } else {
                         task.title.clone()
                     };
-                    let skill_cmd = resolve_skill_command(&plugin, "planning", &planning_agent, &task_content);
-                    let prompt = resolve_prompt(&plugin, "planning", &task_content, &task.id, &planning_agent);
-                    let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
+                    // If research artifact exists, agent already has context — don't resend task description
+                    let has_research = task.worktree_path.as_ref().map_or(false, |wt| {
+                        research_artifact_exists(wt, &task.id, &plugin)
+                    });
+                    let planning_phase = if has_research { "planning_with_research" } else { "planning" };
+                    let skill_cmd = resolve_skill_command(&plugin, planning_phase, &planning_agent, &task_content);
+                    let prompt = resolve_prompt(&plugin, planning_phase, &task_content, &task.id, &planning_agent);
+                    let prompt_trigger = resolve_prompt_trigger(&plugin, planning_phase);
 
                     let tmux_ops = Arc::clone(&self.state.tmux_ops);
                     let task_content_clone = task_content.clone();
@@ -2909,7 +2914,7 @@ impl App {
                 } else {
                     // No research session — create worktree + tmux window from scratch (non-blocking)
                     let task_content = if let Some(desc) = &task.description {
-                        format!("{}\n\n{}", task.title, desc)
+                        desc.clone()
                     } else {
                         task.title.clone()
                     };
@@ -2994,7 +2999,7 @@ impl App {
                     let plugin = self.load_task_plugin(&task);
                     let (running_agent, agent_switch) = needs_agent_switch(&self.state.config, &task, "running");
                     let task_content = if let Some(desc) = &task.description {
-                        format!("{}\n\n{}", task.title, desc)
+                        desc.clone()
                     } else {
                         task.title.clone()
                     };
@@ -3027,7 +3032,7 @@ impl App {
                 if let Some(session_name) = &task.session_name {
                     let plugin = self.load_task_plugin(&task);
                     let task_content = if let Some(desc) = &task.description {
-                        format!("{}\n\n{}", task.title, desc)
+                        desc.clone()
                     } else {
                         task.title.clone()
                     };
@@ -3160,7 +3165,7 @@ impl App {
         let agent_name = self.state.config.agent_for_phase("research").to_string();
 
         let task_content = if let Some(desc) = &task.description {
-            format!("{}\n\n{}", task.title, desc)
+            desc.clone()
         } else {
             task.title.clone()
         };
@@ -3259,7 +3264,7 @@ impl App {
 
         // Build prompt - skip planning, go straight to implementation
         let task_content = if let Some(desc) = &task.description {
-            format!("{}\n\n{}", task.title, desc)
+            desc.clone()
         } else {
             task.title.clone()
         };
@@ -4409,9 +4414,14 @@ fn resolve_skill_command(plugin: &Option<WorkflowPlugin>, phase: &str, agent_nam
                 // Explicit empty command means "no command" (e.g., void plugin)
                 return None;
             }
-            // Collapse task content to single line for commands (newlines → spaces)
-            let task_oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-            let expanded = c.replace("{task}", &task_oneline);
+            // When research was already done, strip {task} — agent already has context
+            let expanded = if phase == "planning_with_research" {
+                c.replace("{task}", "").trim().to_string()
+            } else {
+                // Collapse task content to single line for commands (newlines → spaces)
+                let task_oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+                c.replace("{task}", &task_oneline)
+            };
             return skills::transform_plugin_command(&expanded, agent_name);
         }
     }
@@ -4442,26 +4452,33 @@ fn send_skill_and_prompt(
     // Codex: skill mentions ($skill-name) are inline references that must be
     //   part of a message — sending just "$skill" standalone does nothing.
     if matches!(agent_name, "gemini" | "codex") {
-        if let Some(cmd) = skill_cmd {
+        let text_to_send = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
-                let combined = format!("{}\n\n{}", cmd, prompt);
-                let _ = tmux_ops.send_keys_literal(target, &combined);
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
+                Some(format!("{}\n\n{}", cmd, prompt))
             } else {
-                let _ = tmux_ops.send_keys_literal(target, cmd);
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
+                Some(cmd.clone())
             }
         } else if !prompt.is_empty() {
-            let _ = tmux_ops.send_keys_literal(target, prompt);
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let _ = tmux_ops.send_keys_literal(target, "Enter");
+            Some(prompt.to_string())
         } else {
             let oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-            if !oneline.is_empty() {
-                let _ = tmux_ops.send_keys_literal(target, &oneline);
+            if !oneline.is_empty() { Some(oneline) } else { None }
+        };
+
+        if let Some(text) = text_to_send {
+            let _ = tmux_ops.send_keys_literal(target, &text);
+            // Wait for text to appear in pane before sending Enter (Ink TUIs need time to render)
+            let check_str = text.lines().next().unwrap_or(&text);
+            for _ in 0..20 { // up to 4s
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = tmux_ops.capture_pane(target) {
+                    if content.contains(check_str) {
+                        break;
+                    }
+                }
             }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = tmux_ops.send_keys_literal(target, "Enter");
         }
         return;
     }
@@ -4594,6 +4611,23 @@ fn phase_artifact_exists(worktree_path: &str, status: TaskStatus, plugin: &Optio
     let full_path = Path::new(worktree_path).join(rel_path);
 
     // Support simple wildcard: "specs/*/plan.md" matches any single directory level
+    if rel_path.contains('*') {
+        return glob_path_exists(&full_path.to_string_lossy());
+    }
+
+    full_path.exists()
+}
+
+/// Check if the research artifact exists for a task.
+/// Uses plugin-configured artifact path or defaults to `.agtx/research/{task_id}.md`.
+fn research_artifact_exists(worktree_path: &str, task_id: &str, plugin: &Option<WorkflowPlugin>) -> bool {
+    let rel_path = plugin.as_ref()
+        .and_then(|p| p.artifacts.research.as_deref())
+        .unwrap_or(".agtx/research/{task_id}.md")
+        .replace("{task_id}", task_id);
+
+    let full_path = Path::new(worktree_path).join(&rel_path);
+
     if rel_path.contains('*') {
         return glob_path_exists(&full_path.to_string_lossy());
     }
