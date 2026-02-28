@@ -1,8 +1,11 @@
 <div align="center">
 
-# agtx
+<img src="https://github.com/user-attachments/assets/f8d3f9b6-712b-49d0-a84e-2a2c9400bacc" width="720" />
 
-**Terminal-native kanban board for managing spec-driven AI coding agent sessions.**
+
+
+
+ **Terminal-native kanban board for managing spec-driven AI coding agent sessions.**
 
 Plug in any existing spec-driven development framework or specify your own spec-driven workflow as a custom plugin with per-phase skills, prompts, artifact tracking and autonomous execution.
 
