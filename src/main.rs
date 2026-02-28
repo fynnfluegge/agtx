@@ -96,17 +96,18 @@ fn prompt_agent_selection(agents: &[agent::Agent]) -> Result<&agent::Agent> {
     stdout.execute(cursor::Hide)?;
 
     // Print ASCII art banner
+    let gold = style::Color::Rgb { r: 234, g: 212, b: 154 }; // #ead49a
     let banner: &[(&str, &str)] = &[
-        ("  █████╗  ██████╗ ████████╗██╗  ██╗", ""),
-        (" ██╔══██╗██╔════╝ ╚══██╔══╝╚██╗██╔╝", ""),
-        (" ███████║██║  ███╗   ██║    ╚███╔╝ ", "  Autonomous multi-session"),
-        (" ██╔══██║██║   ██║   ██║    ██╔██╗ ", "  AI coding in the terminal"),
-        (" ██║  ██║╚██████╔╝   ██║   ██╔╝ ██╗", ""),
-        (" ╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝", ""),
+        (" █████╗  ██████╗████████╗██╗  ██╗", ""),
+        ("██╔══██╗██╔════╝╚══██╔══╝╚██╗██╔╝", ""),
+        ("███████║██║  ███╗  ██║    ╚███╔╝ ", "  Autonomous multi-session spec-driven"),
+        ("██╔══██║██║   ██║  ██║    ██╔██╗ ", "  AI coding orchestration in the terminal"),
+        ("██║  ██║╚██████╔╝  ██║   ██╔╝ ██╗", ""),
+        ("╚═╝  ╚═╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝", ""),
     ];
     stdout.execute(style::Print("\r\n"))?;
     for (art, tagline) in banner {
-        stdout.execute(style::PrintStyledContent((*art).cyan()))?;
+        stdout.execute(style::PrintStyledContent(style::style(format!("  {}", art)).with(gold)))?;
         if !tagline.is_empty() {
             stdout.execute(style::PrintStyledContent((*tagline).dark_grey()))?;
         }

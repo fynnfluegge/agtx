@@ -1516,42 +1516,37 @@ impl App {
     }
 
     fn draw_dashboard(state: &AppState, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-            ])
-            .split(area);
-
-        // Header
-        let header = Paragraph::new(" agtx Dashboard ")
-            .style(Style::default().fg(Color::Cyan).bold())
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(header, chunks[0]);
-
-        // Content area split: message + options/project list
-        let content_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(5), // Message
-                Constraint::Min(0),    // Project list or options
-            ])
-            .split(chunks[1]);
-
         let dimmed_color = hex_to_color(&state.config.theme.color_dimmed);
         let selected_color = hex_to_color(&state.config.theme.color_selected);
 
-        // Message
-        let message = Paragraph::new("\n  No project found in current directory.\n")
-            .style(Style::default().fg(selected_color))
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(dimmed_color)));
-        frame.render_widget(message, content_chunks[0]);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10), // Logo + subtitle
+                Constraint::Min(0),    // Project list or options
+                Constraint::Length(3), // Footer
+            ])
+            .split(area);
+
+        // ASCII art logo — hardcoded gold to match docs/banner.svg
+        let logo_color = Color::Rgb(234, 212, 154); // #ead49a
+        let logo = vec![
+            Line::from(""),
+            Line::from(Span::styled(" █████╗  ██████╗████████╗██╗  ██╗", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled("██╔══██╗██╔════╝╚══██╔══╝╚██╗██╔╝", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled("███████║██║  ███╗  ██║    ╚███╔╝ ", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled("██╔══██║██║   ██║  ██║    ██╔██╗ ", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled("██║  ██║╚██████╔╝  ██║   ██╔╝ ██╗", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled("╚═╝  ╚═╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝", Style::default().fg(logo_color).bold())),
+            Line::from(""),
+            Line::from(Span::styled("Autonomous multi-session spec-driven AI coding orchestration in the terminal", Style::default().fg(dimmed_color))),
+        ];
+        let logo_widget = Paragraph::new(logo)
+            .alignment(Alignment::Center);
+        frame.render_widget(logo_widget, chunks[0]);
 
         // Project list or options
         if state.show_project_list && !state.projects.is_empty() {
-            // Show project list
             let items: Vec<ListItem> = state
                 .projects
                 .iter()
@@ -1573,14 +1568,13 @@ impl App {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(selected_color)),
             );
-            frame.render_widget(list, content_chunks[1]);
+            frame.render_widget(list, chunks[1]);
         } else {
-            // Show options
             let options = Paragraph::new(
                 "\n  [p] Open existing project\n  [n] Create new project in current directory\n",
             )
             .block(Block::default().title(" Options ").borders(Borders::ALL).border_style(Style::default().fg(dimmed_color)));
-            frame.render_widget(options, content_chunks[1]);
+            frame.render_widget(options, chunks[1]);
         }
 
         // Footer
