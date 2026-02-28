@@ -9,10 +9,11 @@ You are in the **research phase** of an agtx-managed task. This is a read-only e
 
 ## Instructions
 
-1. Read and understand the task description
-2. Explore the codebase to find relevant files, patterns, and architecture
-3. Identify dependencies, related code, and potential complexity
-4. Assess feasibility and estimate scope
+1. **Wait for the next message** — it contains the task title, description, and artifact path. Do not start working until you receive it.
+2. Read and understand the task description
+3. Explore the codebase to find relevant files, patterns, and architecture
+4. Identify dependencies, related code, and potential complexity
+5. Assess feasibility and estimate scope
 
 ## Output
 

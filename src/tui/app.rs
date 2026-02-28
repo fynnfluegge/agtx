@@ -2808,7 +2808,7 @@ impl App {
                         // Check if agent is still running in the tmux pane
                         let agent_running = task.session_name.as_ref().map_or(false, |target| {
                             self.state.tmux_ops.window_exists(target).unwrap_or(false)
-                                && !is_pane_at_shell(&*self.state.tmux_ops, target)
+                                && is_agent_active(&*self.state.tmux_ops, target)
                         });
                         if agent_running {
                             self.state.move_confirm_popup = Some(MoveConfirmPopup {
@@ -2859,7 +2859,7 @@ impl App {
                             switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_agent_clone, &new_cmd);
                             let _ = wait_for_agent_ready(&tmux_ops, &target);
                         }
-                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone);
+                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &planning_agent_clone);
                     });
                 } else {
                     // No research session — create worktree + tmux window from scratch
@@ -2893,9 +2893,10 @@ impl App {
                     let prompt_clone = prompt.clone();
                     let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
                     let task_content_clone = task_content.clone();
+                    let planning_agent_clone = planning_agent.clone();
                     std::thread::spawn(move || {
                         if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                            send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone);
+                            send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone, &planning_agent_clone);
                         }
                     });
                 }
@@ -2928,7 +2929,7 @@ impl App {
                             switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
                             let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
                         }
-                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone);
+                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &running_agent_clone);
                     });
                     task.agent = running_agent;
                 }
@@ -2961,7 +2962,7 @@ impl App {
                             switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
                             let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
                         }
-                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone);
+                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &review_agent_clone);
                     });
                 }
                 task.agent = review_agent.clone();
@@ -3101,9 +3102,10 @@ impl App {
         let prompt_clone = prompt.clone();
         let prompt_trigger = resolve_prompt_trigger(&plugin, "research");
         let task_content_clone = task_content.clone();
+        let agent_name_clone = agent_name.clone();
         std::thread::spawn(move || {
             if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone);
+                send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone, &agent_name_clone);
             }
         });
 
@@ -3169,9 +3171,10 @@ impl App {
         let prompt_clone = prompt.clone();
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
         let task_content_clone = task_content.clone();
+        let running_agent_clone = running_agent.clone();
         std::thread::spawn(move || {
             if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone);
+                send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone, &running_agent_clone);
             }
         });
 
@@ -4276,6 +4279,7 @@ fn send_skill_and_prompt(
     prompt: &str,
     prompt_trigger: &Option<String>,
     task_content: &str,
+    agent_name: &str,
 ) {
     match (skill_cmd, prompt_trigger) {
         // Skill + prompt trigger: must send separately, wait for trigger between them
@@ -4288,33 +4292,43 @@ fn send_skill_and_prompt(
                 }
             }
         }
-        // Skill + prompt, no trigger: send separately, wait for pane to stabilize between them
+        // Skill + prompt, no trigger: agent-specific handling
         (Some(cmd), None) => {
-            let _ = tmux_ops.send_keys(target, cmd);
-            if !prompt.is_empty() {
-                // Wait for agent to finish processing the skill command before sending the prompt.
-                // Poll pane content until it stabilizes (agent re-rendered its UI after the command).
-                let mut last_content = String::new();
-                let mut stable_ticks = 0u32;
-                for _ in 0..50 { // 10s max
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    if let Ok(content) = tmux_ops.capture_pane(target) {
-                        if content == last_content {
-                            stable_ticks += 1;
-                            if stable_ticks >= 10 { // 2s of no changes
-                                break;
-                            }
-                        } else {
-                            stable_ticks = 0;
-                            last_content = content;
-                        }
-                    }
-                }
-                // Send text first, then Enter with a delay so Gemini's Ink TUI
-                // can finish rendering the input before processing Enter.
-                let _ = tmux_ops.send_keys_literal(target, prompt);
+            if agent_name == "gemini" && !prompt.is_empty() {
+                // Gemini: combine skill and prompt into a single message.
+                // Sending separately causes Gemini to execute the skill and queue
+                // the prompt, which gets lost or arrives too late.
+                let combined = format!("{}\n\n{}", cmd, prompt);
+                let _ = tmux_ops.send_keys_literal(target, &combined);
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 let _ = tmux_ops.send_keys_literal(target, "Enter");
+            } else {
+                let _ = tmux_ops.send_keys(target, cmd);
+                if !prompt.is_empty() {
+                    // Wait for agent to finish processing the skill command before sending the prompt.
+                    // Poll pane content until it stabilizes (agent re-rendered its UI after the command).
+                    let mut last_content = String::new();
+                    let mut stable_ticks = 0u32;
+                    for _ in 0..50 { // 10s max
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        if let Ok(content) = tmux_ops.capture_pane(target) {
+                            if content == last_content {
+                                stable_ticks += 1;
+                                if stable_ticks >= 10 { // 2s of no changes
+                                    break;
+                                }
+                            } else {
+                                stable_ticks = 0;
+                                last_content = content;
+                            }
+                        }
+                    }
+                    // Send text first, then Enter with a delay so Gemini's Ink TUI
+                    // can finish rendering the input before processing Enter.
+                    let _ = tmux_ops.send_keys_literal(target, prompt);
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let _ = tmux_ops.send_keys_literal(target, "Enter");
+                }
             }
         }
         // No skill command, just prompt
@@ -4465,6 +4479,13 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 /// Known agent binary names as they appear in `pane_current_command`.
 const AGENT_COMMANDS: &[&str] = &["claude", "codex", "gemini", "copilot", "opencode", "node", "python3", "python"];
 
+/// Strings in pane content that indicate an agent TUI is active.
+/// Used by `is_agent_active` to detect agents like Gemini that run inside
+/// bash and don't change `pane_current_command`.
+const AGENT_ACTIVE_INDICATORS: &[&str] = &[
+    "Type your message",   // Gemini
+];
+
 /// Check if the pane is running a shell (i.e. the agent has exited).
 /// Returns true when `pane_current_command` reports a shell (bash, zsh, sh, fish)
 /// rather than an agent process.
@@ -4474,6 +4495,29 @@ fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Check if an agent is actively running in the pane.
+/// Uses both `pane_current_command` (works for Claude, Codex, Copilot) and
+/// pane content indicators (works for Gemini which runs inside bash).
+fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
+    // Check 1: agent process visible in pane_current_command
+    if !is_pane_at_shell(tmux_ops, target) {
+        return true;
+    }
+    // Check 2: check the bottom of the visible pane for agent UI indicators.
+    // Only the last few lines are checked to avoid false positives from
+    // indicator strings appearing in conversation output higher up.
+    if let Ok(content) = tmux_ops.capture_pane(target) {
+        let lines: Vec<&str> = content.lines().collect();
+        let bottom = lines.len().saturating_sub(5);
+        let tail = &lines[bottom..];
+        let tail_text = tail.join("\n");
+        if AGENT_ACTIVE_INDICATORS.iter().any(|s| tail_text.contains(s)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Gracefully switch the agent running in a tmux window.
@@ -4570,12 +4614,38 @@ fn switch_agent_in_tmux(
 /// then waits a fixed delay for the agent to fully initialize.
 /// Handles the bypass warning prompt (sends acceptance) during the wait.
 /// Always returns Some — the prompt is always sent (better late than never).
+/// Strings that indicate an agent's TUI is ready for input.
+const AGENT_READY_INDICATORS: &[&str] = &[
+    "Type your message",   // Gemini
+    "Yes, I accept",       // Claude bypass prompt
+    "I accept the risk",   // Claude bypass prompt (alt)
+];
+
+/// Number of consecutive stable polls (200ms each) before considering the agent ready.
+/// 3s of no pane content changes = agent has finished loading its TUI.
+const CONTENT_STABLE_THRESHOLD: u32 = 15;
+
 fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Option<String> {
-    // Wait a fixed 8s for the agent to fully initialize.
-    // During the wait, check for the bypass warning prompt (Claude).
-    for _ in 0..40 { // 8s (40 * 200ms)
+    // Poll until the agent is ready (up to 30s).
+    // Three detection methods, whichever fires first:
+    //   1. Agent process detected via pane_current_command (Claude, Codex, Copilot)
+    //   2. Known ready indicator in pane content (Gemini's "Type your message")
+    //   3. Content stabilization: pane unchanged for 3s (universal fallback)
+    let mut last_content = String::new();
+    let mut stable_ticks: u32 = 0;
+    let mut change_count: u32 = 0;
+
+    for _ in 0..150 { // 30s (150 * 200ms)
         std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Check 1: agent process detected via pane_current_command
+        if !is_pane_at_shell(tmux_ops.as_ref(), target) {
+            break;
+        }
+
+        // Check 2 & 3: pane content checks
         if let Ok(content) = tmux_ops.capture_pane(target) {
+            // Handle Claude bypass prompt immediately
             if content.contains("Yes, I accept") || content.contains("I accept the risk") {
                 let _ = tmux_ops.send_keys_literal(target, "2");
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -4583,8 +4653,31 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
                 std::thread::sleep(std::time::Duration::from_millis(1000));
                 return Some(target.to_string());
             }
+
+            // Check 2: known ready indicator
+            if AGENT_READY_INDICATORS.iter().any(|s| content.contains(s)) {
+                break;
+            }
+
+            // Check 3: content stabilization (unchanged for 3s)
+            // Only count after content has changed multiple times (>=3), so we
+            // don't false-positive on shell init output (e.g. asdf notice prints
+            // once, then shell pauses while loading profiles/launching agent).
+            if content != last_content {
+                change_count += 1;
+                stable_ticks = 0;
+                last_content = content;
+            } else if change_count >= 3 {
+                stable_ticks += 1;
+                if stable_ticks >= CONTENT_STABLE_THRESHOLD {
+                    break;
+                }
+            }
         }
     }
+
+    // Short settle delay for the TUI to be fully interactive
+    std::thread::sleep(std::time::Duration::from_millis(1000));
 
     Some(target.to_string())
 }
