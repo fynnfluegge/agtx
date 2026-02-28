@@ -98,12 +98,10 @@ impl TmuxOperations for RealTmuxOps {
     }
 
     fn send_keys(&self, target: &str, keys: &str) -> Result<()> {
-        // Send the text first
         std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
             .args(["send-keys", "-t", target, keys])
             .output()?;
-        // Send Enter separately (like the original implementation)
         std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
             .args(["send-keys", "-t", target, "Enter"])

@@ -114,6 +114,10 @@ struct AppState {
     pr_creation_rx: Option<mpsc::Receiver<Result<(i32, String), String>>>,
     // Confirmation popup for moving to Done with open PR
     done_confirm_popup: Option<DoneConfirmPopup>,
+    // Confirmation popup for moving task when phase is incomplete
+    move_confirm_popup: Option<MoveConfirmPopup>,
+    // Flag to skip move confirmation (set after user confirms popup)
+    skip_move_confirm: bool,
     // Confirmation popup for deleting a task
     delete_confirm_popup: Option<DeleteConfirmPopup>,
     // Confirmation popup for asking if user wants to create PR when moving to Review
@@ -142,6 +146,14 @@ enum DoneConfirmPrState {
     Merged,
     Closed,
     Unknown,
+}
+
+/// State for confirming move when phase is incomplete (agent still working)
+#[derive(Debug, Clone)]
+struct MoveConfirmPopup {
+    task_id: String,
+    from_status: TaskStatus,
+    to_status: TaskStatus,
 }
 
 /// State for PR creation status popup (loading/success/error)
@@ -350,6 +362,8 @@ impl App {
                 pr_status_popup: None,
                 pr_creation_rx: None,
                 done_confirm_popup: None,
+                move_confirm_popup: None,
+                skip_move_confirm: false,
                 delete_confirm_popup: None,
                 review_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
@@ -1091,6 +1105,35 @@ impl App {
             frame.render_widget(content, inner);
         }
 
+        // Move confirmation popup (phase incomplete)
+        if let Some(ref popup) = state.move_confirm_popup {
+            let popup_area = centered_rect(50, 20, area);
+            frame.render_widget(Clear, popup_area);
+
+            let phase_name = match popup.from_status {
+                TaskStatus::Planning => "Planning",
+                TaskStatus::Running => "Running",
+                TaskStatus::Review => "Review",
+                _ => "Current",
+            };
+            let main_block = Block::default()
+                .title(format!(" {} Phase Incomplete ", phase_name))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_selected)));
+            frame.render_widget(main_block, popup_area);
+
+            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
+            let text = format!(
+                "The agent is still working and the {} artifact\nhas not been created yet.\n\nAre you sure you want to move this task forward?\n\n[y] Yes, move    [n/Esc] Cancel",
+                phase_name.to_lowercase()
+            );
+            let content = Paragraph::new(text)
+                .style(Style::default().fg(Color::White))
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(content, inner);
+        }
+
         // Delete confirmation popup
         if let Some(ref popup) = state.delete_confirm_popup {
             let popup_area = centered_rect(50, 25, area);
@@ -1488,6 +1531,11 @@ impl App {
             return Ok(());
         }
 
+        // Handle Move confirmation popup if open (phase incomplete)
+        if self.state.move_confirm_popup.is_some() {
+            return self.handle_move_confirm_key(key);
+        }
+
         // Handle Done confirmation popup if open
         if self.state.done_confirm_popup.is_some() {
             return self.handle_done_confirm_key(key);
@@ -1552,6 +1600,24 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     // Cancelled
                     self.state.done_confirm_popup = None;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_move_confirm_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        if self.state.move_confirm_popup.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.state.move_confirm_popup = None;
+                    self.state.skip_move_confirm = true;
+                    self.move_task_right()?;
+                    self.state.skip_move_confirm = false;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.state.move_confirm_popup = None;
                 }
                 _ => {}
             }
@@ -2732,6 +2798,30 @@ impl App {
         };
 
         if let Some(new_status) = next_status {
+            // Check if phase is incomplete and agent is still working
+            if !self.state.skip_move_confirm
+                && matches!(current_status, TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review)
+            {
+                let plugin = self.load_task_plugin(&task);
+                if let Some(ref wt_path) = task.worktree_path {
+                    if !phase_artifact_exists(wt_path, current_status, &plugin) {
+                        // Check if agent is still running in the tmux pane
+                        let agent_running = task.session_name.as_ref().map_or(false, |target| {
+                            self.state.tmux_ops.window_exists(target).unwrap_or(false)
+                                && !is_pane_at_shell(&*self.state.tmux_ops, target)
+                        });
+                        if agent_running {
+                            self.state.move_confirm_popup = Some(MoveConfirmPopup {
+                                task_id: task.id.clone(),
+                                from_status: current_status,
+                                to_status: new_status,
+                            });
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
             // Create worktree and tmux window when moving from Backlog to Planning
             if current_status == TaskStatus::Backlog && new_status == TaskStatus::Planning {
                 // Stamp plugin on task if not already set (may be set from research)
@@ -2755,32 +2845,21 @@ impl App {
                     };
                     let skill_cmd = resolve_skill_command(&plugin, "planning", &planning_agent, &task_content);
                     let prompt = resolve_prompt(&plugin, "planning", &task_content, &task.id, &planning_agent);
+                    let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
 
                     let tmux_ops = Arc::clone(&self.state.tmux_ops);
                     let task_content_clone = task_content.clone();
                     let agent_registry = Arc::clone(&self.state.agent_registry);
                     let planning_agent_clone = planning_agent.clone();
+                    let current_agent_clone = task.agent.clone();
                     std::thread::spawn(move || {
                         if agent_switch {
                             let agent_ops = agent_registry.get(&planning_agent_clone);
                             let new_cmd = agent_ops.build_interactive_command("");
-                            switch_agent_in_tmux(tmux_ops.as_ref(), &target, &new_cmd);
-                            // Wait for new agent to be ready
+                            switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_agent_clone, &new_cmd);
                             let _ = wait_for_agent_ready(&tmux_ops, &target);
                         }
-                        if let Some(ref cmd) = skill_cmd {
-                            let _ = tmux_ops.send_keys(&target, cmd);
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                        }
-                        if !prompt.is_empty() {
-                            let _ = tmux_ops.send_keys(&target, &prompt);
-                        } else if skill_cmd.is_none() {
-                            // No command and no prompt (e.g. void plugin): prefill task in input
-                            let oneline = task_content_clone.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-                            if !oneline.is_empty() {
-                                let _ = tmux_ops.send_keys_literal(&target, &oneline);
-                            }
-                        }
+                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone);
                     });
                 } else {
                     // No research session — create worktree + tmux window from scratch
@@ -2816,26 +2895,7 @@ impl App {
                     let task_content_clone = task_content.clone();
                     std::thread::spawn(move || {
                         if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                            if let Some(ref cmd) = skill_cmd {
-                                let _ = tmux_ops.send_keys(&target, cmd);
-                                std::thread::sleep(std::time::Duration::from_millis(500));
-                            }
-                            if !prompt_clone.is_empty() {
-                                if let Some(ref trigger) = prompt_trigger {
-                                    if wait_for_prompt_trigger(&tmux_ops, &target, trigger) {
-                                        std::thread::sleep(std::time::Duration::from_millis(500));
-                                        let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                                    }
-                                } else {
-                                    let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                                }
-                            } else if skill_cmd.is_none() {
-                                // No command and no prompt (e.g. void plugin): prefill task in input
-                                let oneline = task_content_clone.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-                                if !oneline.is_empty() {
-                                    let _ = tmux_ops.send_keys_literal(&target, &oneline);
-                                }
-                            }
+                            send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone);
                         }
                     });
                 }
@@ -2854,22 +2914,21 @@ impl App {
                     };
                     let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content);
                     let prompt = resolve_prompt(&plugin, "running", &task_content, &task.id, &running_agent);
+                    let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
                     let session_clone = session_name.clone();
                     let tmux_ops = Arc::clone(&self.state.tmux_ops);
                     let agent_registry = Arc::clone(&self.state.agent_registry);
                     let running_agent_clone = running_agent.clone();
+                    let current_agent_clone = task.agent.clone();
+                    let task_content_clone = task_content.clone();
                     std::thread::spawn(move || {
                         if agent_switch {
                             let agent_ops = agent_registry.get(&running_agent_clone);
                             let new_cmd = agent_ops.build_interactive_command("");
-                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &new_cmd);
+                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
                             let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
                         }
-                        if let Some(cmd) = skill_cmd {
-                            let _ = tmux_ops.send_keys(&session_clone, &cmd);
-                        } else if !prompt.is_empty() {
-                            let _ = tmux_ops.send_keys(&session_clone, &prompt);
-                        }
+                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone);
                     });
                     task.agent = running_agent;
                 }
@@ -2888,22 +2947,21 @@ impl App {
                     };
                     let skill_cmd = resolve_skill_command(&plugin, "review", &review_agent, &task_content);
                     let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, &review_agent);
+                    let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
                     let session_clone = session_name.clone();
                     let tmux_ops = Arc::clone(&self.state.tmux_ops);
                     let agent_registry = Arc::clone(&self.state.agent_registry);
                     let review_agent_clone = review_agent.clone();
+                    let current_agent_clone = task.agent.clone();
+                    let task_content_clone = task_content.clone();
                     std::thread::spawn(move || {
                         if agent_switch {
                             let agent_ops = agent_registry.get(&review_agent_clone);
                             let new_cmd = agent_ops.build_interactive_command("");
-                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &new_cmd);
+                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
                             let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
                         }
-                        if let Some(cmd) = skill_cmd {
-                            let _ = tmux_ops.send_keys(&session_clone, &cmd);
-                        } else if !prompt.is_empty() {
-                            let _ = tmux_ops.send_keys(&session_clone, &prompt);
-                        }
+                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone);
                     });
                 }
                 task.agent = review_agent.clone();
@@ -3045,27 +3103,7 @@ impl App {
         let task_content_clone = task_content.clone();
         std::thread::spawn(move || {
             if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                if let Some(ref cmd) = skill_cmd {
-                    let _ = tmux_ops.send_keys(&target, cmd);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-                if !prompt_clone.is_empty() {
-                    if let Some(ref trigger) = prompt_trigger {
-                        // Wait for the trigger text before sending the prompt
-                        if wait_for_prompt_trigger(&tmux_ops, &target, trigger) {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                        }
-                    } else {
-                        let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                    }
-                } else if skill_cmd.is_none() {
-                    // No command and no prompt (e.g. void plugin): prefill task in input
-                    let oneline = task_content_clone.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-                    if !oneline.is_empty() {
-                        let _ = tmux_ops.send_keys_literal(&target, &oneline);
-                    }
-                }
+                send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone);
             }
         });
 
@@ -3130,22 +3168,10 @@ impl App {
         let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content);
         let prompt_clone = prompt.clone();
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
+        let task_content_clone = task_content.clone();
         std::thread::spawn(move || {
             if let Some(target) = wait_for_agent_ready(&tmux_ops, &target_clone) {
-                if let Some(ref cmd) = skill_cmd {
-                    let _ = tmux_ops.send_keys(&target, cmd);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-                if !prompt_clone.is_empty() {
-                    if let Some(ref trigger) = prompt_trigger {
-                        if wait_for_prompt_trigger(&tmux_ops, &target, trigger) {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                        }
-                    } else {
-                        let _ = tmux_ops.send_keys(&target, &prompt_clone);
-                    }
-                }
+                send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt_clone, &prompt_trigger, &task_content_clone);
             }
         });
 
@@ -3177,10 +3203,11 @@ impl App {
                         let tmux_ops = Arc::clone(&self.state.tmux_ops);
                         let agent_registry = Arc::clone(&self.state.agent_registry);
                         let running_agent_clone = running_agent.clone();
+                        let current_agent_clone = task.agent.clone();
                         std::thread::spawn(move || {
                             let agent_ops = agent_registry.get(&running_agent_clone);
                             let new_cmd = agent_ops.build_interactive_command("");
-                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &new_cmd);
+                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
                         });
                     }
                 }
@@ -3210,10 +3237,11 @@ impl App {
                         let tmux_ops = Arc::clone(&self.state.tmux_ops);
                         let agent_registry = Arc::clone(&self.state.agent_registry);
                         let planning_agent_clone = planning_agent.clone();
+                        let current_agent_clone = task.agent.clone();
                         std::thread::spawn(move || {
                             let agent_ops = agent_registry.get(&planning_agent_clone);
                             let new_cmd = agent_ops.build_interactive_command("");
-                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &new_cmd);
+                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
                         });
                     }
                 }
@@ -4237,6 +4265,73 @@ fn resolve_skill_command(plugin: &Option<WorkflowPlugin>, phase: &str, agent_nam
 
 /// Resolve the prompt trigger text for a given phase.
 /// When set, the system polls the tmux pane for this text before sending the prompt.
+/// Send skill command and prompt to the agent via tmux.
+/// When there is no prompt_trigger, combines skill command + prompt into a single message
+/// (separated by a newline). When a prompt_trigger is set, sends them as two separate messages
+/// with the prompt sent only after the trigger text appears in the pane.
+fn send_skill_and_prompt(
+    tmux_ops: &Arc<dyn TmuxOperations>,
+    target: &str,
+    skill_cmd: &Option<String>,
+    prompt: &str,
+    prompt_trigger: &Option<String>,
+    task_content: &str,
+) {
+    match (skill_cmd, prompt_trigger) {
+        // Skill + prompt trigger: must send separately, wait for trigger between them
+        (Some(cmd), Some(trigger)) => {
+            let _ = tmux_ops.send_keys(target, cmd);
+            if !prompt.is_empty() {
+                if wait_for_prompt_trigger(tmux_ops, target, trigger) {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let _ = tmux_ops.send_keys(target, prompt);
+                }
+            }
+        }
+        // Skill + prompt, no trigger: send separately, wait for pane to stabilize between them
+        (Some(cmd), None) => {
+            let _ = tmux_ops.send_keys(target, cmd);
+            if !prompt.is_empty() {
+                // Wait for agent to finish processing the skill command before sending the prompt.
+                // Poll pane content until it stabilizes (agent re-rendered its UI after the command).
+                let mut last_content = String::new();
+                let mut stable_ticks = 0u32;
+                for _ in 0..50 { // 10s max
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    if let Ok(content) = tmux_ops.capture_pane(target) {
+                        if content == last_content {
+                            stable_ticks += 1;
+                            if stable_ticks >= 10 { // 2s of no changes
+                                break;
+                            }
+                        } else {
+                            stable_ticks = 0;
+                            last_content = content;
+                        }
+                    }
+                }
+                // Send text first, then Enter with a delay so Gemini's Ink TUI
+                // can finish rendering the input before processing Enter.
+                let _ = tmux_ops.send_keys_literal(target, prompt);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let _ = tmux_ops.send_keys_literal(target, "Enter");
+            }
+        }
+        // No skill command, just prompt
+        (None, _) => {
+            if !prompt.is_empty() {
+                let _ = tmux_ops.send_keys(target, prompt);
+            } else {
+                // No command and no prompt (e.g. void plugin): prefill task in input
+                let oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+                if !oneline.is_empty() {
+                    let _ = tmux_ops.send_keys_literal(target, &oneline);
+                }
+            }
+        }
+    }
+}
+
 fn resolve_prompt_trigger(plugin: &Option<WorkflowPlugin>, phase: &str) -> Option<String> {
     plugin.as_ref().and_then(|p| {
         match phase {
@@ -4385,11 +4480,10 @@ fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
 /// Terminates the current agent, waits for the shell prompt,
 /// then starts the new agent.
 ///
-/// Exit strategy (works across all agents):
-///   1. Ctrl+C to interrupt any in-progress operation
-///   2. `/exit` command (works for Claude, Gemini, OpenCode)
-///   3. Poll `pane_current_command` until the agent process is gone
-///   4. Ctrl+C + Ctrl+D as last resort
+/// Exit commands per agent:
+///   - Claude, OpenCode: `/exit`
+///   - Gemini, Codex: `/quit`
+///   - Fallback: Ctrl+C + Ctrl+D as last resort
 ///
 /// Detection uses `tmux display -p #{pane_current_command}` which reports
 /// the actual process name (e.g. "claude", "node", "bash"), avoiding
@@ -4397,49 +4491,91 @@ fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
 fn switch_agent_in_tmux(
     tmux_ops: &dyn TmuxOperations,
     target: &str,
+    current_agent: &str,
     new_agent_cmd: &str,
 ) {
-    // 1. Ctrl+C to interrupt any running operation, then /exit
-    let _ = tmux_ops.send_keys_literal(target, "C-c");
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    let _ = tmux_ops.send_keys(target, "/exit");
+    // 1. Send the graceful exit command for the current agent.
+    let exit_cmd = match current_agent {
+        "codex" => None,   // Codex has no exit command — Ctrl+C is the only way
+        "gemini" => Some("/quit"),
+        _ => Some("/exit"), // claude, opencode, and others
+    };
 
-    // 2. Poll pane_current_command until agent process exits (drops to shell)
+    if let Some(cmd) = exit_cmd {
+        let _ = tmux_ops.send_keys(target, cmd);
+    } else {
+        let _ = tmux_ops.send_keys_literal(target, "C-c");
+    }
+
+    // 2. Poll for shell (agent exited). If the agent was busy, the exit command
+    //    may have been queued — so we wait up to 3s for it to take effect.
     let mut found_shell = false;
-    for i in 0..100 {
-        // 10s max
+    for _ in 0..30 { // 3s
         std::thread::sleep(std::time::Duration::from_millis(100));
         if is_pane_at_shell(tmux_ops, target) {
             found_shell = true;
             break;
         }
-        // After 3 seconds, try Ctrl+C again as fallback (for agents that ignore /exit)
-        if i == 30 {
-            let _ = tmux_ops.send_keys_literal(target, "C-c");
+    }
+
+    // 3. If still running, the agent was likely busy. Ctrl+C to cancel, then retry exit.
+    if !found_shell {
+        let _ = tmux_ops.send_keys_literal(target, "C-c");
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+
+        if let Some(cmd) = exit_cmd {
+            let _ = tmux_ops.send_keys(target, cmd);
+        }
+
+        // Wait for shell after retry
+        for _ in 0..50 { // 5s
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if is_pane_at_shell(tmux_ops, target) {
+                found_shell = true;
+                break;
+            }
         }
     }
 
-    // 3. Last resort: Ctrl+C + Ctrl+D if still not at shell
+    // 4. Last resort: Ctrl+D to force exit
     if !found_shell {
-        let _ = tmux_ops.send_keys_literal(target, "C-c");
-        std::thread::sleep(std::time::Duration::from_millis(200));
         let _ = tmux_ops.send_keys_literal(target, "C-d");
-        std::thread::sleep(std::time::Duration::from_millis(1000));
+        for _ in 0..20 { // 2s
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if is_pane_at_shell(tmux_ops, target) {
+                break;
+            }
+        }
     }
 
-    // 4. Start the new agent
+    // 4. Let the shell fully initialize before sending the new agent command
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+
+    // 5. Start the new agent
     let _ = tmux_ops.send_keys(target, new_agent_cmd);
+
+    // 6. Wait for the new agent process to actually start (pane_current_command != shell).
+    //    Without this, wait_for_agent_ready may see stale ">" from old pane content
+    //    and return before the new agent has even launched.
+    for _ in 0..100 { // 10s max
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if !is_pane_at_shell(tmux_ops, target) {
+            break;
+        }
+    }
 }
 
 /// Wait for an agent in a tmux pane to be ready for input.
-/// Handles both the bypass warning prompt (sends acceptance) and agents that skip it.
-/// Returns the target string if the agent became ready, None on timeout.
+/// First waits for the agent process to start (pane_current_command != shell),
+/// then waits a fixed delay for the agent to fully initialize.
+/// Handles the bypass warning prompt (sends acceptance) during the wait.
+/// Always returns Some — the prompt is always sent (better late than never).
 fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Option<String> {
-    for _ in 0..50 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
+    // Wait a fixed 8s for the agent to fully initialize.
+    // During the wait, check for the bypass warning prompt (Claude).
+    for _ in 0..40 { // 8s (40 * 200ms)
+        std::thread::sleep(std::time::Duration::from_millis(200));
         if let Ok(content) = tmux_ops.capture_pane(target) {
-            // Check for bypass warning prompt (needs acceptance)
             if content.contains("Yes, I accept") || content.contains("I accept the risk") {
                 let _ = tmux_ops.send_keys_literal(target, "2");
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -4447,14 +4583,10 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
                 std::thread::sleep(std::time::Duration::from_millis(1000));
                 return Some(target.to_string());
             }
-            // Agent started without acceptance prompt (e.g. --dangerously-skip-permissions)
-            if content.contains(">") || content.contains("❯") || content.contains("$") {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                return Some(target.to_string());
-            }
         }
     }
-    None
+
+    Some(target.to_string())
 }
 
 /// Load workflow plugin if configured

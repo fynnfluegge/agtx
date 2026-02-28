@@ -40,7 +40,7 @@ impl Agent {
         if prompt.is_empty() {
             return match self.name.as_str() {
                 "claude" => "claude --dangerously-skip-permissions".to_string(),
-                "codex" => "codex --approval-mode full-auto".to_string(),
+                "codex" => "codex --full-auto".to_string(),
                 "copilot" => "copilot --allow-all-tools".to_string(),
                 "gemini" => "gemini --approval-mode yolo".to_string(),
                 "opencode" => "opencode".to_string(),
@@ -51,7 +51,7 @@ impl Agent {
         let escaped_prompt = prompt.replace('\'', "'\"'\"'");
         match self.name.as_str() {
             "claude" => format!("claude --dangerously-skip-permissions '{}'", escaped_prompt),
-            "codex" => format!("codex --approval-mode full-auto '{}'", escaped_prompt),
+            "codex" => format!("codex --full-auto '{}'", escaped_prompt),
             "copilot" => format!("copilot --allow-all-tools -p '{}'", escaped_prompt),
             "gemini" => format!("gemini --approval-mode yolo -i '{}'", escaped_prompt),
             "opencode" => format!("opencode -p '{}'", escaped_prompt),

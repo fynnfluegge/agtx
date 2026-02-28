@@ -2532,86 +2532,86 @@ fn test_is_pane_at_shell_returns_false_when_none() {
 
 // === switch_agent_in_tmux tests ===
 
+/// Test that switch_agent_in_tmux sends the correct exit command per agent
+/// and starts the new agent. Uses relaxed mocking since the function has
+/// multiple polling loops with retries.
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_switch_agent_sends_exit_sequence_and_starts_new_agent() {
-    use mockall::Sequence;
+fn test_switch_agent_claude_sends_exit() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     let mut mock = MockTmuxOperations::new();
-    let mut seq = Sequence::new();
+    let exit_sent = Arc::new(AtomicBool::new(false));
+    let new_agent_sent = Arc::new(AtomicBool::new(false));
+    let exit_sent_c = exit_sent.clone();
+    let new_agent_sent_c = new_agent_sent.clone();
 
-    // 1. Ctrl+C to interrupt
-    mock.expect_send_keys_literal()
-        .withf(|t, k| t == "sess:win" && k == "C-c")
-        .times(1)
-        .in_sequence(&mut seq)
-        .returning(|_, _| Ok(()));
-
-    // 2. /exit command
+    // Claude uses /exit
     mock.expect_send_keys()
-        .withf(|t, k| t == "sess:win" && k == "/exit")
-        .times(1)
-        .in_sequence(&mut seq)
-        .returning(|_, _| Ok(()));
-
-    // 3. First poll returns agent still running, second returns shell
+        .returning(move |_, k| {
+            if k == "/exit" { exit_sent_c.store(true, Ordering::SeqCst); }
+            if k == "codex" { new_agent_sent_c.store(true, Ordering::SeqCst); }
+            Ok(())
+        });
+    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    // Return shell immediately so polling exits fast
     mock.expect_pane_current_command()
-        .withf(|t| t == "sess:win")
-        .times(1)
-        .in_sequence(&mut seq)
-        .returning(|_| Some("claude".to_string()));
-
-    mock.expect_pane_current_command()
-        .withf(|t| t == "sess:win")
-        .times(1)
-        .in_sequence(&mut seq)
         .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok(String::new()));
 
-    // 4. Start the new agent
-    mock.expect_send_keys()
-        .withf(|t, k| t == "sess:win" && k == "codex")
-        .times(1)
-        .in_sequence(&mut seq)
-        .returning(|_, _| Ok(()));
-
-    switch_agent_in_tmux(&mock, "sess:win", "codex");
+    switch_agent_in_tmux(&mock, "sess:win", "claude", "codex");
+    assert!(exit_sent.load(Ordering::SeqCst), "/exit should be sent for claude");
+    assert!(new_agent_sent.load(Ordering::SeqCst), "new agent command should be sent");
 }
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_switch_agent_immediate_shell_starts_new_agent() {
-    use mockall::Sequence;
+fn test_switch_agent_gemini_sends_quit() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     let mut mock = MockTmuxOperations::new();
-    let mut seq = Sequence::new();
+    let quit_sent = Arc::new(AtomicBool::new(false));
+    let quit_sent_c = quit_sent.clone();
 
-    // 1. Ctrl+C
-    mock.expect_send_keys_literal()
-        .withf(|t, k| t == "sess:win" && k == "C-c")
-        .times(1)
-        .in_sequence(&mut seq)
-        .returning(|_, _| Ok(()));
-
-    // 2. /exit
     mock.expect_send_keys()
-        .withf(|t, k| t == "sess:win" && k == "/exit")
-        .times(1)
-        .in_sequence(&mut seq)
-        .returning(|_, _| Ok(()));
-
-    // 3. Immediately at shell
+        .returning(move |_, k| {
+            if k == "/quit" { quit_sent_c.store(true, Ordering::SeqCst); }
+            Ok(())
+        });
+    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
     mock.expect_pane_current_command()
-        .withf(|t| t == "sess:win")
-        .times(1)
-        .in_sequence(&mut seq)
         .returning(|_| Some("zsh".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok(String::new()));
 
-    // 4. Start new agent
-    mock.expect_send_keys()
-        .withf(|t, k| t == "sess:win" && k == "gemini")
-        .times(1)
-        .in_sequence(&mut seq)
-        .returning(|_, _| Ok(()));
+    switch_agent_in_tmux(&mock, "sess:win", "gemini", "claude");
+    assert!(quit_sent.load(Ordering::SeqCst), "/quit should be sent for gemini");
+}
 
-    switch_agent_in_tmux(&mock, "sess:win", "gemini");
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_switch_agent_codex_sends_ctrl_c() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let mut mock = MockTmuxOperations::new();
+    let ctrl_c_sent = Arc::new(AtomicBool::new(false));
+    let ctrl_c_sent_c = ctrl_c_sent.clone();
+
+    mock.expect_send_keys().returning(|_, _| Ok(()));
+    mock.expect_send_keys_literal()
+        .returning(move |_, k| {
+            if k == "C-c" { ctrl_c_sent_c.store(true, Ordering::SeqCst); }
+            Ok(())
+        });
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok(String::new()));
+
+    switch_agent_in_tmux(&mock, "sess:win", "codex", "claude");
+    assert!(ctrl_c_sent.load(Ordering::SeqCst), "Ctrl+C should be sent for codex");
 }
