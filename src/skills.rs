@@ -2,10 +2,10 @@
 /// Skills follow the Agent Skills spec (SKILL.md with YAML frontmatter + markdown).
 /// Content is loaded from .md files at compile time via include_str!().
 
-pub const RESEARCH_SKILL: &str = include_str!("../skills/research.md");
-pub const PLAN_SKILL: &str = include_str!("../skills/plan.md");
-pub const EXECUTE_SKILL: &str = include_str!("../skills/execute.md");
-pub const REVIEW_SKILL: &str = include_str!("../skills/review.md");
+pub const RESEARCH_SKILL: &str = include_str!("../plugins/agtx/skills/research.md");
+pub const PLAN_SKILL: &str = include_str!("../plugins/agtx/skills/plan.md");
+pub const EXECUTE_SKILL: &str = include_str!("../plugins/agtx/skills/execute.md");
+pub const REVIEW_SKILL: &str = include_str!("../plugins/agtx/skills/review.md");
 
 /// Default built-in skills: (directory_name, SKILL.md content)
 /// Used for worktree phases (Research, Planning, Running, Review)
@@ -16,19 +16,13 @@ pub const DEFAULT_SKILLS: &[(&str, &str)] = &[
     ("agtx-review", REVIEW_SKILL),
 ];
 
-/// Default task prompts per phase transition.
-/// These are sent as the task content message AFTER the skill command.
-/// For agents with native skill invocation, the skill is invoked separately via send_keys.
-pub const DEFAULT_PROMPT_RESEARCH: &str =
-    "Task: {task}\n\nWrite your findings to .agtx/research/{task_id}.md";
-pub const DEFAULT_PROMPT_PLANNING: &str =
-    "Task: {task}";
-pub const DEFAULT_PROMPT_PLANNING_WITH_RESEARCH: &str =
-    "Task: {task}\n\nIf research was done, findings are available in .agtx/research/{task_id}.md — use them as context if present.";
-pub const DEFAULT_PROMPT_RUNNING: &str =
-    "Plan approved. Implement the changes described in .agtx/plan.md";
-pub const DEFAULT_PROMPT_REVIEW: &str =
-    "Implementation complete. Review the changes.";
+/// Load a bundled plugin by name from compile-time embedded TOML.
+pub fn load_bundled_plugin(name: &str) -> Option<crate::config::WorkflowPlugin> {
+    BUNDLED_PLUGINS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .and_then(|(_, _, content)| toml::from_str(content).ok())
+}
 
 /// Agent-native command/skill directory paths.
 /// Returns (base_dir_relative_to_worktree, namespace_subdir) or None if agent has no native discovery.
@@ -181,6 +175,11 @@ pub fn skill_to_gemini_toml(description: &str, skill_content: &str) -> String {
 /// Bundled plugin configurations: (name, description, plugin.toml content)
 /// These are embedded at compile time so the TUI can install them without external files.
 pub const BUNDLED_PLUGINS: &[(&str, &str, &str)] = &[
+    (
+        "agtx",
+        "Built-in workflow with skills and prompts",
+        include_str!("../plugins/agtx/plugin.toml"),
+    ),
     (
         "gsd",
         "Get Shit Done - structured spec-driven development",

@@ -18,7 +18,3 @@ running = "/speckit.implement"
 review = "/speckit.analyze"
 
 [prompts]
-research = ""
-planning = ""
-running = ""
-review = ""

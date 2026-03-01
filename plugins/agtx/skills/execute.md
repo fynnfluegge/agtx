@@ -5,12 +5,14 @@ description: Execute an approved implementation plan. Implement the changes, the
 
 # Execution Phase
 
-You are in the **execution phase** of an agtx-managed task. Your plan has been approved.
+You are in the **execution phase** of an agtx-managed task.
 
 ## Instructions
 
-1. Read your plan from `.agtx/plan.md`
-2. Implement the changes described in the plan
+1. Check if `.agtx/plan.md` exists:
+   - **If it exists**: read it — it contains the approved implementation plan. Proceed to step 2.
+   - **If it does not exist**: **wait for the next message** — it contains the task description. Do not proceed until you receive it.
+2. Implement the changes
 3. Run relevant tests to verify your changes
 4. Fix any issues found during testing
 

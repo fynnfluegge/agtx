@@ -19,9 +19,6 @@ review = "/gsd:verify-work 1"
 
 [prompts]
 research = "Task: {task}"
-planning = ""
-running = ""
-review = ""
 
 [prompt_triggers]
 research = "What do you want to build?"

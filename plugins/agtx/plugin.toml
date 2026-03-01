@@ -1,0 +1,16 @@
+name = "agtx"
+description = "Built-in workflow with skills and prompts"
+
+[artifacts]
+research = ".agtx/research.md"
+planning = ".agtx/plan.md"
+running = ".agtx/execute.md"
+review = ".agtx/review.md"
+
+[commands]
+# Unset — uses agent-native skill invocation (/agtx:plan, $agtx-plan, etc.)
+
+[prompts]
+research = "Task: {task}"
+planning = "Task: {task}"
+running_direct = "Task: {task}"
