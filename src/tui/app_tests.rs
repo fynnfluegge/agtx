@@ -1775,7 +1775,8 @@ fn test_transform_skill_frontmatter_no_agtx() {
 #[test]
 fn test_resolve_prompt_claude_no_skill_ref() {
     // Claude has skill invocation support — prompt should NOT contain skill reference
-    let prompt = resolve_prompt(&None, "planning", "my task", "task-123", "claude");
+    let plugin = skills::load_bundled_plugin("agtx");
+    let prompt = resolve_prompt(&plugin, "planning", "my task", "task-123", "claude");
     assert!(prompt.contains("my task"));
     assert!(!prompt.contains("/agtx:plan"));
     assert!(!prompt.contains("SKILL.md"));
@@ -1784,31 +1785,69 @@ fn test_resolve_prompt_claude_no_skill_ref() {
 #[test]
 fn test_resolve_prompt_copilot_has_file_path() {
     // Copilot has no skill invocation — prompt should contain file-path reference
-    let prompt = resolve_prompt(&None, "planning", "my task", "task-123", "copilot");
+    let plugin = skills::load_bundled_plugin("agtx");
+    let prompt = resolve_prompt(&plugin, "planning", "my task", "task-123", "copilot");
     assert!(prompt.contains("my task"));
     assert!(prompt.contains(".agtx/skills/agtx-plan/SKILL.md"));
 }
 
 #[test]
-fn test_resolve_prompt_research_has_task_id() {
-    let prompt = resolve_prompt(&None, "research", "my task", "abc-123", "claude");
-    assert!(prompt.contains("abc-123"));
+fn test_resolve_prompt_research_has_task() {
+    let plugin = skills::load_bundled_plugin("agtx");
+    let prompt = resolve_prompt(&plugin, "research", "my task", "abc-123", "claude");
+    assert!(prompt.contains("my task"));
     // Claude should NOT have skill ref in prompt (sent via send_keys)
     assert!(!prompt.contains("/agtx:research"));
 }
 
 #[test]
 fn test_resolve_prompt_running_phase() {
-    let prompt = resolve_prompt(&None, "running", "my task", "task-123", "claude");
-    assert!(prompt.contains("Plan approved"));
-    assert!(!prompt.contains("SKILL.md"));
+    let plugin = skills::load_bundled_plugin("agtx");
+    let prompt = resolve_prompt(&plugin, "running", "my task", "task-123", "claude");
+    // No running prompt — execute skill handles instructions
+    assert!(prompt.is_empty());
 }
 
 #[test]
 fn test_resolve_prompt_review_phase() {
-    let prompt = resolve_prompt(&None, "review", "my task", "task-123", "copilot");
-    assert!(prompt.contains("Implementation complete"));
+    let plugin = skills::load_bundled_plugin("agtx");
+    let prompt = resolve_prompt(&plugin, "review", "my task", "task-123", "copilot");
+    // No review prompt — review skill handles instructions.
+    // Copilot gets skill file reference since it has no interactive invocation.
     assert!(prompt.contains(".agtx/skills/agtx-review/SKILL.md"));
+}
+
+#[test]
+fn test_resolve_prompt_planning_with_research() {
+    let plugin = skills::load_bundled_plugin("agtx");
+    let prompt = resolve_prompt(&plugin, "planning_with_research", "my task", "task-123", "claude");
+    // Empty — agent already has task from research session, skill handles research file discovery
+    assert!(prompt.is_empty());
+}
+
+#[test]
+fn test_resolve_prompt_no_plugin_returns_empty() {
+    // Without a plugin, all prompts return empty
+    let prompt = resolve_prompt(&None, "planning", "my task", "task-123", "claude");
+    assert!(prompt.is_empty());
+}
+
+#[test]
+fn test_agtx_plugin_artifacts() {
+    let plugin = skills::load_bundled_plugin("agtx").expect("agtx plugin should load");
+    assert_eq!(plugin.artifacts.research.as_deref(), Some(".agtx/research.md"));
+    assert_eq!(plugin.artifacts.planning.as_deref(), Some(".agtx/plan.md"));
+    assert_eq!(plugin.artifacts.running.as_deref(), Some(".agtx/execute.md"));
+    assert_eq!(plugin.artifacts.review.as_deref(), Some(".agtx/review.md"));
+}
+
+#[test]
+fn test_agtx_plugin_has_no_commands() {
+    let plugin = skills::load_bundled_plugin("agtx").expect("agtx plugin should load");
+    assert!(plugin.commands.research.is_none());
+    assert!(plugin.commands.planning.is_none());
+    assert!(plugin.commands.running.is_none());
+    assert!(plugin.commands.review.is_none());
 }
 
 #[test]
@@ -1986,25 +2025,26 @@ fn test_bundled_plugins_are_valid_toml() {
 
 #[test]
 fn test_bundled_plugins_list() {
-    // We ship gsd, spec-kit, and void
     let names: Vec<&str> = skills::BUNDLED_PLUGINS.iter().map(|(n, _, _)| *n).collect();
+    assert!(names.contains(&"agtx"));
     assert!(names.contains(&"gsd"));
     assert!(names.contains(&"spec-kit"));
     assert!(names.contains(&"void"));
-    assert_eq!(names.len(), 3);
+    assert_eq!(names.len(), 4);
 }
 
 #[test]
 fn test_plugin_select_popup_construction_no_active() {
-    // When no plugin is active, (none) should be selected
+    // When no plugin is active, agtx should be selected
     let current = "";
     let mut options = vec![PluginOption {
         name: String::new(),
-        label: "(none)".to_string(),
-        description: "Use agtx built-in defaults".to_string(),
+        label: "agtx".to_string(),
+        description: "Built-in workflow with skills and prompts".to_string(),
         active: current.is_empty(),
     }];
     for (name, desc, _) in skills::BUNDLED_PLUGINS {
+        if *name == "agtx" { continue; }
         options.push(PluginOption {
             name: name.to_string(),
             label: name.to_string(),
@@ -2024,11 +2064,12 @@ fn test_plugin_select_popup_construction_gsd_active() {
     let current = "gsd";
     let mut options = vec![PluginOption {
         name: String::new(),
-        label: "(none)".to_string(),
-        description: "Use agtx built-in defaults".to_string(),
+        label: "agtx".to_string(),
+        description: "Built-in workflow with skills and prompts".to_string(),
         active: current.is_empty(),
     }];
     for (name, desc, _) in skills::BUNDLED_PLUGINS {
+        if *name == "agtx" { continue; }
         options.push(PluginOption {
             name: name.to_string(),
             label: name.to_string(),

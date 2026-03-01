@@ -430,7 +430,10 @@ pub struct PluginCommands {
 pub struct PluginPrompts {
     pub research: Option<String>,
     pub planning: Option<String>,
+    pub planning_with_research: Option<String>,
     pub running: Option<String>,
+    /// Prompt for Backlog → Running (skipping Planning). Includes {task} since there's no plan.
+    pub running_direct: Option<String>,
     pub review: Option<String>,
 }
 

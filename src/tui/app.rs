@@ -1740,6 +1740,7 @@ impl App {
             active: current.is_empty(),
         }];
         for (name, desc, _content) in skills::BUNDLED_PLUGINS {
+            if *name == "agtx" { continue; }
             options.push(PluginOption {
                 name: name.to_string(),
                 label: name.to_string(),
@@ -3055,8 +3056,12 @@ impl App {
                     } else {
                         task.title.clone()
                     };
+                    let has_plan = task.worktree_path.as_ref().map_or(false, |wt| {
+                        phase_artifact_exists(wt, TaskStatus::Planning, &plugin)
+                    });
+                    let run_phase = if has_plan { "running" } else { "running_direct" };
                     let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content);
-                    let prompt = resolve_prompt(&plugin, "running", &task_content, &task.id, &running_agent);
+                    let prompt = resolve_prompt(&plugin, run_phase, &task_content, &task.id, &running_agent);
                     let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
                     let session_clone = session_name.clone();
                     let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -3357,10 +3362,6 @@ impl App {
         } else {
             task.title.clone()
         };
-        let prompt = format!(
-            "Task: {}\n\nPlease implement this task directly. No need to plan first - go ahead and make the changes.",
-            task_content
-        );
 
         // Stamp plugin on task
         task.plugin = self.state.config.workflow_plugin.clone();
@@ -3368,6 +3369,7 @@ impl App {
         let plugin = self.load_task_plugin(&task);
         let running_agent = self.state.config.agent_for_phase("running").to_string();
         let all_agents = collect_phase_agents(&self.state.config);
+        let prompt = resolve_prompt(&plugin, "running_direct", &task_content, &task.id, &running_agent);
         let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content);
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
         let project_name = self.state.project_name.clone();
@@ -3539,11 +3541,11 @@ impl App {
     }
 
     /// Load the plugin that a specific task was created with.
-    /// Returns None for tasks created with agtx defaults (task.plugin is None).
+    /// Falls back to bundled agtx plugin for tasks with no explicit plugin.
     fn load_task_plugin(&self, task: &Task) -> Option<WorkflowPlugin> {
         let plugin = match &task.plugin {
             Some(name) => WorkflowPlugin::load(name, self.state.project_path.as_deref()).ok(),
-            None => None,
+            None => skills::load_bundled_plugin("agtx"),
         };
         if let Some(ref p) = plugin {
             if !p.supports_agent(&self.state.config.default_agent) {
@@ -3614,20 +3616,22 @@ impl App {
             }
 
             let phase_status = if status == TaskStatus::Backlog {
-                // Research artifact: check worktree first, then project root
+                // Research artifact: check worktree only (research runs in worktree)
+                let plugin = plugin_cache.entry(task_plugin.clone()).or_insert_with(|| {
+                    match &task_plugin {
+                        Some(name) => WorkflowPlugin::load(name, self.state.project_path.as_deref()).ok(),
+                        None => skills::load_bundled_plugin("agtx"),
+                    }
+                });
                 let found = worktree_path.as_ref().map_or(false, |wt| {
-                    Path::new(wt).join(".agtx").join("research")
-                        .join(format!("{}.md", task_id)).exists()
-                }) || project_path.as_ref().map_or(false, |pp| {
-                    pp.join(".agtx").join("research")
-                        .join(format!("{}.md", task_id)).exists()
+                    research_artifact_exists(wt, &task_id, plugin)
                 });
                 if found { PhaseStatus::Ready } else { PhaseStatus::Working }
             } else if let Some(ref wt) = worktree_path {
                 let plugin = plugin_cache.entry(task_plugin.clone()).or_insert_with(|| {
                     match &task_plugin {
                         Some(name) => WorkflowPlugin::load(name, self.state.project_path.as_deref()).ok(),
-                        None => None,
+                        None => skills::load_bundled_plugin("agtx"),
                     }
                 });
                 if phase_artifact_exists(wt, status, plugin) {
@@ -3853,15 +3857,6 @@ fn setup_task_worktree(
     // Deploy for all unique agents configured across phases
     let agent_refs: Vec<&str> = all_phase_agents.iter().map(|s| s.as_str()).collect();
     write_skills_to_worktree(&worktree_path_str, project_path, plugin, &agent_refs);
-
-    // Copy research artifact into worktree if it exists
-    let research_path = project_path.join(".agtx").join("research")
-        .join(format!("{}.md", task.id));
-    if research_path.exists() {
-        let dst_dir = Path::new(&worktree_path_str).join(".agtx");
-        let _ = std::fs::create_dir_all(&dst_dir);
-        let _ = std::fs::copy(&research_path, dst_dir.join("research.md"));
-    }
 
     // Run plugin init_script (in addition to project init_script)
     // Supports {agent} placeholder for agent-specific initialization
@@ -4489,30 +4484,34 @@ fn resolve_prompt(plugin: &Option<WorkflowPlugin>, phase: &str, task_content: &s
     let template = match phase {
         "research" => plugin.as_ref()
             .and_then(|p| p.prompts.research.as_deref())
-            .unwrap_or(skills::DEFAULT_PROMPT_RESEARCH),
+            .unwrap_or(""),
         "planning" => plugin.as_ref()
             .and_then(|p| p.prompts.planning.as_deref())
-            .unwrap_or(skills::DEFAULT_PROMPT_PLANNING),
+            .unwrap_or(""),
         "planning_with_research" => plugin.as_ref()
-            .and_then(|p| p.prompts.planning.as_deref())
-            .unwrap_or(skills::DEFAULT_PROMPT_PLANNING_WITH_RESEARCH),
+            .and_then(|p| p.prompts.planning_with_research.as_deref())
+            .unwrap_or(""),
         "running" => plugin.as_ref()
             .and_then(|p| p.prompts.running.as_deref())
-            .unwrap_or(skills::DEFAULT_PROMPT_RUNNING),
+            .unwrap_or(""),
+        "running_direct" => plugin.as_ref()
+            .and_then(|p| p.prompts.running_direct.as_deref()
+                .or(p.prompts.running.as_deref()))
+            .unwrap_or(""),
         "review" => plugin.as_ref()
             .and_then(|p| p.prompts.review.as_deref())
-            .unwrap_or(skills::DEFAULT_PROMPT_REVIEW),
+            .unwrap_or(""),
         _ => return task_content.to_string(),
     };
-
-    // Explicit empty prompt means "send nothing" (e.g., void plugin)
-    if template.is_empty() {
-        return String::new();
-    }
 
     // For agents without interactive skill invocation, append a file-path reference
     let skill_dir_name = skills::phase_to_skill_dir(phase);
     let skill_ref = skills::skill_reference(agent_name, skill_dir_name);
+
+    if template.is_empty() {
+        // No prompt text — return just the skill reference (if any)
+        return skill_ref;
+    }
 
     let result = template
         .replace("{task}", task_content)
@@ -4721,23 +4720,14 @@ fn wait_for_prompt_trigger(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, tri
 
 /// Check if the phase artifact exists for a task in its worktree
 fn phase_artifact_exists(worktree_path: &str, status: TaskStatus, plugin: &Option<WorkflowPlugin>) -> bool {
-    let rel_path = if let Some(ref p) = plugin {
-        match status {
-            TaskStatus::Planning => p.artifacts.planning.as_deref(),
-            TaskStatus::Running => p.artifacts.running.as_deref(),
-            TaskStatus::Review => p.artifacts.review.as_deref(),
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    let rel_path = rel_path.unwrap_or(match status {
-        TaskStatus::Planning => ".agtx/plan.md",
-        TaskStatus::Running => ".agtx/execute.md",
-        TaskStatus::Review => ".agtx/review.md",
-        _ => return false,
+    let rel_path = plugin.as_ref().and_then(|p| match status {
+        TaskStatus::Planning => p.artifacts.planning.as_deref(),
+        TaskStatus::Running => p.artifacts.running.as_deref(),
+        TaskStatus::Review => p.artifacts.review.as_deref(),
+        _ => None,
     });
+
+    let Some(rel_path) = rel_path else { return false; };
 
     let full_path = Path::new(worktree_path).join(rel_path);
 
@@ -4750,12 +4740,11 @@ fn phase_artifact_exists(worktree_path: &str, status: TaskStatus, plugin: &Optio
 }
 
 /// Check if the research artifact exists for a task.
-/// Uses plugin-configured artifact path or defaults to `.agtx/research/{task_id}.md`.
 fn research_artifact_exists(worktree_path: &str, task_id: &str, plugin: &Option<WorkflowPlugin>) -> bool {
-    let rel_path = plugin.as_ref()
-        .and_then(|p| p.artifacts.research.as_deref())
-        .unwrap_or(".agtx/research/{task_id}.md")
-        .replace("{task_id}", task_id);
+    let Some(template) = plugin.as_ref().and_then(|p| p.artifacts.research.as_deref()) else {
+        return false;
+    };
+    let rel_path = template.replace("{task_id}", task_id);
 
     let full_path = Path::new(worktree_path).join(&rel_path);
 
@@ -5038,6 +5027,7 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
 fn load_plugin_if_configured(config: &MergedConfig, project_path: Option<&Path>) -> Option<WorkflowPlugin> {
     config.workflow_plugin.as_ref()
         .and_then(|name| WorkflowPlugin::load(name, project_path).ok())
+        .or_else(|| skills::load_bundled_plugin("agtx"))
 }
 
 /// Write skill files to a worktree's .agtx/skills/ directory and agent-native discovery paths.
