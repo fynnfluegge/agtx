@@ -54,6 +54,7 @@ skills/                # Built-in skill files (embedded at compile time)
 └── research.md        # Research phase instructions
 
 plugins/               # Bundled plugin configs (embedded at compile time)
+├── agtx/plugin.toml   # Default workflow with skills and prompts
 ├── gsd/plugin.toml    # Get Shit Done workflow
 ├── spec-kit/plugin.toml # GitHub spec-kit workflow
 └── void/plugin.toml   # Plain agent session, no prompting
@@ -87,12 +88,15 @@ Backlog → Planning → Running → Review → Done
 
 ### Workflow Plugins
 Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin.toml`) that defines:
-- **commands**: Slash commands sent to the agent at each phase (auto-translated per agent)
-- **prompts**: Task content templates with `{task}` and `{task_id}` placeholders
-- **artifacts**: File paths that signal phase completion (supports `*` wildcards)
+- **commands**: Slash commands sent to the agent at each phase (auto-translated per agent). Supports `preresearch` (one-time setup) and `research` (default research command).
+- **prompts**: Task content templates with `{task}`, `{task_id}`, and `{phase}` placeholders
+- **artifacts**: File paths that signal phase completion (supports `*` wildcards and `{phase}` placeholder)
 - **prompt_triggers**: Text patterns to wait for in tmux before sending prompts
 - **init_script**: Shell command run in worktree before agent starts (`{agent}` placeholder)
 - **copy_dirs**: Extra directories to copy from project root into worktrees
+- **copy_files**: Individual files to copy from project root into worktrees (merged with project-level `copy_files`)
+- **copy_back**: Files/dirs to copy from worktree back to project root when a phase completes
+- **cyclic**: When true, enables Review → Planning transition with incrementing phase counter
 - **supported_agents**: Agent whitelist (empty = all supported)
 
 Plugin resolution: project-local `.agtx/plugins/{name}/` → global `~/.config/agtx/plugins/{name}/` → bundled.
@@ -113,7 +117,7 @@ Commands are written once in canonical format (`/ns:command`) and auto-translate
 - Claude/Gemini: `/ns:command` (unchanged)
 - OpenCode: `/ns-command` (colon → hyphen)
 - Codex: `$ns-command` (slash → dollar, colon → hyphen)
-- Copilot: no interactive skill invocation (falls back to file-path reference in prompt)
+- Copilot: no interactive skill invocation (prompt only, no commands sent)
 
 ### Session Persistence
 - Tmux window stays open when moving Running → Review
@@ -242,7 +246,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 
 ### Phase Status Polling
 - `refresh_sessions()` runs every 100ms, checks artifact files with 2-second cache TTL
-- Three states: Working (spinner), Ready (checkmark), Exited (no window)
+- Four states: Working (spinner), Idle (pause icon, 15s no output), Ready (checkmark), Exited (no window)
 - Phase artifact paths come from the task's plugin or agtx defaults
 - Plugin instances cached per task in `HashMap<Option<String>, Option<WorkflowPlugin>>` to avoid repeated disk reads
 
@@ -250,7 +254,8 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 - Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
 - Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--approval-mode full-auto`), Gemini (`--approval-mode yolo`), Copilot (`--allow-all-tools`)
 - Skills deployed to agent-native paths via `write_skills_to_worktree()` in app.rs
-- Commands and prompts resolved per-task via `resolve_skill_command()` and `resolve_prompt()`
+- Commands resolved per-task via `resolve_skill_command()` (plugin command + agent transform)
+- Prompts resolved per-task via `resolve_prompt()` (pure template substitution, agent-agnostic)
 
 ## Building & Testing
 
@@ -289,8 +294,7 @@ Dependencies require:
 1. Add to `known_agents()` in `src/agent/mod.rs`
 2. Add `build_interactive_command()` match arm in `src/agent/mod.rs`
 3. Add agent-native skill dir in `agent_native_skill_dir()` in `src/skills.rs`
-4. Add skill invocation format in `skill_invocation_command()` in `src/skills.rs`
-5. Add plugin command transform in `transform_plugin_command()` in `src/skills.rs`
+4. Add plugin command transform in `transform_plugin_command()` in `src/skills.rs`
 
 ### Adding a keyboard shortcut
 1. Find the appropriate `handle_*_key` function in `src/tui/app.rs`

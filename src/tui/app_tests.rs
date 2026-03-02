@@ -205,6 +205,7 @@ fn test_create_pr_with_content_success() {
         pr_number: None,
         pr_url: None,
         plugin: None,
+        cycle: 1,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -292,6 +293,7 @@ fn test_create_pr_with_content_no_changes() {
         pr_number: None,
         pr_url: None,
         plugin: None,
+        cycle: 1,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -349,6 +351,7 @@ fn test_create_pr_with_content_push_failure() {
         pr_number: None,
         pr_url: None,
         plugin: None,
+        cycle: 1,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -403,6 +406,7 @@ fn test_push_changes_to_existing_pr_success() {
         pr_number: Some(99),
         pr_url: Some("https://github.com/org/repo/pull/99".to_string()),
         plugin: None,
+        cycle: 1,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -454,6 +458,7 @@ fn test_push_changes_to_existing_pr_no_changes() {
         pr_number: Some(50),
         pr_url: Some("https://github.com/org/repo/pull/50".to_string()),
         plugin: None,
+        cycle: 1,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -488,6 +493,7 @@ fn test_push_changes_to_existing_pr_no_url() {
         pr_number: None,
         pr_url: None, // No PR URL
         plugin: None,
+        cycle: 1,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1259,7 +1265,7 @@ fn test_word_boundary_roundtrip() {
 
 #[test]
 fn test_footer_text_sidebar_focused() {
-    let text = build_footer_text(InputMode::Normal, true, 0);
+    let text = build_footer_text(InputMode::Normal, true, 0, false);
     assert!(text.contains("[j/k] navigate"));
     assert!(text.contains("[e] hide sidebar"));
     assert!(!text.contains("[o] new"));
@@ -1267,7 +1273,7 @@ fn test_footer_text_sidebar_focused() {
 
 #[test]
 fn test_footer_text_backlog_column() {
-    let text = build_footer_text(InputMode::Normal, false, 0);
+    let text = build_footer_text(InputMode::Normal, false, 0, false);
     assert!(text.contains("[M] run"));
     assert!(text.contains("[m] plan"));
     assert!(!text.contains("[r] move left"));
@@ -1275,7 +1281,7 @@ fn test_footer_text_backlog_column() {
 
 #[test]
 fn test_footer_text_planning_column() {
-    let text = build_footer_text(InputMode::Normal, false, 1);
+    let text = build_footer_text(InputMode::Normal, false, 1, false);
     assert!(text.contains("[m] run"));
     assert!(!text.contains("[M] run"));
     assert!(!text.contains("[r] move left"));
@@ -1283,21 +1289,29 @@ fn test_footer_text_planning_column() {
 
 #[test]
 fn test_footer_text_running_column() {
-    let text = build_footer_text(InputMode::Normal, false, 2);
+    let text = build_footer_text(InputMode::Normal, false, 2, false);
     assert!(text.contains("[r] move left"));
     assert!(text.contains("[m] move"));
 }
 
 #[test]
 fn test_footer_text_review_column() {
-    let text = build_footer_text(InputMode::Normal, false, 3);
+    let text = build_footer_text(InputMode::Normal, false, 3, false);
     assert!(text.contains("[r] move left"));
     assert!(text.contains("[m] move"));
 }
 
 #[test]
+fn test_footer_text_review_column_cyclic() {
+    let text = build_footer_text(InputMode::Normal, false, 3, true);
+    assert!(text.contains("[p] next phase"));
+    assert!(text.contains("[r] resume"));
+    assert!(text.contains("[m] done"));
+}
+
+#[test]
 fn test_footer_text_done_column() {
-    let text = build_footer_text(InputMode::Normal, false, 4);
+    let text = build_footer_text(InputMode::Normal, false, 4, false);
     assert!(!text.contains("[m] move"));
     assert!(!text.contains("[r]"));
     assert!(!text.contains("[d] diff"));
@@ -1305,14 +1319,14 @@ fn test_footer_text_done_column() {
 
 #[test]
 fn test_footer_text_input_title() {
-    let text = build_footer_text(InputMode::InputTitle, false, 0);
+    let text = build_footer_text(InputMode::InputTitle, false, 0, false);
     assert!(text.contains("Enter task title"));
     assert!(text.contains("[Esc] cancel"));
 }
 
 #[test]
 fn test_footer_text_input_description() {
-    let text = build_footer_text(InputMode::InputDescription, false, 0);
+    let text = build_footer_text(InputMode::InputDescription, false, 0, false);
     assert!(text.contains("[#] file search"));
     assert!(text.contains("[\\+Enter] newline"));
 }
@@ -1666,35 +1680,6 @@ fn test_agent_native_skill_dir() {
 }
 
 #[test]
-fn test_skill_reference_native_agent() {
-    // Agents with skill invocation get empty reference (skill sent via send_keys)
-    assert_eq!(skills::skill_reference("claude", "agtx-plan"), "");
-    assert_eq!(skills::skill_reference("gemini", "agtx-execute"), "");
-    assert_eq!(skills::skill_reference("opencode", "agtx-plan"), "");
-    assert_eq!(skills::skill_reference("codex", "agtx-review"), "");
-}
-
-#[test]
-fn test_skill_reference_fallback_agent() {
-    // Agents without skill invocation get file-path reference
-    let ref_copilot = skills::skill_reference("copilot", "agtx-plan");
-    assert_eq!(ref_copilot, "Follow the instructions in .agtx/skills/agtx-plan/SKILL.md");
-
-    let ref_unknown = skills::skill_reference("unknown", "agtx-execute");
-    assert!(ref_unknown.contains(".agtx/skills/agtx-execute/SKILL.md"));
-}
-
-#[test]
-fn test_skill_invocation_command() {
-    assert_eq!(skills::skill_invocation_command("claude", "agtx-plan"), Some("/agtx:plan".to_string()));
-    assert_eq!(skills::skill_invocation_command("gemini", "agtx-execute"), Some("/agtx:execute".to_string()));
-    assert_eq!(skills::skill_invocation_command("opencode", "agtx-plan"), Some("/agtx-plan".to_string()));
-    assert_eq!(skills::skill_invocation_command("codex", "agtx-plan"), Some("$agtx-plan".to_string()));
-    assert_eq!(skills::skill_invocation_command("copilot", "agtx-plan"), None);
-    assert_eq!(skills::skill_invocation_command("unknown", "agtx-plan"), None);
-}
-
-#[test]
 fn test_transform_plugin_command() {
     // Claude/Gemini: canonical form unchanged
     assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "claude"), Some("/gsd:plan-phase 1".to_string()));
@@ -1711,16 +1696,6 @@ fn test_transform_plugin_command() {
     // Unsupported agents
     assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "copilot"), None);
     assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "unknown"), None);
-}
-
-#[test]
-fn test_phase_to_skill_dir() {
-    assert_eq!(skills::phase_to_skill_dir("research"), "agtx-research");
-    assert_eq!(skills::phase_to_skill_dir("planning"), "agtx-plan");
-    assert_eq!(skills::phase_to_skill_dir("planning_with_research"), "agtx-plan");
-    assert_eq!(skills::phase_to_skill_dir("running"), "agtx-execute");
-    assert_eq!(skills::phase_to_skill_dir("review"), "agtx-review");
-    assert_eq!(skills::phase_to_skill_dir("other"), "");
 }
 
 #[test]
@@ -1773,28 +1748,17 @@ fn test_transform_skill_frontmatter_no_agtx() {
 }
 
 #[test]
-fn test_resolve_prompt_claude_no_skill_ref() {
-    // Claude has skill invocation support — prompt should NOT contain skill reference
+fn test_resolve_prompt_with_template() {
     let plugin = skills::load_bundled_plugin("agtx");
-    let prompt = resolve_prompt(&plugin, "planning", "my task", "task-123", "claude");
+    let prompt = resolve_prompt(&plugin, "planning", "my task", "task-123", 1);
     assert!(prompt.contains("my task"));
-    assert!(!prompt.contains("/agtx:plan"));
     assert!(!prompt.contains("SKILL.md"));
-}
-
-#[test]
-fn test_resolve_prompt_copilot_has_file_path() {
-    // Copilot has no skill invocation — prompt should contain file-path reference
-    let plugin = skills::load_bundled_plugin("agtx");
-    let prompt = resolve_prompt(&plugin, "planning", "my task", "task-123", "copilot");
-    assert!(prompt.contains("my task"));
-    assert!(prompt.contains(".agtx/skills/agtx-plan/SKILL.md"));
 }
 
 #[test]
 fn test_resolve_prompt_research_has_task() {
     let plugin = skills::load_bundled_plugin("agtx");
-    let prompt = resolve_prompt(&plugin, "research", "my task", "abc-123", "claude");
+    let prompt = resolve_prompt(&plugin, "research", "my task", "abc-123", 1);
     assert!(prompt.contains("my task"));
     // Claude should NOT have skill ref in prompt (sent via send_keys)
     assert!(!prompt.contains("/agtx:research"));
@@ -1803,7 +1767,7 @@ fn test_resolve_prompt_research_has_task() {
 #[test]
 fn test_resolve_prompt_running_phase() {
     let plugin = skills::load_bundled_plugin("agtx");
-    let prompt = resolve_prompt(&plugin, "running", "my task", "task-123", "claude");
+    let prompt = resolve_prompt(&plugin, "running", "my task", "task-123", 1);
     // No running prompt — execute skill handles instructions
     assert!(prompt.is_empty());
 }
@@ -1811,16 +1775,15 @@ fn test_resolve_prompt_running_phase() {
 #[test]
 fn test_resolve_prompt_review_phase() {
     let plugin = skills::load_bundled_plugin("agtx");
-    let prompt = resolve_prompt(&plugin, "review", "my task", "task-123", "copilot");
-    // No review prompt — review skill handles instructions.
-    // Copilot gets skill file reference since it has no interactive invocation.
-    assert!(prompt.contains(".agtx/skills/agtx-review/SKILL.md"));
+    let prompt = resolve_prompt(&plugin, "review", "my task", "task-123", 1);
+    // No review prompt template defined — returns empty
+    assert!(prompt.is_empty());
 }
 
 #[test]
 fn test_resolve_prompt_planning_with_research() {
     let plugin = skills::load_bundled_plugin("agtx");
-    let prompt = resolve_prompt(&plugin, "planning_with_research", "my task", "task-123", "claude");
+    let prompt = resolve_prompt(&plugin, "planning_with_research", "my task", "task-123", 1);
     // Empty — agent already has task from research session, skill handles research file discovery
     assert!(prompt.is_empty());
 }
@@ -1828,7 +1791,7 @@ fn test_resolve_prompt_planning_with_research() {
 #[test]
 fn test_resolve_prompt_no_plugin_returns_empty() {
     // Without a plugin, all prompts return empty
-    let prompt = resolve_prompt(&None, "planning", "my task", "task-123", "claude");
+    let prompt = resolve_prompt(&None, "planning", "my task", "task-123", 1);
     assert!(prompt.is_empty());
 }
 
@@ -1842,22 +1805,22 @@ fn test_agtx_plugin_artifacts() {
 }
 
 #[test]
-fn test_agtx_plugin_has_no_commands() {
+fn test_agtx_plugin_has_commands() {
     let plugin = skills::load_bundled_plugin("agtx").expect("agtx plugin should load");
-    assert!(plugin.commands.research.is_none());
-    assert!(plugin.commands.planning.is_none());
-    assert!(plugin.commands.running.is_none());
-    assert!(plugin.commands.review.is_none());
+    assert_eq!(plugin.commands.research.as_deref(), Some("/agtx:research"));
+    assert_eq!(plugin.commands.planning.as_deref(), Some("/agtx:plan"));
+    assert_eq!(plugin.commands.running.as_deref(), Some("/agtx:execute"));
+    assert_eq!(plugin.commands.review.as_deref(), Some("/agtx:review"));
 }
 
 #[test]
 fn test_resolve_skill_command_no_plugin() {
-    // No plugin: falls back to agent-native skill invocation
-    assert_eq!(resolve_skill_command(&None, "planning", "claude", ""), Some("/agtx:plan".to_string()));
-    assert_eq!(resolve_skill_command(&None, "running", "codex", ""), Some("$agtx-execute".to_string()));
-    assert_eq!(resolve_skill_command(&None, "review", "gemini", ""), Some("/agtx:review".to_string()));
-    assert_eq!(resolve_skill_command(&None, "planning", "opencode", ""), Some("/agtx-plan".to_string()));
-    assert_eq!(resolve_skill_command(&None, "planning", "copilot", ""), None);
+    // No plugin: no commands, returns None for all agents/phases
+    assert_eq!(resolve_skill_command(&None, "planning", "claude", "", 1), None);
+    assert_eq!(resolve_skill_command(&None, "running", "codex", "", 1), None);
+    assert_eq!(resolve_skill_command(&None, "review", "gemini", "", 1), None);
+    assert_eq!(resolve_skill_command(&None, "planning", "opencode", "", 1), None);
+    assert_eq!(resolve_skill_command(&None, "planning", "copilot", "", 1), None);
 }
 
 #[test]
@@ -1871,6 +1834,7 @@ fn test_resolve_skill_command_with_plugin() {
         artifacts: PluginArtifacts::default(),
         commands: PluginCommands {
             research: Some("/gsd:discuss-phase 1".to_string()),
+            preresearch: None,
             planning: Some("/gsd:plan-phase 1".to_string()),
             running: Some("/gsd:execute-phase 1".to_string()),
             review: Some("/gsd:verify-work 1".to_string()),
@@ -1879,20 +1843,23 @@ fn test_resolve_skill_command_with_plugin() {
         prompt_triggers: PluginPromptTriggers::default(),
         research_required: false,
         copy_dirs: vec![],
+        copy_files: vec![],
+        cyclic: false,
+        copy_back: std::collections::HashMap::new(),
     });
     // Claude/Gemini: canonical form unchanged
-    assert_eq!(resolve_skill_command(&plugin, "planning", "claude", ""), Some("/gsd:plan-phase 1".to_string()));
-    assert_eq!(resolve_skill_command(&plugin, "running", "claude", ""), Some("/gsd:execute-phase 1".to_string()));
-    assert_eq!(resolve_skill_command(&plugin, "review", "gemini", ""), Some("/gsd:verify-work 1".to_string()));
-    assert_eq!(resolve_skill_command(&plugin, "research", "claude", ""), Some("/gsd:discuss-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "planning", "claude", "", 1), Some("/gsd:plan-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "running", "claude", "", 1), Some("/gsd:execute-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "review", "gemini", "", 1), Some("/gsd:verify-work 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "research", "claude", "", 1), Some("/gsd:discuss-phase 1".to_string()));
     // OpenCode: colon → hyphen
-    assert_eq!(resolve_skill_command(&plugin, "planning", "opencode", ""), Some("/gsd-plan-phase 1".to_string()));
-    assert_eq!(resolve_skill_command(&plugin, "research", "opencode", ""), Some("/gsd-discuss-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "planning", "opencode", "", 1), Some("/gsd-plan-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "research", "opencode", "", 1), Some("/gsd-discuss-phase 1".to_string()));
     // Codex: slash → dollar, colon → hyphen
-    assert_eq!(resolve_skill_command(&plugin, "planning", "codex", ""), Some("$gsd-plan-phase 1".to_string()));
-    assert_eq!(resolve_skill_command(&plugin, "running", "codex", ""), Some("$gsd-execute-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "planning", "codex", "", 1), Some("$gsd-plan-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&plugin, "running", "codex", "", 1), Some("$gsd-execute-phase 1".to_string()));
     // Unsupported agents: None (will use file-path fallback in prompt)
-    assert_eq!(resolve_skill_command(&plugin, "planning", "copilot", ""), None);
+    assert_eq!(resolve_skill_command(&plugin, "planning", "copilot", "", 1), None);
 }
 
 #[test]
@@ -1911,6 +1878,9 @@ fn test_plugin_supports_agent() {
         prompt_triggers: Default::default(),
         research_required: false,
         copy_dirs: vec![],
+        copy_files: vec![],
+        cyclic: false,
+        copy_back: std::collections::HashMap::new(),
     };
     assert!(plugin.supports_agent("claude"));
     assert!(plugin.supports_agent("copilot"));
@@ -1928,6 +1898,9 @@ fn test_plugin_supports_agent() {
         prompt_triggers: Default::default(),
         research_required: false,
         copy_dirs: vec![],
+        copy_files: vec![],
+        cyclic: false,
+        copy_back: std::collections::HashMap::new(),
     };
     assert!(plugin.supports_agent("claude"));
     assert!(plugin.supports_agent("codex"));
@@ -1995,19 +1968,22 @@ fn test_phase_artifact_exists_with_glob() {
         prompt_triggers: Default::default(),
         research_required: false,
         copy_dirs: vec![],
+        copy_files: vec![],
+        cyclic: false,
+        copy_back: std::collections::HashMap::new(),
     });
 
     let worktree = tmp.to_string_lossy().to_string();
 
     // Planning artifact exists (glob matches)
-    assert!(phase_artifact_exists(&worktree, TaskStatus::Planning, &plugin));
+    assert!(phase_artifact_exists(&worktree, TaskStatus::Planning, &plugin, 1));
 
     // Research artifact doesn't exist yet (no spec.md)
-    assert!(!phase_artifact_exists(&worktree, TaskStatus::Backlog, &plugin));
+    assert!(!phase_artifact_exists(&worktree, TaskStatus::Backlog, &plugin, 1));
 
     // Running/Review fall back to agtx defaults (don't exist)
-    assert!(!phase_artifact_exists(&worktree, TaskStatus::Running, &plugin));
-    assert!(!phase_artifact_exists(&worktree, TaskStatus::Review, &plugin));
+    assert!(!phase_artifact_exists(&worktree, TaskStatus::Running, &plugin, 1));
+    assert!(!phase_artifact_exists(&worktree, TaskStatus::Review, &plugin, 1));
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -2152,7 +2128,7 @@ fn test_install_plugin_none_clears_config() {
 
 #[test]
 fn test_footer_text_backlog_includes_research() {
-    let text = build_footer_text(InputMode::Normal, false, 0);
+    let text = build_footer_text(InputMode::Normal, false, 0, false);
     assert!(text.contains("[R] research"));
 }
 
@@ -2180,7 +2156,7 @@ fn test_resolve_skill_command_research_phase() {
         [artifacts]
     "#;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
-    let cmd = resolve_skill_command(&Some(plugin), "research", "claude", "");
+    let cmd = resolve_skill_command(&Some(plugin), "research", "claude", "", 1);
     assert_eq!(cmd, Some("/gsd:new-project".to_string()));
 }
 
@@ -2199,7 +2175,7 @@ fn test_resolve_skill_command_planning_with_plugin() {
         [artifacts]
     "#;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
-    let cmd = resolve_skill_command(&Some(plugin), "planning", "claude", "");
+    let cmd = resolve_skill_command(&Some(plugin), "planning", "claude", "", 1);
     assert_eq!(cmd, Some("/gsd:plan-phase 1".to_string()));
 }
 
@@ -2218,7 +2194,7 @@ fn test_resolve_prompt_empty_for_gsd_planning() {
         [artifacts]
     "#;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
-    let prompt = resolve_prompt(&Some(plugin), "planning", "my task content", "task-123", "claude");
+    let prompt = resolve_prompt(&Some(plugin), "planning", "my task content", "task-123", 1);
     assert!(prompt.is_empty());
 }
 
@@ -2234,7 +2210,7 @@ fn test_resolve_prompt_research_with_task() {
         [artifacts]
     "#;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
-    let prompt = resolve_prompt(&Some(plugin), "research", "add tests", "task-123", "claude");
+    let prompt = resolve_prompt(&Some(plugin), "research", "add tests", "task-123", 1);
     assert_eq!(prompt, "Task: add tests");
 }
 
@@ -2247,8 +2223,10 @@ fn test_gsd_plugin_toml_has_research_command() {
         .find(|(n, _, _)| *n == "gsd")
         .expect("gsd plugin should be bundled");
     let plugin: WorkflowPlugin = toml::from_str(content).unwrap();
-    assert_eq!(plugin.commands.research, Some("/gsd:new-project".to_string()));
-    assert_eq!(plugin.commands.planning, Some("/gsd:plan-phase 1".to_string()));
+    assert_eq!(plugin.commands.preresearch, Some("/gsd:new-project".to_string()));
+    assert_eq!(plugin.commands.research, Some("/gsd:discuss-phase {phase}".to_string()));
+    assert_eq!(plugin.commands.planning, Some("/gsd:plan-phase {phase}".to_string()));
+    assert!(plugin.cyclic);
 }
 
 #[test]
@@ -2270,6 +2248,9 @@ fn test_resolve_prompt_trigger_with_gsd() {
         },
         research_required: false,
         copy_dirs: vec![],
+        copy_files: vec![],
+        cyclic: false,
+        copy_back: std::collections::HashMap::new(),
     });
     assert_eq!(
         resolve_prompt_trigger(&plugin, "research"),
@@ -2305,6 +2286,9 @@ fn test_resolve_prompt_trigger_empty_string_filtered() {
         },
         research_required: false,
         copy_dirs: vec![],
+        copy_files: vec![],
+        cyclic: false,
+        copy_back: std::collections::HashMap::new(),
     });
     // Empty strings should be filtered out
     assert_eq!(resolve_prompt_trigger(&plugin, "research"), None);
@@ -2661,4 +2645,148 @@ fn test_switch_agent_codex_sends_ctrl_c() {
 
     switch_agent_in_tmux(&mock, "sess:win", "codex", "claude");
     assert!(ctrl_c_sent.load(Ordering::SeqCst), "Ctrl+C should be sent for codex");
+}
+
+// =============================================================================
+// Tests for cyclic phase support and {phase} substitution
+// =============================================================================
+
+#[test]
+fn test_resolve_skill_command_phase_substitution() {
+    use crate::config::{WorkflowPlugin, PluginCommands};
+    let plugin_toml = r#"
+        name = "gsd"
+        init_script = "echo test"
+        [commands]
+        preresearch = "/gsd:new-project"
+        research = "/gsd:discuss-phase {phase}"
+        planning = "/gsd:plan-phase {phase}"
+        running = "/gsd:execute-phase {phase}"
+        review = "/gsd:verify-work {phase}"
+        [prompts]
+        [artifacts]
+    "#;
+    let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
+    let p = Some(plugin);
+
+    // Cycle 1: {phase} → "1"
+    assert_eq!(resolve_skill_command(&p, "planning", "claude", "", 1), Some("/gsd:plan-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&p, "running", "claude", "", 1), Some("/gsd:execute-phase 1".to_string()));
+    assert_eq!(resolve_skill_command(&p, "review", "claude", "", 1), Some("/gsd:verify-work 1".to_string()));
+
+    // Cycle 2: {phase} → "2"
+    assert_eq!(resolve_skill_command(&p, "planning", "claude", "", 2), Some("/gsd:plan-phase 2".to_string()));
+    assert_eq!(resolve_skill_command(&p, "running", "claude", "", 2), Some("/gsd:execute-phase 2".to_string()));
+    assert_eq!(resolve_skill_command(&p, "review", "claude", "", 2), Some("/gsd:verify-work 2".to_string()));
+
+    // preresearch also gets {phase} substitution (falls back to research command)
+    assert_eq!(resolve_skill_command(&p, "preresearch", "claude", "", 1), Some("/gsd:new-project".to_string()));
+}
+
+#[test]
+fn test_phase_artifact_exists_with_phase_substitution() {
+    use crate::config::{WorkflowPlugin, PluginArtifacts};
+
+    let tmp = std::env::temp_dir().join("agtx_test_phase_artifact");
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    // Create .planning/2/UAT.md to simulate phase 2 review artifact
+    let phase_dir = tmp.join(".planning").join("2");
+    std::fs::create_dir_all(&phase_dir).unwrap();
+    std::fs::write(phase_dir.join("UAT.md"), "# UAT").unwrap();
+
+    let plugin_toml = r#"
+        name = "gsd"
+        init_script = "echo test"
+        [commands]
+        [prompts]
+        [artifacts]
+        review = ".planning/{phase}/UAT.md"
+    "#;
+    let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
+    let p = Some(plugin);
+    let wt = tmp.to_string_lossy().to_string();
+
+    // Phase 1: artifact doesn't exist
+    assert!(!phase_artifact_exists(&wt, TaskStatus::Review, &p, 1));
+
+    // Phase 2: artifact exists
+    assert!(phase_artifact_exists(&wt, TaskStatus::Review, &p, 2));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_footer_text_review_non_cyclic_no_next_phase() {
+    let text = build_footer_text(InputMode::Normal, false, 3, false);
+    assert!(!text.contains("[p] next phase"));
+    assert!(text.contains("[m] move"));
+}
+
+#[test]
+fn test_resolve_skill_command_preresearch_fallback() {
+    // When preresearch is not set, falls back to research command
+    let plugin_toml = r#"
+        name = "test"
+        init_script = "echo test"
+        [commands]
+        research = "/test:discuss"
+        [prompts]
+        [artifacts]
+    "#;
+    use crate::config::WorkflowPlugin;
+    let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
+    let p = Some(plugin);
+    assert_eq!(resolve_skill_command(&p, "preresearch", "claude", "", 1), Some("/test:discuss".to_string()));
+}
+
+#[test]
+fn test_copy_back_to_project() {
+    let tmp = std::env::temp_dir().join("agtx_test_copy_back");
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let worktree = tmp.join("worktree");
+    let project = tmp.join("project");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+
+    // Create files in worktree
+    std::fs::write(worktree.join("PROJECT.md"), "# Project").unwrap();
+    std::fs::write(worktree.join("ROADMAP.md"), "# Roadmap").unwrap();
+    let planning_dir = worktree.join(".planning");
+    std::fs::create_dir_all(&planning_dir).unwrap();
+    std::fs::write(planning_dir.join("context.md"), "# Context").unwrap();
+
+    // Copy back
+    let entries = vec![
+        "PROJECT.md".to_string(),
+        "ROADMAP.md".to_string(),
+        ".planning".to_string(),
+        "NONEXISTENT.md".to_string(), // Should be silently skipped
+    ];
+    copy_back_to_project(&worktree, &project, &entries);
+
+    // Verify files were copied
+    assert!(project.join("PROJECT.md").exists());
+    assert!(project.join("ROADMAP.md").exists());
+    assert!(project.join(".planning").join("context.md").exists());
+    assert!(!project.join("NONEXISTENT.md").exists());
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_gsd_plugin_has_cyclic_and_copy_back() {
+    use crate::config::WorkflowPlugin;
+    let (_name, _desc, content) = skills::BUNDLED_PLUGINS
+        .iter()
+        .find(|(n, _, _)| *n == "gsd")
+        .expect("gsd plugin should be bundled");
+    let plugin: WorkflowPlugin = toml::from_str(content).unwrap();
+    assert!(plugin.cyclic);
+    assert!(!plugin.copy_files.is_empty());
+    assert!(plugin.copy_back.contains_key("research"));
+    let research_entries = &plugin.copy_back["research"];
+    assert!(research_entries.contains(&"PROJECT.md".to_string()));
+    assert!(research_entries.contains(&".planning".to_string()));
 }

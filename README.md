@@ -14,7 +14,7 @@ Let different coding agents collaborate on the same task. Plug in any existing s
 
 ## Features
 
-- **Kanban workflow**: Backlog/Research → Planning → Running → Review → Done
+- **Kanban workflow**: Backlog/Research → Planning → Running → Review → Done (with optional cyclic phases for multi-milestone plugins)
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
 - **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, OpenCode and Copilot
 - **Multi-agent per task**: Configure different agents per workflow phase — e.g. Gemini for planning, Claude for implementation, Codex for review — with automatic agent switching in the same tmux window
@@ -70,7 +70,8 @@ agtx -g
 | `R` | Enter research mode |
 | `↩` | Open task (view agent session) |
 | `m` | Move task forward in workflow |
-| `r` | Resume task (Review → Running) |
+| `r` | Resume task (Review → Running) / Move back (Running → Planning) |
+| `p` | Next phase (Review → Planning, cyclic plugins only) |
 | `d` | Show git diff |
 | `x` | Delete task |
 | `/` | Search tasks |
@@ -194,8 +195,6 @@ review = "/my-plugin:review"
 
 [prompts]
 planning = "Task: {task}"
-running = ""
-review = ""
 ```
 
 **Full reference** with all available fields:
@@ -216,15 +215,29 @@ supported_agents = ["claude", "codex", "gemini", "opencode"]
 # are always copied automatically.
 copy_dirs = [".my-plugin"]
 
+# Individual files to copy from project root into each worktree.
+# Merged with project-level copy_files from .agtx/config.toml.
+copy_files = ["PROJECT.md", "REQUIREMENTS.md"]
+
+# When true, enables Review → Planning transition via the `p` key.
+# Each cycle increments the phase counter ({phase} placeholder).
+# Use this for multi-milestone workflows (e.g. plan → execute → review → next milestone).
+cyclic = false
+
+# When true, the research phase must be completed before planning or running.
+# Prevents skipping research for plugins that depend on it.
+research_required = false
+
 # Artifact files that signal phase completion.
 # When detected, the task shows a checkmark instead of the spinner.
 # Supports * wildcard for one directory level (e.g. "specs/*/plan.md").
-# Omitted phases fall back to agtx defaults (.agtx/plan.md, .agtx/execute.md, .agtx/review.md).
+# Use {phase} for cycle-aware paths (replaced with the current cycle number).
+# Omitted phases show no completion indicator.
 [artifacts]
 research = ".my-plugin/research.md"
-planning = ".my-plugin/plan.md"
-running = ".my-plugin/summary.md"
-review = ".my-plugin/review.md"
+planning = ".my-plugin/{phase}/plan.md"
+running = ".my-plugin/{phase}/summary.md"
+review = ".my-plugin/{phase}/review.md"
 
 # Slash commands sent to the agent via tmux for each phase.
 # Written in canonical format (Claude/Gemini style): /namespace:command
@@ -232,35 +245,49 @@ review = ".my-plugin/review.md"
 #   Claude/Gemini: /my-plugin:plan (unchanged)
 #   OpenCode:      /my-plugin-plan (colon -> hyphen)
 #   Codex:         $my-plugin-plan (slash -> dollar, colon -> hyphen)
+# Omitted phases fall back to agent-native agtx skill invocation
+# (e.g. /agtx:plan for Claude, $agtx-plan for Codex).
 # Set to "" to skip sending a command for that phase.
+# Use {phase} for cycle-aware commands (replaced with the current cycle number).
+# Use {task} to inline the task description.
 [commands]
-research = "/my-plugin:research {task}"
-planning = "/my-plugin:plan {task}"
-running = "/my-plugin:execute"
-review = "/my-plugin:review"
+preresearch = "/my-plugin:research {task}"  # Used only when no research artifacts exist yet
+research = "/my-plugin:discuss {phase}"
+planning = "/my-plugin:plan {phase}"
+running = "/my-plugin:execute {phase}"
+review = "/my-plugin:review {phase}"
 
 # Prompt templates sent as task content after the command.
-# {task} = task title + description, {task_id} = unique task ID.
-# Set to "" to skip sending a prompt for that phase.
+# {task} = task title + description, {task_id} = unique task ID, {phase} = cycle number.
+# Omitted phases send no prompt (the skill/command handles instructions).
 [prompts]
 research = "Task: {task}"
-planning = ""
-running = ""
-review = ""
 
 # Text patterns to wait for in the tmux pane before sending the prompt.
 # Useful when a command triggers an interactive prompt that must appear first.
 # Polls every 500ms, times out after 5 minutes.
 [prompt_triggers]
 research = "What do you want to build?"
+
+# Files/dirs to copy from worktree back to project root after a phase completes.
+# Triggered automatically when the phase artifact is detected (spinner → checkmark).
+# Useful for sharing research artifacts (specs, plans) across worktrees.
+[copy_back]
+research = ["PROJECT.md", "REQUIREMENTS.md", ".my-plugin"]
 ```
 
 **What happens at each phase transition:**
 
 1. The **command** is sent to the agent via tmux (e.g., `/my-plugin:plan`)
 2. If a **prompt_trigger** is set, agtx waits for that prompt trigger to appear in the tmux pane
-3. The **prompt** is sent with `{task}` and `{task_id}` replaced
-4. agtx polls for the **artifact** file — when found, the spinner becomes a checkmark to indicate task phase completion
+3. The **prompt** is sent with `{task}`, `{task_id}`, and `{phase}` replaced
+4. agtx polls for the **artifact** file — when found, the spinner becomes a checkmark
+5. If **copy_back** is configured, artifacts are copied from worktree to project root on completion
+6. If the agent appears idle (no output for 15s), the spinner becomes a pause icon
+
+**Preresearch fallback:** When pressing `R` on a task, if `preresearch` is configured and no research artifacts from `copy_back` exist in the project root yet, the `preresearch` command is used instead of `research`. This lets plugins run a one-time project setup (e.g. `/gsd:new-project`) before switching to the regular research command for subsequent tasks.
+
+**Cyclic workflows:** When `cyclic = true`, pressing `p` in Review moves the task back to Planning with an incremented phase counter. This enables multi-milestone workflows where each cycle (plan → execute → review) produces artifacts in a separate `{phase}` directory.
 
 **Custom skills:** If your plugin provides its own skill files, place them in the plugin directory:
 

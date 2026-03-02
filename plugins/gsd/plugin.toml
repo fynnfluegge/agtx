@@ -3,22 +3,28 @@ description = "Get Shit Done - structured spec-driven development framework"
 init_script = "npx get-shit-done-cc@latest --{agent} --local --non-interactive"
 supported_agents = ["claude", "codex", "gemini", "opencode"]
 research_required = true
+cyclic = true
+copy_files = ["PROJECT.md", "REQUIREMENTS.md", "ROADMAP.md", "STATE.md"]
 copy_dirs = [".planning"]
 
 [artifacts]
-research = ".planning/ROADMAP.md"
-planning = ".planning/1/1-PLAN.md"
-running = ".planning/1/1-SUMMARY.md"
-review = ".planning/1/UAT.md"
+research = ".planning/1/1-CONTEXT.md"
+planning = ".planning/{phase}/*-PLAN.md"
+running = ".planning/{phase}/*-SUMMARY.md"
+review = ".planning/{phase}/UAT.md"
 
 [commands]
-research = "/gsd:new-project"
-planning = "/gsd:plan-phase 1"
-running = "/gsd:execute-phase 1"
-review = "/gsd:verify-work 1"
+preresearch = "/gsd:new-project"
+research = "/gsd:discuss-phase {phase}"
+planning = "/gsd:plan-phase {phase}"
+running = "/gsd:execute-phase {phase}"
+review = "/gsd:verify-work {phase}"
 
 [prompts]
 research = "Task: {task}"
 
 [prompt_triggers]
 research = "What do you want to build?"
+
+[copy_back]
+research = ["PROJECT.md", "REQUIREMENTS.md", "ROADMAP.md", "STATE.md", ".planning"]

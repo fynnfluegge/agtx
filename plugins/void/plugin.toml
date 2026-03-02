@@ -1,14 +1,3 @@
 name = "void"
 description = "Plain coding agent session without any prompting or skills"
-
-[commands]
-research = ""
-planning = ""
-running = ""
-review = ""
-
-[prompts]
-research = ""
-planning = ""
-running = ""
-review = ""
+cyclic = true

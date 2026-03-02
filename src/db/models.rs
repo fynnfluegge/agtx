@@ -69,6 +69,7 @@ pub struct Task {
     pub pr_number: Option<i32>,
     pub pr_url: Option<String>,
     pub plugin: Option<String>,
+    pub cycle: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -90,6 +91,7 @@ impl Task {
             pr_number: None,
             pr_url: None,
             plugin: None,
+            cycle: 1,
             created_at: now,
             updated_at: now,
         }
@@ -167,6 +169,8 @@ impl AgentStatus {
 pub enum PhaseStatus {
     /// Agent is still working, no artifact yet
     Working,
+    /// Agent output hasn't changed for 15s — may need user input
+    Idle,
     /// Phase artifact detected, ready to advance
     Ready,
     /// Tmux window gone (process exited)

@@ -404,6 +404,17 @@ pub struct WorkflowPlugin {
     /// Extra directories to copy from project root to worktrees (e.g. [".specify"]).
     #[serde(default)]
     pub copy_dirs: Vec<String>,
+    /// Individual files to copy from project root to worktrees (e.g. ["PROJECT.md"]).
+    /// Merged with project-level copy_files during worktree setup.
+    #[serde(default)]
+    pub copy_files: Vec<String>,
+    /// When true, enables Review → Planning transition for multi-phase workflows.
+    #[serde(default)]
+    pub cyclic: bool,
+    /// Files/dirs to copy from worktree back to project root after a phase completes.
+    /// Keyed by phase name (e.g. { research = ["PROJECT.md", ".planning"] }).
+    #[serde(default)]
+    pub copy_back: std::collections::HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -418,6 +429,10 @@ pub struct PluginArtifacts {
 /// e.g. "/gsd:plan-phase 1" or "/speckit.plan"
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginCommands {
+    /// Command to run before research artifacts exist (e.g. "/gsd:new-project").
+    /// Used only when no research artifacts are found in the project root.
+    /// Falls back to `research` if not set.
+    pub preresearch: Option<String>,
     pub research: Option<String>,
     pub planning: Option<String>,
     pub running: Option<String>,

@@ -73,28 +73,6 @@ pub fn skill_dir_to_filename(skill_dir_name: &str, agent_name: &str) -> String {
 
 /// Generate the send_keys command to invoke a skill interactively.
 /// Returns None for agents without interactive skill invocation.
-///
-/// Each agent has a different syntax:
-/// - Claude: `/agtx:plan` (slash command from .claude/commands/)
-/// - Gemini: `/agtx:plan` (slash command from .gemini/commands/)
-/// - OpenCode: `/agtx-plan` (slash command, hyphen separator)
-/// - Codex: `$agtx-plan` (dollar-sign mention from .codex/skills/)
-pub fn skill_invocation_command(agent_name: &str, skill_dir_name: &str) -> Option<String> {
-    match agent_name {
-        "claude" | "gemini" => {
-            let cmd = skill_name_to_command(skill_dir_name);
-            Some(format!("/{}", cmd))
-        }
-        "opencode" => {
-            Some(format!("/{}", skill_dir_name))
-        }
-        "codex" => {
-            Some(format!("${}", skill_dir_name))
-        }
-        _ => None,
-    }
-}
-
 /// Transform a canonical plugin command (Claude/Gemini format) for a specific agent.
 ///
 /// Plugin commands in plugin.toml are stored in canonical form: `/namespace:command args`
@@ -120,31 +98,6 @@ pub fn transform_plugin_command(canonical_cmd: &str, agent_name: &str) -> Option
             }
         }
         _ => None,
-    }
-}
-
-/// Generate skill reference text for prompts (fallback for agents without interactive invocation).
-/// For agents with skill invocation: empty string (skill is invoked via send_keys).
-/// For agents without: "Follow the instructions in .agtx/skills/agtx-plan/SKILL.md"
-pub fn skill_reference(agent_name: &str, skill_dir_name: &str) -> String {
-    if skill_invocation_command(agent_name, skill_dir_name).is_some() {
-        String::new()
-    } else {
-        format!(
-            "Follow the instructions in .agtx/skills/{}/SKILL.md",
-            skill_dir_name
-        )
-    }
-}
-
-/// Map a phase name to the corresponding skill directory name.
-pub fn phase_to_skill_dir(phase: &str) -> &'static str {
-    match phase {
-        "research" => "agtx-research",
-        "planning" | "planning_with_research" => "agtx-plan",
-        "running" => "agtx-execute",
-        "review" => "agtx-review",
-        _ => "",
     }
 }
 

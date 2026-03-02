@@ -8,7 +8,10 @@ running = ".agtx/execute.md"
 review = ".agtx/review.md"
 
 [commands]
-# Unset — uses agent-native skill invocation (/agtx:plan, $agtx-plan, etc.)
+research = "/agtx:research"
+planning = "/agtx:plan"
+running = "/agtx:execute"
+review = "/agtx:review"
 
 [prompts]
 research = "Task: {task}"
