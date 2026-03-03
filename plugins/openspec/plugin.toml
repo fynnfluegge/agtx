@@ -1,0 +1,20 @@
+name = "openspec"
+description = "OpenSpec - lightweight AI-guided specification framework"
+# No init_script — openspec must be initialized in the project root first (openspec init).
+# The openspec/ directory (containing change specs) is copied to worktrees automatically.
+copy_dirs = ["openspec"]
+
+[artifacts]
+planning = "openspec/changes/*/proposal.md"
+running = "openspec/changes/*/tasks.md"
+
+[commands]
+planning = "/opsx:propose {task}"
+running = "/opsx:apply"
+review = "/opsx:verify"
+
+[prompts]
+# propose takes {task} inline in the command — no separate prompt needed
+
+[copy_back]
+planning = ["openspec"]

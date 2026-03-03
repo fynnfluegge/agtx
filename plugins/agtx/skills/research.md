@@ -1,6 +1,6 @@
 ---
 name: agtx-research
-description: Explore the codebase to understand a task before planning. Write findings to .agtx/research/{task-id}.md and stop. This is a read-only exploration — do not modify any files.
+description: Explore the codebase to understand a task before planning. Write findings to .agtx/research.md and stop. This is a read-only exploration — do not modify any files.
 ---
 
 # Research Phase
@@ -17,7 +17,7 @@ You are in the **research phase** of an agtx-managed task. This is a read-only e
 
 ## Output
 
-Write your findings to the research artifact path provided in the task prompt. Include:
+Write your findings to `.agtx/research.md`. Include:
 
 ## Relevant Files
 Key files and their roles — what exists, what needs changing.
@@ -37,5 +37,5 @@ This is a **read-only** exploration:
 - Do NOT modify any source files
 - Do NOT create branches or worktrees
 - Do NOT start planning or implementing
-- Say: "Research complete. Findings written to {artifact_path}."
+- Say: "Research complete. Findings written to .agtx/research.md."
 - Wait for further instructions

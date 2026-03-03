@@ -14,11 +14,11 @@ Let different coding agents collaborate on the same task. Plug in any existing s
 
 ## Features
 
-- **Kanban workflow**: Backlog/Research → Planning → Running → Review → Done (with optional cyclic phases for multi-milestone plugins)
+- **Kanban workflow**: Backlog → Planning → Running → Review → Done (with optional research and cyclic phases)
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
 - **Coding agent integrations**: Automatic session management for Claude Code, Codex, Gemini, OpenCode and Copilot
 - **Multi-agent per task**: Configure different agents per workflow phase — e.g. Gemini for planning, Claude for implementation, Codex for review — with automatic agent switching in the same tmux window
-- **Spec-driven development plugins**: Plug in any spec-driven development framework or select from a predefined set of plugins like GSD or Spec-kit — or define custom skills, prompts and artifact tracking - with automatic execution and tracking at each phase
+- **Spec-driven development plugins**: Plug in any spec-driven development framework or select from a predefined set of plugins like GSD, Spec-kit or OpenSpec — or define custom skills, prompts and artifact tracking - with automatic execution and tracking at each phase
 - **Multi-project dashboard**: Manage tasks across all your projects
 - **PR workflow**: Generate descriptions with AI, create PRs directly from the TUI
 - **Customizable themes**: Configure colors via config file
@@ -149,7 +149,9 @@ Phases without an explicit agent override keep whatever agent is currently runni
 
 ## Spec-driven Development Plugins
 
-agtx ships with a plugin system that lets any spec-driven development framework hook into the task lifecycle. A plugin is a single TOML file that defines what happens at each phase transition — the commands sent to the agent, the prompts, the artifact files that signal completion, and optional setup scripts. Write a command once in canonical format and agtx translates it automatically for every supported agent.
+agtx ships with a fully declarative plugin framework — a single TOML file is all it takes to integrate any spec-driven development framework into the task lifecycle. No code changes, no custom adapters. The plugin defines commands, prompts, artifact paths, and copy-back rules — agtx handles the rest: phase gating, artifact polling, worktree sync, agent switching, and autonomous execution.
+
+All runtime behavior is derived from the TOML config. Commands are written once in canonical format and translated automatically for every supported agent. Phases are flexible — plugins can skip research, combine research and planning, or define cyclic multi-milestone workflows. Phase accessibility is inferred from the config: if a phase's command or prompt contains `{task}`, it can be entered directly from Backlog; otherwise it's gated behind a prior phase.
 
 Press `P` to select a plugin for the current project. The active plugin is shown in the header bar.
 
@@ -159,6 +161,7 @@ Press `P` to select a plugin for the current project. The active plugin is shown
 | **agtx** (default) | Built-in workflow with skills and prompts for each phase |
 | **gsd** | [Get Shit Done](https://github.com/fynnfluegge/get-shit-done-cc) - structured spec-driven development with interactive planning |
 | **spec-kit** | [Spec-Driven Development](https://github.com/github/spec-kit) by GitHub - specifications become executable artifacts |
+| **openspec** | [OpenSpec](https://github.com/Fission-AI/OpenSpec) - lightweight AI-guided specification framework |
 
 ### Agent Compatibility
 
@@ -173,6 +176,7 @@ Commands are written once in canonical format and automatically translated per a
 | **agtx** | ✅ | ✅ | ✅ | 🟡 | ✅ |
 | **gsd** | ✅ | ✅ | ✅ | ❌ | ✅ |
 | **spec-kit** | ✅ | ✅ | ✅ | 🟡 | ✅ |
+| **openspec** | ✅ | ✅ | ✅ | 🟡 | ✅ |
 | **void** | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
@@ -224,10 +228,6 @@ copy_files = ["PROJECT.md", "REQUIREMENTS.md"]
 # Use this for multi-milestone workflows (e.g. plan → execute → review → next milestone).
 cyclic = false
 
-# When true, the research phase must be completed before planning or running.
-# Prevents skipping research for plugins that depend on it.
-research_required = false
-
 # Artifact files that signal phase completion.
 # When detected, the task shows a checkmark instead of the spinner.
 # Supports * wildcard for one directory level (e.g. "specs/*/plan.md").
@@ -274,6 +274,13 @@ research = "What do you want to build?"
 # Useful for sharing research artifacts (specs, plans) across worktrees.
 [copy_back]
 research = ["PROJECT.md", "REQUIREMENTS.md", ".my-plugin"]
+
+# Auto-dismiss interactive prompts that appear before the prompt trigger.
+# Each rule fires when ALL detect patterns are present and the pane is stable.
+# Response is newline-separated keystrokes (e.g. "2\nEnter" sends "2" then Enter).
+[[auto_dismiss]]
+detect = ["Map codebase", "Skip mapping", "Enter to select"]
+response = "2\nEnter"
 ```
 
 **What happens at each phase transition:**
@@ -285,7 +292,9 @@ research = ["PROJECT.md", "REQUIREMENTS.md", ".my-plugin"]
 5. If **copy_back** is configured, artifacts are copied from worktree to project root on completion
 6. If the agent appears idle (no output for 15s), the spinner becomes a pause icon
 
-**Preresearch fallback:** When pressing `R` on a task, if `preresearch` is configured and no research artifacts from `copy_back` exist in the project root yet, the `preresearch` command is used instead of `research`. This lets plugins run a one-time project setup (e.g. `/gsd:new-project`) before switching to the regular research command for subsequent tasks.
+**Phase gating:** Whether a phase can be entered directly from Backlog is derived from the plugin config. If a phase's command or prompt contains `{task}`, it can receive task context and is accessible from Backlog. If neither has `{task}`, the phase depends on a prior phase and is blocked until that artifact exists. For example, OpenSpec's `/opsx:propose {task}` allows direct Backlog → Planning, but `/opsx:apply` (no `{task}`) blocks Backlog → Running until proposal artifacts exist.
+
+**Preresearch fallback:** When pressing `R` on a task, if `preresearch` is configured and no research artifacts from `copy_back` exist in the project root yet, the `preresearch` command is used instead of `research`. This lets plugins run a one-time project setup (e.g. `/gsd:new-project`) before switching to the regular research command for subsequent tasks. If the plugin has no research command at all (e.g. OpenSpec), pressing `R` shows a warning.
 
 **Cyclic workflows:** When `cyclic = true`, pressing `p` in Review moves the task back to Planning with an incremented phase counter. This enables multi-milestone workflows where each cycle (plan → execute → review) produces artifacts in a separate `{phase}` directory.
 

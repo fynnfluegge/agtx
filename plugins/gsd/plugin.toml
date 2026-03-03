@@ -2,16 +2,15 @@ name = "gsd"
 description = "Get Shit Done - structured spec-driven development framework"
 init_script = "npx get-shit-done-cc@latest --{agent} --local --non-interactive"
 supported_agents = ["claude", "codex", "gemini", "opencode"]
-research_required = true
 cyclic = true
-copy_files = ["PROJECT.md", "REQUIREMENTS.md", "ROADMAP.md", "STATE.md"]
-copy_dirs = [".planning"]
+copy_files = [".planning/config.json", ".planning/PROJECT.md", ".planning/REQUIREMENTS.md", ".planning/ROADMAP.md", ".planning/STATE.md"]
 
 [artifacts]
-research = ".planning/1/1-CONTEXT.md"
-planning = ".planning/{phase}/*-PLAN.md"
-running = ".planning/{phase}/*-SUMMARY.md"
-review = ".planning/{phase}/UAT.md"
+preresearch = [".planning/config.json", ".planning/PROJECT.md", ".planning/REQUIREMENTS.md", ".planning/ROADMAP.md", ".planning/STATE.md"]
+research = ".planning/phases/*/{phase}-CONTEXT.md"
+planning = ".planning/phases/*/{phase}-PLAN.md"
+running = ".planning/phases/*/{phase}-SUMMARY.md"
+review = ".planning/phases/*/UAT.md"
 
 [commands]
 preresearch = "/gsd:new-project"
@@ -27,4 +26,8 @@ research = "Task: {task}"
 research = "What do you want to build?"
 
 [copy_back]
-research = ["PROJECT.md", "REQUIREMENTS.md", "ROADMAP.md", "STATE.md", ".planning"]
+preresearch = [".planning/config.json", ".planning/PROJECT.md", ".planning/REQUIREMENTS.md", ".planning/ROADMAP.md", ".planning/STATE.md"]
+
+[[auto_dismiss]]
+detect = ["Map codebase", "Skip mapping", "Enter to select"]
+response = "2\nEnter"

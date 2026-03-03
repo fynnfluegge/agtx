@@ -144,6 +144,11 @@ pub const BUNDLED_PLUGINS: &[(&str, &str, &str)] = &[
         include_str!("../plugins/spec-kit/plugin.toml"),
     ),
     (
+        "openspec",
+        "OpenSpec - lightweight AI-guided specification framework",
+        include_str!("../plugins/openspec/plugin.toml"),
+    ),
+    (
         "void",
         "Plain agent session - no prompting or skills",
         include_str!("../plugins/void/plugin.toml"),

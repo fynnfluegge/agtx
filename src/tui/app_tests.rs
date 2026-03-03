@@ -1767,8 +1767,11 @@ fn test_resolve_prompt_research_has_task() {
 #[test]
 fn test_resolve_prompt_running_phase() {
     let plugin = skills::load_bundled_plugin("agtx");
+    // running = direct from Backlog, needs task prompt
     let prompt = resolve_prompt(&plugin, "running", "my task", "task-123", 1);
-    // No running prompt — execute skill handles instructions
+    assert_eq!(prompt, "Task: my task");
+    // running_with_research_or_planning = after prior phase, no prompt needed
+    let prompt = resolve_prompt(&plugin, "running_with_research_or_planning", "my task", "task-123", 1);
     assert!(prompt.is_empty());
 }
 
@@ -1841,11 +1844,11 @@ fn test_resolve_skill_command_with_plugin() {
         },
         prompts: PluginPrompts::default(),
         prompt_triggers: PluginPromptTriggers::default(),
-        research_required: false,
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
+        auto_dismiss: vec![],
     });
     // Claude/Gemini: canonical form unchanged
     assert_eq!(resolve_skill_command(&plugin, "planning", "claude", "", 1), Some("/gsd:plan-phase 1".to_string()));
@@ -1876,11 +1879,11 @@ fn test_plugin_supports_agent() {
         commands: Default::default(),
         prompts: Default::default(),
         prompt_triggers: Default::default(),
-        research_required: false,
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
+        auto_dismiss: vec![],
     };
     assert!(plugin.supports_agent("claude"));
     assert!(plugin.supports_agent("copilot"));
@@ -1896,11 +1899,11 @@ fn test_plugin_supports_agent() {
         commands: Default::default(),
         prompts: Default::default(),
         prompt_triggers: Default::default(),
-        research_required: false,
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
+        auto_dismiss: vec![],
     };
     assert!(plugin.supports_agent("claude"));
     assert!(plugin.supports_agent("codex"));
@@ -1958,6 +1961,7 @@ fn test_phase_artifact_exists_with_glob() {
         init_script: None,
         supported_agents: vec![],
         artifacts: PluginArtifacts {
+            preresearch: vec![],
             research: Some("specs/*/spec.md".to_string()),
             planning: Some("specs/*/plan.md".to_string()),
             running: None,
@@ -1966,11 +1970,11 @@ fn test_phase_artifact_exists_with_glob() {
         commands: PluginCommands::default(),
         prompts: PluginPrompts::default(),
         prompt_triggers: Default::default(),
-        research_required: false,
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
+        auto_dismiss: vec![],
     });
 
     let worktree = tmp.to_string_lossy().to_string();
@@ -2005,8 +2009,9 @@ fn test_bundled_plugins_list() {
     assert!(names.contains(&"agtx"));
     assert!(names.contains(&"gsd"));
     assert!(names.contains(&"spec-kit"));
+    assert!(names.contains(&"openspec"));
     assert!(names.contains(&"void"));
-    assert_eq!(names.len(), 4);
+    assert_eq!(names.len(), 5);
 }
 
 #[test]
@@ -2246,11 +2251,11 @@ fn test_resolve_prompt_trigger_with_gsd() {
             running: None,
             review: None,
         },
-        research_required: false,
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
+        auto_dismiss: vec![],
     });
     assert_eq!(
         resolve_prompt_trigger(&plugin, "research"),
@@ -2284,11 +2289,11 @@ fn test_resolve_prompt_trigger_empty_string_filtered() {
             running: None,
             review: None,
         },
-        research_required: false,
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
+        auto_dismiss: vec![],
     });
     // Empty strings should be filtered out
     assert_eq!(resolve_prompt_trigger(&plugin, "research"), None);
@@ -2784,9 +2789,7 @@ fn test_gsd_plugin_has_cyclic_and_copy_back() {
         .expect("gsd plugin should be bundled");
     let plugin: WorkflowPlugin = toml::from_str(content).unwrap();
     assert!(plugin.cyclic);
-    assert!(!plugin.copy_files.is_empty());
-    assert!(plugin.copy_back.contains_key("research"));
-    let research_entries = &plugin.copy_back["research"];
-    assert!(research_entries.contains(&"PROJECT.md".to_string()));
-    assert!(research_entries.contains(&".planning".to_string()));
+    assert!(plugin.copy_back.contains_key("preresearch"));
+    let preresearch_entries = &plugin.copy_back["preresearch"];
+    assert!(preresearch_entries.contains(&".planning/PROJECT.md".to_string()));
 }

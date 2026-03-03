@@ -2932,8 +2932,8 @@ impl App {
                 }
                 let plugin = self.load_task_plugin(&task);
 
-                // Block if plugin requires research and it hasn't been completed
-                if plugin.as_ref().map_or(false, |p| p.research_required) {
+                // Block if planning phase doesn't accept {task} and no prior phase artifact exists
+                if plugin.as_ref().map_or(false, |p| !p.phase_accepts_task("planning")) {
                     let has_research = task.worktree_path.as_ref().map_or(false, |wt| {
                         research_artifact_exists(wt, &task.id, &plugin)
                     });
@@ -2974,6 +2974,7 @@ impl App {
                     let agent_registry = Arc::clone(&self.state.agent_registry);
                     let planning_agent_clone = planning_agent.clone();
                     let current_agent_clone = task.agent.clone();
+                    let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
                     std::thread::spawn(move || {
                         if agent_switch {
                             let agent_ops = agent_registry.get(&planning_agent_clone);
@@ -2981,7 +2982,7 @@ impl App {
                             switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_agent_clone, &new_cmd);
                             let _ = wait_for_agent_ready(&tmux_ops, &target);
                         }
-                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &planning_agent_clone);
+                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &planning_agent_clone, &auto_dismiss);
                     });
                 } else if self.state.setup_rx.is_some() {
                     // Setup already in progress, skip
@@ -3007,6 +3008,7 @@ impl App {
                     let task_title = task.title.clone();
                     let plugin_name = task.plugin.clone();
                     let planning_agent_clone = planning_agent.clone();
+                    let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
 
                     let (tx, rx) = mpsc::channel();
                     self.state.setup_rx = Some(rx);
@@ -3045,7 +3047,7 @@ impl App {
                                 });
 
                                 if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
-                                    send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &planning_agent_clone);
+                                    send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &planning_agent_clone, &auto_dismiss);
                                 }
                             }
                             Err(e) => {
@@ -3078,10 +3080,11 @@ impl App {
                     } else {
                         task.title.clone()
                     };
-                    let has_plan = task.worktree_path.as_ref().map_or(false, |wt| {
-                        phase_artifact_exists(wt, TaskStatus::Planning, &plugin, task.cycle)
+                    let has_prior_phase = task.worktree_path.as_ref().map_or(false, |wt| {
+                        research_artifact_exists(wt, &task.id, &plugin)
+                            || phase_artifact_exists(wt, TaskStatus::Planning, &plugin, task.cycle)
                     });
-                    let run_phase = if has_plan { "running" } else { "running_direct" };
+                    let run_phase = if has_prior_phase { "running_with_research_or_planning" } else { "running" };
                     let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content, task.cycle);
                     let prompt = resolve_prompt(&plugin, run_phase, &task_content, &task.id, task.cycle);
                     let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
@@ -3091,6 +3094,7 @@ impl App {
                     let running_agent_clone = running_agent.clone();
                     let current_agent_clone = task.agent.clone();
                     let task_content_clone = task_content.clone();
+                    let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
                     std::thread::spawn(move || {
                         if agent_switch {
                             let agent_ops = agent_registry.get(&running_agent_clone);
@@ -3098,7 +3102,7 @@ impl App {
                             switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
                             let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
                         }
-                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &running_agent_clone);
+                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &running_agent_clone, &auto_dismiss);
                     });
                     task.agent = running_agent;
                 }
@@ -3124,6 +3128,7 @@ impl App {
                     let review_agent_clone = review_agent.clone();
                     let current_agent_clone = task.agent.clone();
                     let task_content_clone = task_content.clone();
+                    let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
                     std::thread::spawn(move || {
                         if agent_switch {
                             let agent_ops = agent_registry.get(&review_agent_clone);
@@ -3131,7 +3136,7 @@ impl App {
                             switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
                             let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
                         }
-                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &review_agent_clone);
+                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &review_agent_clone, &auto_dismiss);
                     });
                 }
                 task.agent = review_agent.clone();
@@ -3263,6 +3268,18 @@ impl App {
         task.plugin = self.state.config.workflow_plugin.clone();
         let plugin_name = task.plugin.clone();
         let plugin = self.load_task_plugin(&task);
+
+        // Block if plugin has no research command (e.g. OpenSpec uses planning as first phase)
+        let has_research_cmd = plugin.as_ref()
+            .map_or(false, |p| p.commands.research.is_some() || p.commands.preresearch.is_some());
+        if !has_research_cmd {
+            self.state.warning_message = Some((
+                "This plugin has no research phase — move to Planning instead".to_string(),
+                std::time::Instant::now(),
+            ));
+            return Ok(());
+        }
+
         let agent_name = self.state.config.agent_for_phase("research").to_string();
 
         let task_content = if let Some(desc) = &task.description {
@@ -3271,19 +3288,6 @@ impl App {
             task.title.clone()
         };
 
-        // Check if research artifacts already exist in project root (preresearch fallback)
-        // If artifacts exist, use "research" command. If not and preresearch is configured, use "preresearch".
-        let use_preresearch = plugin.as_ref().map_or(false, |p| {
-            p.commands.preresearch.is_some()
-                && !p.copy_back.get("research").map_or(false, |entries| {
-                    entries.iter().any(|e| project_path.join(e).exists())
-                })
-        });
-        let research_phase = if use_preresearch { "preresearch" } else { "research" };
-
-        let prompt = resolve_prompt(&plugin, research_phase, &task_content, &task.id, task.cycle);
-        let skill_cmd = resolve_skill_command(&plugin, research_phase, &agent_name, &task_content, task.cycle);
-        let prompt_trigger = resolve_prompt_trigger(&plugin, research_phase);
         let all_agents = collect_phase_agents(&self.state.config);
         let project_name = self.state.project_name.clone();
         let copy_files = self.state.config.copy_files.clone();
@@ -3295,6 +3299,8 @@ impl App {
 
         let task_id = task.id.clone();
         let task_title = task.title.clone();
+        let task_cycle = task.cycle;
+        let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
@@ -3305,11 +3311,13 @@ impl App {
             tmp_task.id = task_id.clone();
             tmp_task.plugin = plugin_name.clone();
 
+            // setup_task_worktree creates the worktree and copies files (including preresearch artifacts if they exist at root)
+            // We pass an empty prompt here — the actual prompt is resolved after worktree creation
             let result = setup_task_worktree(
                 &mut tmp_task,
                 &project_path,
                 &project_name,
-                &prompt,
+                "",
                 copy_files,
                 init_script,
                 &plugin,
@@ -3322,10 +3330,27 @@ impl App {
 
             match result {
                 Ok(target) => {
+                    let worktree_path = tmp_task.worktree_path.clone().unwrap_or_default();
+
+                    // Determine preresearch vs research by checking if preresearch artifacts
+                    // exist in the worktree (they would have been copied from project root via copy_files)
+                    let use_preresearch = plugin.as_ref().map_or(false, |p| {
+                        p.commands.preresearch.is_some()
+                            && !p.artifacts.preresearch.is_empty()
+                            && !p.artifacts.preresearch.iter().all(|a| {
+                                Path::new(&worktree_path).join(a).exists()
+                            })
+                    });
+                    let research_phase = if use_preresearch { "preresearch" } else { "research" };
+
+                    let prompt = resolve_prompt(&plugin, research_phase, &task_content, &task_id, task_cycle);
+                    let skill_cmd = resolve_skill_command(&plugin, research_phase, &agent_name, &task_content, task_cycle);
+                    let prompt_trigger = resolve_prompt_trigger(&plugin, research_phase);
+
                     let _ = tx.send(SetupResult {
                         task_id: task_id.clone(),
                         session_name: tmp_task.session_name.unwrap_or_default(),
-                        worktree_path: tmp_task.worktree_path.unwrap_or_default(),
+                        worktree_path,
                         branch_name: tmp_task.branch_name.unwrap_or_default(),
                         new_status: None, // stays in Backlog
                         agent: agent_name.clone(),
@@ -3335,7 +3360,7 @@ impl App {
 
                     // Wait for agent ready and send skill+prompt
                     if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
-                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &agent_name);
+                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &agent_name, &auto_dismiss);
                     }
                 }
                 Err(e) => {
@@ -3373,15 +3398,21 @@ impl App {
             return Ok(());
         }
 
-        // Block if plugin requires research and it hasn't been completed
+        // Stamp plugin on task before checking research requirement
+        if task.plugin.is_none() {
+            task.plugin = self.state.config.workflow_plugin.clone();
+        }
+
+        // Block if running phase doesn't accept {task} and no prior phase artifact exists
         let plugin_check = self.load_task_plugin(&task);
-        if plugin_check.as_ref().map_or(false, |p| p.research_required) {
-            let has_research = task.worktree_path.as_ref().map_or(false, |wt| {
+        if plugin_check.as_ref().map_or(false, |p| !p.phase_accepts_task("running")) {
+            let has_prior = task.worktree_path.as_ref().map_or(false, |wt| {
                 research_artifact_exists(wt, &task.id, &plugin_check)
+                    || phase_artifact_exists(wt, TaskStatus::Planning, &plugin_check, task.cycle)
             });
-            if !has_research {
+            if !has_prior {
                 self.state.warning_message = Some((
-                    format!("Research phase required first — press R to start research"),
+                    format!("Research or planning phase required first"),
                     std::time::Instant::now(),
                 ));
                 return Ok(());
@@ -3395,13 +3426,11 @@ impl App {
             task.title.clone()
         };
 
-        // Stamp plugin on task
-        task.plugin = self.state.config.workflow_plugin.clone();
         let plugin_name = task.plugin.clone();
         let plugin = self.load_task_plugin(&task);
         let running_agent = self.state.config.agent_for_phase("running").to_string();
         let all_agents = collect_phase_agents(&self.state.config);
-        let prompt = resolve_prompt(&plugin, "running_direct", &task_content, &task.id, task.cycle);
+        let prompt = resolve_prompt(&plugin, "running", &task_content, &task.id, task.cycle);
         let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content, task.cycle);
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
         let project_name = self.state.project_name.clone();
@@ -3413,6 +3442,7 @@ impl App {
         let task_id = task.id.clone();
         let task_title = task.title.clone();
         let running_agent_clone = running_agent.clone();
+        let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
@@ -3451,7 +3481,7 @@ impl App {
                     });
 
                     if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
-                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &running_agent_clone);
+                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &running_agent_clone, &auto_dismiss);
                     }
                 }
                 Err(e) => {
@@ -3535,6 +3565,7 @@ impl App {
                     let planning_agent_clone = planning_agent.clone();
                     let current_agent_clone = task.agent.clone();
                     let task_content_clone = task_content.clone();
+                    let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
                     std::thread::spawn(move || {
                         if agent_switch {
                             let agent_ops = agent_registry.get(&planning_agent_clone);
@@ -3542,7 +3573,7 @@ impl App {
                             switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
                             let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
                         }
-                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &planning_agent_clone);
+                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &planning_agent_clone, &auto_dismiss);
                     });
                 }
 
@@ -3703,6 +3734,31 @@ impl App {
                         None => skills::load_bundled_plugin("agtx"),
                     }
                 });
+
+                // Preresearch artifact: copy back project files when preresearch completes
+                // Only copy if not all files exist at project root yet (avoids repeated copies)
+                if let (Some(ref wt), Some(ref pp)) = (&worktree_path, &project_path) {
+                    if let Some(ref p) = plugin {
+                        if let Some(entries) = p.copy_back.get("preresearch") {
+                            let all_at_root = !entries.is_empty() && entries.iter().all(|e| Path::new(pp).join(e).exists());
+                            if !all_at_root && !p.artifacts.preresearch.is_empty() {
+                                // Check if all preresearch artifacts exist in worktree
+                                let any_artifact = p.artifacts.preresearch.iter().all(|a| {
+                                    let path = Path::new(wt).join(a);
+                                    if a.contains('*') {
+                                        glob_path_exists(&path.to_string_lossy())
+                                    } else {
+                                        path.exists()
+                                    }
+                                });
+                                if any_artifact {
+                                    copy_back_to_project(Path::new(wt), Path::new(pp), entries);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let found = worktree_path.as_ref().map_or(false, |wt| {
                     research_artifact_exists(wt, &task_id, plugin)
                 });
@@ -3743,6 +3799,7 @@ impl App {
                         }
                     }
                 }
+
             } else if phase_status == PhaseStatus::Ready {
                 self.state.pane_content_hashes.remove(&task_id);
 
@@ -3757,7 +3814,8 @@ impl App {
                                 None => skills::load_bundled_plugin("agtx"),
                             }
                         });
-                        let phase_name = status.as_str();
+                        // Backlog tasks are in research phase; map to "research" for copy_back lookup
+                        let phase_name = if status == TaskStatus::Backlog { "research" } else { status.as_str() };
                         if let Some(ref p) = plugin {
                             if let Some(entries) = p.copy_back.get(phase_name) {
                                 copy_back_to_project(Path::new(wt), Path::new(pp), entries);
@@ -3841,17 +3899,13 @@ fn copy_back_to_project(worktree: &Path, project_root: &Path, entries: &[String]
             continue;
         }
         if src.is_dir() {
-            if let Err(e) = crate::git::copy_dir_recursive(&src, &dst) {
-                eprintln!("copy_back: failed to copy dir '{}': {}", entry, e);
-            }
+            let _ = crate::git::copy_dir_recursive(&src, &dst);
         } else {
             // Ensure parent directory exists for nested file paths
             if let Some(parent) = dst.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            if let Err(e) = std::fs::copy(&src, &dst) {
-                eprintln!("copy_back: failed to copy file '{}': {}", entry, e);
-            }
+            let _ = std::fs::copy(&src, &dst);
         }
     }
 }
@@ -4013,9 +4067,8 @@ fn setup_task_worktree(
         init_script,
         copy_dirs,
     );
-    for warning in &init_warnings {
-        eprintln!("Worktree init: {}", warning);
-    }
+    // Warnings from copy_files are expected (e.g. files don't exist yet on first run)
+    let _ = &init_warnings;
 
     // Write skills to worktree .agtx/skills/ and agent-native discovery paths
     // Deploy for all unique agents configured across phases
@@ -4657,9 +4710,8 @@ fn resolve_prompt(plugin: &Option<WorkflowPlugin>, phase: &str, task_content: &s
         "running" => plugin.as_ref()
             .and_then(|p| p.prompts.running.as_deref())
             .unwrap_or(""),
-        "running_direct" => plugin.as_ref()
-            .and_then(|p| p.prompts.running_direct.as_deref()
-                .or(p.prompts.running.as_deref()))
+        "running_with_research_or_planning" => plugin.as_ref()
+            .and_then(|p| p.prompts.running_with_research_or_planning.as_deref())
             .unwrap_or(""),
         "review" => plugin.as_ref()
             .and_then(|p| p.prompts.review.as_deref())
@@ -4689,7 +4741,7 @@ fn resolve_skill_command(plugin: &Option<WorkflowPlugin>, phase: &str, agent_nam
             .or(p.commands.research.as_deref()),
         "research" => p.commands.research.as_deref(),
         "planning" | "planning_with_research" => p.commands.planning.as_deref(),
-        "running" => p.commands.running.as_deref(),
+        "running" | "running_with_research_or_planning" => p.commands.running.as_deref(),
         "review" => p.commands.review.as_deref(),
         _ => None,
     }?;
@@ -4699,8 +4751,8 @@ fn resolve_skill_command(plugin: &Option<WorkflowPlugin>, phase: &str, agent_nam
         return None;
     }
 
-    // When research was already done, strip {task} — agent already has context
-    let expanded = if phase == "planning_with_research" {
+    // When a prior phase was done, strip {task} — agent already has context
+    let expanded = if phase == "planning_with_research" || phase == "running_with_research_or_planning" {
         cmd.replace("{task}", "").trim().to_string()
     } else {
         // Collapse task content to single line for commands (newlines → spaces)
@@ -4725,6 +4777,7 @@ fn send_skill_and_prompt(
     prompt_trigger: &Option<String>,
     task_content: &str,
     agent_name: &str,
+    auto_dismiss: &[crate::config::AutoDismiss],
 ) {
     // Gemini & Codex: always combine skill+prompt into a single message.
     // Gemini: sending separately causes it to execute the skill and queue the
@@ -4768,31 +4821,35 @@ fn send_skill_and_prompt(
         (Some(cmd), Some(trigger)) => {
             let _ = tmux_ops.send_keys(target, cmd);
             if !prompt.is_empty() {
-                if wait_for_prompt_trigger(tmux_ops, target, trigger) {
+                if wait_for_prompt_trigger(tmux_ops, target, trigger, auto_dismiss) {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     let _ = tmux_ops.send_keys(target, prompt);
                 }
             }
         }
-        // Skill + prompt, no trigger: send separately, wait for pane to stabilize
+        // Skill + prompt, no trigger: send separately, wait for agent to finish processing
         (Some(cmd), None) => {
             let _ = tmux_ops.send_keys(target, cmd);
             if !prompt.is_empty() {
-                // Wait for agent to finish processing the skill command before sending the prompt.
-                // Poll pane content until it stabilizes (agent re-rendered its UI after the command).
+                // Wait for agent to process the skill command and become idle again.
+                // Requires at least 1 content change (agent started processing) before
+                // counting stability, to avoid false-positive when the command hasn't
+                // been picked up yet.
                 let mut last_content = String::new();
                 let mut stable_ticks = 0u32;
-                for _ in 0..50 { // 10s max
+                let mut change_count = 0u32;
+                for _ in 0..75 { // 15s max
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     if let Ok(content) = tmux_ops.capture_pane(target) {
-                        if content == last_content {
-                            stable_ticks += 1;
-                            if stable_ticks >= 10 { // 2s of no changes
-                                break;
-                            }
-                        } else {
+                        if content != last_content {
+                            change_count += 1;
                             stable_ticks = 0;
                             last_content = content;
+                        } else if change_count >= 1 {
+                            stable_ticks += 1;
+                            if stable_ticks >= 10 { // 2s of no changes after agent responded
+                                break;
+                            }
                         }
                     }
                 }
@@ -4819,7 +4876,7 @@ fn resolve_prompt_trigger(plugin: &Option<WorkflowPlugin>, phase: &str) -> Optio
         match phase {
             "preresearch" | "research" => p.prompt_triggers.research.clone(),
             "planning" | "planning_with_research" => p.prompt_triggers.planning.clone(),
-            "running" => p.prompt_triggers.running.clone(),
+            "running" | "running_with_research_or_planning" => p.prompt_triggers.running.clone(),
             "review" => p.prompt_triggers.review.clone(),
             _ => None,
         }
@@ -4828,11 +4885,13 @@ fn resolve_prompt_trigger(plugin: &Option<WorkflowPlugin>, phase: &str) -> Optio
 
 /// Wait for a specific text to appear in a tmux pane, then return.
 /// Returns true if the trigger was found, false if timed out.
-fn wait_for_prompt_trigger(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, trigger: &str) -> bool {
+/// Auto-dismiss rules are checked while waiting: when all detect patterns match
+/// and the pane is stable for ~2s, the response keystrokes are sent automatically.
+fn wait_for_prompt_trigger(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, trigger: &str, auto_dismiss: &[crate::config::AutoDismiss]) -> bool {
     let mut last_content = String::new();
-    let mut stable_ticks = 0u32; // how many consecutive polls the content hasn't changed
+    let mut stable_ticks = 0u32;
 
-    for _ in 0..600 { // ~5 minutes (600 * 500ms) — long timeout to handle interactive steps
+    for _ in 0..600 { // ~5 minutes (600 * 500ms)
         std::thread::sleep(std::time::Duration::from_millis(500));
         if let Ok(content) = tmux_ops.capture_pane(target) {
             if content == last_content {
@@ -4842,25 +4901,25 @@ fn wait_for_prompt_trigger(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, tri
                 last_content = content.clone();
             }
 
-            // Auto-dismiss known interactive prompts that block the trigger.
-            // GSD's "Map codebase first?" prompt: select "Skip mapping" (option 2).
-            if stable_ticks >= 4
-                && content.contains("Map codebase")
-                && content.contains("Skip mapping")
-                && content.contains("Enter to select")
-            {
-                let _ = tmux_ops.send_keys_literal(target, "2");
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
-                stable_ticks = 0;
-                last_content.clear();
-                continue;
+            // Auto-dismiss interactive prompts that block the trigger.
+            // Requires stability (2s) to ensure the UI is ready for input.
+            if stable_ticks >= 4 {
+                for rule in auto_dismiss {
+                    if rule.detect.iter().all(|p| content.contains(p.as_str())) {
+                        for key in rule.response.split('\n') {
+                            let _ = tmux_ops.send_keys_literal(target, key);
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        stable_ticks = 0;
+                        last_content.clear();
+                        break;
+                    }
+                }
+                if last_content.is_empty() { continue; }
             }
 
-            // Trigger when the text is present AND pane has been stable for ~2s.
-            // While the agent is reading files / generating output, content keeps
-            // changing. Once it asks the question and waits for input, it settles.
-            if stable_ticks >= 4 && content.contains(trigger) {
+            // Trigger as soon as the text is present in the pane.
+            if content.contains(trigger) {
                 return true;
             }
         }
@@ -4868,7 +4927,8 @@ fn wait_for_prompt_trigger(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, tri
     false
 }
 
-/// Check if the phase artifact exists for a task in its worktree
+/// Check if the phase artifact exists for a task in its worktree.
+/// Tries both zero-padded (e.g. "01") and non-padded (e.g. "1") {phase} substitution.
 fn phase_artifact_exists(worktree_path: &str, status: TaskStatus, plugin: &Option<WorkflowPlugin>, cycle: i32) -> bool {
     let rel_template = plugin.as_ref().and_then(|p| match status {
         TaskStatus::Planning => p.artifacts.planning.as_deref(),
@@ -4878,36 +4938,41 @@ fn phase_artifact_exists(worktree_path: &str, status: TaskStatus, plugin: &Optio
     });
 
     let Some(rel_template) = rel_template else { return false; };
-    let rel_path = rel_template.replace("{phase}", &cycle.to_string());
-
-    let full_path = Path::new(worktree_path).join(&rel_path);
-
-    // Support simple wildcard: "specs/*/plan.md" matches any single directory level
-    if rel_path.contains('*') {
-        return glob_path_exists(&full_path.to_string_lossy());
-    }
-
-    full_path.exists()
+    artifact_path_exists(worktree_path, rel_template, cycle)
 }
 
 /// Check if the research artifact exists for a task.
+/// Tries both zero-padded (e.g. "01") and non-padded (e.g. "1") {phase} substitution.
 fn research_artifact_exists(worktree_path: &str, task_id: &str, plugin: &Option<WorkflowPlugin>) -> bool {
     let Some(template) = plugin.as_ref().and_then(|p| p.artifacts.research.as_deref()) else {
         return false;
     };
-    let rel_path = template.replace("{task_id}", task_id);
-
-    let full_path = Path::new(worktree_path).join(&rel_path);
-
-    if rel_path.contains('*') {
-        return glob_path_exists(&full_path.to_string_lossy());
-    }
-
-    full_path.exists()
+    let rel_template = template.replace("{task_id}", task_id);
+    // Research is always cycle 1
+    artifact_path_exists(worktree_path, &rel_template, 1)
 }
 
-/// Simple glob matching for paths with a single `*` wildcard (one directory level).
-/// e.g. "/path/to/specs/*/plan.md" matches "/path/to/specs/my-feature/plan.md"
+/// Check if an artifact path exists, trying both zero-padded and non-padded {phase} substitution.
+fn artifact_path_exists(worktree_path: &str, rel_template: &str, cycle: i32) -> bool {
+    // Try zero-padded first (e.g. "01"), then non-padded (e.g. "1")
+    for phase_str in [format!("{:02}", cycle), cycle.to_string()] {
+        let rel_path = rel_template.replace("{phase}", &phase_str);
+        let full_path = Path::new(worktree_path).join(&rel_path);
+
+        if rel_path.contains('*') {
+            if glob_path_exists(&full_path.to_string_lossy()) {
+                return true;
+            }
+        } else if full_path.exists() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Simple glob matching for paths with `*` wildcards.
+/// Supports directory-level wildcards (e.g. "/path/*/plan.md")
+/// and file-level wildcards (e.g. "/path/*-PLAN.md").
 fn glob_path_exists(pattern: &str) -> bool {
     let Some(star_pos) = pattern.find('*') else {
         return Path::new(pattern).exists();
@@ -4922,17 +4987,27 @@ fn glob_path_exists(pattern: &str) -> bool {
         return false;
     };
 
+    // File-level wildcard: * is in the last path component (e.g. "*-CONTEXT.md")
+    let is_file_wildcard = !remainder.starts_with('/');
+
     for entry in entries.flatten() {
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let candidate = format!("{}{}", entry.path().display(), remainder);
-        if remainder.contains('*') {
-            if glob_path_exists(&candidate) {
+        let path = entry.path();
+        if is_file_wildcard {
+            // Match against filenames: e.g. "*-CONTEXT.md" matches "01-CONTEXT.md"
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with(remainder) {
+                    return true;
+                }
+            }
+        } else if path.is_dir() {
+            let candidate = format!("{}{}", path.display(), remainder);
+            if remainder.contains('*') {
+                if glob_path_exists(&candidate) {
+                    return true;
+                }
+            } else if Path::new(&candidate).exists() {
                 return true;
             }
-        } else if Path::new(&candidate).exists() {
-            return true;
         }
     }
     false
@@ -5176,6 +5251,17 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
 
 /// Load workflow plugin if configured
 fn load_plugin_if_configured(config: &MergedConfig, project_path: Option<&Path>) -> Option<WorkflowPlugin> {
+    // For bundled plugins, always write the latest version to disk so updates ship with new releases
+    if let (Some(name), Some(pp)) = (config.workflow_plugin.as_ref(), project_path) {
+        if let Some((_name, _desc, content)) = skills::BUNDLED_PLUGINS
+            .iter()
+            .find(|(n, _, _)| *n == name.as_str())
+        {
+            let plugin_dir = pp.join(".agtx").join("plugins").join(name.as_str());
+            let _ = std::fs::create_dir_all(&plugin_dir);
+            let _ = std::fs::write(plugin_dir.join("plugin.toml"), content);
+        }
+    }
     config.workflow_plugin.as_ref()
         .and_then(|name| WorkflowPlugin::load(name, project_path).ok())
         .or_else(|| skills::load_bundled_plugin("agtx"))

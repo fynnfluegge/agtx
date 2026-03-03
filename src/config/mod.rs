@@ -372,7 +372,7 @@ impl MergedConfig {
         match phase {
             "research" => self.phase_agents.research.as_deref(),
             "planning" | "planning_with_research" => self.phase_agents.planning.as_deref(),
-            "running" => self.phase_agents.running.as_deref(),
+            "running" | "running_with_research_or_planning" => self.phase_agents.running.as_deref(),
             "review" => self.phase_agents.review.as_deref(),
             _ => None,
         }
@@ -397,10 +397,6 @@ pub struct WorkflowPlugin {
     pub prompts: PluginPrompts,
     #[serde(default)]
     pub prompt_triggers: PluginPromptTriggers,
-    /// When true, research phase must be completed before planning or running.
-    /// Prevents skipping research for plugins that depend on it (e.g. GSD creates .planning/ during research).
-    #[serde(default)]
-    pub research_required: bool,
     /// Extra directories to copy from project root to worktrees (e.g. [".specify"]).
     #[serde(default)]
     pub copy_dirs: Vec<String>,
@@ -415,10 +411,27 @@ pub struct WorkflowPlugin {
     /// Keyed by phase name (e.g. { research = ["PROJECT.md", ".planning"] }).
     #[serde(default)]
     pub copy_back: std::collections::HashMap<String, Vec<String>>,
+    /// Auto-dismiss rules for interactive prompts that appear before the prompt trigger.
+    /// Each rule specifies patterns to detect and keystrokes to send in response.
+    #[serde(default)]
+    pub auto_dismiss: Vec<AutoDismiss>,
+}
+
+/// Rule for auto-dismissing interactive prompts in the tmux pane.
+/// When all `detect` patterns are present in the pane content (AND logic),
+/// the `response` keystrokes are sent automatically.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AutoDismiss {
+    /// All patterns must be present in pane content for the rule to trigger.
+    pub detect: Vec<String>,
+    /// Newline-separated keystrokes to send (e.g. "2\nEnter").
+    pub response: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginArtifacts {
+    #[serde(default)]
+    pub preresearch: Vec<String>,
     pub research: Option<String>,
     pub planning: Option<String>,
     pub running: Option<String>,
@@ -447,8 +460,8 @@ pub struct PluginPrompts {
     pub planning: Option<String>,
     pub planning_with_research: Option<String>,
     pub running: Option<String>,
-    /// Prompt for Backlog → Running (skipping Planning). Includes {task} since there's no plan.
-    pub running_direct: Option<String>,
+    /// Prompt for Running after research or planning. Usually empty — prior phase provides context.
+    pub running_with_research_or_planning: Option<String>,
     pub review: Option<String>,
 }
 
@@ -464,6 +477,27 @@ pub struct PluginPromptTriggers {
 }
 
 impl WorkflowPlugin {
+    /// Check if a phase's command or prompt contains `{task}`, meaning the phase
+    /// can receive task context directly and can be entered from Backlog.
+    /// If neither command nor prompt has `{task}`, the phase depends on a prior phase.
+    pub fn phase_accepts_task(&self, phase: &str) -> bool {
+        let cmd_has_task = match phase {
+            "planning" => self.commands.planning.as_deref(),
+            "running" => self.commands.running.as_deref(),
+            _ => None,
+        }
+        .map_or(false, |c| c.contains("{task}"));
+
+        let prompt_has_task = match phase {
+            "planning" => self.prompts.planning.as_deref(),
+            "running" => self.prompts.running.as_deref(),
+            _ => None,
+        }
+        .map_or(false, |p| p.contains("{task}"));
+
+        cmd_has_task || prompt_has_task
+    }
+
     /// Check if the given agent is supported by this plugin.
     /// Returns true if supported_agents is empty (all agents allowed) or contains the agent.
     pub fn supports_agent(&self, agent_name: &str) -> bool {

@@ -16,4 +16,4 @@ review = "/agtx:review"
 [prompts]
 research = "Task: {task}"
 planning = "Task: {task}"
-running_direct = "Task: {task}"
+running = "Task: {task}"
