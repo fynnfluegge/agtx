@@ -121,21 +121,17 @@ By default, all phases use `default_agent`. You can override the agent for speci
 default_agent = "claude"
 
 [agents]
-research = "claude"
+research = "gemini"
 planning = "claude"
-running = "codex"
-review = "claude"
+running = "claude"
+review = "codex"
 ```
 
 ```toml
 # .agtx/config.toml (project override — takes precedence over global)
 [agents]
-running = "gemini"
+running = "codex"
 ```
-
-When a task moves to a phase with a different agent configured, the current agent session is terminated and the new agent starts automatically in the same tmux window. The worktree, git state, and all file changes are preserved across the switch.
-
-Phases without an explicit agent override keep whatever agent is currently running — no unnecessary switching occurs.
 
 ## Spec-driven Development Plugins
 
