@@ -66,6 +66,24 @@ impl Database {
         Ok(db)
     }
 
+    /// Open an in-memory project database (for testing only)
+    #[cfg(feature = "test-mocks")]
+    pub fn open_in_memory_project() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let db = Self { conn };
+        db.init_project_schema()?;
+        Ok(db)
+    }
+
+    /// Open an in-memory global database (for testing only)
+    #[cfg(feature = "test-mocks")]
+    pub fn open_in_memory_global() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let db = Self { conn };
+        db.init_global_schema()?;
+        Ok(db)
+    }
+
     fn init_project_schema(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"

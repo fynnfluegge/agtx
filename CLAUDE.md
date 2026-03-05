@@ -57,6 +57,7 @@ plugins/               # Bundled plugin configs (embedded at compile time)
 ├── agtx/plugin.toml   # Default workflow with skills and prompts
 ├── gsd/plugin.toml    # Get Shit Done workflow
 ├── spec-kit/plugin.toml # GitHub spec-kit workflow
+├── openspec/plugin.toml # OpenSpec specification framework
 └── void/plugin.toml   # Plain agent session, no prompting
 
 tests/
@@ -98,6 +99,9 @@ Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin
 - **copy_back**: Files/dirs to copy from worktree back to project root when a phase completes
 - **cyclic**: When true, enables Review → Planning transition with incrementing phase counter
 - **supported_agents**: Agent whitelist (empty = all supported)
+- **auto_dismiss**: Rules to auto-dismiss interactive prompts before sending the task prompt
+
+Phase gating is derived from the config: if a phase's command or prompt contains `{task}`, the phase can be entered directly from Backlog. Otherwise, it requires a prior phase artifact. This replaces the old `research_required` flag — all behavior is now inferred from the plugin TOML.
 
 Plugin resolution: project-local `.agtx/plugins/{name}/` → global `~/.config/agtx/plugins/{name}/` → bundled.
 

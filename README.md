@@ -88,13 +88,6 @@ When writing a task description, you can reference files and agent skills inline
 | `#` or `@` | Fuzzy search and insert a file path |
 | `!` | Fuzzy search and insert an agent skill/command |
 
-**Skill references** (`!`) discover commands from your active agent's native command directory (e.g., `.claude/commands/` for Claude, `.codex/skills/` for Codex). The dropdown shows all available slash commands with descriptions, and inserts them in the agent's native invocation format:
-
-```
-/agtx:research the authentication module, then /agtx:plan a fix for the session timeout bug
-```
-
-This includes agtx built-in skills, plugin commands, and any custom user-defined commands.
 
 ### Agent Session Features
 

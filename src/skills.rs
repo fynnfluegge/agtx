@@ -9,7 +9,7 @@ pub const REVIEW_SKILL: &str = include_str!("../plugins/agtx/skills/review.md");
 
 /// Default built-in skills: (directory_name, SKILL.md content)
 /// Used for worktree phases (Research, Planning, Running, Review)
-pub const DEFAULT_SKILLS: &[(&str, &str)] = &[
+pub const BUILTIN_SKILLS: &[(&str, &str)] = &[
     ("agtx-research", RESEARCH_SKILL),
     ("agtx-plan", PLAN_SKILL),
     ("agtx-execute", EXECUTE_SKILL),
@@ -168,6 +168,23 @@ pub fn extract_description(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Enumerate built-in skills as agent-native `(command, description)` pairs.
+/// Uses compile-time embedded `BUILTIN_SKILLS` — no filesystem access needed.
+pub fn enumerate_available_skills(agent_name: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    for (skill_name, skill_content) in BUILTIN_SKILLS {
+        let canonical = format!("/{}", skill_name_to_command(skill_name));
+        let command = match transform_plugin_command(&canonical, agent_name) {
+            Some(cmd) => cmd,
+            None => canonical,
+        };
+        let description = extract_description(skill_content)
+            .unwrap_or_else(|| skill_name.replace('-', " "));
+        results.push((command, description));
+    }
+    results
 }
 
 /// Extract description from a markdown file with YAML frontmatter on disk.

@@ -97,6 +97,11 @@ impl Task {
         }
     }
 
+    /// Returns the task description if present, otherwise the title.
+    pub fn content_text(&self) -> String {
+        self.description.as_deref().unwrap_or(&self.title).to_string()
+    }
+
     /// Generate tmux session name: task-{id}--{project}--{slug}
     pub fn generate_session_name(&self, project_name: &str) -> String {
         let slug = self

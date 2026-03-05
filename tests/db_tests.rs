@@ -1,4 +1,4 @@
-use agtx::db::{Task, TaskStatus, Project};
+use agtx::db::{Database, Task, TaskStatus, Project};
 
 // === TaskStatus Tests ===
 
@@ -92,6 +92,19 @@ fn test_task_unique_ids() {
     assert_ne!(task1.id, task2.id);
 }
 
+#[test]
+fn test_task_content_text_with_description() {
+    let mut task = Task::new("My Title", "claude", "proj");
+    task.description = Some("Detailed description".to_string());
+    assert_eq!(task.content_text(), "Detailed description");
+}
+
+#[test]
+fn test_task_content_text_without_description() {
+    let task = Task::new("My Title", "claude", "proj");
+    assert_eq!(task.content_text(), "My Title");
+}
+
 // === Project Tests ===
 
 #[test]
@@ -111,4 +124,71 @@ fn test_project_unique_ids() {
     let project2 = Project::new("proj2", "/path2");
 
     assert_ne!(project1.id, project2.id);
+}
+
+// === In-Memory Database Tests ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_in_memory_project_db_creates_successfully() {
+    let db = Database::open_in_memory_project().unwrap();
+    // Should be able to create and retrieve a task
+    let task = Task::new("Test Task", "claude", "proj-1");
+    db.create_task(&task).unwrap();
+    let retrieved = db.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(retrieved.title, "Test Task");
+    assert_eq!(retrieved.status, TaskStatus::Backlog);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_in_memory_project_db_update_task() {
+    let db = Database::open_in_memory_project().unwrap();
+    let mut task = Task::new("Original", "claude", "proj-1");
+    db.create_task(&task).unwrap();
+
+    task.status = TaskStatus::Running;
+    task.session_name = Some("session-1".to_string());
+    db.update_task(&task).unwrap();
+
+    let retrieved = db.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(retrieved.status, TaskStatus::Running);
+    assert_eq!(retrieved.session_name.as_deref(), Some("session-1"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_in_memory_project_db_list_tasks() {
+    let db = Database::open_in_memory_project().unwrap();
+    let task1 = Task::new("Task 1", "claude", "proj-1");
+    let task2 = Task::new("Task 2", "gemini", "proj-1");
+    db.create_task(&task1).unwrap();
+    db.create_task(&task2).unwrap();
+
+    let tasks = db.get_tasks_by_status(TaskStatus::Backlog).unwrap();
+    assert_eq!(tasks.len(), 2);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_in_memory_global_db_creates_successfully() {
+    let db = Database::open_in_memory_global().unwrap();
+    let project = Project::new("myproject", "/path/to/project");
+    db.upsert_project(&project).unwrap();
+    let projects = db.get_all_projects().unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].name, "myproject");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_in_memory_dbs_are_isolated() {
+    let db1 = Database::open_in_memory_project().unwrap();
+    let db2 = Database::open_in_memory_project().unwrap();
+    let task = Task::new("Only in db1", "claude", "proj-1");
+    db1.create_task(&task).unwrap();
+
+    // db2 should be empty — each in-memory DB is independent
+    let tasks = db2.get_tasks_by_status(TaskStatus::Backlog).unwrap();
+    assert_eq!(tasks.len(), 0);
 }
