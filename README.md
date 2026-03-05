@@ -135,11 +135,11 @@ running = "codex"
 
 ## Spec-driven Development Plugins
 
-agtx ships with a fully declarative plugin framework — a single TOML file is all it takes to integrate any spec-driven development framework into the task lifecycle. No code changes, no custom adapters. The plugin defines commands, prompts, artifact paths, and copy-back rules — agtx handles the rest: phase gating, artifact polling, worktree sync, agent switching, and autonomous execution.
+agtx ships with a fully declarative plugin framework — a single TOML file is all it takes to integrate any spec-driven development framework into the task lifecycle. 
 
-All runtime behavior is derived from the TOML config. Commands are written once in canonical format and translated automatically for every supported agent. Phases are flexible — plugins can skip research, combine research and planning, or define cyclic multi-milestone workflows. Phase accessibility is inferred from the config: if a phase's command or prompt contains `{task}`, it can be entered directly from Backlog; otherwise it's gated behind a prior phase.
+A plugin defines commands, prompts and artifacts — agtx handles the rest: phase gating, artifact polling, worktree sync, agent switching, and autonomous execution.
 
-Press `P` to select a plugin for the current project. The active plugin is shown in the header bar.
+Press `P` to activate a plugin for the current project. The active plugin is shown in the header bar.
 
 | Plugin | Description |
 |--------|-------------|
