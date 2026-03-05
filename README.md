@@ -2,8 +2,8 @@
 
 <img src="https://github.com/user-attachments/assets/54ac039b-085e-490b-aacc-36c8e244e313" width="428" />
 
-#### Manage your AI coding sessions via a central board and let different AI coding agents collaborate on the same task. 
-
+## Run multi-agent AI coding workflows from a single terminal board
+Let different AI coding agents collaborate on the same task. **Gemini → research → Claude → implement → Codex → review.**  
 Plug in any existing spec-driven development framework or specify your own workflow as a custom plugin with per-phase skills, prompts, artifact tracking and autonomous execution.
 
 <img width="960" height="645" alt="Screenshot 2026-02-28 at 18 32 06" src="https://github.com/user-attachments/assets/442965f4-d2c4-435f-a065-df56dc483ab7" />
@@ -15,8 +15,7 @@ Plug in any existing spec-driven development framework or specify your own workf
 ## Features
 
 - **Multi-project dashboard**: Manage and orchestrate coding agent sessions across all your projects
-- **Task lifecycle**: Backlog → Planning → Running → Review → Done
-- **Multi-agent per task**: Configure different agents per workflow phase — e.g. Gemini for planning, Claude for implementation, Codex for review — with automatic agent switching in the same tmux window
+- **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for planning, Claude for implementation, Codex for review — with automatic agent switching in the same tmux window
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
 - **Spec-driven development plugins**: Plug in any spec-driven development framework or select from a predefined set of plugins like GSD, Spec-kit or OpenSpec — or define custom skills, prompts and artifact tracking - with automatic execution and tracking at each phase
 - **Multi-agent per task**: Configure different agents per workflow phase — e.g. Gemini for planning, Claude for implementation, Codex for review — with automatic agent switching in the same tmux window
