@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://github.com/user-attachments/assets/f8d3f9b6-712b-49d0-a84e-2a2c9400bacc" width="680" />
+<img src="https://github.com/user-attachments/assets/54ac039b-085e-490b-aacc-36c8e244e313" width="428" />
 
 ### **Terminal-native kanban board for managing spec-driven AI coding agent sessions.**
 
