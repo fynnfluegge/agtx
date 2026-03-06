@@ -2,8 +2,6 @@
 
 [//]: <img src="https://github.com/user-attachments/assets/54ac039b-085e-490b-aacc-36c8e244e313" width="428" />
 
-<img width="1486" height="680" src="https://github.com/user-attachments/assets/45858e09-ab61-422b-b708-db060c73a900" />
-
 # agtx
 ### Run and manage multi-agent AI coding workflows in the terminal
 Let different AI coding agents collaborate on the same task.  
@@ -15,12 +13,20 @@ Let different AI coding agents collaborate on the same task.
 Plug in any existing spec-driven development framework or specify a custom plugin with per-phase skills,  
 prompts, artifact tracking and autonomous execution.
 
+<br/>
+
+<img width="840" src="https://github.com/user-attachments/assets/45858e09-ab61-422b-b708-db060c73a900" />
+
+[//]:  <img width="840" src="https://github.com/user-attachments/assets/42f71a6c-424c-4cc4-80fc-dc9bb8ba1467" />
+
+<br/>
 
 [//]: <img width="1486" height="680" src="https://github.com/user-attachments/assets/45858e09-ab61-422b-b708-db060c73a900" />
 
+[//]: <![Xnapper-2026-02-14-09 36 33 (1)](https://github.com/user-attachments/assets/fce21a9c-2fe1-4b14-8f24-55e058531370)>
+
 </div>
 
-[//]: <![Xnapper-2026-02-14-09 36 33 (1)](https://github.com/user-attachments/assets/fce21a9c-2fe1-4b14-8f24-55e058531370)>
 
 ## Features
 
@@ -28,6 +34,7 @@ prompts, artifact tracking and autonomous execution.
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for planning, Claude for implementation, Codex for review — with automatic agent switching in the same tmux window
 - **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
 - **Spec-driven development plugins**: Plug in any spec-driven development framework or select from a predefined set of plugins like GSD, Spec-kit or OpenSpec — or define custom skills, prompts and artifact tracking - with automatic execution and tracking at each phase
+- **Supported coding agents**: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/sst/opencode), [Copilot](https://github.com/github/copilot-cli)
 
 ## Installation
 
@@ -47,8 +54,7 @@ cp target/release/agtx ~/.local/bin/
 ### Requirements
 
 - **tmux** - Agent sessions run in a dedicated tmux server
-- **gh** - GitHub CLI for PR operations
-- Supported coding agents: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/sst/opencode), [Copilot](https://github.com/github/copilot-cli)
+- **gh** (optional) - GitHub CLI for PR operations
 
 ## Quick Start
 
