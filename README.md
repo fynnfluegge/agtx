@@ -4,9 +4,16 @@
 
 <img width="1486" height="680" src="https://github.com/user-attachments/assets/45858e09-ab61-422b-b708-db060c73a900" />
 
-## Run and manage multi-agent AI coding workflows from a single terminal board
-Let different AI coding agents collaborate on the same task. **Gemini → research → Claude → implement → Codex → review.**  
-Plug in any existing spec-driven development framework or specify your own workflow as a custom plugin with per-phase skills, prompts, artifact tracking and autonomous execution.
+# agtx
+### Run and manage multi-agent AI coding workflows in the terminal
+Let different AI coding agents collaborate on the same task.  
+
+**Gemini → research**  
+**Claude → implement**  
+**Codex → review**  
+
+Plug in any existing spec-driven development framework or specify a custom plugin with per-phase skills,  
+prompts, artifact tracking and autonomous execution.
 
 
 [//]: <img width="1486" height="680" src="https://github.com/user-attachments/assets/45858e09-ab61-422b-b708-db060c73a900" />
