@@ -1,0 +1,21 @@
+name = "bmad"
+description = "BMAD Method - AI-driven agile development with structured phases"
+init_script = "npx bmad-method install --non-interactive"
+copy_dirs = ["_bmad", "_bmad-output"]
+
+[artifacts]
+planning = "_bmad-output/planning-artifacts/PRD.md"
+running = "_bmad-output/implementation-artifacts/*.md"
+
+[commands]
+planning = "/bmad:bmm-create-prd"
+running = "/bmad:dev-story"
+review = "/bmad:code-review"
+
+[prompts]
+planning = "Task: {task}"
+running = "Task: {task}"
+
+[copy_back]
+planning = ["_bmad-output/planning-artifacts"]
+running = ["_bmad-output/implementation-artifacts"]

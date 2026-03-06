@@ -1,0 +1,18 @@
+name = "superpowers"
+description = "Superpowers by @obra - brainstorming, plans, TDD, subagent-driven development"
+supported_agents = ["claude"]
+init_script = "git clone --depth 1 https://github.com/obra/superpowers.git .superpowers 2>/dev/null; mkdir -p .claude/hooks && printf '{\"hooks\":{\"SessionStart\":[{\"matcher\":\"startup|resume|clear|compact\",\"hooks\":[{\"type\":\"command\",\"command\":\"bash .superpowers/hooks/session-start\",\"async\":false}]}]}}' > .claude/hooks/hooks.json; mkdir -p .claude/commands/superpowers && cp .superpowers/commands/*.md .claude/commands/superpowers/"
+
+[artifacts]
+planning = "docs/plans/*.md"
+
+[commands]
+planning = "/superpowers:brainstorm"
+running = "/superpowers:execute-plan"
+
+[prompts]
+planning = "You are already in an isolated git worktree managed by agtx. Do NOT create additional worktrees or branches. Work directly in this directory.\n\nTask: {task}"
+running = ""
+
+[copy_back]
+planning = ["docs/plans"]

@@ -2042,7 +2042,9 @@ fn test_bundled_plugins_list() {
     assert!(names.contains(&"spec-kit"));
     assert!(names.contains(&"openspec"));
     assert!(names.contains(&"void"));
-    assert_eq!(names.len(), 5);
+    assert!(names.contains(&"bmad"));
+    assert!(names.contains(&"superpowers"));
+    assert_eq!(names.len(), 7);
 }
 
 #[test]

@@ -58,6 +58,8 @@ plugins/               # Bundled plugin configs (embedded at compile time)
 ├── gsd/plugin.toml    # Get Shit Done workflow
 ├── spec-kit/plugin.toml # GitHub spec-kit workflow
 ├── openspec/plugin.toml # OpenSpec specification framework
+├── bmad/plugin.toml   # BMAD Method - AI-driven agile development
+├── superpowers/plugin.toml # Superpowers - brainstorming, plans, TDD, subagent-driven dev
 └── void/plugin.toml   # Plain agent session, no prompting
 
 tests/

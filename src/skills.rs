@@ -153,6 +153,16 @@ pub const BUNDLED_PLUGINS: &[(&str, &str, &str)] = &[
         "Plain agent session - no prompting or skills",
         include_str!("../plugins/void/plugin.toml"),
     ),
+    (
+        "bmad",
+        "BMAD Method - AI-driven agile development",
+        include_str!("../plugins/bmad/plugin.toml"),
+    ),
+    (
+        "superpowers",
+        "Superpowers - brainstorming, plans, TDD, subagent-driven development",
+        include_str!("../plugins/superpowers/plugin.toml"),
+    ),
 ];
 
 /// Extract the description from YAML frontmatter.
