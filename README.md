@@ -150,6 +150,8 @@ Press `P` to activate a plugin for the current project. The active plugin is sho
 | **gsd** | [Get Shit Done](https://github.com/fynnfluegge/get-shit-done-cc) - structured spec-driven development with interactive planning |
 | **spec-kit** | [Spec-Driven Development](https://github.com/github/spec-kit) by GitHub - specifications become executable artifacts |
 | **openspec** | [OpenSpec](https://github.com/Fission-AI/OpenSpec) - lightweight AI-guided specification framework |
+| **bmad** | [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) - AI-driven agile development with structured phases |
+| **superpowers** | [Superpowers](https://github.com/obra/superpowers) - brainstorming, plans, TDD, subagent-driven development |
 
 ### Agent Compatibility
 
@@ -165,6 +167,8 @@ Commands are written once in canonical format and automatically translated per a
 | **gsd** | ✅ | ✅ | ✅ | ❌ | ✅ |
 | **spec-kit** | ✅ | ✅ | ✅ | 🟡 | ✅ |
 | **openspec** | ✅ | ✅ | ✅ | 🟡 | ✅ |
+| **bmad** | ✅ | ✅ | ✅ | 🟡 | ✅ |
+| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **void** | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
