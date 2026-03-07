@@ -163,6 +163,11 @@ pub const BUNDLED_PLUGINS: &[(&str, &str, &str)] = &[
         "Superpowers - brainstorming, plans, TDD, subagent-driven development",
         include_str!("../plugins/superpowers/plugin.toml"),
     ),
+    (
+        "omc",
+        "oh-my-claudecode - Multi-agent orchestration",
+        include_str!("../plugins/omc/plugin.toml"),
+    ),
 ];
 
 /// Extract the description from YAML frontmatter.
