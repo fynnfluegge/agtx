@@ -7,14 +7,18 @@ description: Execute an approved implementation plan. Implement the changes, the
 
 You are in the **execution phase** of an agtx-managed task.
 
+## Input
+
+- **Task description** — provided inline with this command (when entering directly from Backlog)
+- **`.agtx/plan.md`** — approved implementation plan (when planning was completed first)
+
 ## Instructions
 
-1. Check if `.agtx/plan.md` exists:
-   - **If it exists**: read it — it contains the approved implementation plan. Proceed to step 2.
-   - **If it does not exist**: **wait for the next message** — it contains the task description. Do not proceed until you receive it.
-2. Implement the changes
-3. Run relevant tests to verify your changes
-4. Fix any issues found during testing
+1. If `.agtx/plan.md` exists, read it for the approved plan
+2. Read and understand the task description
+3. Implement the changes
+4. Run relevant tests to verify your changes
+5. Fix any issues found during testing
 
 ## Output
 

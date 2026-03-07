@@ -8,12 +8,7 @@ running = ".agtx/execute.md"
 review = ".agtx/review.md"
 
 [commands]
-research = "/agtx:research"
-planning = "/agtx:plan"
-running = "/agtx:execute"
+research = "/agtx:research {task}"
+planning = "/agtx:plan {task}"
+running = "/agtx:execute {task}"
 review = "/agtx:review"
-
-[prompts]
-research = "Task: {task}"
-planning = "Task: {task}"
-running = "Task: {task}"
