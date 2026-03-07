@@ -2030,7 +2030,8 @@ fn test_bundled_plugins_list() {
     assert!(names.contains(&"void"));
     assert!(names.contains(&"bmad"));
     assert!(names.contains(&"superpowers"));
-    assert_eq!(names.len(), 7);
+    assert!(names.contains(&"omc"));
+    assert_eq!(names.len(), 8);
 }
 
 #[test]
