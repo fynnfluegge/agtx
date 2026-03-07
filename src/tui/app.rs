@@ -3264,9 +3264,9 @@ impl App {
             let (running_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "running");
             let task_content = task.content_text();
             let run_phase = determine_phase_variant("running", task.worktree_path.as_deref(), &task.id, &plugin, task.cycle);
-            let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content, task.cycle);
+            let skill_cmd = resolve_skill_command(&plugin, run_phase, &running_agent, &task_content, task.cycle);
             let prompt = resolve_prompt(&plugin, run_phase, &task_content, &task.id, task.cycle);
-            let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
+            let prompt_trigger = resolve_prompt_trigger(&plugin, run_phase);
             let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),

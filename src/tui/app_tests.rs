@@ -1796,9 +1796,9 @@ fn test_agtx_plugin_artifacts() {
 #[test]
 fn test_agtx_plugin_has_commands() {
     let plugin = skills::load_bundled_plugin("agtx").expect("agtx plugin should load");
-    assert_eq!(plugin.commands.research.as_deref(), Some("/agtx:research Task: {task}"));
-    assert_eq!(plugin.commands.planning.as_deref(), Some("/agtx:plan Task: {task}"));
-    assert_eq!(plugin.commands.running.as_deref(), Some("/agtx:execute Task: {task}"));
+    assert_eq!(plugin.commands.research.as_deref(), Some("/agtx:research {task}"));
+    assert_eq!(plugin.commands.planning.as_deref(), Some("/agtx:plan {task}"));
+    assert_eq!(plugin.commands.running.as_deref(), Some("/agtx:execute {task}"));
     assert_eq!(plugin.commands.review.as_deref(), Some("/agtx:review"));
 }
 
