@@ -7,11 +7,15 @@ description: Plan a task implementation. Analyze the codebase, create a detailed
 
 You are in the **planning phase** of an agtx-managed task.
 
+## Input
+
+- **Task description** — provided inline with this command (when entering directly from Backlog)
+- **`.agtx/research.md`** — prior analysis from research phase (when research was completed first)
+
 ## Instructions
 
-1. Check if `.agtx/research.md` exists:
-   - **If it exists**: read it first — it contains the task description and prior analysis. Proceed to step 2.
-   - **If it does not exist**: **wait for the next message** — it contains the task description. Do not proceed until you receive it.
+1. If `.agtx/research.md` exists, read it for prior analysis
+2. Read and understand the task description
 3. Explore the codebase to understand relevant files, patterns, and architecture
 4. Identify all files that need to be created or modified
 5. Create a detailed implementation plan

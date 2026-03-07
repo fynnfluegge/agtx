@@ -1748,29 +1748,15 @@ fn test_transform_skill_frontmatter_no_agtx() {
 }
 
 #[test]
-fn test_resolve_prompt_with_template() {
+fn test_resolve_prompt_agtx_no_prompts() {
+    // agtx plugin has no prompts — task is embedded in the command
     let plugin = skills::load_bundled_plugin("agtx");
     let prompt = resolve_prompt(&plugin, "planning", "my task", "task-123", 1);
-    assert!(prompt.contains("my task"));
-    assert!(!prompt.contains("SKILL.md"));
-}
-
-#[test]
-fn test_resolve_prompt_research_has_task() {
-    let plugin = skills::load_bundled_plugin("agtx");
+    assert!(prompt.is_empty());
     let prompt = resolve_prompt(&plugin, "research", "my task", "abc-123", 1);
-    assert!(prompt.contains("my task"));
-    // Claude should NOT have skill ref in prompt (sent via send_keys)
-    assert!(!prompt.contains("/agtx:research"));
-}
-
-#[test]
-fn test_resolve_prompt_running_phase() {
-    let plugin = skills::load_bundled_plugin("agtx");
-    // running = direct from Backlog, needs task prompt
+    assert!(prompt.is_empty());
     let prompt = resolve_prompt(&plugin, "running", "my task", "task-123", 1);
-    assert_eq!(prompt, "Task: my task");
-    // running_with_research_or_planning = after prior phase, no prompt needed
+    assert!(prompt.is_empty());
     let prompt = resolve_prompt(&plugin, "running_with_research_or_planning", "my task", "task-123", 1);
     assert!(prompt.is_empty());
 }
@@ -1810,9 +1796,9 @@ fn test_agtx_plugin_artifacts() {
 #[test]
 fn test_agtx_plugin_has_commands() {
     let plugin = skills::load_bundled_plugin("agtx").expect("agtx plugin should load");
-    assert_eq!(plugin.commands.research.as_deref(), Some("/agtx:research"));
-    assert_eq!(plugin.commands.planning.as_deref(), Some("/agtx:plan"));
-    assert_eq!(plugin.commands.running.as_deref(), Some("/agtx:execute"));
+    assert_eq!(plugin.commands.research.as_deref(), Some("/agtx:research Task: {task}"));
+    assert_eq!(plugin.commands.planning.as_deref(), Some("/agtx:plan Task: {task}"));
+    assert_eq!(plugin.commands.running.as_deref(), Some("/agtx:execute Task: {task}"));
     assert_eq!(plugin.commands.review.as_deref(), Some("/agtx:review"));
 }
 
