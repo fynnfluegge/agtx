@@ -1805,12 +1805,13 @@ fn test_agtx_plugin_has_commands() {
 #[test]
 fn test_enumerate_available_skills_claude() {
     let skills = skills::enumerate_available_skills("claude");
-    assert_eq!(skills.len(), 4);
+    assert_eq!(skills.len(), 5);
     let commands: Vec<&str> = skills.iter().map(|(c, _)| c.as_str()).collect();
     assert!(commands.contains(&"/agtx:research"));
     assert!(commands.contains(&"/agtx:plan"));
     assert!(commands.contains(&"/agtx:execute"));
     assert!(commands.contains(&"/agtx:review"));
+    assert!(commands.contains(&"/agtx:merge-conflicts"));
     // Each should have a description
     for (_, desc) in &skills {
         assert!(!desc.is_empty());
@@ -3474,5 +3475,61 @@ fn test_quit_sets_should_quit() {
     assert!(!app.state.should_quit);
     press_key(&mut app, KeyCode::Char('q'));
     assert!(app.state.should_quit);
+}
+
+#[test]
+fn test_merge_conflicts_skill_name_to_command() {
+    assert_eq!(skills::skill_name_to_command("agtx-merge-conflicts"), "agtx:merge-conflicts");
+}
+
+#[test]
+fn test_merge_conflicts_transform_plugin_command() {
+    assert_eq!(
+        skills::transform_plugin_command("/agtx:merge-conflicts", "claude"),
+        Some("/agtx:merge-conflicts".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/agtx:merge-conflicts", "gemini"),
+        Some("/agtx:merge-conflicts".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/agtx:merge-conflicts", "opencode"),
+        Some("/agtx-merge-conflicts".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/agtx:merge-conflicts", "codex"),
+        Some("$agtx-merge-conflicts".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/agtx:merge-conflicts", "copilot"),
+        None
+    );
+}
+
+#[test]
+fn test_merge_conflicts_skill_registered() {
+    // Verify the merge-conflicts skill is in BUILTIN_SKILLS
+    assert!(
+        skills::BUILTIN_SKILLS.iter().any(|(name, _)| *name == "agtx-merge-conflicts"),
+        "agtx-merge-conflicts should be registered in BUILTIN_SKILLS"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_merge_conflict_checked_guard() {
+    let mut app = make_test_app();
+    let task_id = "test-task-123".to_string();
+
+    // Initially not checked
+    assert!(!app.state.merge_conflict_checked.contains(&task_id));
+
+    // After inserting, should be guarded
+    app.state.merge_conflict_checked.insert(task_id.clone());
+    assert!(app.state.merge_conflict_checked.contains(&task_id));
+
+    // Clear resets the guard
+    app.state.merge_conflict_checked.clear();
+    assert!(!app.state.merge_conflict_checked.contains(&task_id));
 }
 
