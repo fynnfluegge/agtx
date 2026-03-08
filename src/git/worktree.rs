@@ -183,7 +183,7 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Detect the main branch name (main or master)
-fn detect_main_branch(project_path: &Path) -> Result<String> {
+pub fn detect_main_branch(project_path: &Path) -> Result<String> {
     // Check if 'main' exists
     let output = Command::new("git")
         .current_dir(project_path)

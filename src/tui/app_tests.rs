@@ -1805,12 +1805,13 @@ fn test_agtx_plugin_has_commands() {
 #[test]
 fn test_enumerate_available_skills_claude() {
     let skills = skills::enumerate_available_skills("claude");
-    assert_eq!(skills.len(), 4);
+    assert_eq!(skills.len(), 5);
     let commands: Vec<&str> = skills.iter().map(|(c, _)| c.as_str()).collect();
     assert!(commands.contains(&"/agtx:research"));
     assert!(commands.contains(&"/agtx:plan"));
     assert!(commands.contains(&"/agtx:execute"));
     assert!(commands.contains(&"/agtx:review"));
+    assert!(commands.contains(&"/agtx:orchestrate"));
     // Each should have a description
     for (_, desc) in &skills {
         assert!(!desc.is_empty());

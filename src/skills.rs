@@ -6,6 +6,7 @@ pub const RESEARCH_SKILL: &str = include_str!("../plugins/agtx/skills/research.m
 pub const PLAN_SKILL: &str = include_str!("../plugins/agtx/skills/plan.md");
 pub const EXECUTE_SKILL: &str = include_str!("../plugins/agtx/skills/execute.md");
 pub const REVIEW_SKILL: &str = include_str!("../plugins/agtx/skills/review.md");
+pub const ORCHESTRATE_SKILL: &str = include_str!("../plugins/agtx/skills/orchestrate.md");
 
 /// Default built-in skills: (directory_name, SKILL.md content)
 /// Used for worktree phases (Research, Planning, Running, Review)
@@ -14,6 +15,7 @@ pub const BUILTIN_SKILLS: &[(&str, &str)] = &[
     ("agtx-plan", PLAN_SKILL),
     ("agtx-execute", EXECUTE_SKILL),
     ("agtx-review", REVIEW_SKILL),
+    ("agtx-orchestrate", ORCHESTRATE_SKILL),
 ];
 
 /// Load a bundled plugin by name from compile-time embedded TOML.

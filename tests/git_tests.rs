@@ -471,3 +471,74 @@ fn test_initialize_worktree_copy_directory_supported() {
     let content = std::fs::read_to_string(worktree_path.join("config").join("app.toml")).unwrap();
     assert_eq!(content, "key = 1");
 }
+
+// =============================================================================
+// Conflict detection tests
+// =============================================================================
+
+#[test]
+fn test_check_merge_conflicts_no_conflict() {
+    let temp_dir = setup_git_repo();
+    let path = temp_dir.path();
+
+    // Create a feature branch with a non-conflicting change
+    Command::new("git")
+        .current_dir(path)
+        .args(["checkout", "-b", "task/feature"])
+        .output()
+        .unwrap();
+
+    std::fs::write(path.join("new_file.txt"), "feature content").unwrap();
+    Command::new("git").current_dir(path).args(["add", "."]).output().unwrap();
+    Command::new("git").current_dir(path).args(["commit", "-m", "add new file"]).output().unwrap();
+
+    // Switch back to main
+    Command::new("git").current_dir(path).args(["checkout", "main"]).output().unwrap();
+
+    let (has_conflicts, files) = git::check_merge_conflicts(path, "main", "task/feature").unwrap();
+    assert!(!has_conflicts);
+    assert!(files.is_empty());
+}
+
+#[test]
+fn test_check_merge_conflicts_with_conflict() {
+    let temp_dir = setup_git_repo();
+    let path = temp_dir.path();
+
+    // Create a feature branch that modifies README.md
+    Command::new("git")
+        .current_dir(path)
+        .args(["checkout", "-b", "task/feature"])
+        .output()
+        .unwrap();
+
+    std::fs::write(path.join("README.md"), "# Feature branch change").unwrap();
+    Command::new("git").current_dir(path).args(["add", "."]).output().unwrap();
+    Command::new("git").current_dir(path).args(["commit", "-m", "modify readme on feature"]).output().unwrap();
+
+    // Switch back to main and make a conflicting change
+    Command::new("git").current_dir(path).args(["checkout", "main"]).output().unwrap();
+
+    std::fs::write(path.join("README.md"), "# Main branch change").unwrap();
+    Command::new("git").current_dir(path).args(["add", "."]).output().unwrap();
+    Command::new("git").current_dir(path).args(["commit", "-m", "modify readme on main"]).output().unwrap();
+
+    let (has_conflicts, files) = git::check_merge_conflicts(path, "main", "task/feature").unwrap();
+    assert!(has_conflicts);
+    assert!(files.iter().any(|f| f.contains("README.md")));
+}
+
+#[test]
+fn test_check_merge_conflicts_nonexistent_branch() {
+    let temp_dir = setup_git_repo();
+    let result = git::check_merge_conflicts(temp_dir.path(), "main", "nonexistent");
+    // Should return error (git merge-tree fails on non-existent ref)
+    assert!(result.is_err() || result.unwrap().0);
+}
+
+#[test]
+fn test_detect_main_branch_public() {
+    let temp_dir = setup_git_repo();
+    let branch = git::detect_main_branch(temp_dir.path()).unwrap();
+    assert_eq!(branch, "main");
+}

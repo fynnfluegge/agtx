@@ -1,4 +1,4 @@
-use agtx::db::{Database, Task, TaskStatus, Project};
+use agtx::db::{Database, Notification, Task, TaskStatus, Project};
 
 // === TaskStatus Tests ===
 
@@ -191,4 +191,35 @@ fn test_in_memory_dbs_are_isolated() {
     // db2 should be empty — each in-memory DB is independent
     let tasks = db2.get_tasks_by_status(TaskStatus::Backlog).unwrap();
     assert_eq!(tasks.len(), 0);
+}
+
+// === Notification Tests ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_notifications_create_and_consume() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let n1 = Notification::new("Task created: foo");
+    let n2 = Notification::new("Phase completed: bar");
+    db.create_notification(&n1).unwrap();
+    db.create_notification(&n2).unwrap();
+
+    // First consume returns both
+    let notifs = db.consume_notifications().unwrap();
+    assert_eq!(notifs.len(), 2);
+    assert_eq!(notifs[0].message, "Task created: foo");
+    assert_eq!(notifs[1].message, "Phase completed: bar");
+
+    // Second consume returns empty (they were deleted)
+    let notifs = db.consume_notifications().unwrap();
+    assert_eq!(notifs.len(), 0);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_notifications_empty_queue() {
+    let db = Database::open_in_memory_project().unwrap();
+    let notifs = db.consume_notifications().unwrap();
+    assert_eq!(notifs.len(), 0);
 }

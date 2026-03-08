@@ -15,6 +15,17 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     let mode = match args.get(1).map(|s| s.as_str()) {
+        Some("mcp-serve") => {
+            let project_path = args
+                .get(2)
+                .map(PathBuf::from)
+                .unwrap_or(std::env::current_dir()?);
+            let project_path = project_path.canonicalize()?;
+            if !git::is_git_repo(&project_path) {
+                anyhow::bail!("mcp-serve requires a git project directory");
+            }
+            return agtx::mcp::serve(project_path).await;
+        }
         Some("-g") => AppMode::Dashboard,
         Some(".") => AppMode::Project(std::env::current_dir()?),
         Some(path) => AppMode::Project(PathBuf::from(path)),

@@ -141,6 +141,31 @@ impl Project {
     }
 }
 
+/// A queued request for a task state transition (used by MCP server).
+/// The TUI polls this table and executes transitions with full side effects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitionRequest {
+    pub id: String,
+    pub task_id: String,
+    pub action: String,
+    pub requested_at: DateTime<Utc>,
+    pub processed_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
+impl TransitionRequest {
+    pub fn new(task_id: impl Into<String>, action: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_id: task_id.into(),
+            action: action.into(),
+            requested_at: Utc::now(),
+            processed_at: None,
+            error: None,
+        }
+    }
+}
+
 /// Represents a running agent session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunningAgent {
@@ -165,6 +190,25 @@ impl AgentStatus {
             AgentStatus::Running => "running",
             AgentStatus::Waiting => "waiting",
             AgentStatus::Completed => "completed",
+        }
+    }
+}
+
+/// A notification for the orchestrator agent (pull-based).
+/// Events are written to the DB by the TUI and fetched by the orchestrator via MCP.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Notification {
+    pub id: String,
+    pub message: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Notification {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            message: message.into(),
+            created_at: Utc::now(),
         }
     }
 }

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::Path;
 
-use super::models::{Project, Task, TaskStatus};
+use super::models::{Notification, Project, Task, TaskStatus, TransitionRequest};
 
 /// Database wrapper for SQLite operations
 pub struct Database {
@@ -115,6 +115,26 @@ impl Database {
         let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN pr_url TEXT", []);
         let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN plugin TEXT", []);
         let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN cycle INTEGER NOT NULL DEFAULT 1", []);
+
+        // MCP transition request queue
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS transition_requests (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                processed_at TEXT,
+                error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS notifications (
+                id TEXT PRIMARY KEY,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )?;
 
         Ok(())
     }
@@ -331,5 +351,124 @@ impl Database {
             .collect();
 
         Ok(projects)
+    }
+
+    // === Transition Request Operations (MCP command queue) ===
+
+    pub fn create_transition_request(&self, req: &TransitionRequest) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO transition_requests (id, task_id, action, requested_at, processed_at, error)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                req.id,
+                req.task_id,
+                req.action,
+                req.requested_at.to_rfc3339(),
+                req.processed_at.map(|dt| dt.to_rfc3339()),
+                req.error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_transition_request(&self, id: &str) -> Result<Option<TransitionRequest>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM transition_requests WHERE id = ?1")?;
+
+        let req = stmt
+            .query_row(params![id], Self::transition_request_from_row)
+            .ok();
+
+        Ok(req)
+    }
+
+    pub fn get_pending_transition_requests(&self) -> Result<Vec<TransitionRequest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM transition_requests WHERE processed_at IS NULL ORDER BY requested_at ASC",
+        )?;
+
+        let requests = stmt
+            .query_map([], Self::transition_request_from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(requests)
+    }
+
+    pub fn mark_transition_processed(&self, id: &str, error: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE transition_requests SET processed_at = ?1, error = ?2 WHERE id = ?3",
+            params![chrono::Utc::now().to_rfc3339(), error, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn cleanup_old_transition_requests(&self) -> Result<()> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        self.conn.execute(
+            "DELETE FROM transition_requests WHERE processed_at IS NOT NULL AND processed_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(())
+    }
+
+    fn transition_request_from_row(row: &rusqlite::Row) -> rusqlite::Result<TransitionRequest> {
+        Ok(TransitionRequest {
+            id: row.get("id")?,
+            task_id: row.get("task_id")?,
+            action: row.get("action")?,
+            requested_at: chrono::DateTime::parse_from_rfc3339(
+                &row.get::<_, String>("requested_at")?,
+            )
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now()),
+            processed_at: row
+                .get::<_, Option<String>>("processed_at")?
+                .and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .ok()
+                }),
+            error: row.get("error")?,
+        })
+    }
+
+    // ── Notifications ───────────────────────────────────────────────────
+
+    pub fn create_notification(&self, notif: &Notification) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO notifications (id, message, created_at) VALUES (?1, ?2, ?3)",
+            params![notif.id, notif.message, notif.created_at.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch and delete all pending notifications (atomic consume).
+    pub fn consume_notifications(&self) -> Result<Vec<Notification>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM notifications ORDER BY created_at ASC")?;
+
+        let notifs: Vec<Notification> = stmt
+            .query_map([], |row| {
+                Ok(Notification {
+                    id: row.get("id")?,
+                    message: row.get("message")?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(
+                        &row.get::<_, String>("created_at")?,
+                    )
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        self.conn.execute("DELETE FROM notifications", [])?;
+
+        Ok(notifs)
     }
 }

@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use crate::agent::{self, AgentOperations};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig, WorkflowPlugin};
-use crate::db::{Database, PhaseStatus, Task, TaskStatus};
+use crate::db::{Database, PhaseStatus, Task, TaskStatus, TransitionRequest};
 use crate::git::{self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps};
 use crate::skills;
 use crate::tmux::{self, RealTmuxOps, TmuxOperations};
@@ -38,12 +38,12 @@ fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_colu
                 " [j/k] navigate  [Enter] open  [l] board  [e] hide sidebar  [q] quit ".to_string()
             } else {
                 match selected_column {
-                    0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
-                    1 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string(),
-                    2 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
-                    3 if has_cyclic_plugin => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string(),
-                    3 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
-                    _ => " [o] new  [/] search  [Enter] open  [x] del  [e] sidebar  [q] quit".to_string(),
+                    0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run  [O] orch  [e] sidebar  [q] quit".to_string(),
+                    1 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [O] orch  [e] sidebar  [q] quit".to_string(),
+                    2 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [O] orch  [e] sidebar  [q] quit".to_string(),
+                    3 if has_cyclic_plugin => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [O] orch  [e] sidebar  [q] quit".to_string(),
+                    3 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [O] orch  [e] sidebar  [q] quit".to_string(),
+                    _ => " [o] new  [/] search  [Enter] open  [x] del  [O] orch  [e] sidebar  [q] quit".to_string(),
                 }
             }
         }
@@ -231,6 +231,12 @@ struct AppState {
     warning_message: Option<(String, Instant)>,
     // Plugin selection popup
     plugin_select_popup: Option<PluginSelectPopup>,
+    // Orchestrator agent tmux target (e.g. "project:orchestrator")
+    orchestrator_session: Option<String>,
+    // Orchestrator idle detection for push notifications
+    orchestrator_last_content: String,
+    orchestrator_stable_since: Option<Instant>,
+    orchestrator_last_check: Instant,
 }
 
 /// State for confirming move to Done
@@ -487,6 +493,10 @@ impl App {
                 cached_plugin: None,
                 warning_message: None,
                 plugin_select_popup: None,
+                orchestrator_session: None,
+                orchestrator_last_content: String::new(),
+                orchestrator_stable_since: None,
+                orchestrator_last_check: Instant::now(),
             },
         };
 
@@ -581,6 +591,10 @@ impl App {
                 cached_plugin: None,
                 warning_message: None,
                 plugin_select_popup: None,
+                orchestrator_session: None,
+                orchestrator_last_content: String::new(),
+                orchestrator_stable_since: None,
+                orchestrator_last_check: Instant::now(),
             },
         })
     }
@@ -652,6 +666,9 @@ impl App {
                 }
             }
 
+            // Process MCP transition requests from the command queue
+            self.process_transition_requests()?;
+
             if event::poll(std::time::Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
@@ -667,6 +684,9 @@ impl App {
 
             // Periodically refresh session status
             self.refresh_sessions()?;
+
+            // Deliver queued notifications to orchestrator when idle
+            self.deliver_orchestrator_notifications();
 
             // Clear expired warning messages
             if let Some((_, created)) = &self.state.warning_message {
@@ -2596,6 +2616,10 @@ impl App {
                 // Open plugin selection popup
                 self.open_plugin_select_popup();
             }
+            KeyCode::Char('O') => {
+                // Toggle orchestrator agent
+                self.toggle_orchestrator()?;
+            }
             _ => {}
         }
         Ok(())
@@ -3011,6 +3035,16 @@ impl App {
                 }
                 // Task starts in Backlog without tmux window
                 db.create_task(&task)?;
+
+                // Queue notification for orchestrator
+                if self.state.orchestrator_session.is_some() {
+                    let short_id = if task.id.len() >= 8 { &task.id[..8] } else { &task.id };
+                    let notif = crate::db::Notification::new(format!(
+                        "New task added to Backlog: \"{}\" ({})",
+                        task.title, short_id
+                    ));
+                    let _ = db.create_notification(&notif);
+                }
             }
             self.refresh_tasks()?;
         }
@@ -3757,6 +3791,299 @@ impl App {
         Ok(())
     }
 
+    // === MCP Transition Request Processing ===
+
+    /// Poll the transition_requests table for unprocessed requests and execute them.
+    fn process_transition_requests(&mut self) -> Result<()> {
+        let Some(db) = &self.state.db else { return Ok(()) };
+        let pending = db.get_pending_transition_requests()?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        for req in pending {
+            let result = self.execute_transition_request(&req);
+            if let Some(db) = &self.state.db {
+                match &result {
+                    Ok(()) => {
+                        let _ = db.mark_transition_processed(&req.id, None);
+                    }
+                    Err(e) => {
+                        let _ = db.mark_transition_processed(&req.id, Some(&e.to_string()));
+                    }
+                }
+            }
+            self.refresh_tasks()?;
+        }
+
+        // Periodically clean up old processed requests
+        if let Some(db) = &self.state.db {
+            let _ = db.cleanup_old_transition_requests();
+        }
+
+        Ok(())
+    }
+
+    fn execute_transition_request(&mut self, req: &TransitionRequest) -> Result<()> {
+        let Some(db) = &self.state.db else {
+            anyhow::bail!("No project database");
+        };
+        let Some(project_path) = self.state.project_path.clone() else {
+            anyhow::bail!("No project path");
+        };
+
+        let mut task = db
+            .get_task(&req.task_id)?
+            .ok_or_else(|| anyhow::anyhow!("Task not found: {}", req.task_id))?;
+
+        match req.action.as_str() {
+            "research" => {
+                if task.status != TaskStatus::Backlog {
+                    anyhow::bail!(
+                        "Task must be in Backlog to start research (current: {})",
+                        task.status.as_str()
+                    );
+                }
+                if task.session_name.is_some() {
+                    anyhow::bail!("Task already has an active session (research may already be running)");
+                }
+                self.start_research(&req.task_id)?;
+            }
+            "move_forward" => {
+                self.execute_forward_transition(&mut task, &project_path)?;
+            }
+            "move_to_planning" => {
+                if task.status != TaskStatus::Backlog {
+                    anyhow::bail!(
+                        "Task must be in Backlog to move to Planning (current: {})",
+                        task.status.as_str()
+                    );
+                }
+                self.execute_forward_transition(&mut task, &project_path)?;
+            }
+            "move_to_running" => {
+                if task.status != TaskStatus::Planning {
+                    anyhow::bail!(
+                        "Task must be in Planning to move to Running (current: {})",
+                        task.status.as_str()
+                    );
+                }
+                self.execute_forward_transition(&mut task, &project_path)?;
+            }
+            "move_to_review" => {
+                if task.status != TaskStatus::Running {
+                    anyhow::bail!(
+                        "Task must be in Running to move to Review (current: {})",
+                        task.status.as_str()
+                    );
+                }
+                self.mcp_transition_to_review(&mut task)?;
+            }
+            "move_to_done" => {
+                if task.status != TaskStatus::Review {
+                    anyhow::bail!(
+                        "Task must be in Review to move to Done (current: {})",
+                        task.status.as_str()
+                    );
+                }
+                self.force_move_to_done(&task.id)?;
+            }
+            "resume" => {
+                if task.status != TaskStatus::Review {
+                    anyhow::bail!(
+                        "Task must be in Review to resume (current: {})",
+                        task.status.as_str()
+                    );
+                }
+                self.move_review_to_running(&req.task_id)?;
+            }
+            other => {
+                anyhow::bail!("Unknown action: {}", other);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Execute a forward transition (next column), mirroring move_task_right logic.
+    fn execute_forward_transition(&mut self, task: &mut Task, project_path: &Path) -> Result<()> {
+        let next_status = match task.status {
+            TaskStatus::Backlog => TaskStatus::Planning,
+            TaskStatus::Planning => TaskStatus::Running,
+            TaskStatus::Running => TaskStatus::Review,
+            TaskStatus::Review => TaskStatus::Done,
+            TaskStatus::Done => anyhow::bail!("Task is already Done"),
+        };
+
+        // Skip the phase-incomplete confirmation for MCP requests
+        let handled = match (task.status, next_status) {
+            (TaskStatus::Backlog, TaskStatus::Planning) => {
+                if self.state.setup_rx.is_some() {
+                    anyhow::bail!("Another task setup is already in progress, try again shortly");
+                }
+                self.transition_to_planning(task, project_path)?
+            }
+            (TaskStatus::Planning, TaskStatus::Running) => self.transition_to_running(task)?,
+            (TaskStatus::Running, TaskStatus::Review) => {
+                self.mcp_transition_to_review(task)?;
+                return Ok(());
+            }
+            (TaskStatus::Review, TaskStatus::Done) => {
+                self.force_move_to_done(&task.id)?;
+                return Ok(());
+            }
+            _ => false,
+        };
+
+        if !handled {
+            task.status = next_status;
+            task.updated_at = chrono::Utc::now();
+            if let Some(db) = &self.state.db {
+                db.update_task(task)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// MCP version of transition_to_review: sends review prompt but skips PR popup.
+    fn mcp_transition_to_review(&mut self, task: &mut Task) -> Result<()> {
+        let (review_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "review");
+        if let Some(session_name) = &task.session_name {
+            let plugin = self.load_task_plugin(task);
+            let task_content = task.content_text();
+            let skill_cmd =
+                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle);
+            let prompt =
+                resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
+            let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
+            let auto_dismiss = plugin
+                .as_ref()
+                .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+            spawn_send_to_agent(
+                Arc::clone(&self.state.tmux_ops),
+                Arc::clone(&self.state.agent_registry),
+                session_name.clone(),
+                task.agent.clone(),
+                review_agent.clone(),
+                agent_switch,
+                skill_cmd,
+                prompt,
+                prompt_trigger,
+                task_content,
+                auto_dismiss,
+            );
+        }
+        task.agent = review_agent;
+        task.status = TaskStatus::Review;
+        task.updated_at = chrono::Utc::now();
+        if let Some(db) = &self.state.db {
+            db.update_task(task)?;
+        }
+        Ok(())
+    }
+
+    /// Toggle orchestrator agent: spawn if not running, view if running.
+    fn toggle_orchestrator(&mut self) -> Result<()> {
+        let project_path = match &self.state.project_path {
+            Some(p) => p.clone(),
+            None => {
+                self.state.warning_message = Some((
+                    "Orchestrator requires a project (not dashboard mode)".to_string(),
+                    Instant::now(),
+                ));
+                return Ok(());
+            }
+        };
+
+        let project_name = self.state.project_name.clone();
+        let window_name = "orchestrator";
+        let target = format!("{}:{}", project_name, window_name);
+
+        // If orchestrator is running, open the popup to view it
+        if let Some(ref orch_target) = self.state.orchestrator_session {
+            if self.state.tmux_ops.window_exists(orch_target).unwrap_or(false) {
+                let mut popup = ShellPopup::new("Orchestrator".to_string(), orch_target.clone());
+                if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
+                    let pane_width = SHELL_POPUP_CONTENT_WIDTH;
+                    let popup_height = (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
+                    let pane_height = popup_height.saturating_sub(4);
+                    let _ = self.state.tmux_ops.resize_window(orch_target, pane_width, pane_height);
+                    popup.last_pane_size = Some((pane_width, pane_height));
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                popup.cached_content = capture_tmux_pane_with_history(orch_target, 500, self.state.tmux_ops.as_ref());
+                self.state.shell_popup = Some(popup);
+                return Ok(());
+            } else {
+                // Window gone, clear the session
+                self.state.orchestrator_session = None;
+            }
+        }
+
+        // Spawn new orchestrator
+        let default_agent = self.state.config.default_agent.clone();
+        let agent = self.state.agent_registry.get(&default_agent);
+        let project_path_str = project_path.to_string_lossy().to_string();
+
+        // Build MCP registration JSON for the agtx server
+        let agtx_bin = std::env::current_exe()
+            .unwrap_or_else(|_| PathBuf::from("agtx"))
+            .to_string_lossy()
+            .to_string();
+        let mcp_json = serde_json::json!({
+            "type": "stdio",
+            "command": agtx_bin,
+            "args": ["mcp-serve", &project_path_str]
+        });
+        let mcp_json_str = mcp_json.to_string().replace('\'', "'\\''");
+
+        // Build agent command: register MCP in local scope, launch agent, clean up on exit
+        // --scope local stores in ~/.claude.json tied to project path (not in project files)
+        let agent_base = agent.build_interactive_command("");
+        let agent_cmd = match default_agent.as_str() {
+            "claude" => format!(
+                "claude mcp add-json agtx '{}' --scope local && {}; claude mcp remove agtx --scope local",
+                mcp_json_str, agent_base
+            ),
+            _ => agent_base,
+        };
+
+        // Ensure project tmux session exists
+        ensure_project_tmux_session(&project_name, &project_path, self.state.tmux_ops.as_ref());
+
+        // Create orchestrator tmux window in the project root (no worktree)
+        self.state.tmux_ops.create_window(
+            &project_name,
+            window_name,
+            &project_path_str,
+            Some(agent_cmd),
+        )?;
+
+        self.state.orchestrator_session = Some(target.clone());
+
+        // Send the orchestrator skill content as the initial prompt in a background thread
+        let skill_body = skills::strip_frontmatter(skills::ORCHESTRATE_SKILL).to_string();
+        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+        let agent_name = default_agent.clone();
+        std::thread::spawn(move || {
+            if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &target) {
+                send_skill_and_prompt(
+                    &tmux_ops,
+                    &ready_target,
+                    &None,           // no skill command — sending content directly
+                    &skill_body,     // prompt = skill body
+                    &None,           // no prompt trigger
+                    &String::new(),  // no task content
+                    &agent_name,
+                    &[],             // no auto-dismiss rules
+                );
+            }
+        });
+
+        Ok(())
+    }
+
     fn open_selected_task(&mut self) -> Result<()> {
         if let Some(task) = self.state.board.selected_task() {
             if let Some(window_name) = &task.session_name.clone() {
@@ -3826,6 +4153,70 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Push queued notifications to the orchestrator's tmux pane, but only when idle.
+    /// Runs every 2s. Idle = pane content unchanged for ≥3s.
+    fn deliver_orchestrator_notifications(&mut self) {
+        // Only check every 2 seconds
+        if self.state.orchestrator_last_check.elapsed() < std::time::Duration::from_secs(2) {
+            return;
+        }
+        self.state.orchestrator_last_check = Instant::now();
+
+        let orch_target = match &self.state.orchestrator_session {
+            Some(t) => t.clone(),
+            None => return,
+        };
+
+        // Check window still exists
+        if !self.state.tmux_ops.window_exists(&orch_target).unwrap_or(false) {
+            return;
+        }
+
+        // Capture current pane content (bottom portion for comparison)
+        let current_content = self.state.tmux_ops
+            .capture_pane(&orch_target)
+            .unwrap_or_default();
+
+        if current_content != self.state.orchestrator_last_content {
+            // Content changed — agent is working, reset idle timer
+            self.state.orchestrator_last_content = current_content;
+            self.state.orchestrator_stable_since = Some(Instant::now());
+            return;
+        }
+
+        // Content unchanged — check if stable long enough (≥3s)
+        let stable_since = match self.state.orchestrator_stable_since {
+            Some(t) => t,
+            None => {
+                self.state.orchestrator_stable_since = Some(Instant::now());
+                return;
+            }
+        };
+
+        if stable_since.elapsed() < std::time::Duration::from_secs(3) {
+            return;
+        }
+
+        // Orchestrator is idle — deliver pending notifications
+        let db = match &self.state.db {
+            Some(db) => db,
+            None => return,
+        };
+
+        let notifications = match db.consume_notifications() {
+            Ok(n) if !n.is_empty() => n,
+            _ => return,
+        };
+
+        let messages: Vec<String> = notifications.iter().map(|n| n.message.clone()).collect();
+        let combined = format!("[agtx] {}", messages.join(" | "));
+        let _ = self.state.tmux_ops.send_keys(&orch_target, &combined);
+
+        // Reset idle tracking since we just sent input
+        self.state.orchestrator_last_content.clear();
+        self.state.orchestrator_stable_since = None;
     }
 
     fn refresh_sessions(&mut self) -> Result<()> {
@@ -3947,6 +4338,23 @@ impl App {
                             if let Some(entries) = p.copy_back.get(phase_name) {
                                 copy_back_to_project(Path::new(wt), Path::new(pp), entries);
                             }
+                        }
+                    }
+
+                    // Queue notification for orchestrator
+                    if self.state.orchestrator_session.is_some() {
+                        if let Some(db) = &self.state.db {
+                            let task_title = self.state.board.tasks.iter()
+                                .find(|t| t.id == task_id)
+                                .map(|t| t.title.as_str())
+                                .unwrap_or("unknown");
+                            let phase_name = if status == TaskStatus::Backlog { "research" } else { status.as_str() };
+                            let short_id = if task_id.len() >= 8 { &task_id[..8] } else { &task_id };
+                            let notif = crate::db::Notification::new(format!(
+                                "Task \"{}\" ({}) completed phase: {}",
+                                task_title, short_id, phase_name
+                            ));
+                            let _ = db.create_notification(&notif);
                         }
                     }
                 }
