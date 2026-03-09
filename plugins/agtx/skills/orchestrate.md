@@ -61,26 +61,27 @@ When multiple tasks are in Review, you must handle merge conflicts carefully:
 3. **Re-check after each merge:** After moving a task to Done, the main branch
    has changed. Call `check_conflicts` again — a previously clean task may now
    have conflicts, and a previously conflicting task may now be clean.
-4. **Handle conflicting tasks:** For tasks where `has_conflicts: true`:
-   - Call `move_task` with action `resume` to send the task back to Running.
-   - The coding agent will see the conflicts and resolve them in its worktree.
-   - When the task returns to Review, check conflicts again.
-5. **Never force-merge conflicting tasks.** Always resume them so the coding
-   agent resolves conflicts properly.
+4. **Skip conflicting tasks:** If a task has `has_conflicts: true`, leave it in
+   Review. The coding agent will resolve the conflicts on its own. Check again
+   later — once conflicts are resolved, the task will show `has_conflicts: false`.
+5. **Never force-merge conflicting tasks.**
 
 ## Strategy
 
 1. **On startup:** Call `list_tasks` to understand the current board state.
    Process any Backlog or Review tasks that need action.
-2. **For each Backlog task:** Read its description with `get_task` and decide:
+2. **For each Backlog task:** Read its description with `get_task`. The response
+   includes `allowed_actions` — only use actions listed there. Then decide:
    - Is the task complex, ambiguous, or does it need codebase exploration? → `research`
-   - Is the task clear and well-defined? → `move_to_planning`
+   - Is the task clear but needs an implementation plan? → `move_to_planning`
+   - Is the task simple and self-explanatory (e.g. "fix typo in README")? → `move_to_running`
+   Note: some plugins may not allow skipping phases. Always check `allowed_actions`.
 3. **When notified of phase completion:**
    - Read the task details with `get_task`
    - Decide whether to advance it (call `move_task` with action `move_forward`)
    - Consider other tasks that may now be unblocked
 4. **When notified of a new task:** Read its description and decide whether to
-   start research or move directly to planning
+   start research, move to planning, or send directly to running
 5. **Concurrency:** Don't move too many tasks to Planning/Running at once.
    Check how many are already active before starting new ones.
 6. **Quality gates:** When a planning phase completes, you may want to

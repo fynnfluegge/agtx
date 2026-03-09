@@ -3557,11 +3557,21 @@ impl App {
 
     /// Move task directly from Backlog to Running (skip Planning)
     fn move_backlog_to_running(&mut self) -> Result<()> {
+        let task_id = match self.state.board.selected_task() {
+            Some(t) if t.status == TaskStatus::Backlog => t.id.clone(),
+            _ => return Ok(()),
+        };
+        self.move_backlog_to_running_by_id(&task_id)
+    }
+
+    fn move_backlog_to_running_by_id(&mut self, task_id: &str) -> Result<()> {
         // Don't start if a setup is already in progress
-        if self.state.setup_rx.is_some() { return Ok(()) }
+        if self.state.setup_rx.is_some() {
+            anyhow::bail!("Another task setup is already in progress, try again shortly");
+        }
 
         let (mut task, project_path) = match (
-            self.state.board.selected_task().cloned(),
+            self.state.db.as_ref().and_then(|db| db.get_task(task_id).ok().flatten()),
             self.state.project_path.clone(),
         ) {
             (Some(t), Some(p)) => (t, p),
@@ -3569,7 +3579,7 @@ impl App {
         };
 
         if task.status != TaskStatus::Backlog {
-            return Ok(());
+            anyhow::bail!("Task must be in Backlog to move to Running (current: {})", task.status.as_str());
         }
 
         // Stamp plugin on task before checking research requirement
@@ -3862,13 +3872,17 @@ impl App {
                 self.execute_forward_transition(&mut task, &project_path)?;
             }
             "move_to_running" => {
-                if task.status != TaskStatus::Planning {
+                if task.status != TaskStatus::Planning && task.status != TaskStatus::Backlog {
                     anyhow::bail!(
-                        "Task must be in Planning to move to Running (current: {})",
+                        "Task must be in Backlog or Planning to move to Running (current: {})",
                         task.status.as_str()
                     );
                 }
-                self.execute_forward_transition(&mut task, &project_path)?;
+                if task.status == TaskStatus::Backlog {
+                    self.move_backlog_to_running_by_id(&req.task_id)?;
+                } else {
+                    self.execute_forward_transition(&mut task, &project_path)?;
+                }
             }
             "move_to_review" => {
                 if task.status != TaskStatus::Running {

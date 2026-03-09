@@ -10,7 +10,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Database, TaskStatus, TransitionRequest};
+use crate::db::{Database, Task, TaskStatus, TransitionRequest};
 
 // === Parameter types ===
 
@@ -98,6 +98,8 @@ struct TaskDetail {
     cycle: i32,
     created_at: String,
     updated_at: String,
+    /// Actions the orchestrator can take on this task given its current status and plugin rules.
+    allowed_actions: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -163,6 +165,41 @@ impl AgtxMcpServer {
     fn open_global_db(&self) -> Result<Database, String> {
         Database::open_global().map_err(|e| format!("Failed to open global database: {}", e))
     }
+
+    /// Compute which move_task actions are valid for a task given its status and plugin rules.
+    fn allowed_actions(&self, task: &Task) -> Vec<String> {
+        let mut actions = Vec::new();
+
+        let plugin = match &task.plugin {
+            Some(name) => crate::config::WorkflowPlugin::load(name, Some(&self.project_path)).ok(),
+            None => crate::skills::load_bundled_plugin("agtx"),
+        };
+
+        match task.status {
+            TaskStatus::Backlog => {
+                actions.push("research".to_string());
+                if plugin.as_ref().map_or(true, |p| p.phase_accepts_task("planning")) {
+                    actions.push("move_to_planning".to_string());
+                }
+                if plugin.as_ref().map_or(true, |p| p.phase_accepts_task("running")) {
+                    actions.push("move_to_running".to_string());
+                }
+            }
+            TaskStatus::Planning => {
+                actions.push("move_forward".to_string());
+            }
+            TaskStatus::Running => {
+                actions.push("move_forward".to_string());
+            }
+            TaskStatus::Review => {
+                actions.push("move_to_done".to_string());
+                actions.push("resume".to_string());
+            }
+            TaskStatus::Done => {}
+        }
+
+        actions
+    }
 }
 
 #[tool_router]
@@ -224,11 +261,12 @@ impl AgtxMcpServer {
         }
     }
 
-    #[tool(description = "Get full details of a specific task by its ID")]
+    #[tool(description = "Get full details of a specific task by its ID. Includes allowed_actions based on the task's current status and plugin rules.")]
     fn get_task(&self, Parameters(params): Parameters<GetTaskParams>) -> String {
         match self.open_project_db() {
             Ok(db) => match db.get_task(&params.task_id) {
                 Ok(Some(t)) => {
+                    let allowed = self.allowed_actions(&t);
                     let detail = TaskDetail {
                         id: t.id,
                         title: t.title,
@@ -245,6 +283,7 @@ impl AgtxMcpServer {
                         cycle: t.cycle,
                         created_at: t.created_at.to_rfc3339(),
                         updated_at: t.updated_at.to_rfc3339(),
+                        allowed_actions: allowed,
                     };
                     serde_json::to_string_pretty(&detail).unwrap_or_else(|e| format!("Error serializing: {}", e))
                 }
