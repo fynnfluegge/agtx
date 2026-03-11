@@ -23,6 +23,7 @@ Your feature branch has **merge conflicts** with the default branch (main/master
    If the project uses `master` instead of `main`, use `origin/master`.
 
 3. Resolve ALL merge conflicts:
+   - **Before resolving**, note which files have conflicts: `git diff --name-only --diff-filter=U`
    - Open each conflicted file
    - Remove conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
    - Choose the correct resolution for each conflict, preserving both sides' intent when possible
@@ -30,7 +31,17 @@ Your feature branch has **merge conflicts** with the default branch (main/master
 4. After resolving all conflicts:
    - `git add -A && git commit --no-edit`
 
-5. Run tests to verify nothing is broken. Fix any issues introduced by the merge.
+5. **Review only the conflicted files** to catch resolution mistakes:
+   - For each file that had conflicts (from step 3), compare your resolution against both parents:
+     - `git diff HEAD^1..HEAD -- <file>` (what changed vs your branch before merge)
+     - `git diff HEAD^2..HEAD -- <file>` (what changed vs the default branch)
+   - Verify:
+     - No code was accidentally dropped from either side
+     - The combined logic is coherent (e.g., imports, function signatures, variable names all consistent)
+     - No duplicate code blocks were introduced
+   - If you find a problem, fix it immediately and commit the fix separately
+
+6. Run tests to verify nothing is broken. Fix any issues introduced by the merge.
 
 ## Rules
 
