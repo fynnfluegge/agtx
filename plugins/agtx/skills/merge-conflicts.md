@@ -33,8 +33,8 @@ Your feature branch has **merge conflicts** with the default branch (main/master
 
 5. **Review only the conflicted files** to catch resolution mistakes:
    - For each file that had conflicts (from step 3), compare your resolution against both parents:
-     - `git diff HEAD^1..HEAD -- <file>` (what changed vs your branch before merge)
-     - `git diff HEAD^2..HEAD -- <file>` (what changed vs the default branch)
+     - `git diff HEAD^2..HEAD -- <file>` (what changed vs the default branch — shows only your feature's additions). **Start here** — this is usually the smaller, more focused diff.
+     - `git diff HEAD^1..HEAD -- <file>` (what changed vs your branch before merge — shows what main brought in). This can be very large; if so, focus on the areas around the conflict markers you resolved rather than reading the entire diff.
    - Verify:
      - No code was accidentally dropped from either side
      - The combined logic is coherent (e.g., imports, function signatures, variable names all consistent)
