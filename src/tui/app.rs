@@ -31,19 +31,20 @@ fn hex_to_color(hex: &str) -> Color {
 }
 
 /// Build footer help text based on current UI state
-fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_column: usize, has_cyclic_plugin: bool) -> String {
+fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_column: usize, has_cyclic_plugin: bool, experimental: bool) -> String {
+    let orch = if experimental { "  [O] orch" } else { "" };
     match input_mode {
         InputMode::Normal => {
             if sidebar_focused {
                 " [j/k] navigate  [Enter] open  [l] board  [e] hide sidebar  [q] quit ".to_string()
             } else {
                 match selected_column {
-                    0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run  [O] orch  [e] sidebar  [q] quit".to_string(),
-                    1 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [O] orch  [e] sidebar  [q] quit".to_string(),
-                    2 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [O] orch  [e] sidebar  [q] quit".to_string(),
-                    3 if has_cyclic_plugin => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [O] orch  [e] sidebar  [q] quit".to_string(),
-                    3 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [O] orch  [e] sidebar  [q] quit".to_string(),
-                    _ => " [o] new  [/] search  [Enter] open  [x] del  [O] orch  [e] sidebar  [q] quit".to_string(),
+                    0 => format!(" [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run{}  [e] sidebar  [q] quit", orch),
+                    1 => format!(" [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run{}  [e] sidebar  [q] quit", orch),
+                    2 => format!(" [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left{}  [e] sidebar  [q] quit", orch),
+                    3 if has_cyclic_plugin => format!(" [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase{}  [e] sidebar  [q] quit", orch),
+                    3 => format!(" [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left{}  [e] sidebar  [q] quit", orch),
+                    _ => format!(" [o] new  [/] search  [Enter] open  [x] del{}  [e] sidebar  [q] quit", orch),
                 }
             }
         }
@@ -157,6 +158,7 @@ const SHELL_POPUP_HEIGHT_PERCENT: u16 = 75; // Percentage of terminal height
 /// Application state (separate from terminal for borrow checker)
 struct AppState {
     mode: AppMode,
+    flags: crate::FeatureFlags,
     should_quit: bool,
     board: BoardState,
     input_mode: InputMode,
@@ -387,9 +389,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(mode: AppMode) -> Result<Self> {
+    pub fn new(mode: AppMode, flags: crate::FeatureFlags) -> Result<Self> {
         Self::with_ops(
             mode,
+            flags,
             Arc::new(RealTmuxOps),
             Arc::new(RealGitOps),
             Arc::new(RealGitHubOps),
@@ -399,6 +402,7 @@ impl App {
 
     pub fn with_ops(
         mode: AppMode,
+        flags: crate::FeatureFlags,
         tmux_ops: Arc<dyn TmuxOperations>,
         git_ops: Arc<dyn GitOperations>,
         git_provider_ops: Arc<dyn GitProviderOperations>,
@@ -448,6 +452,7 @@ impl App {
             terminal,
             state: AppState {
                 mode,
+                flags,
                 should_quit: false,
                 board: BoardState::new(),
                 input_mode: InputMode::Normal,
@@ -546,6 +551,7 @@ impl App {
             terminal,
             state: AppState {
                 mode,
+                flags: crate::FeatureFlags::default(),
                 should_quit: false,
                 board: BoardState::new(),
                 input_mode: InputMode::Normal,
@@ -895,11 +901,11 @@ impl App {
             if created.elapsed() < std::time::Duration::from_secs(5) {
                 (msg.clone(), Style::default().fg(Color::Yellow))
             } else {
-                (build_footer_text(state.input_mode, state.sidebar_focused, state.board.selected_column, has_cyclic_plugin),
+                (build_footer_text(state.input_mode, state.sidebar_focused, state.board.selected_column, has_cyclic_plugin, state.flags.experimental),
                  Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)))
             }
         } else {
-            (build_footer_text(state.input_mode, state.sidebar_focused, state.board.selected_column, has_cyclic_plugin),
+            (build_footer_text(state.input_mode, state.sidebar_focused, state.board.selected_column, has_cyclic_plugin, state.flags.experimental),
              Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)))
         };
 
@@ -2616,8 +2622,8 @@ impl App {
                 // Open plugin selection popup
                 self.open_plugin_select_popup();
             }
-            KeyCode::Char('O') => {
-                // Toggle orchestrator agent
+            KeyCode::Char('O') if self.state.flags.experimental => {
+                // Toggle orchestrator agent (experimental)
                 self.toggle_orchestrator()?;
             }
             _ => {}
@@ -4012,7 +4018,7 @@ impl App {
 
         let project_name = self.state.project_name.clone();
         let window_name = "orchestrator";
-        let target = format!("{}:{}", project_name, window_name);
+        let orch_target = format!("{}:{}", project_name, window_name);
 
         // If orchestrator is running, open the popup to view it
         if let Some(ref orch_target) = self.state.orchestrator_session {
@@ -4074,12 +4080,25 @@ impl App {
             Some(agent_cmd),
         )?;
 
-        self.state.orchestrator_session = Some(target.clone());
+        self.state.orchestrator_session = Some(orch_target.clone());
+
+        // Open the popup immediately so the user can see the orchestrator starting
+        let mut popup = ShellPopup::new("Orchestrator".to_string(), orch_target.clone());
+        if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
+            let pane_width = SHELL_POPUP_CONTENT_WIDTH;
+            let popup_height = (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
+            let pane_height = popup_height.saturating_sub(4);
+            let _ = self.state.tmux_ops.resize_window(&orch_target, pane_width, pane_height);
+            popup.last_pane_size = Some((pane_width, pane_height));
+        }
+        popup.cached_content = capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
+        self.state.shell_popup = Some(popup);
 
         // Send the orchestrator skill content as the initial prompt in a background thread
         let skill_body = skills::strip_frontmatter(skills::ORCHESTRATE_SKILL).to_string();
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let agent_name = default_agent.clone();
+        let target = orch_target;
         std::thread::spawn(move || {
             if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &target) {
                 send_skill_and_prompt(

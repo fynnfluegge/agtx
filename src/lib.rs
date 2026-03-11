@@ -14,3 +14,10 @@ pub enum AppMode {
     Dashboard,
     Project(PathBuf),
 }
+
+/// Feature flags parsed from CLI arguments
+#[derive(Debug, Clone, Default)]
+pub struct FeatureFlags {
+    /// Enable experimental features (orchestrator agent, etc.)
+    pub experimental: bool,
+}
