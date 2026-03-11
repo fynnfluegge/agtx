@@ -91,14 +91,24 @@ agtx -g
 | `e` | Toggle project sidebar |
 | `q` | Quit |
 
+### Task Creation Wizard
+
+Press `o` to create a new task. The wizard guides you through:
+1. **Title** — enter a short task name
+2. **Plugin** — select a workflow plugin (auto-skipped if only one option)
+3. **Prompt** — write a detailed task description with inline references
+
+The agent is configured at the project level via `config.toml` (not per-task).
+
 ### Task Description Editor
 
-When writing a task description, you can reference files and agent skills inline:
+When writing a task description, you can reference files, skills, and other tasks inline:
 
 | Key | Action |
 |-----|--------|
 | `#` or `@` | Fuzzy search and insert a file path |
-| `!` | Fuzzy search and insert an agent skill/command |
+| `/` | Fuzzy search and insert an agent skill/command (at line start or after space) |
+| `!` | Fuzzy search and insert a task reference (at line start or after space) |
 
 
 ### Agent Session Features

@@ -48,7 +48,8 @@ fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_colu
             }
         }
         InputMode::InputTitle => " Enter task title... [Esc] cancel [Enter] next ".to_string(),
-        InputMode::InputDescription => " Enter prompt for agent... [#] file search [!] skills [Esc] cancel [\\+Enter] newline [Enter] save ".to_string(),
+        InputMode::SelectPlugin => " [j/k] select plugin  [Tab] cycle  [Enter] next  [Esc] cancel ".to_string(),
+        InputMode::InputDescription => " [#] files  [/] skills  [!] tasks  [Esc] cancel  [\\+Enter] newline  [Enter] save ".to_string(),
     }
 }
 
@@ -162,9 +163,12 @@ struct AppState {
     input_mode: InputMode,
     input_buffer: String,
     input_cursor: usize, // Cursor position in input_buffer
-    // For task creation/editing
+    // For task creation/editing wizard
     pending_task_title: String,
     editing_task_id: Option<String>, // Some(id) when editing, None when creating
+    wizard_selected_plugin: usize,
+    wizard_plugin_options: Vec<PluginOption>,
+    wizard_referenced_task_ids: HashSet<String>,
     db: Option<Database>,
     #[allow(dead_code)]
     global_db: Database,
@@ -193,7 +197,9 @@ struct AppState {
     file_search: Option<FileSearchState>,
     // Skill search dropdown
     skill_search: Option<SkillSearchState>,
-    // References inserted via file search or skill search (for highlighting)
+    // Task reference search dropdown
+    task_ref_search: Option<TaskRefSearchState>,
+    // References inserted via file search, skill search, or task search (for highlighting)
     highlighted_references: HashSet<String>,
     // Task search popup
     task_search: Option<TaskSearchState>,
@@ -233,6 +239,8 @@ struct AppState {
     warning_message: Option<(String, Instant)>,
     // Plugin selection popup
     plugin_select_popup: Option<PluginSelectPopup>,
+    // Background session refresh channel (non-blocking phase status polling)
+    session_refresh_rx: Option<mpsc::Receiver<SessionRefreshResult>>,
 }
 
 /// State for confirming move to Done
@@ -270,6 +278,37 @@ struct SetupResult {
     agent: String,
     plugin: Option<String>,
     error: Option<String>,
+}
+
+/// Pre-fetched info about a referenced task for worktree setup (avoids DB access in thread).
+#[derive(Debug, Clone)]
+struct ReferencedTaskInfo {
+    slug: String,
+    branch_name: Option<String>,
+    worktree_path: Option<String>,
+}
+
+/// Per-task result from the background session refresh thread.
+struct SessionTaskStatus {
+    task_id: String,
+    phase_status: PhaseStatus,
+    /// Content hash from tmux capture (for idle detection on main thread).
+    content_hash: Option<u64>,
+    /// Task status (needed for merge-conflict check on main thread).
+    status: TaskStatus,
+    /// Worktree path (needed for merge-conflict check).
+    worktree_path: Option<String>,
+    /// Tmux session name (needed for merge-conflict check).
+    session_name: Option<String>,
+    /// Agent name (needed for merge-conflict skill dispatch).
+    agent: String,
+    /// Whether this task was already Ready before this refresh cycle.
+    was_ready: bool,
+}
+
+/// Results sent back from the background session refresh thread.
+struct SessionRefreshResult {
+    statuses: Vec<SessionTaskStatus>,
 }
 
 /// State for PR creation status popup (loading/success/error)
@@ -338,12 +377,21 @@ struct SkillEntry {
     description: String,  // from frontmatter or file stem
 }
 
-/// State for skill search dropdown (triggered by `!`)
+/// State for skill search dropdown (triggered by `/`)
 #[derive(Debug, Clone)]
 struct SkillSearchState {
     pattern: String,
     matches: Vec<SkillEntry>,
     all_skills: Vec<SkillEntry>, // cached full list for re-filtering
+    selected: usize,
+    start_pos: usize, // cursor position where `/` was typed
+}
+
+/// State for task reference search dropdown (triggered by `!`)
+#[derive(Debug, Clone)]
+struct TaskRefSearchState {
+    pattern: String,
+    matches: Vec<(String, String, TaskStatus)>, // (id, title, status)
     selected: usize,
     start_pos: usize, // cursor position where `!` was typed
 }
@@ -451,6 +499,9 @@ impl App {
                 input_cursor: 0,
                 pending_task_title: String::new(),
                 editing_task_id: None,
+                wizard_selected_plugin: 0,
+                wizard_plugin_options: vec![],
+                wizard_referenced_task_ids: HashSet::new(),
                 db,
                 global_db,
                 config,
@@ -469,6 +520,7 @@ impl App {
                 shell_popup: None,
                 file_search: None,
                 skill_search: None,
+                task_ref_search: None,
                 highlighted_references: HashSet::new(),
                 task_search: None,
                 pr_confirm_popup: None,
@@ -490,6 +542,7 @@ impl App {
                 cached_plugin: None,
                 warning_message: None,
                 plugin_select_popup: None,
+                session_refresh_rx: None,
             },
         };
 
@@ -546,6 +599,9 @@ impl App {
                 input_cursor: 0,
                 pending_task_title: String::new(),
                 editing_task_id: None,
+                wizard_selected_plugin: 0,
+                wizard_plugin_options: vec![],
+                wizard_referenced_task_ids: HashSet::new(),
                 db,
                 global_db,
                 config,
@@ -564,6 +620,7 @@ impl App {
                 shell_popup: None,
                 file_search: None,
                 skill_search: None,
+                task_ref_search: None,
                 highlighted_references: HashSet::new(),
                 task_search: None,
                 pr_confirm_popup: None,
@@ -585,6 +642,7 @@ impl App {
                 cached_plugin: None,
                 warning_message: None,
                 plugin_select_popup: None,
+                session_refresh_rx: None,
             },
         })
     }
@@ -669,8 +727,22 @@ impl App {
                 popup.cached_content = capture_tmux_pane_with_history(&popup.window_name, 500, self.state.tmux_ops.as_ref());
             }
 
-            // Periodically refresh session status
-            self.refresh_sessions()?;
+            // Apply results from background session refresh (non-blocking)
+            if let Some(ref rx) = self.state.session_refresh_rx {
+                match rx.try_recv() {
+                    Ok(result) => {
+                        self.state.session_refresh_rx = None;
+                        self.apply_session_refresh(result);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Thread panicked or dropped sender — clear to allow future spawns
+                        self.state.session_refresh_rx = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            // Spawn background refresh if not already running and cache expired
+            self.maybe_spawn_session_refresh();
 
             // Clear expired warning messages
             if let Some((_, created)) = &self.state.warning_message {
@@ -893,167 +965,261 @@ impl App {
         frame.render_widget(footer, chunks[2]);
 
         // Input overlay if in input mode
-        if state.input_mode == InputMode::InputTitle || state.input_mode == InputMode::InputDescription {
-            let input_area = centered_rect(50, 40, area);
+        if matches!(state.input_mode, InputMode::InputTitle | InputMode::SelectPlugin | InputMode::InputDescription) {
+            let input_area = centered_rect(55, 55, area);
             frame.render_widget(Clear, input_area);
 
             let is_editing = state.editing_task_id.is_some();
-            let (title, label) = match state.input_mode {
-                InputMode::InputTitle => {
-                    if is_editing { (" Edit Task ", "Title: ") } else { (" New Task ", "Title: ") }
-                }
-                InputMode::InputDescription => {
-                    if is_editing { (" Edit Task ", "Prompt: ") } else { (" New Task ", "Prompt: ") }
-                }
-                _ => ("", ""),
-            };
-
-            // Show title if we're on description step
-            // Insert cursor (█) at the correct position
-            let (before_cursor, after_cursor) = state.input_buffer.split_at(
-                state.input_cursor.min(state.input_buffer.len())
-            );
+            let block_title = if is_editing { " Edit Task " } else { " New Task " };
             let text_color = hex_to_color(&state.config.theme.color_text);
             let highlight_color = hex_to_color(&state.config.theme.color_accent);
-            let full_text = if state.input_mode == InputMode::InputDescription {
-                format!(
-                    "Title: {}\n\n{}{}█{}",
-                    state.pending_task_title,
-                    label,
-                    before_cursor,
-                    after_cursor
-                )
-            } else {
-                format!("{}{}█{}", label, before_cursor, after_cursor)
-            };
+            let dimmed_color = hex_to_color(&state.config.theme.color_dimmed);
+            let selected_color = hex_to_color(&state.config.theme.color_selected);
+            let desc_color = hex_to_color(&state.config.theme.color_description);
 
-            let styled_text = if state.input_mode == InputMode::InputDescription && !state.highlighted_references.is_empty() {
-                build_highlighted_text(&full_text, &state.highlighted_references, text_color, highlight_color)
-            } else {
-                Text::raw(full_text)
+            // Determine current step index: Title=0, Plugin=1, Prompt=2
+            let step = match state.input_mode {
+                InputMode::InputTitle => 0,
+                InputMode::SelectPlugin => 1,
+                InputMode::InputDescription => 2,
+                _ => 0,
             };
+            let step_labels = ["Title", "Plugin", "Prompt"];
 
-            let input = Paragraph::new(styled_text)
+            let mut lines: Vec<Line> = Vec::new();
+
+            // Step indicator breadcrumb
+            let mut breadcrumb_spans: Vec<Span> = Vec::new();
+            breadcrumb_spans.push(Span::raw("  "));
+            for (i, label) in step_labels.iter().enumerate() {
+                let style = if i == step {
+                    Style::default().fg(selected_color).add_modifier(Modifier::BOLD)
+                } else if i < step {
+                    Style::default().fg(highlight_color)
+                } else {
+                    Style::default().fg(dimmed_color)
+                };
+                breadcrumb_spans.push(Span::styled(*label, style));
+                if i < step_labels.len() - 1 {
+                    breadcrumb_spans.push(Span::styled("  ›  ", Style::default().fg(dimmed_color)));
+                }
+            }
+            lines.push(Line::from(breadcrumb_spans));
+
+            // Separator
+            let inner_width = input_area.width.saturating_sub(4) as usize;
+            lines.push(Line::from(Span::styled(
+                format!("  {}", "─".repeat(inner_width.saturating_sub(2))),
+                Style::default().fg(dimmed_color),
+            )));
+            lines.push(Line::from(""));
+
+            // Completed fields shown as read-only context
+            if step >= 1 {
+                lines.push(Line::from(vec![
+                    Span::styled("  Title: ", Style::default().fg(dimmed_color)),
+                    Span::styled(&state.pending_task_title, Style::default().fg(text_color)),
+                ]));
+            }
+            if step >= 2 {
+                let plugin_name = state.wizard_plugin_options
+                    .get(state.wizard_selected_plugin)
+                    .map(|o| o.label.as_str())
+                    .unwrap_or("agtx");
+                lines.push(Line::from(vec![
+                    Span::styled("  Plugin: ", Style::default().fg(dimmed_color)),
+                    Span::styled(plugin_name, Style::default().fg(text_color)),
+                ]));
+            }
+            if step >= 1 { lines.push(Line::from("")); }
+
+            // Active area content
+            match state.input_mode {
+                InputMode::InputTitle => {
+                    let (before_cursor, after_cursor) = state.input_buffer.split_at(
+                        state.input_cursor.min(state.input_buffer.len())
+                    );
+                    lines.push(Line::from(vec![
+                        Span::styled("  Title: ", Style::default().fg(selected_color).add_modifier(Modifier::BOLD)),
+                        Span::styled(before_cursor, Style::default().fg(text_color)),
+                        Span::styled("█", Style::default().fg(selected_color)),
+                        Span::styled(after_cursor, Style::default().fg(text_color)),
+                    ]));
+                }
+                InputMode::SelectPlugin => {
+                    let active_plugin = state.config.workflow_plugin.as_deref().unwrap_or("");
+                    for (i, opt) in state.wizard_plugin_options.iter().enumerate() {
+                        let is_sel = i == state.wizard_selected_plugin;
+                        let marker = if is_sel { "  > " } else { "    " };
+                        let is_project_default = (opt.name.is_empty() && active_plugin.is_empty())
+                            || opt.name == active_plugin;
+                        let check = if is_project_default { " ✓" } else { "" };
+                        let name_style = if is_sel {
+                            Style::default().fg(selected_color).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(text_color)
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(marker, name_style),
+                            Span::styled(format!("{:<14}", &opt.label), name_style),
+                            Span::styled(&opt.description, Style::default().fg(desc_color)),
+                            Span::styled(check, Style::default().fg(Color::Green)),
+                        ]));
+                    }
+                }
+                InputMode::InputDescription => {
+                    let (before_cursor, after_cursor) = state.input_buffer.split_at(
+                        state.input_cursor.min(state.input_buffer.len())
+                    );
+                    let full_text = format!("  Prompt: {}█{}", before_cursor, after_cursor);
+                    // Split on newlines to handle multi-line descriptions
+                    for part in full_text.split('\n') {
+                        if !state.highlighted_references.is_empty() {
+                            let styled = build_highlighted_text(part, &state.highlighted_references, text_color, highlight_color);
+                            for line in styled.lines {
+                                let owned_spans: Vec<Span<'static>> = line.spans.into_iter()
+                                    .map(|s| Span::styled(s.content.into_owned(), s.style))
+                                    .collect();
+                                lines.push(Line::from(owned_spans));
+                            }
+                        } else {
+                            lines.push(Line::from(Span::styled(part.to_string(), Style::default().fg(text_color))));
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            let content = Paragraph::new(Text::from(lines))
                 .style(Style::default().fg(text_color))
                 .wrap(Wrap { trim: false })
                 .block(
                     Block::default()
-                        .title(title)
+                        .title(block_title)
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_selected))),
+                        .border_style(Style::default().fg(selected_color)),
                 );
-            frame.render_widget(input, input_area);
+            frame.render_widget(content, input_area);
 
-            // File search dropdown
-            if let Some(ref search) = state.file_search {
-                if !search.matches.is_empty() {
-                    let dropdown_height = (search.matches.len() as u16 + 2).min(12);
-                    let dropdown_area = Rect {
-                        x: input_area.x + 2,
-                        y: input_area.y + input_area.height,
-                        width: input_area.width.saturating_sub(4),
-                        height: dropdown_height,
-                    };
+            // Search dropdowns (only in InputDescription mode)
+            if state.input_mode == InputMode::InputDescription {
+                // File search dropdown
+                if let Some(ref search) = state.file_search {
+                    if !search.matches.is_empty() {
+                        let dropdown_height = (search.matches.len() as u16 + 2).min(12);
+                        let dropdown_area = Rect {
+                            x: input_area.x + 2,
+                            y: input_area.y + input_area.height,
+                            width: input_area.width.saturating_sub(4),
+                            height: dropdown_height,
+                        };
+                        let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height {
+                            Rect { y: input_area.y.saturating_sub(dropdown_height), ..dropdown_area }
+                        } else { dropdown_area };
 
-                    // Make sure dropdown doesn't go off screen
-                    let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height {
-                        Rect {
-                            y: input_area.y.saturating_sub(dropdown_height),
-                            ..dropdown_area
-                        }
-                    } else {
-                        dropdown_area
-                    };
-
-                    frame.render_widget(Clear, dropdown_area);
-
-                    let file_selected_color = hex_to_color(&state.config.theme.color_selected);
-                    let items: Vec<ListItem> = search.matches
-                        .iter()
-                        .enumerate()
-                        .map(|(i, path)| {
-                            let style = if i == search.selected {
-                                Style::default().bg(file_selected_color).fg(Color::Black)
-                            } else {
-                                Style::default().fg(Color::White)
-                            };
-                            ListItem::new(format!(" {} ", path)).style(style)
-                        })
-                        .collect();
-
-                    let list = List::new(items)
-                        .block(
+                        frame.render_widget(Clear, dropdown_area);
+                        let file_selected_color = hex_to_color(&state.config.theme.color_selected);
+                        let items: Vec<ListItem> = search.matches.iter().enumerate()
+                            .map(|(i, path)| {
+                                let style = if i == search.selected {
+                                    Style::default().bg(file_selected_color).fg(Color::Black)
+                                } else {
+                                    Style::default().fg(Color::White)
+                                };
+                                ListItem::new(format!(" {} ", path)).style(style)
+                            }).collect();
+                        let list = List::new(items).block(
                             Block::default()
                                 .title(" Files [↑↓] select [Tab/Enter] insert [Esc] cancel ")
                                 .borders(Borders::ALL)
                                 .border_style(Style::default().fg(Color::Cyan)),
                         );
-                    frame.render_widget(list, dropdown_area);
+                        frame.render_widget(list, dropdown_area);
+                    }
                 }
-            }
 
-            // Skill search dropdown
-            if let Some(ref search) = state.skill_search {
-                if !search.matches.is_empty() {
-                    let dropdown_height = (search.matches.len() as u16 + 2).min(12);
-                    let dropdown_area = Rect {
-                        x: input_area.x + 2,
-                        y: input_area.y + input_area.height,
-                        width: input_area.width.saturating_sub(4),
-                        height: dropdown_height,
-                    };
+                // Skill search dropdown
+                if let Some(ref search) = state.skill_search {
+                    if !search.matches.is_empty() {
+                        let dropdown_height = (search.matches.len() as u16 + 2).min(12);
+                        let dropdown_area = Rect {
+                            x: input_area.x + 2,
+                            y: input_area.y + input_area.height,
+                            width: input_area.width.saturating_sub(4),
+                            height: dropdown_height,
+                        };
+                        let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height {
+                            Rect { y: input_area.y.saturating_sub(dropdown_height), ..dropdown_area }
+                        } else { dropdown_area };
 
-                    let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height {
-                        Rect {
-                            y: input_area.y.saturating_sub(dropdown_height),
-                            ..dropdown_area
-                        }
-                    } else {
-                        dropdown_area
-                    };
-
-                    frame.render_widget(Clear, dropdown_area);
-
-                    let skill_selected_color = hex_to_color(&state.config.theme.color_selected);
-                    let accent_color = hex_to_color(&state.config.theme.color_accent);
-                    let dimmed_color = hex_to_color(&state.config.theme.color_dimmed);
-                    let items: Vec<ListItem> = search.matches
-                        .iter()
-                        .enumerate()
-                        .map(|(i, entry)| {
-                            let style = if i == search.selected {
-                                Style::default().bg(skill_selected_color).fg(Color::Black)
-                            } else {
-                                Style::default()
-                            };
-                            let cmd_style = if i == search.selected {
-                                Style::default().bg(skill_selected_color).fg(Color::Black)
-                            } else {
-                                Style::default().fg(accent_color)
-                            };
-                            let desc_style = if i == search.selected {
-                                Style::default().bg(skill_selected_color).fg(Color::Black)
-                            } else {
-                                Style::default().fg(dimmed_color)
-                            };
-                            // Pad command to align descriptions
-                            let cmd_padded = format!(" {:<24}", entry.command);
-                            let line = Line::from(vec![
-                                Span::styled(cmd_padded, cmd_style),
-                                Span::styled(&entry.description, desc_style),
-                            ]);
-                            ListItem::new(line).style(style)
-                        })
-                        .collect();
-
-                    let list = List::new(items)
-                        .block(
+                        frame.render_widget(Clear, dropdown_area);
+                        let skill_sel_color = hex_to_color(&state.config.theme.color_selected);
+                        let accent = hex_to_color(&state.config.theme.color_accent);
+                        let dim = hex_to_color(&state.config.theme.color_dimmed);
+                        let items: Vec<ListItem> = search.matches.iter().enumerate()
+                            .map(|(i, entry)| {
+                                let (style, cmd_style, dsc_style) = if i == search.selected {
+                                    let s = Style::default().bg(skill_sel_color).fg(Color::Black);
+                                    (s, s, s)
+                                } else {
+                                    (Style::default(), Style::default().fg(accent), Style::default().fg(dim))
+                                };
+                                let cmd_padded = format!(" {:<24}", entry.command);
+                                ListItem::new(Line::from(vec![
+                                    Span::styled(cmd_padded, cmd_style),
+                                    Span::styled(&entry.description, dsc_style),
+                                ])).style(style)
+                            }).collect();
+                        let list = List::new(items).block(
                             Block::default()
                                 .title(" Skills [↑↓] select [Tab/Enter] insert [Esc] cancel ")
                                 .borders(Borders::ALL)
                                 .border_style(Style::default().fg(Color::Cyan)),
                         );
-                    frame.render_widget(list, dropdown_area);
+                        frame.render_widget(list, dropdown_area);
+                    }
+                }
+
+                // Task reference search dropdown
+                if let Some(ref search) = state.task_ref_search {
+                    if !search.matches.is_empty() {
+                        let dropdown_height = (search.matches.len() as u16 + 2).min(12);
+                        let dropdown_area = Rect {
+                            x: input_area.x + 2,
+                            y: input_area.y + input_area.height,
+                            width: input_area.width.saturating_sub(4),
+                            height: dropdown_height,
+                        };
+                        let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height {
+                            Rect { y: input_area.y.saturating_sub(dropdown_height), ..dropdown_area }
+                        } else { dropdown_area };
+
+                        frame.render_widget(Clear, dropdown_area);
+                        let task_sel_color = hex_to_color(&state.config.theme.color_selected);
+                        let accent = hex_to_color(&state.config.theme.color_accent);
+                        let dim = hex_to_color(&state.config.theme.color_dimmed);
+                        let items: Vec<ListItem> = search.matches.iter().enumerate()
+                            .map(|(i, (_, title, status))| {
+                                let (style, title_style, status_style) = if i == search.selected {
+                                    let s = Style::default().bg(task_sel_color).fg(Color::Black);
+                                    (s, s, s)
+                                } else {
+                                    (Style::default(), Style::default().fg(accent), Style::default().fg(dim))
+                                };
+                                let status_badge = format!("  [{}]", status.as_str());
+                                ListItem::new(Line::from(vec![
+                                    Span::styled(format!(" {}", title), title_style),
+                                    Span::styled(status_badge, status_style),
+                                ])).style(style)
+                            }).collect();
+                        let list = List::new(items).block(
+                            Block::default()
+                                .title(" Tasks [↑↓] select [Tab/Enter] insert [Esc] cancel ")
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(Color::Cyan)),
+                        );
+                        frame.render_widget(list, dropdown_area);
+                    }
                 }
             }
         }
@@ -1838,6 +2004,7 @@ impl App {
                 match self.state.input_mode {
                     InputMode::Normal => self.handle_normal_key(key.code),
                     InputMode::InputTitle => self.handle_title_input(key),
+                    InputMode::SelectPlugin => self.handle_plugin_select_wizard(key),
                     InputMode::InputDescription => self.handle_description_input(key),
                 }
             }
@@ -2609,34 +2776,14 @@ impl App {
         let has_alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
         match key.code {
             KeyCode::Esc => {
-                self.state.input_mode = InputMode::Normal;
-                self.state.input_buffer.clear();
-                self.state.input_cursor = 0;
-                self.state.pending_task_title.clear();
-                self.state.editing_task_id = None;
+                self.cancel_wizard();
             }
             KeyCode::Enter => {
                 if !self.state.input_buffer.is_empty() {
-                    // Save title and move to description input
                     self.state.pending_task_title = self.state.input_buffer.clone();
-
-                    // If editing, pre-fill description
-                    if let Some(task_id) = &self.state.editing_task_id {
-                        if let Some(db) = &self.state.db {
-                            if let Ok(Some(task)) = db.get_task(task_id) {
-                                self.state.input_buffer = task.description.unwrap_or_default();
-                            } else {
-                                self.state.input_buffer.clear();
-                            }
-                        } else {
-                            self.state.input_buffer.clear();
-                        }
-                    } else {
-                        self.state.input_buffer.clear();
-                    }
-
-                    self.state.input_cursor = self.state.input_buffer.len();
-                    self.state.input_mode = InputMode::InputDescription;
+                    self.state.input_buffer.clear();
+                    self.state.input_cursor = 0;
+                    self.advance_from_title();
                 }
             }
             KeyCode::Left if has_alt => {
@@ -2694,12 +2841,117 @@ impl App {
         Ok(())
     }
 
+    fn handle_plugin_select_wizard(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => { self.cancel_wizard(); }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let max = self.state.wizard_plugin_options.len().saturating_sub(1);
+                if self.state.wizard_selected_plugin < max {
+                    self.state.wizard_selected_plugin += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.state.wizard_selected_plugin > 0 {
+                    self.state.wizard_selected_plugin -= 1;
+                }
+            }
+            KeyCode::Tab => {
+                let len = self.state.wizard_plugin_options.len();
+                if len > 0 {
+                    self.state.wizard_selected_plugin = (self.state.wizard_selected_plugin + 1) % len;
+                }
+            }
+            KeyCode::Enter => {
+                self.init_description_input();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn handle_description_input(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        // Handle task reference search mode if active
+        if let Some(ref mut search) = self.state.task_ref_search {
+            match key.code {
+                KeyCode::Esc => {
+                    // Cancel task ref search, remove `!` + pattern from buffer
+                    let remove_end = search.start_pos + 1 + search.pattern.len();
+                    let suffix = self.state.input_buffer[remove_end..].to_string();
+                    self.state.input_buffer.truncate(search.start_pos);
+                    self.state.input_buffer.push_str(&suffix);
+                    self.state.input_cursor = search.start_pos;
+                    self.state.task_ref_search = None;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    if let Some((task_id, title, _status)) = search.matches.get(search.selected).cloned() {
+                        // Replace `!` + pattern with ![task-title]
+                        let pattern_end = search.start_pos + 1 + search.pattern.len();
+                        let suffix = self.state.input_buffer[pattern_end..].to_string();
+                        self.state.input_buffer.truncate(search.start_pos);
+                        let ref_text = format!("![{}]", title);
+                        self.state.input_buffer.push_str(&ref_text);
+                        self.state.input_cursor = self.state.input_buffer.len();
+                        self.state.input_buffer.push_str(&suffix);
+                        self.state.highlighted_references.insert(ref_text);
+                        self.state.wizard_referenced_task_ids.insert(task_id);
+                    }
+                    self.state.task_ref_search = None;
+                }
+                KeyCode::Up => {
+                    if search.selected > 0 {
+                        search.selected -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if search.selected < search.matches.len().saturating_sub(1) {
+                        search.selected += 1;
+                    }
+                }
+                KeyCode::Backspace => {
+                    if search.pattern.is_empty() {
+                        // Remove the `!` trigger character
+                        if self.state.input_cursor > 0 {
+                            self.state.input_cursor -= 1;
+                            self.state.input_buffer.remove(self.state.input_cursor);
+                        }
+                        self.state.task_ref_search = None;
+                    } else {
+                        search.pattern.pop();
+                        if self.state.input_cursor > 0 {
+                            self.state.input_cursor -= 1;
+                            self.state.input_buffer.remove(self.state.input_cursor);
+                        }
+                        let query = search.pattern.clone();
+                        let matches = self.get_all_task_matches(&query);
+                        if let Some(ref mut search) = self.state.task_ref_search {
+                            search.matches = matches;
+                            search.selected = 0;
+                        }
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(ref mut search) = self.state.task_ref_search {
+                        search.pattern.push(c);
+                    }
+                    self.state.input_buffer.insert(self.state.input_cursor, c);
+                    self.state.input_cursor += 1;
+                    let query = self.state.task_ref_search.as_ref().map(|s| s.pattern.clone()).unwrap_or_default();
+                    let matches = self.get_all_task_matches(&query);
+                    if let Some(ref mut search) = self.state.task_ref_search {
+                        search.matches = matches;
+                        search.selected = 0;
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // Handle skill search mode if active
         if let Some(ref mut search) = self.state.skill_search {
             match key.code {
                 KeyCode::Esc => {
-                    // Cancel skill search, remove `!` + pattern from buffer
+                    // Cancel skill search, remove `/` + pattern from buffer
                     let remove_end = search.start_pos + 1 + search.pattern.len();
                     let suffix = self.state.input_buffer[remove_end..].to_string();
                     self.state.input_buffer.truncate(search.start_pos);
@@ -2709,7 +2961,7 @@ impl App {
                 }
                 KeyCode::Enter | KeyCode::Tab => {
                     if let Some(entry) = search.matches.get(search.selected).cloned() {
-                        // Replace `!` + pattern with the full command
+                        // Replace `/` + pattern with the full command
                         let pattern_end = search.start_pos + 1 + search.pattern.len();
                         let suffix = self.state.input_buffer[pattern_end..].to_string();
                         self.state.input_buffer.truncate(search.start_pos);
@@ -2831,13 +3083,7 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                self.state.input_mode = InputMode::Normal;
-                self.state.input_buffer.clear();
-                self.state.input_cursor = 0;
-                self.state.pending_task_title.clear();
-                self.state.editing_task_id = None;
-                self.state.highlighted_references.clear();
-                self.state.skill_search = None;
+                self.cancel_wizard();
             }
             KeyCode::Enter => {
                 // Check if line ends with backslash for line continuation
@@ -2849,13 +3095,7 @@ impl App {
                 } else {
                     // Save task (create or update)
                     self.save_task()?;
-                    self.state.input_mode = InputMode::Normal;
-                    self.state.input_buffer.clear();
-                    self.state.input_cursor = 0;
-                    self.state.pending_task_title.clear();
-                    self.state.editing_task_id = None;
-                    self.state.highlighted_references.clear();
-                    self.state.skill_search = None;
+                    self.cancel_wizard();
                 }
             }
             KeyCode::Left if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
@@ -2919,10 +3159,10 @@ impl App {
                 });
                 self.update_file_search_matches();
             }
-            KeyCode::Char('!') => {
-                // Start skill search at cursor position
+            KeyCode::Char('/') if self.state.input_cursor == 0 || matches!(self.state.input_buffer.as_bytes().get(self.state.input_cursor.wrapping_sub(1)), Some(&b'\n') | Some(&b' ')) => {
+                // Start skill search at cursor position (at start of line or after space)
                 let start_pos = self.state.input_cursor;
-                self.state.input_buffer.insert(self.state.input_cursor, '!');
+                self.state.input_buffer.insert(self.state.input_cursor, '/');
                 self.state.input_cursor += 1;
 
                 // Start with bundled skills (always available, no filesystem needed)
@@ -2948,6 +3188,20 @@ impl App {
                     pattern: String::new(),
                     matches: all_skills.clone(),
                     all_skills,
+                    selected: 0,
+                    start_pos,
+                });
+            }
+            KeyCode::Char('!') if self.state.input_cursor == 0 || self.state.input_buffer.as_bytes().get(self.state.input_cursor.wrapping_sub(1)) == Some(&b'\n') || self.state.input_buffer.as_bytes().get(self.state.input_cursor.wrapping_sub(1)) == Some(&b' ') => {
+                // Start task reference search at cursor position (at start of line or after space)
+                let start_pos = self.state.input_cursor;
+                self.state.input_buffer.insert(self.state.input_cursor, '!');
+                self.state.input_cursor += 1;
+
+                let matches = self.get_all_task_matches("");
+                self.state.task_ref_search = Some(TaskRefSearchState {
+                    pattern: String::new(),
+                    matches,
                     selected: 0,
                     start_pos,
                 });
@@ -2992,6 +3246,18 @@ impl App {
 
     fn save_task(&mut self) -> Result<()> {
         if let Some(db) = &self.state.db {
+            let agent = self.state.config.default_agent.clone();
+            let plugin_name = self.state.wizard_plugin_options
+                .get(self.state.wizard_selected_plugin)
+                .map(|o| o.name.clone())
+                .unwrap_or_default();
+            let plugin = if plugin_name.is_empty() { None } else { Some(plugin_name) };
+            let refs = if self.state.wizard_referenced_task_ids.is_empty() {
+                None
+            } else {
+                Some(self.state.wizard_referenced_task_ids.iter().cloned().collect::<Vec<_>>().join(","))
+            };
+
             if let Some(task_id) = &self.state.editing_task_id {
                 // Editing existing task
                 if let Some(mut task) = db.get_task(task_id)? {
@@ -3001,24 +3267,116 @@ impl App {
                     } else {
                         Some(self.state.input_buffer.clone())
                     };
+                    task.agent = agent;
+                    task.plugin = plugin;
+                    task.referenced_tasks = refs;
                     task.updated_at = chrono::Utc::now();
                     db.update_task(&task)?;
                 }
             } else {
                 // Creating new task
                 let project_id = self.state.project_name.clone();
-                let agent = self.state.config.default_agent.clone();
 
                 let mut task = Task::new(&self.state.pending_task_title, agent, project_id);
                 if !self.state.input_buffer.is_empty() {
                     task.description = Some(self.state.input_buffer.clone());
                 }
+                task.plugin = plugin;
+                task.referenced_tasks = refs;
                 // Task starts in Backlog without tmux window
                 db.create_task(&task)?;
             }
             self.refresh_tasks()?;
         }
         Ok(())
+    }
+
+    /// Initialize plugin selection options for the wizard, filtered by selected agent.
+    fn init_plugin_selection(&mut self) {
+        let current = if let Some(task_id) = &self.state.editing_task_id {
+            self.state.db.as_ref()
+                .and_then(|db| db.get_task(task_id).ok().flatten())
+                .and_then(|t| t.plugin.clone())
+                .or_else(|| self.state.config.workflow_plugin.clone())
+                .unwrap_or_default()
+        } else {
+            self.state.config.workflow_plugin.as_deref().unwrap_or("").to_string()
+        };
+
+        let selected_agent_name = &self.state.config.default_agent;
+
+        let mut options = vec![PluginOption {
+            name: String::new(),
+            label: "agtx".to_string(),
+            description: "Built-in workflow with skills and prompts".to_string(),
+            active: current.is_empty(),
+        }];
+        for (name, desc, content) in skills::BUNDLED_PLUGINS {
+            if *name == "agtx" { continue; }
+            // Filter by agent compatibility
+            if let Ok(plugin) = toml::from_str::<WorkflowPlugin>(content) {
+                if !plugin.supports_agent(selected_agent_name) { continue; }
+            }
+            options.push(PluginOption {
+                name: name.to_string(),
+                label: name.to_string(),
+                description: desc.to_string(),
+                active: current == *name,
+            });
+        }
+        let selected = options.iter().position(|o| o.active).unwrap_or(0);
+        self.state.wizard_plugin_options = options;
+        self.state.wizard_selected_plugin = selected;
+    }
+
+    /// Initialize the description input step of the wizard.
+    fn init_description_input(&mut self) {
+        if let Some(task_id) = &self.state.editing_task_id {
+            if let Some(db) = &self.state.db {
+                if let Ok(Some(task)) = db.get_task(task_id) {
+                    self.state.input_buffer = task.description.unwrap_or_default();
+                    // Restore referenced task IDs if editing
+                    self.state.wizard_referenced_task_ids = task.referenced_tasks
+                        .as_deref()
+                        .map(|s| s.split(',').filter(|id| !id.is_empty()).map(String::from).collect())
+                        .unwrap_or_default();
+                } else {
+                    self.state.input_buffer.clear();
+                }
+            } else {
+                self.state.input_buffer.clear();
+            }
+        }
+        self.state.input_cursor = self.state.input_buffer.len();
+        self.state.input_mode = InputMode::InputDescription;
+    }
+
+    /// Cancel the task creation/edit wizard entirely.
+    fn cancel_wizard(&mut self) {
+        self.state.input_mode = InputMode::Normal;
+        self.state.input_buffer.clear();
+        self.state.input_cursor = 0;
+        self.state.pending_task_title.clear();
+        self.state.editing_task_id = None;
+        self.state.highlighted_references.clear();
+        self.state.wizard_plugin_options.clear();
+        self.state.wizard_referenced_task_ids.clear();
+        self.state.task_ref_search = None;
+    }
+
+    /// Advance from title step to plugin selection or description.
+    fn advance_from_title(&mut self) {
+        // Skip plugin selection when no agents detected (e.g. test mode)
+        if self.state.available_agents.is_empty() {
+            self.init_description_input();
+            return;
+        }
+        self.init_plugin_selection();
+        if self.state.wizard_plugin_options.len() <= 1 {
+            self.init_description_input();
+        } else {
+            self.state.input_mode = InputMode::SelectPlugin;
+        }
     }
 
     fn delete_selected_task(&mut self) -> Result<()> {
@@ -3212,6 +3570,21 @@ impl App {
         let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
         let project_path = project_path.to_path_buf();
 
+        // Pre-fetch referenced task info (DB isn't Send, so fetch before spawning thread)
+        let referenced_tasks: Vec<ReferencedTaskInfo> = task.referenced_tasks.as_deref()
+            .map(|refs_str| {
+                refs_str.split(',').filter(|s| !s.is_empty()).filter_map(|ref_id| {
+                    self.state.db.as_ref()
+                        .and_then(|db| db.get_task(ref_id).ok().flatten())
+                        .map(|ref_task| ReferencedTaskInfo {
+                            slug: generate_task_slug(&ref_task.id, &ref_task.title),
+                            branch_name: ref_task.branch_name.clone(),
+                            worktree_path: ref_task.worktree_path.clone(),
+                        })
+                }).collect()
+            })
+            .unwrap_or_default();
+
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
 
@@ -3224,6 +3597,7 @@ impl App {
                 &mut tmp_task, &project_path, &project_name, &prompt,
                 copy_files, init_script, &plugin, &planning_agent_clone, &all_agents,
                 tmux_ops.as_ref(), git_ops.as_ref(), agent_ops.as_ref(),
+                &referenced_tasks,
             );
 
             match result {
@@ -3470,6 +3844,7 @@ impl App {
                 tmux_ops.as_ref(),
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
+                &[],
             );
 
             match result {
@@ -3605,6 +3980,7 @@ impl App {
                 tmux_ops.as_ref(),
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
+                &[],
             );
 
             match result {
@@ -3832,140 +4208,170 @@ impl App {
         Ok(())
     }
 
-    fn refresh_sessions(&mut self) -> Result<()> {
+    /// Spawn a background thread to check phase statuses if no refresh is already running
+    /// and the cache has expired for at least one task.
+    fn maybe_spawn_session_refresh(&mut self) {
+        // Don't spawn if a refresh is already in flight
+        if self.state.session_refresh_rx.is_some() {
+            self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
+            return;
+        }
+
         let now = Instant::now();
         const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
-        let project_path = self.state.project_path.clone();
-
+        // Collect tasks that need checking (cache expired or never checked)
         let tasks_to_check: Vec<_> = self.state.board.tasks.iter()
             .filter(|t| {
                 matches!(t.status, TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review)
                 || (t.status == TaskStatus::Backlog && t.session_name.is_some())
             })
             .filter(|t| t.worktree_path.is_some() || t.session_name.is_some())
-            .map(|t| (t.id.clone(), t.status, t.worktree_path.clone(), t.plugin.clone(), t.session_name.clone(), t.cycle, t.agent.clone()))
+            .filter(|t| {
+                self.state.phase_status_cache.get(&t.id)
+                    .map_or(true, |(_, ts)| now.duration_since(*ts) >= CACHE_TTL)
+            })
+            .map(|t| {
+                let was_ready = self.state.phase_status_cache.get(&t.id)
+                    .map_or(false, |(prev, _)| *prev == PhaseStatus::Ready);
+                (t.id.clone(), t.status, t.worktree_path.clone(), t.plugin.clone(), t.session_name.clone(), t.cycle, was_ready, t.agent.clone())
+            })
             .collect();
 
-        // Cache loaded plugins by name to avoid reloading from disk for each task
-        let mut plugin_cache: HashMap<Option<String>, Option<WorkflowPlugin>> = HashMap::new();
+        if tasks_to_check.is_empty() {
+            self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
+            return;
+        }
 
-        for (task_id, status, worktree_path, task_plugin, session_name, cycle, agent) in tasks_to_check {
-            if let Some((_, timestamp)) = self.state.phase_status_cache.get(&task_id) {
-                if now.duration_since(*timestamp) < CACHE_TTL {
-                    continue;
-                }
-            }
+        let project_path = self.state.project_path.clone();
+        let tmux_ops = Arc::clone(&self.state.tmux_ops);
 
-            let phase_status = if status == TaskStatus::Backlog {
-                // Research artifact: check worktree only (research runs in worktree)
+        let (tx, rx) = mpsc::channel();
+        self.state.session_refresh_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let mut plugin_cache: HashMap<Option<String>, Option<WorkflowPlugin>> = HashMap::new();
+            let mut statuses = Vec::new();
+
+            for (task_id, status, worktree_path, task_plugin, session_name, cycle, was_ready, agent) in tasks_to_check {
                 let plugin = plugin_cache.entry(task_plugin.clone()).or_insert_with(|| {
                     match &task_plugin {
-                        Some(name) => WorkflowPlugin::load(name, self.state.project_path.as_deref()).ok(),
+                        Some(name) => WorkflowPlugin::load(name, project_path.as_deref()).ok(),
                         None => skills::load_bundled_plugin("agtx"),
                     }
                 });
 
-                // Preresearch artifact: copy back project files when preresearch completes
-                // Only copy if not all files exist at project root yet (avoids repeated copies)
-                if let (Some(ref wt), Some(ref pp)) = (&worktree_path, &project_path) {
-                    if let Some(ref p) = plugin {
-                        if let Some(entries) = p.copy_back.get("preresearch") {
-                            let all_at_root = !entries.is_empty() && entries.iter().all(|e| Path::new(pp).join(e).exists());
-                            if !all_at_root && !p.artifacts.preresearch.is_empty() {
-                                // Check if all preresearch artifacts exist in worktree
-                                let any_artifact = p.artifacts.preresearch.iter().all(|a| {
-                                    let path = Path::new(wt).join(a);
-                                    if a.contains('*') {
-                                        glob_path_exists(&path.to_string_lossy())
-                                    } else {
-                                        path.exists()
+                let phase_status = if status == TaskStatus::Backlog {
+                    // Preresearch copy-back
+                    if let (Some(ref wt), Some(ref pp)) = (&worktree_path, &project_path) {
+                        if let Some(ref p) = plugin {
+                            if let Some(entries) = p.copy_back.get("preresearch") {
+                                let all_at_root = !entries.is_empty() && entries.iter().all(|e| pp.join(e).exists());
+                                if !all_at_root && !p.artifacts.preresearch.is_empty() {
+                                    let any_artifact = p.artifacts.preresearch.iter().all(|a| {
+                                        let path = Path::new(wt).join(a);
+                                        if a.contains('*') {
+                                            glob_path_exists(&path.to_string_lossy())
+                                        } else {
+                                            path.exists()
+                                        }
+                                    });
+                                    if any_artifact {
+                                        copy_back_to_project(Path::new(wt), pp, entries);
                                     }
-                                });
-                                if any_artifact {
-                                    copy_back_to_project(Path::new(wt), Path::new(pp), entries);
                                 }
                             }
                         }
                     }
-                }
 
-                let found = worktree_path.as_ref().map_or(false, |wt| {
-                    research_artifact_exists(wt, &task_id, plugin)
-                });
-                if found { PhaseStatus::Ready } else { PhaseStatus::Working }
-            } else if let Some(ref wt) = worktree_path {
-                let plugin = plugin_cache.entry(task_plugin.clone()).or_insert_with(|| {
-                    match &task_plugin {
-                        Some(name) => WorkflowPlugin::load(name, self.state.project_path.as_deref()).ok(),
-                        None => skills::load_bundled_plugin("agtx"),
+                    let found = worktree_path.as_ref().map_or(false, |wt| {
+                        research_artifact_exists(wt, &task_id, plugin)
+                    });
+                    if found { PhaseStatus::Ready } else { PhaseStatus::Working }
+                } else if let Some(ref wt) = worktree_path {
+                    if phase_artifact_exists(wt, status, plugin, cycle) {
+                        PhaseStatus::Ready
+                    } else {
+                        PhaseStatus::Working
                     }
-                });
-                if phase_artifact_exists(wt, status, plugin, cycle) {
-                    PhaseStatus::Ready
                 } else {
                     PhaseStatus::Working
-                }
-            } else {
-                PhaseStatus::Working
-            };
+                };
 
-            // Idle detection: if Working, check if pane content has been stable for 15s
-            let mut phase_status = phase_status;
-            let mut newly_ready = false;
-            if phase_status == PhaseStatus::Working {
-                if let Some(ref session_name) = session_name {
-                    if let Ok(content) = self.state.tmux_ops.capture_pane(session_name) {
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        content.hash(&mut hasher);
-                        let hash = hasher.finish();
-
-                        let entry = self.state.pane_content_hashes
-                            .entry(task_id.clone())
-                            .or_insert((hash, now));
-                        if entry.0 != hash {
-                            *entry = (hash, now);
-                        } else if now.duration_since(entry.1) >= std::time::Duration::from_secs(15) {
-                            phase_status = PhaseStatus::Idle;
-                        }
-                    }
-                }
-
-            } else if phase_status == PhaseStatus::Ready {
-                self.state.pane_content_hashes.remove(&task_id);
-
-                // Copy-back: on Working → Ready transition, copy artifacts from worktree to project root
-                let was_ready = self.state.phase_status_cache.get(&task_id)
-                    .map_or(false, |(prev, _)| *prev == PhaseStatus::Ready);
-                if !was_ready {
-                    newly_ready = true;
+                // Copy-back on Working → Ready transition
+                if phase_status == PhaseStatus::Ready && !was_ready {
                     if let (Some(ref wt), Some(ref pp)) = (&worktree_path, &project_path) {
-                        let plugin = plugin_cache.entry(task_plugin.clone()).or_insert_with(|| {
-                            match &task_plugin {
-                                Some(name) => WorkflowPlugin::load(name, self.state.project_path.as_deref()).ok(),
-                                None => skills::load_bundled_plugin("agtx"),
-                            }
-                        });
-                        // Backlog tasks are in research phase; map to "research" for copy_back lookup
                         let phase_name = if status == TaskStatus::Backlog { "research" } else { status.as_str() };
                         if let Some(ref p) = plugin {
                             if let Some(entries) = p.copy_back.get(phase_name) {
-                                copy_back_to_project(Path::new(wt), Path::new(pp), entries);
+                                copy_back_to_project(Path::new(wt), pp, entries);
                             }
                         }
                     }
                 }
+
+                // Capture tmux content hash for idle detection (only when Working)
+                let content_hash = if phase_status == PhaseStatus::Working {
+                    session_name.as_ref().and_then(|sn| {
+                        tmux_ops.capture_pane(sn).ok().map(|content| {
+                            use std::hash::{Hash, Hasher};
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            content.hash(&mut hasher);
+                            hasher.finish()
+                        })
+                    })
+                } else {
+                    None
+                };
+
+                statuses.push(SessionTaskStatus {
+                    task_id,
+                    phase_status,
+                    content_hash,
+                    status,
+                    worktree_path,
+                    session_name,
+                    agent,
+                    was_ready,
+                });
             }
 
-            self.state.phase_status_cache.insert(task_id.clone(), (phase_status, now));
+            let _ = tx.send(SessionRefreshResult { statuses });
+        });
+    }
+
+    /// Apply results from the background session refresh thread.
+    fn apply_session_refresh(&mut self, result: SessionRefreshResult) {
+        let now = Instant::now();
+
+        for task_status in result.statuses {
+            let mut phase = task_status.phase_status;
+
+            if phase == PhaseStatus::Working {
+                // Idle detection: check if content hash has been stable for 15s
+                if let Some(hash) = task_status.content_hash {
+                    let entry = self.state.pane_content_hashes
+                        .entry(task_status.task_id.clone())
+                        .or_insert((hash, now));
+                    if entry.0 != hash {
+                        *entry = (hash, now);
+                    } else if now.duration_since(entry.1) >= std::time::Duration::from_secs(15) {
+                        phase = PhaseStatus::Idle;
+                    }
+                }
+            } else if phase == PhaseStatus::Ready {
+                self.state.pane_content_hashes.remove(&task_status.task_id);
+            }
+
+            self.state.phase_status_cache.insert(task_status.task_id.clone(), (phase, now));
 
             // Auto merge-conflict check for Review tasks
-            if status == TaskStatus::Review && !self.state.merge_conflict_checked.contains(&task_id) {
-                let should_check = match phase_status {
+            if task_status.status == TaskStatus::Review && !self.state.merge_conflict_checked.contains(&task_status.task_id) {
+                let newly_ready = phase == PhaseStatus::Ready && !task_status.was_ready;
+                let should_check = match phase {
                     PhaseStatus::Ready => newly_ready,
                     PhaseStatus::Idle => {
-                        self.state.pane_content_hashes.get(&task_id)
+                        self.state.pane_content_hashes.get(&task_status.task_id)
                             .map_or(false, |(_, last_change)| {
                                 now.duration_since(*last_change) >= std::time::Duration::from_secs(30)
                             })
@@ -3974,15 +4380,15 @@ impl App {
                 };
 
                 if should_check {
-                    if let (Some(ref wt), Some(ref sn)) = (&worktree_path, &session_name) {
+                    if let (Some(ref wt), Some(ref sn)) = (&task_status.worktree_path, &task_status.session_name) {
                         if self.state.tmux_ops.window_exists(sn).unwrap_or(false) {
-                            self.state.merge_conflict_checked.insert(task_id.clone());
+                            self.state.merge_conflict_checked.insert(task_status.task_id.clone());
 
                             let git_ops = Arc::clone(&self.state.git_ops);
                             let tmux_ops = Arc::clone(&self.state.tmux_ops);
                             let wt = wt.clone();
                             let sn = sn.clone();
-                            let agent_name = agent.clone();
+                            let agent_name = task_status.agent.clone();
 
                             std::thread::spawn(move || {
                                 match git_ops.fetch_and_check_conflicts(Path::new(&wt)) {
@@ -4012,7 +4418,6 @@ impl App {
         }
 
         self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
-        Ok(())
     }
 
     fn switch_to_project(&mut self, project: &ProjectInfo) -> Result<()> {
@@ -4219,6 +4624,7 @@ fn setup_task_worktree(
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
     agent_ops: &dyn AgentOperations,
+    referenced_tasks: &[ReferencedTaskInfo],
 ) -> Result<String> {
     let unique_slug = generate_task_slug(&task.id, &task.title);
     let window_name = format!("task-{}", unique_slug);
@@ -4266,6 +4672,43 @@ fn setup_task_worktree(
     // Deploy for all unique agents configured across phases
     let agent_refs: Vec<&str> = all_phase_agents.iter().map(|s| s.as_str()).collect();
     write_skills_to_worktree(&worktree_path_str, project_path, plugin, &agent_refs);
+
+    // Copy referenced task artifacts into .agtx/references/
+    if !referenced_tasks.is_empty() {
+        let refs_dir = worktree_path.join(".agtx").join("references");
+        for ref_info in referenced_tasks {
+            // 1. Git diff of referenced task's branch
+            if let Some(ref branch) = ref_info.branch_name {
+                if let Ok(output) = std::process::Command::new("git")
+                    .args(["diff", &format!("main..{}", branch)])
+                    .current_dir(project_path)
+                    .output()
+                {
+                    if output.status.success() && !output.stdout.is_empty() {
+                        let _ = std::fs::create_dir_all(&refs_dir);
+                        let diff_path = refs_dir.join(format!("{}.diff", ref_info.slug));
+                        let _ = std::fs::write(&diff_path, &output.stdout);
+                    }
+                }
+            }
+            // 2. Copy artifact files from referenced task's worktree (if it still exists)
+            if let Some(ref wt) = ref_info.worktree_path {
+                let wt_path = Path::new(wt);
+                if wt_path.exists() {
+                    let dest = refs_dir.join(&ref_info.slug);
+                    let _ = std::fs::create_dir_all(&dest);
+                    // Copy common artifact locations
+                    for pattern in &[".agtx/skills", ".planning"] {
+                        let src = wt_path.join(pattern);
+                        if src.exists() {
+                            let target_dir = dest.join(pattern);
+                            let _ = crate::git::copy_dir_recursive(&src, &target_dir);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Run plugin init_script (in addition to project init_script)
     // Supports {agent} placeholder for agent-specific initialization

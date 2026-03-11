@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 244" fill="none">
+  <!-- Terminal window background -->
+  <rect width="640" height="244" rx="10" fill="#1a1b26"/>
+
+  <!-- ASCII art + subtitle via foreignObject for true monospace -->
+  <foreignObject x="0" y="0" width="640" height="244">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code',Menlo,Consolas,monospace;">
+      <pre style="margin:0;font-size:15px;line-height:1.35;color:#ead49a;font-weight:bold;letter-spacing:0;"> █████╗  ██████╗████████╗██╗  ██╗
+██╔══██╗██╔════╝╚══██╔══╝╚██╗██╔╝
+███████║██║  ███╗  ██║    ╚███╔╝
+██╔══██║██║   ██║  ██║    ██╔██╗
+██║  ██║╚██████╔╝  ██║   ██╔╝ ██╗
+╚═╝  ╚═╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝</pre>
+      <div style="margin-top:16px;font-size:16px;color:#9C9991;letter-spacing:1px;text-align:center;line-height:1.6;">Autonomous multi-session spec-driven<br/>AI coding orchestration in the terminal</div>
+
+    </div>
+  </foreignObject>
+</svg>
