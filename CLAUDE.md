@@ -284,6 +284,15 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
   - Git diffs (`{slug}.diff`) from `git diff main..{branch}`
   - Worktree files (`.agtx/skills/`, `.planning/`) if the referenced worktree still exists
 
+### Auto Merge-Conflict Resolution
+- During `apply_session_refresh`, Review tasks are checked for merge conflicts with the default branch (main/master)
+- Uses `git merge-tree --write-tree` (Git 2.38+) for a non-destructive virtual merge check — does not modify the worktree
+- Triggers when a Review task becomes **newly Ready** or has been **Idle for 30+ seconds**
+- If conflicts detected, sends the `/agtx:merge-conflicts` skill + prompt to the agent's tmux session
+- One-shot per task: `merge_conflict_checked: HashSet<String>` guard ensures each task is only checked once
+- Works with all plugins — the merge-conflicts skill is a builtin skill deployed to every worktree
+- The skill instructs the agent to: commit current work → merge origin/main → resolve conflicts → review only conflicted files against both parents → run tests
+
 ### Agent Integration
 - Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
 - Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--approval-mode full-auto`), Gemini (`--approval-mode yolo`), Copilot (`--allow-all-tools`)

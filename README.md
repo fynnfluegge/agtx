@@ -116,6 +116,7 @@ When writing a task description, you can reference files, skills, and other task
 - Sessions automatically resume when moving Review → Running
 - Full conversation context is preserved across the task lifecycle
 - View live agent output in the task popup
+- **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch. If conflicts are detected, the agent is automatically instructed to resolve them.
 
 ## Configuration
 
