@@ -115,6 +115,7 @@ impl Database {
         let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN pr_url TEXT", []);
         let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN plugin TEXT", []);
         let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN cycle INTEGER NOT NULL DEFAULT 1", []);
+        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN referenced_tasks TEXT", []);
 
         // MCP transition request queue
         self.conn.execute_batch(
@@ -172,8 +173,8 @@ impl Database {
     pub fn create_task(&self, task: &Task) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             "#,
             params![
                 task.id,
@@ -189,6 +190,7 @@ impl Database {
                 task.pr_url,
                 task.plugin,
                 task.cycle,
+                task.referenced_tasks,
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
             ],
@@ -211,7 +213,8 @@ impl Database {
                 pr_url = ?10,
                 plugin = ?11,
                 cycle = ?12,
-                updated_at = ?13
+                referenced_tasks = ?13,
+                updated_at = ?14
             WHERE id = ?1
             "#,
             params![
@@ -227,6 +230,7 @@ impl Database {
                 task.pr_url,
                 task.plugin,
                 task.cycle,
+                task.referenced_tasks,
                 task.updated_at.to_rfc3339(),
             ],
         )?;
@@ -255,6 +259,7 @@ impl Database {
             pr_url: row.get("pr_url").ok().flatten(),
             plugin: row.get("plugin").ok().flatten(),
             cycle: row.get("cycle").unwrap_or(1),
+            referenced_tasks: row.get("referenced_tasks").ok().flatten(),
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>("created_at")?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),

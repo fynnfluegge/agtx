@@ -248,10 +248,25 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `Ctrl+s` | Create PR and move to Review |
 | `Esc` | Cancel |
 
+### Task Creation Wizard
+The wizard flow is: **Title → Plugin → Prompt** (plugin step auto-skipped if ≤1 option or no agents detected).
+
+| Key | Action |
+|-----|--------|
+| `j/k` or arrows | Navigate plugin list |
+| `Tab` | Cycle through options |
+| `Enter` | Advance to next step / save |
+| `Esc` | Cancel wizard |
+
+Agent is determined by `config.default_agent` (set via config file), not selected per-task.
+Plugin defaults to the project's active plugin (set via `P` on the board).
+
 ### Task Edit (Description)
 | Key | Action |
 |-----|--------|
 | `#` or `@` | Start file search (fuzzy find) |
+| `/` | Start skill search (at start of line or after space) |
+| `!` | Start task reference search (at start of line or after space) |
 | `\` + Enter | Line continuation (multi-line) |
 | Arrow keys | Move cursor |
 | `Alt+Left/Right` or `Alt+b/f` | Word-by-word navigation |
@@ -278,14 +293,36 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 ### Background Operations
 - PR description generation runs in background thread
 - PR creation runs in background thread
-- Uses `mpsc` channels to communicate results back to main thread
+- Phase status polling runs in background thread (`maybe_spawn_session_refresh`)
+- Uses `mpsc` channels to communicate results back to main thread via `try_recv()` (non-blocking)
 - Loading spinners shown during async operations
 
 ### Phase Status Polling
-- `refresh_sessions()` runs every 100ms, checks artifact files with 2-second cache TTL
+- `maybe_spawn_session_refresh()` spawns a background thread with 2-second cache TTL per task
+- Overlap guard: only one refresh thread runs at a time (`session_refresh_rx.is_some()`)
+- Thread does all expensive work: plugin TOML loading, artifact file checks, `tmux capture-pane`, copy-back side effects
+- `apply_session_refresh()` applies results on main thread (non-blocking `try_recv`)
+- Idle detection (Working → Idle) handled on main thread using `pane_content_hashes` timestamps
 - Four states: Working (spinner), Idle (pause icon, 15s no output), Ready (checkmark), Exited (no window)
 - Phase artifact paths come from the task's plugin or agtx defaults
 - Plugin instances cached per task in `HashMap<Option<String>, Option<WorkflowPlugin>>` to avoid repeated disk reads
+
+### Task References
+- In description input, type `!` (at start of line or after space) to search existing tasks
+- Selecting a task inserts `![task-title]` and tracks the reference ID
+- Referenced task IDs stored as comma-separated string in `task.referenced_tasks`
+- At worktree setup, referenced tasks' artifacts are copied to `.agtx/references/`:
+  - Git diffs (`{slug}.diff`) from `git diff main..{branch}`
+  - Worktree files (`.agtx/skills/`, `.planning/`) if the referenced worktree still exists
+
+### Auto Merge-Conflict Resolution
+- During `apply_session_refresh`, Review tasks are checked for merge conflicts with the default branch (main/master)
+- Uses `git merge-tree --write-tree` (Git 2.38+) for a non-destructive virtual merge check — does not modify the worktree
+- Triggers when a Review task becomes **newly Ready** or has been **Idle for 30+ seconds**
+- If conflicts detected, sends the `/agtx:merge-conflicts` skill + prompt to the agent's tmux session
+- One-shot per task: `merge_conflict_checked: HashSet<String>` guard ensures each task is only checked once
+- Works with all plugins — the merge-conflicts skill is a builtin skill deployed to every worktree
+- The skill instructs the agent to: commit current work → merge origin/main → resolve conflicts → review only conflicted files against both parents → run tests
 
 ### Agent Integration
 - Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`

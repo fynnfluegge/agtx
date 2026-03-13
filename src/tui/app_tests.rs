@@ -206,6 +206,7 @@ fn test_create_pr_with_content_success() {
         pr_url: None,
         plugin: None,
         cycle: 1,
+        referenced_tasks: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -294,6 +295,7 @@ fn test_create_pr_with_content_no_changes() {
         pr_url: None,
         plugin: None,
         cycle: 1,
+        referenced_tasks: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -352,6 +354,7 @@ fn test_create_pr_with_content_push_failure() {
         pr_url: None,
         plugin: None,
         cycle: 1,
+        referenced_tasks: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -407,6 +410,7 @@ fn test_push_changes_to_existing_pr_success() {
         pr_url: Some("https://github.com/org/repo/pull/99".to_string()),
         plugin: None,
         cycle: 1,
+        referenced_tasks: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -459,6 +463,7 @@ fn test_push_changes_to_existing_pr_no_changes() {
         pr_url: Some("https://github.com/org/repo/pull/50".to_string()),
         plugin: None,
         cycle: 1,
+        referenced_tasks: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -494,6 +499,7 @@ fn test_push_changes_to_existing_pr_no_url() {
         pr_url: None, // No PR URL
         plugin: None,
         cycle: 1,
+        referenced_tasks: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1327,7 +1333,9 @@ fn test_footer_text_input_title() {
 #[test]
 fn test_footer_text_input_description() {
     let text = build_footer_text(InputMode::InputDescription, false, 0, false, false);
-    assert!(text.contains("[#] file search"));
+    assert!(text.contains("[#] files"));
+    assert!(text.contains("[/] skills"));
+    assert!(text.contains("[!] tasks"));
     assert!(text.contains("[\\+Enter] newline"));
 }
 
@@ -1385,6 +1393,7 @@ fn test_setup_task_worktree_success() {
         &mock_tmux,
         &mock_git,
         &mock_agent,
+        &[],
     );
 
     assert!(result.is_ok());
@@ -1433,6 +1442,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         &mock_tmux,
         &mock_git,
         &mock_agent,
+        &[],
     ).unwrap();
 
     // session_name should be the returned target
@@ -1484,6 +1494,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         &mock_tmux,
         &mock_git,
         &mock_agent,
+        &[],
     );
 
     // Should succeed despite worktree creation failure (uses fallback path)
@@ -1533,6 +1544,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         &mock_tmux,
         &mock_git,
         &mock_agent,
+        &[],
     );
 
     // Should propagate the error
@@ -1586,6 +1598,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         &mock_tmux,
         &mock_git,
         &mock_agent,
+        &[],
     );
 
     assert!(result.is_ok());
@@ -1635,6 +1648,7 @@ fn test_setup_task_worktree_passes_init_config() {
         &mock_tmux,
         &mock_git,
         &mock_agent,
+        &[],
     );
 
     assert!(result.is_ok());
@@ -1805,13 +1819,14 @@ fn test_agtx_plugin_has_commands() {
 #[test]
 fn test_enumerate_available_skills_claude() {
     let skills = skills::enumerate_available_skills("claude");
-    assert_eq!(skills.len(), 5);
+    assert_eq!(skills.len(), 6);
     let commands: Vec<&str> = skills.iter().map(|(c, _)| c.as_str()).collect();
     assert!(commands.contains(&"/agtx:research"));
     assert!(commands.contains(&"/agtx:plan"));
     assert!(commands.contains(&"/agtx:execute"));
     assert!(commands.contains(&"/agtx:review"));
     assert!(commands.contains(&"/agtx:orchestrate"));
+    assert!(commands.contains(&"/agtx:merge-conflicts"));
     // Each should have a description
     for (_, desc) in &skills {
         assert!(!desc.is_empty());
@@ -3347,7 +3362,7 @@ fn test_create_task_full_flow() {
     assert!(app.state.input_buffer.is_empty());
 
     // Type a description
-    type_str(&mut app, "Users report 500 error on /login");
+    type_str(&mut app, "Users report 500 error on the login page");
 
     // Press Enter to save
     press_key(&mut app, KeyCode::Enter);
@@ -3357,7 +3372,7 @@ fn test_create_task_full_flow() {
     assert_eq!(app.state.board.tasks.len(), 1);
     let task = &app.state.board.tasks[0];
     assert_eq!(task.title, "Fix login bug");
-    assert_eq!(task.description.as_deref(), Some("Users report 500 error on /login"));
+    assert_eq!(task.description.as_deref(), Some("Users report 500 error on the login page"));
     assert_eq!(task.status, TaskStatus::Backlog);
 }
 
@@ -3475,5 +3490,332 @@ fn test_quit_sets_should_quit() {
     assert!(!app.state.should_quit);
     press_key(&mut app, KeyCode::Char('q'));
     assert!(app.state.should_quit);
+}
+
+#[test]
+fn test_merge_conflicts_skill_name_to_command() {
+    assert_eq!(skills::skill_name_to_command("agtx-merge-conflicts"), "agtx:merge-conflicts");
+}
+
+#[test]
+fn test_merge_conflicts_transform_plugin_command() {
+    assert_eq!(
+        skills::transform_plugin_command("/agtx:merge-conflicts", "claude"),
+        Some("/agtx:merge-conflicts".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/agtx:merge-conflicts", "gemini"),
+        Some("/agtx:merge-conflicts".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/agtx:merge-conflicts", "opencode"),
+        Some("/agtx-merge-conflicts".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/agtx:merge-conflicts", "codex"),
+        Some("$agtx-merge-conflicts".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/agtx:merge-conflicts", "copilot"),
+        None
+    );
+}
+
+#[test]
+fn test_merge_conflicts_skill_registered() {
+    // Verify the merge-conflicts skill is in BUILTIN_SKILLS
+    assert!(
+        skills::BUILTIN_SKILLS.iter().any(|(name, _)| *name == "agtx-merge-conflicts"),
+        "agtx-merge-conflicts should be registered in BUILTIN_SKILLS"
+    );
+}
+
+// --- Wizard: Agent & Plugin Selection ---
+
+/// Helper: create a test app with multiple agents available.
+#[cfg(feature = "test-mocks")]
+fn make_test_app_with_agents() -> App {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    ).unwrap();
+
+    // Inject 2 agents so wizard doesn't auto-skip
+    app.state.available_agents = vec![
+        crate::agent::Agent::new("claude", "claude", "Anthropic Claude", "Claude <noreply@anthropic.com>"),
+        crate::agent::Agent::new("codex", "codex", "OpenAI Codex", "Codex <noreply@openai.com>"),
+    ];
+    app
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_merge_conflict_checked_guard() {
+    let mut app = make_test_app();
+    let task_id = "test-task-123".to_string();
+
+    // Initially not checked
+    assert!(!app.state.merge_conflict_checked.contains(&task_id));
+
+    // After inserting, should be guarded
+    app.state.merge_conflict_checked.insert(task_id.clone());
+    assert!(app.state.merge_conflict_checked.contains(&task_id));
+
+    // Clear resets the guard
+    app.state.merge_conflict_checked.clear();
+    assert!(!app.state.merge_conflict_checked.contains(&task_id));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_wizard_plugin_selection() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Test task");
+    press_key(&mut app, KeyCode::Enter);
+    // Should go directly to plugin selection (multiple bundled plugins)
+    assert_eq!(app.state.input_mode, InputMode::SelectPlugin);
+    assert!(!app.state.wizard_plugin_options.is_empty());
+
+    // Navigate down
+    let initial = app.state.wizard_selected_plugin;
+    press_key(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.state.wizard_selected_plugin, initial + 1);
+
+    // Advance to description
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_wizard_cancel_at_plugin_step() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Cancel me");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::SelectPlugin);
+
+    press_key(&mut app, KeyCode::Esc);
+    assert_eq!(app.state.input_mode, InputMode::Normal);
+    assert!(app.state.pending_task_title.is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_wizard_tab_cycles_plugins() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Tabbing");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::SelectPlugin);
+
+    let len = app.state.wizard_plugin_options.len();
+    assert!(len > 1);
+    assert_eq!(app.state.wizard_selected_plugin, 0);
+    press_key(&mut app, KeyCode::Tab);
+    assert_eq!(app.state.wizard_selected_plugin, 1);
+    // Tab wraps around
+    for _ in 1..len {
+        press_key(&mut app, KeyCode::Tab);
+    }
+    assert_eq!(app.state.wizard_selected_plugin, 0);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_wizard_saves_with_selected_plugin() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Plugin task");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::SelectPlugin);
+
+    // Move to a non-default plugin (index 1 should be gsd or similar)
+    press_key(&mut app, KeyCode::Char('j'));
+    let selected_plugin = app.state.wizard_plugin_options[app.state.wizard_selected_plugin].name.clone();
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    press_key(&mut app, KeyCode::Enter); // save with no description
+
+    let tasks = app.state.board.tasks.clone();
+    assert_eq!(tasks.len(), 1);
+    if selected_plugin.is_empty() {
+        assert!(tasks[0].plugin.is_none());
+    } else {
+        assert_eq!(tasks[0].plugin.as_deref(), Some(selected_plugin.as_str()));
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_wizard_uses_config_default_agent() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Config agent task");
+    press_key(&mut app, KeyCode::Enter);
+    // Advance through plugin
+    if app.state.input_mode == InputMode::SelectPlugin {
+        press_key(&mut app, KeyCode::Enter);
+    }
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    press_key(&mut app, KeyCode::Enter);
+
+    let tasks = app.state.board.tasks.clone();
+    assert_eq!(tasks.len(), 1);
+    // Should use config default_agent, not a wizard selection
+    assert_eq!(tasks[0].agent, app.state.config.default_agent);
+}
+
+// --- Trigger Swap: / for skills, ! for task refs ---
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_skill_search_slash_trigger() {
+    let mut app = make_test_app();
+    // Enter description mode (no agents = skip to description)
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Test");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    // Type `/` at start of buffer — should trigger skill search
+    press_key(&mut app, KeyCode::Char('/'));
+    assert!(app.state.skill_search.is_some());
+    assert_eq!(app.state.input_buffer, "/");
+
+    // Cancel skill search
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.skill_search.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_slash_no_trigger_mid_word() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Test");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    // `/` after a letter (no space) — should NOT trigger skill search
+    type_str(&mut app, "http:/");
+    assert!(app.state.skill_search.is_none());
+    assert!(app.state.input_buffer.contains("http:/"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_slash_triggers_after_space() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Test");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    // `/` after a space — should trigger skill search
+    type_str(&mut app, "run ");
+    press_key(&mut app, KeyCode::Char('/'));
+    assert!(app.state.skill_search.is_some());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_task_ref_search_exclamation_trigger() {
+    let mut app = make_test_app();
+    // Add a task to the board so search has results
+    let db = app.state.db.as_ref().unwrap();
+    db.create_task(&Task::new("Setup auth", "claude", "test-project")).unwrap();
+    app.refresh_tasks().unwrap();
+    assert_eq!(app.state.board.tasks.len(), 1);
+
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "New task");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    // Type `!` at start of buffer — should trigger task ref search
+    press_key(&mut app, KeyCode::Char('!'));
+    assert!(app.state.task_ref_search.is_some());
+    let search = app.state.task_ref_search.as_ref().unwrap();
+    assert_eq!(search.pattern, "");
+    assert!(!search.matches.is_empty()); // Should find "Setup auth"
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_task_ref_inserts_reference() {
+    let mut app = make_test_app();
+    // Add a task to the board
+    let db = app.state.db.as_ref().unwrap();
+    db.create_task(&Task::new("Setup auth", "claude", "test-project")).unwrap();
+    app.refresh_tasks().unwrap();
+
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Uses auth");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    // Trigger task ref search
+    press_key(&mut app, KeyCode::Char('!'));
+    assert!(app.state.task_ref_search.is_some());
+
+    // Select the first match
+    press_key(&mut app, KeyCode::Enter);
+    assert!(app.state.task_ref_search.is_none()); // search closed
+
+    // Buffer should contain ![Setup auth]
+    assert!(app.state.input_buffer.contains("![Setup auth]"), "Buffer: {}", app.state.input_buffer);
+    // Referenced task ID should be tracked
+    assert!(!app.state.wizard_referenced_task_ids.is_empty());
+    // Highlighted references should contain the reference text
+    assert!(app.state.highlighted_references.contains("![Setup auth]"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_task_ref_after_space() {
+    let mut app = make_test_app();
+    let db = app.state.db.as_ref().unwrap();
+    db.create_task(&Task::new("Other task", "claude", "test-project")).unwrap();
+    app.refresh_tasks().unwrap();
+
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Ref test");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    // Type some text, then space + `!` — should trigger
+    type_str(&mut app, "depends on ");
+    press_key(&mut app, KeyCode::Char('!'));
+    assert!(app.state.task_ref_search.is_some());
+}
+
+// --- Footer text ---
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_footer_text_select_plugin() {
+    let text = build_footer_text(InputMode::SelectPlugin, false, 0, false, false);
+    assert!(text.contains("select plugin"));
+    assert!(text.contains("Tab"));
+    assert!(text.contains("Enter"));
+    assert!(text.contains("Esc"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_footer_text_description_shows_all_triggers() {
+    let text = build_footer_text(InputMode::InputDescription, false, 0, false, false);
+    assert!(text.contains("[#] files"), "Missing files trigger: {}", text);
+    assert!(text.contains("[/] skills"), "Missing skills trigger: {}", text);
+    assert!(text.contains("[!] tasks"), "Missing tasks trigger: {}", text);
 }
 

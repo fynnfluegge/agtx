@@ -5,6 +5,8 @@ pub enum InputMode {
     Normal,
     /// Entering task title
     InputTitle,
+    /// Selecting workflow plugin for the task
+    SelectPlugin,
     /// Entering task description/prompt
     InputDescription,
 }

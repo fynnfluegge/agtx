@@ -48,6 +48,11 @@ pub trait GitOperations: Send + Sync {
     /// Push branch to origin
     fn push(&self, worktree_path: &Path, branch: &str, set_upstream: bool) -> Result<()>;
 
+    /// Fetch from origin and check if the feature branch has merge conflicts with the default branch.
+    /// Uses `git merge-tree --write-tree` (Git 2.38+) which does NOT modify the working tree.
+    /// Returns Ok(true) if conflicts exist, Ok(false) if clean merge.
+    fn fetch_and_check_conflicts(&self, worktree_path: &Path) -> Result<bool>;
+
     /// List all files (tracked + untracked, respects .gitignore)
     fn list_files(&self, project_path: &Path) -> Vec<String>;
 
@@ -188,6 +193,40 @@ impl GitOperations for RealGitOps {
             anyhow::bail!("Failed to push branch: {}", stderr);
         }
         Ok(())
+    }
+
+    fn fetch_and_check_conflicts(&self, worktree_path: &Path) -> Result<bool> {
+        // 1. Fetch latest from origin
+        let fetch = std::process::Command::new("git")
+            .current_dir(worktree_path)
+            .args(["fetch", "origin"])
+            .output()?;
+        if !fetch.status.success() {
+            let stderr = String::from_utf8_lossy(&fetch.stderr);
+            anyhow::bail!("git fetch failed: {}", stderr);
+        }
+
+        // 2. Detect default branch on remote (origin/main or origin/master)
+        let main_ref = if std::process::Command::new("git")
+            .current_dir(worktree_path)
+            .args(["rev-parse", "--verify", "origin/main"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            "origin/main"
+        } else {
+            "origin/master"
+        };
+
+        // 3. Virtual merge check (Git 2.38+) — does not modify working tree
+        let merge_tree = std::process::Command::new("git")
+            .current_dir(worktree_path)
+            .args(["merge-tree", "--write-tree", "HEAD", main_ref])
+            .output()?;
+
+        // Exit 0 = clean merge, non-zero = conflicts
+        Ok(!merge_tree.status.success())
     }
 
     fn list_files(&self, project_path: &Path) -> Vec<String> {

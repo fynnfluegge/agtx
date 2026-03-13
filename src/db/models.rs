@@ -70,6 +70,7 @@ pub struct Task {
     pub pr_url: Option<String>,
     pub plugin: Option<String>,
     pub cycle: i32,
+    pub referenced_tasks: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -92,6 +93,7 @@ impl Task {
             pr_url: None,
             plugin: None,
             cycle: 1,
+            referenced_tasks: None,
             created_at: now,
             updated_at: now,
         }
