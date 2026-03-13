@@ -5,23 +5,12 @@
 # agtx
 ### An AI agent that manages other AI agents on a kanban board
 
-Add tasks. Press one key. An orchestrator agent triages, plans, and delegates work<br/>
-to multiple coding agents running in parallel — each in its own worktree.<br/>
-Come back to PRs ready for review.
+Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates<br/>
+to multiple coding agents running in parallel. Come back to PRs ready for merge.
 
-<br/>
+Let different AI coding agents collaborate on the same task, e.g.  
+**Gemini → research** &nbsp; | &nbsp; **Claude → implement** &nbsp; | &nbsp; **Codex → review**
 
-**Gemini → research** | **Claude → implement** | **Codex → review**
-
-<br/>
-
-<a href="https://github.com/anthropics/claude-code"><img src="https://img.shields.io/badge/Claude_Code-cc785c?logo=anthropic&logoColor=white" alt="Claude Code"></a>
-<a href="https://github.com/openai/codex"><img src="https://img.shields.io/badge/Codex-412991?logo=openai&logoColor=white" alt="Codex"></a>
-<a href="https://github.com/google-gemini/gemini-cli"><img src="https://img.shields.io/badge/Gemini_CLI-4285F4?logo=googlegemini&logoColor=white" alt="Gemini CLI"></a>
-<a href="https://github.com/sst/opencode"><img src="https://img.shields.io/badge/OpenCode-000000?logo=data:image/svg+xml;base64,&logoColor=white" alt="OpenCode"></a>
-<a href="https://github.com/github/copilot-cli"><img src="https://img.shields.io/badge/Copilot-000000?logo=githubcopilot&logoColor=white" alt="Copilot"></a>
-
-<br/>
 <br/>
 
 <img width="840" src="https://github.com/user-attachments/assets/45858e09-ab61-422b-b708-db060c73a900" />
@@ -40,7 +29,7 @@ Come back to PRs ready for review.
 
 Most AI coding tools give you one agent, one task, one terminal. agtx gives you a **kanban board where multiple agents work in parallel** — each in its own git worktree, each in its own tmux window, each running autonomously through a spec-driven workflow.
 
-With the orchestrator, you don't even manage the board yourself. **An AI agent triages your backlog, delegates work, and advances tasks** through research, planning, implementation, and review — while you focus on what matters.
+With the orchestrator, you don't even manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, and review — while you focus on what matters.
 
 ## Features
 
