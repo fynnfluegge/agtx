@@ -177,13 +177,7 @@ impl AgtxMcpServer {
 
         match task.status {
             TaskStatus::Backlog => {
-                actions.push("research".to_string());
-                if plugin.as_ref().map_or(true, |p| p.phase_accepts_task("planning")) {
-                    actions.push("move_to_planning".to_string());
-                }
-                if plugin.as_ref().map_or(true, |p| p.phase_accepts_task("running")) {
-                    actions.push("move_to_running".to_string());
-                }
+                // Orchestrator does not manage Backlog — user triages manually
             }
             TaskStatus::Planning => {
                 actions.push("move_forward".to_string());

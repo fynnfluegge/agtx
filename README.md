@@ -3,16 +3,25 @@
 [//]: <img src="https://github.com/user-attachments/assets/54ac039b-085e-490b-aacc-36c8e244e313" width="428" />
 
 # agtx
-### Run and manage multi-agent AI coding workflows in the terminal
-Let different AI coding agents collaborate on the same task.  
+### An AI agent that manages other AI agents on a kanban board
 
-**Gemini → research**  
-**Claude → implement**  
-**Codex → review**  
+Add tasks. Press one key. An orchestrator agent triages, plans, and delegates work<br/>
+to multiple coding agents running in parallel — each in its own worktree.<br/>
+Come back to PRs ready for review.
 
-Plug in any existing spec-driven development framework or specify a custom plugin with per-phase skills,  
-prompts, artifact tracking and autonomous execution.
+<br/>
 
+**Gemini → research** | **Claude → implement** | **Codex → review**
+
+<br/>
+
+<a href="https://github.com/anthropics/claude-code"><img src="https://img.shields.io/badge/Claude_Code-cc785c?logo=anthropic&logoColor=white" alt="Claude Code"></a>
+<a href="https://github.com/openai/codex"><img src="https://img.shields.io/badge/Codex-412991?logo=openai&logoColor=white" alt="Codex"></a>
+<a href="https://github.com/google-gemini/gemini-cli"><img src="https://img.shields.io/badge/Gemini_CLI-4285F4?logo=googlegemini&logoColor=white" alt="Gemini CLI"></a>
+<a href="https://github.com/sst/opencode"><img src="https://img.shields.io/badge/OpenCode-000000?logo=data:image/svg+xml;base64,&logoColor=white" alt="OpenCode"></a>
+<a href="https://github.com/github/copilot-cli"><img src="https://img.shields.io/badge/Copilot-000000?logo=githubcopilot&logoColor=white" alt="Copilot"></a>
+
+<br/>
 <br/>
 
 <img width="840" src="https://github.com/user-attachments/assets/45858e09-ab61-422b-b708-db060c73a900" />
@@ -27,48 +36,57 @@ prompts, artifact tracking and autonomous execution.
 
 </div>
 
+## Why agtx?
+
+Most AI coding tools give you one agent, one task, one terminal. agtx gives you a **kanban board where multiple agents work in parallel** — each in its own git worktree, each in its own tmux window, each running autonomously through a spec-driven workflow.
+
+With the orchestrator, you don't even manage the board yourself. **An AI agent triages your backlog, delegates work, and advances tasks** through research, planning, implementation, and review — while you focus on what matters.
 
 ## Features
 
-- **Multi-project dashboard**: Manage and orchestrate coding agent sessions across all your projects
-- **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for planning, Claude for implementation, Codex for review — with automatic agent switching in the same tmux window
-- **Git worktree and tmux isolation**: Each task gets its own worktree and tmux window, keeping work separated
-- **Spec-driven development plugins**: Plug in any spec-driven development framework or select from a predefined set of plugins like GSD, Spec-kit or OpenSpec — or define custom skills, prompts and artifact tracking - with automatic execution and tracking at each phase
-- **Supported coding agents**: [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex), [Gemini](https://github.com/google-gemini/gemini-cli), [OpenCode](https://github.com/sst/opencode), [Copilot](https://github.com/github/copilot-cli)
+- **Orchestrator agent**: A dedicated AI agent that autonomously manages your kanban board — triages tasks, delegates to coding agents, advances phases ([experimental](#orchestrator-agent-experimental))
+- **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching
+- **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as you want, simultaneously
+- **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — or define your own with a single TOML file
+- **Multi-project dashboard**: Manage agent sessions across all your projects from one place
+- **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode) | [Copilot](https://github.com/github/copilot-cli)
 
-## Installation
-
-### Quick Install
+## Quick Start
 
 ```bash
+# Install
 curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh | bash
+
+# Run in any git repository
+cd your-project && agtx
 ```
 
-### From Source
+That's it. Add tasks, press `m` to start agents, watch them work.
+
+```bash
+# Dashboard mode — manage all projects
+agtx -g
+
+# Orchestrator mode — let an AI manage the board for you
+agtx --experimental
+```
+
+> [!NOTE]
+> Add `.agtx/` to your project's `.gitignore` to avoid committing worktrees and local task data.
+
+<details>
+<summary>Install from source</summary>
 
 ```bash
 cargo build --release
 cp target/release/agtx ~/.local/bin/
 ```
+</details>
 
 ### Requirements
 
-- **tmux** - Agent sessions run in a dedicated tmux server
-- **gh** (optional) - GitHub CLI for PR operations
-
-## Quick Start
-
-```bash
-# Run in any git repository
-cd your-project
-agtx
-
-# Or run in dashboard mode (manage all projects)
-agtx -g
-```
-
-> [!NOTE]
-> Add `.agtx/` to your project's `.gitignore` to avoid committing worktrees and local task data.
+- **tmux** — agent sessions run in a dedicated tmux server
+- **gh** (optional) — GitHub CLI for PR operations
 
 ## Usage
 
@@ -88,6 +106,7 @@ agtx -g
 | `x` | Delete task |
 | `/` | Search tasks |
 | `P` | Select spec-driven workflow plugin |
+| `O` | Toggle orchestrator agent (`--experimental`) |
 | `e` | Toggle project sidebar |
 | `q` | Quit |
 
@@ -148,13 +167,11 @@ review = "codex"
 running = "codex"
 ```
 
-## Spec-driven Development Plugins
+## Plugins
 
-agtx ships with a fully declarative plugin framework — a single TOML file is all it takes to integrate any spec-driven development framework into the task lifecycle. 
+One TOML file. That's all it takes to plug any spec-driven framework into the task lifecycle. Define commands, prompts, and artifacts — agtx handles phase gating, artifact polling, worktree sync, agent switching, and autonomous execution.
 
-A plugin defines commands, prompts and artifacts — agtx handles the rest: phase gating, artifact polling, worktree sync, agent switching, and autonomous execution.
-
-Press `P` to activate a plugin for the current project. The active plugin is shown in the header bar.
+Press `P` to switch plugins. Ships with 7 built-in:
 
 | Plugin | Description |
 |--------|-------------|
@@ -186,7 +203,8 @@ Commands are written once in canonical format and automatically translated per a
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
 
-### Creating a Plugin
+<details>
+<summary><b>Creating a Plugin</b></summary>
 
 Place your plugin at `.agtx/plugins/<name>/plugin.toml` in your project root (or `~/.config/agtx/plugins/<name>/plugin.toml` for global use). It will appear in the plugin selector automatically.
 
@@ -316,6 +334,8 @@ response = "2\nEnter"
 
 These override the built-in agtx skills and are automatically deployed to each agent's native discovery path (`.claude/commands/`, `.codex/skills/`, `.gemini/commands/`, etc.) in every worktree.
 
+</details>
+
 ## How It Works
 
 ### Architecture
@@ -382,6 +402,34 @@ tmux -L agtx attach
 - Config: `~/.config/agtx/config.toml`
 - **Worktrees**: `.agtx/worktrees/` in each project
 - **Tmux**: Dedicated server `agtx` with per-project sessions
+
+## Orchestrator Agent (Experimental)
+
+> Press `O` and walk away. Come back to PRs ready for review.
+
+The orchestrator is an AI agent that **drives other AI agents to completion**. You triage tasks into Planning or Running — the orchestrator takes over from there, advancing each task through its phases until it lands in Review, ready for you to merge.
+
+```bash
+agtx --experimental   # then press O
+```
+
+**What it does:**
+- Monitors tasks in Planning and Running
+- Advances tasks automatically as phases complete (Planning → Running → Review)
+- Respects plugin phase rules — checks `allowed_actions` before each transition
+
+**You triage. It executes.** Move tasks from Backlog into Planning or Running — the orchestrator handles the rest. Merging is your call.
+
+```
+┌─────────────┐     MCP (stdio)     ┌──────────────┐     SQLite     ┌─────┐
+│ Orchestrator │ ←──────────────────→ │  MCP Server  │ ←────────────→ │ DB  │
+│ (Claude Code)│                     │ (agtx serve) │               └──┬──┘
+└──────┬───────┘                     └──────────────┘                  │
+       │  push-when-idle notifications                                 │
+┌──────┴───────┐                                                       │
+│   TUI (agtx) │ ←────────────────────────────────────────────────────┘
+└──────────────┘
+```
 
 ## Development
 

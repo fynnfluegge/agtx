@@ -662,6 +662,18 @@ impl App {
                                 task.plugin = result.plugin;
                                 if let Some(status) = result.new_status {
                                     task.status = status;
+
+                                    // Notify orchestrator when a task enters Planning or Running
+                                    if matches!(status, TaskStatus::Planning | TaskStatus::Running) {
+                                        if self.state.orchestrator_session.is_some() {
+                                            let short_id = if task.id.len() >= 8 { &task.id[..8] } else { &task.id };
+                                            let notif = crate::db::Notification::new(format!(
+                                                "Task \"{}\" ({}) entered phase: {}",
+                                                task.title, short_id, status.as_str()
+                                            ));
+                                            let _ = db.create_notification(&notif);
+                                        }
+                                    }
                                 }
                                 task.updated_at = chrono::Utc::now();
                                 let _ = db.update_task(&task);
@@ -3042,15 +3054,7 @@ impl App {
                 // Task starts in Backlog without tmux window
                 db.create_task(&task)?;
 
-                // Queue notification for orchestrator
-                if self.state.orchestrator_session.is_some() {
-                    let short_id = if task.id.len() >= 8 { &task.id[..8] } else { &task.id };
-                    let notif = crate::db::Notification::new(format!(
-                        "New task added to Backlog: \"{}\" ({})",
-                        task.title, short_id
-                    ));
-                    let _ = db.create_notification(&notif);
-                }
+                // No orchestrator notification for Backlog — orchestrator only manages Planning/Running
             }
             self.refresh_tasks()?;
         }
@@ -3142,6 +3146,20 @@ impl App {
                 task.updated_at = chrono::Utc::now();
                 if let Some(db) = &self.state.db {
                     db.update_task(&task)?;
+                }
+            }
+
+            // Notify orchestrator when a task enters Planning or Running
+            if matches!(new_status, TaskStatus::Planning | TaskStatus::Running) {
+                if self.state.orchestrator_session.is_some() {
+                    if let Some(db) = &self.state.db {
+                        let short_id = if task.id.len() >= 8 { &task.id[..8] } else { &task.id };
+                        let notif = crate::db::Notification::new(format!(
+                            "Task \"{}\" ({}) entered phase: {}",
+                            task.title, short_id, new_status.as_str()
+                        ));
+                        let _ = db.create_notification(&notif);
+                    }
                 }
             }
         }
