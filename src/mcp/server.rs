@@ -171,7 +171,9 @@ impl AgtxMcpServer {
         let mut actions = Vec::new();
 
         let plugin = match &task.plugin {
-            Some(name) => crate::config::WorkflowPlugin::load(name, Some(&self.project_path)).ok(),
+            Some(name) => crate::config::WorkflowPlugin::load(name, Some(&self.project_path))
+                .ok()
+                .or_else(|| crate::skills::load_bundled_plugin(name)),
             None => crate::skills::load_bundled_plugin("agtx"),
         };
 

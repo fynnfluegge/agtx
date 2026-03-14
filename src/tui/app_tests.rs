@@ -3265,6 +3265,71 @@ fn test_load_task_plugin_nonexistent_returns_none() {
     assert!(plugin.is_none());
 }
 
+#[test]
+fn test_load_task_plugin_bundled_fallback() {
+    // When a bundled plugin name is set but not on disk, falls back to bundled
+    let mut task = crate::db::Task::new("Test", "claude", "proj");
+    task.plugin = Some("agtx".to_string());
+    // Pass a path where no .agtx/plugins/agtx/ exists
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = load_task_plugin(&task, Some(dir.path()), "claude");
+    assert!(plugin.is_some(), "should fall back to bundled agtx plugin");
+    assert_eq!(plugin.unwrap().name, "agtx");
+}
+
+#[test]
+fn test_phase_accepts_task_with_task_placeholder() {
+    use crate::config::WorkflowPlugin;
+    let plugin: WorkflowPlugin = toml::from_str(r#"
+        name = "test"
+        [commands]
+        planning = "/test:plan {task}"
+        [prompts]
+        [artifacts]
+    "#).unwrap();
+    assert!(plugin.phase_accepts_task("planning"), "command with {{task}} should be accepted");
+}
+
+#[test]
+fn test_phase_accepts_task_without_task_placeholder() {
+    use crate::config::WorkflowPlugin;
+    let plugin: WorkflowPlugin = toml::from_str(r#"
+        name = "test"
+        [commands]
+        planning = "/test:plan {phase}"
+        [prompts]
+        [artifacts]
+    "#).unwrap();
+    assert!(!plugin.phase_accepts_task("planning"), "command without {{task}} should be blocked");
+}
+
+#[test]
+fn test_phase_accepts_task_void_plugin_ungated() {
+    use crate::config::WorkflowPlugin;
+    // Void plugin: no commands, no prompts — should be ungated
+    let plugin: WorkflowPlugin = toml::from_str(r#"
+        name = "void"
+        [commands]
+        [prompts]
+        [artifacts]
+    "#).unwrap();
+    assert!(plugin.phase_accepts_task("planning"), "void plugin should be ungated for planning");
+    assert!(plugin.phase_accepts_task("running"), "void plugin should be ungated for running");
+}
+
+#[test]
+fn test_phase_accepts_task_prompt_with_task() {
+    use crate::config::WorkflowPlugin;
+    let plugin: WorkflowPlugin = toml::from_str(r#"
+        name = "test"
+        [commands]
+        [prompts]
+        planning = "Task: {task}"
+        [artifacts]
+    "#).unwrap();
+    assert!(plugin.phase_accepts_task("planning"), "prompt with {{task}} should be accepted");
+}
+
 // === App Integration Tests ===
 
 #[cfg(feature = "test-mocks")]
@@ -3647,11 +3712,29 @@ fn test_wizard_saves_with_selected_plugin() {
 
     let tasks = app.state.board.tasks.clone();
     assert_eq!(tasks.len(), 1);
-    if selected_plugin.is_empty() {
-        assert!(tasks[0].plugin.is_none());
-    } else {
-        assert_eq!(tasks[0].plugin.as_deref(), Some(selected_plugin.as_str()));
-    }
+    assert_eq!(tasks[0].plugin.as_deref(), Some(selected_plugin.as_str()));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_wizard_default_plugin_saves_agtx() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Default plugin task");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::SelectPlugin);
+
+    // Keep default selection (index 0 = agtx) and advance
+    assert_eq!(app.state.wizard_selected_plugin, 0);
+    assert_eq!(app.state.wizard_plugin_options[0].name, "agtx");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    press_key(&mut app, KeyCode::Enter); // save with no description
+
+    let tasks = app.state.board.tasks.clone();
+    assert_eq!(tasks.len(), 1);
+    // agtx should be explicitly saved, not None
+    assert_eq!(tasks[0].plugin.as_deref(), Some("agtx"));
 }
 
 #[test]

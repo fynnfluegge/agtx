@@ -480,22 +480,27 @@ impl WorkflowPlugin {
     /// Check if a phase's command or prompt contains `{task}`, meaning the phase
     /// can receive task context directly and can be entered from Backlog.
     /// If neither command nor prompt has `{task}`, the phase depends on a prior phase.
+    /// If no command AND no prompt exist at all (e.g. void plugin), the phase is ungated.
     pub fn phase_accepts_task(&self, phase: &str) -> bool {
-        let cmd_has_task = match phase {
+        let cmd = match phase {
             "planning" => self.commands.planning.as_deref(),
             "running" => self.commands.running.as_deref(),
             _ => None,
-        }
-        .map_or(false, |c| c.contains("{task}"));
+        };
 
-        let prompt_has_task = match phase {
+        let prompt = match phase {
             "planning" => self.prompts.planning.as_deref(),
             "running" => self.prompts.running.as_deref(),
             _ => None,
-        }
-        .map_or(false, |p| p.contains("{task}"));
+        };
 
-        cmd_has_task || prompt_has_task
+        // No command and no prompt → ungated (e.g. void plugin)
+        if cmd.is_none() && prompt.is_none() {
+            return true;
+        }
+
+        cmd.map_or(false, |c| c.contains("{task}"))
+            || prompt.map_or(false, |p| p.contains("{task}"))
     }
 
     /// Check if the given agent is supported by this plugin.

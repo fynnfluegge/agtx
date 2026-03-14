@@ -2163,12 +2163,12 @@ impl App {
     }
 
     fn open_plugin_select_popup(&mut self) {
-        let current = self.state.config.workflow_plugin.as_deref().unwrap_or("");
+        let current = self.state.config.workflow_plugin.as_deref().unwrap_or("agtx");
         let mut options = vec![PluginOption {
-            name: String::new(),
+            name: "agtx".to_string(),
             label: "agtx".to_string(),
             description: "Built-in workflow with skills and prompts".to_string(),
-            active: current.is_empty(),
+            active: current == "agtx",
         }];
         for (name, desc, _content) in skills::BUNDLED_PLUGINS {
             if *name == "agtx" { continue; }
@@ -2218,8 +2218,8 @@ impl App {
         // Load current project config
         let mut project_config = ProjectConfig::load(&project_path).unwrap_or_default();
 
-        if plugin_name.is_empty() {
-            // Clear plugin
+        if plugin_name.is_empty() || plugin_name == "agtx" {
+            // agtx is the default — clear explicit setting
             project_config.workflow_plugin = None;
         } else {
             // Find bundled plugin content and write it
@@ -3378,18 +3378,18 @@ impl App {
                 .and_then(|db| db.get_task(task_id).ok().flatten())
                 .and_then(|t| t.plugin.clone())
                 .or_else(|| self.state.config.workflow_plugin.clone())
-                .unwrap_or_default()
+                .unwrap_or_else(|| "agtx".to_string())
         } else {
-            self.state.config.workflow_plugin.as_deref().unwrap_or("").to_string()
+            self.state.config.workflow_plugin.as_deref().unwrap_or("agtx").to_string()
         };
 
         let selected_agent_name = &self.state.config.default_agent;
 
         let mut options = vec![PluginOption {
-            name: String::new(),
+            name: "agtx".to_string(),
             label: "agtx".to_string(),
             description: "Built-in workflow with skills and prompts".to_string(),
-            active: current.is_empty(),
+            active: current == "agtx",
         }];
         for (name, desc, content) in skills::BUNDLED_PLUGINS {
             if *name == "agtx" { continue; }
@@ -6418,9 +6418,12 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
 }
 
 /// Load the workflow plugin for a task, checking agent compatibility.
+/// Tries disk first (project-local → global), then falls back to bundled plugins.
 fn load_task_plugin(task: &Task, project_path: Option<&Path>, default_agent: &str) -> Option<WorkflowPlugin> {
     let plugin = match &task.plugin {
-        Some(name) => WorkflowPlugin::load(name, project_path).ok(),
+        Some(name) => WorkflowPlugin::load(name, project_path)
+            .ok()
+            .or_else(|| skills::load_bundled_plugin(name)),
         None => skills::load_bundled_plugin("agtx"),
     };
     if let Some(ref p) = plugin {
