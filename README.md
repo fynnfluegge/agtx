@@ -9,7 +9,7 @@ Let different AI coding agents collaborate on the same task, e.g.
 **Gemini → research** &nbsp; | &nbsp; **Claude → implement** &nbsp; | &nbsp; **Codex → review**
 
 Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates<br/>
-to multiple coding agents running in parallel. Come back to PRs ready for merge.
+to multiple coding agents running in parallel. Come back to changs ready to merge.
 
 <br/>
 
@@ -29,7 +29,7 @@ to multiple coding agents running in parallel. Come back to PRs ready for merge.
 
 AI coding tools give you one agent, one task, one terminal. agtx gives you a **kanban board where multiple coding agents work in parallel** — each in its own git worktree, each in its own tmux window, each running autonomously through a spec-driven workflow managed by an orchestrator agent.
 
-With the orchestrator, you don't even manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, and review — while you focus on what matters: researching, defining tasks, and merging PRs.
+With the orchestrator, you don't even manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, review and resolving conflicts — while you focus on what matters: research, defining tasks, and merging changes.
 
 ## Features
 
@@ -421,13 +421,13 @@ agtx --experimental   # then press O
 **You triage. It executes.** Move tasks from Backlog into Planning or Running — the orchestrator handles the rest. Merging is your call.
 
 ```
-┌─────────────┐     MCP (stdio)     ┌──────────────┐     SQLite     ┌─────┐
-│ Orchestrator │ ←──────────────────→ │  MCP Server  │ ←────────────→ │ DB  │
+┌────────────--┐     MCP (stdio)     ┌──────────────┐     SQLite    ┌─────┐
+│ Orchestrator │ ←─────────────────→ │  MCP Server  │ ←───────────→ │ DB  │
 │ (Claude Code)│                     │ (agtx serve) │               └──┬──┘
 └──────┬───────┘                     └──────────────┘                  │
        │  push-when-idle notifications                                 │
 ┌──────┴───────┐                                                       │
-│   TUI (agtx) │ ←────────────────────────────────────────────────────┘
+│   TUI (agtx) │ ←──────────────────────────────────────────────────-──┘
 └──────────────┘
 ```
 
