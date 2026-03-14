@@ -29,7 +29,7 @@ to multiple coding agents running in parallel. Come back to PRs ready for merge.
 
 AI coding tools give you one agent, one task, one terminal. agtx gives you a **kanban board where multiple coding agents work in parallel** — each in its own git worktree, each in its own tmux window, each running autonomously through a spec-driven workflow managed by an orchestrator agent.
 
-With the orchestrator, you don't even need manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, and review — while you focus on what matters. Research, defining tasks, and
+With the orchestrator, you don't even manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, and review — while you focus on what matters: researching, defining tasks, and merging PRs.
 
 ## Features
 
