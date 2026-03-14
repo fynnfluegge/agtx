@@ -112,11 +112,11 @@ Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin
 - **supported_agents**: Agent whitelist (empty = all supported)
 - **auto_dismiss**: Rules to auto-dismiss interactive prompts before sending the task prompt
 
-Phase gating is derived from the config: if a phase's command or prompt contains `{task}`, the phase can be entered directly from Backlog. Otherwise, it requires a prior phase artifact. This replaces the old `research_required` flag — all behavior is now inferred from the plugin TOML.
+Phase gating is derived from the config: if a phase's command or prompt contains `{task}`, the phase can be entered directly from Backlog. Otherwise, it requires a prior phase artifact. If a phase has no command AND no prompt (e.g. void plugin), it is ungated and can be entered freely. This replaces the old `research_required` flag — all behavior is now inferred from the plugin TOML.
 
-Plugin resolution: project-local `.agtx/plugins/{name}/` → global `~/.config/agtx/plugins/{name}/` → bundled.
+Plugin resolution: project-local `.agtx/plugins/{name}/` → global `~/.config/agtx/plugins/{name}/` → bundled. `load_task_plugin` falls back to bundled plugins when disk load fails, so tasks always resolve their plugin correctly even if the on-disk copy is missing.
 
-Each task stores its plugin name in the database at creation time. Switching the project plugin only affects new tasks.
+Each task stores its plugin name explicitly in the database at creation time (e.g. `Some("agtx")`, `Some("gsd")`). Switching the project plugin only affects new tasks.
 
 ### Skill System
 Skills are markdown files with YAML frontmatter deployed to agent-native discovery paths in worktrees:
@@ -194,7 +194,10 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
 - **Orchestrator → TUI**: `transition_requests` DB table (commands like "move task X forward")
 - **TUI → Orchestrator**: `notifications` DB table, pushed via `send_keys` when orchestrator is idle
 - MCP registered per-session via `claude mcp add-json --scope local`, cleaned up on exit
-- Orchestrator manages tasks from Backlog to Review; merging to Done is the user's responsibility
+- Orchestrator only manages Planning and Running phases; the user triages Backlog/Research manually and handles merging in Review/Done
+- Orchestrator is a coordinator, not a reviewer — it moves tasks forward immediately when phases complete, without inspecting output
+- Only "completed phase" notifications are sent (no "entered phase" notifications)
+- On startup, if an orchestrator tmux session already exists, it is detected and reconnected; catch-up notifications are created for tasks that completed phases while the TUI was down (deduplicated via `peek_notifications`)
 
 **MCP tools**: `list_tasks`, `get_task` (includes `allowed_actions`), `move_task`, `get_transition_status`, `check_conflicts`, `get_notifications`
 
@@ -404,7 +407,5 @@ Detected automatically via `known_agents()` in order of preference:
 
 ## Future Enhancements
 - Reopen Done tasks (recreate worktree from preserved branch)
-- Notification when agent finishes work
-- Orchestrator: conflict resolution mechanism (tell coding agent to rebase when conflicts detected)
 - Orchestrator: support non-Claude agents as orchestrator
 - Orchestrator: task deletion notifications
