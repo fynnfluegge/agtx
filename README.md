@@ -405,7 +405,7 @@ tmux -L agtx attach
 
 ## Orchestrator Agent (Experimental)
 
-> Press `O` and walk away. Come back to PRs ready for review.
+> Press `O` and walk away. Come back to PRs ready for merge.
 
 The orchestrator is an AI agent that **drives other AI agents to completion**. You triage tasks into Planning or Running — the orchestrator takes over from there, advancing each task through its phases until it lands in Review, ready for you to merge.
 
