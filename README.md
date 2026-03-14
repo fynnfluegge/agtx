@@ -3,7 +3,7 @@
 [//]: <img src="https://github.com/user-attachments/assets/54ac039b-085e-490b-aacc-36c8e244e313" width="428" />
 
 # agtx
-#### An AI agent that manages other coding agents on a kanban board
+#### An AI agent that manages other coding agents in a terminal kanban board
 
 Let different AI coding agents collaborate on the same task, e.g.  
 **Gemini → research** &nbsp; | &nbsp; **Claude → implement** &nbsp; | &nbsp; **Codex → review**
