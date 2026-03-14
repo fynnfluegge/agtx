@@ -9,7 +9,7 @@ Let different AI coding agents collaborate on the same task, e.g.
 **Gemini → research** &nbsp; | &nbsp; **Claude → implement** &nbsp; | &nbsp; **Codex → review**
 
 Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates<br/>
-to multiple coding agents running in parallel. Come back to changs ready to merge.
+to multiple coding agents running in parallel. Come back to changes ready to merge.
 
 <br/>
 
@@ -33,7 +33,7 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 
 ## Features
 
-- **Orchestrator agent**: A dedicated AI agent that autonomously manages your kanban board — triages tasks, delegates to coding agents, advances phases ([experimental](#orchestrator-agent-experimental))
+- **Orchestrator agent**: A dedicated AI agent that autonomously manages your kanban board via [MCP](https://modelcontextprotocol.io) — delegates to coding agents, advances phases, checks for merge conflicts ([experimental](#orchestrator-agent-experimental))
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as you want, simultaneously
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — or define your own with a single TOML file
@@ -405,7 +405,7 @@ tmux -L agtx attach
 
 ## Orchestrator Agent (Experimental)
 
-> Press `O` and walk away. Come back to PRs ready for merge.
+> Press `O` and walk away. Come back to changes ready to merge.
 
 The orchestrator is an AI agent that **drives other AI agents to completion**. You triage tasks into Planning or Running — the orchestrator takes over from there, advancing each task through its phases until it lands in Review, ready for you to merge.
 
@@ -420,16 +420,38 @@ agtx --experimental   # then press O
 
 **You triage. It executes.** Move tasks from Backlog into Planning or Running — the orchestrator handles the rest. Merging is your call.
 
+### MCP Integration
+
+The orchestrator communicates with agtx through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). agtx ships with a built-in MCP server (`agtx serve`) that exposes the kanban board as a set of tools over JSON-RPC via stdio.
+
 ```
-┌────────────--┐     MCP (stdio)     ┌──────────────┐     SQLite    ┌─────┐
-│ Orchestrator │ ←─────────────────→ │  MCP Server  │ ←───────────→ │ DB  │
+┌─────────────┐     MCP (stdio)     ┌──────────────┐     SQLite     ┌─────┐
+│ Orchestrator │ ←──────────────────→ │  MCP Server  │ ←────────────→ │ DB  │
 │ (Claude Code)│                     │ (agtx serve) │               └──┬──┘
 └──────┬───────┘                     └──────────────┘                  │
        │  push-when-idle notifications                                 │
 ┌──────┴───────┐                                                       │
-│   TUI (agtx) │ ←──────────────────────────────────────────────────-──┘
+│   TUI (agtx) │ ←────────────────────────────────────────────────────┘
 └──────────────┘
 ```
+
+**MCP tools available to the orchestrator:**
+
+| Tool | Description |
+|------|-------------|
+| `list_tasks` | List all tasks, optionally filtered by status |
+| `get_task` | Get task details including `allowed_actions` for valid transitions |
+| `move_task` | Queue a state transition (the TUI executes it with full side effects) |
+| `get_transition_status` | Check if a queued transition completed or errored |
+| `check_conflicts` | Non-destructive merge conflict detection against the default branch |
+| `get_notifications` | Manually fetch pending notifications (backup — usually pushed automatically) |
+
+**How it works:**
+1. When you press `O`, the TUI registers the MCP server with the orchestrator agent via `claude mcp add-json --scope local`
+2. The orchestrator receives phase completion notifications pushed to its tmux pane when idle
+3. It reacts by calling `get_task` to check `allowed_actions`, then `move_task` to advance the task
+4. The TUI processes the transition request, executes all side effects (agent switching, skill deployment, prompt sending), and updates the database
+5. MCP registration is cleaned up when the orchestrator is stopped
 
 ## Development
 
