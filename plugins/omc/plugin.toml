@@ -1,0 +1,43 @@
+name = "omc"
+description = "oh-my-claudecode - Multi-agent orchestration with 37 skills and 22 specialized agents"
+# OMC must be pre-installed: /plugin install oh-my-claudecode && /omc-setup
+# init_script verifies installation and copies .omc state if it exists
+init_script = "test -d .omc || mkdir -p .omc/plans .omc/state .omc/logs"
+supported_agents = ["claude"]
+
+# .omc directory holds plans, state, and logs produced by OMC skills
+copy_dirs = [".omc"]
+
+# Artifact files that signal phase completion.
+# OMC generates timestamped/UUID filenames — wildcards handle this.
+[artifacts]
+research = ".omc/plans/spec-*.md"
+planning = ".omc/plans/plan-*.md"
+# Autopilot writes state when complete; alternatively check for .omc/prd.json
+running = ".omc/prd.json"
+
+# OMC slash commands in canonical /namespace:skill format.
+# deep-interview is interactive (Socratic) — replace with sciomc for fully automated research.
+# ralplan = iterative consensus planning (Planner + Architect + Critic).
+# autopilot = full pipeline: expansion -> planning -> execution -> QA -> validation.
+# code-review = Opus-powered comprehensive review.
+[commands]
+research = "/oh-my-claudecode:deep-interview"
+planning = "/oh-my-claudecode:ralplan"
+running = "/oh-my-claudecode:autopilot"
+review = "/oh-my-claudecode:code-review"
+
+# Prompts sent after commands.
+# research and planning accept {task} → can enter directly from Backlog.
+# running_with_research_or_planning is empty — prior phases provide context.
+[prompts]
+research = "{task}"
+planning = "{task}"
+running = "{task}"
+running_with_research_or_planning = ""
+
+# Copy .omc artifacts back to project root after planning completes
+# so other tasks can reference specs/plans from the main worktree.
+[copy_back]
+research = [".omc/plans"]
+planning = [".omc/plans"]
