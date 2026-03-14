@@ -425,13 +425,13 @@ agtx --experimental   # then press O
 The orchestrator communicates with agtx through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). agtx ships with a built-in MCP server (`agtx serve`) that exposes the kanban board as a set of tools over JSON-RPC via stdio.
 
 ```
-┌─────────────┐     MCP (stdio)     ┌──────────────┐     SQLite     ┌─────┐
-│ Orchestrator │ ←──────────────────→ │  MCP Server  │ ←────────────→ │ DB  │
-│ (Claude Code)│                     │ (agtx serve) │               └──┬──┘
-└──────┬───────┘                     └──────────────┘                  │
-       │  push-when-idle notifications                                 │
-┌──────┴───────┐                                                       │
-│   TUI (agtx) │ ←────────────────────────────────────────────────────┘
+┌─────────────-┐     MCP (stdio)     ┌──────────────┐     SQLite     ┌─────┐
+│ Orchestrator │ ←─────────────────→ │  MCP Server  │ ←────────────→ │ DB  │
+│ (Claude Code)│                     │ (agtx serve) │                └──┬──┘
+└──────┬───────┘                     └──────────────┘                   │
+       │  push-when-idle notifications                                  │
+┌──────┴───────┐                                                        │
+│   TUI (agtx) │ ←───────────────────────────────────────────────────--─┘
 └──────────────┘
 ```
 
