@@ -451,6 +451,30 @@ impl Database {
         Ok(())
     }
 
+    /// Peek at pending notifications without consuming them.
+    pub fn peek_notifications(&self) -> Result<Vec<Notification>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM notifications ORDER BY created_at ASC")?;
+
+        let notifs: Vec<Notification> = stmt
+            .query_map([], |row| {
+                Ok(Notification {
+                    id: row.get("id")?,
+                    message: row.get("message")?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(
+                        &row.get::<_, String>("created_at")?,
+                    )
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(notifs)
+    }
+
     /// Fetch and delete all pending notifications (atomic consume).
     pub fn consume_notifications(&self) -> Result<Vec<Notification>> {
         let mut stmt = self

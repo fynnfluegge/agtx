@@ -31,20 +31,19 @@ fn hex_to_color(hex: &str) -> Color {
 }
 
 /// Build footer help text based on current UI state
-fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_column: usize, has_cyclic_plugin: bool, experimental: bool) -> String {
-    let orch = if experimental { "  [O] orch" } else { "" };
+fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_column: usize, has_cyclic_plugin: bool) -> String {
     match input_mode {
         InputMode::Normal => {
             if sidebar_focused {
                 " [j/k] navigate  [Enter] open  [l] board  [e] hide sidebar  [q] quit ".to_string()
             } else {
                 match selected_column {
-                    0 => format!(" [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run{}  [e] sidebar  [q] quit", orch),
-                    1 => format!(" [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run{}  [e] sidebar  [q] quit", orch),
-                    2 => format!(" [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left{}  [e] sidebar  [q] quit", orch),
-                    3 if has_cyclic_plugin => format!(" [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase{}  [e] sidebar  [q] quit", orch),
-                    3 => format!(" [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left{}  [e] sidebar  [q] quit", orch),
-                    _ => format!(" [o] new  [/] search  [Enter] open  [x] del{}  [e] sidebar  [q] quit", orch),
+                    0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
+                    1 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string(),
+                    2 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
+                    3 if has_cyclic_plugin => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string(),
+                    3 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
+                    _ => " [o] new  [/] search  [Enter] open  [x] del  [e] sidebar  [q] quit".to_string(),
                 }
             }
         }
@@ -572,6 +571,47 @@ impl App {
         // Load projects from global database
         app.refresh_projects()?;
 
+        // Detect existing orchestrator session (survives agtx restarts)
+        if app.state.flags.experimental {
+            let orch_target = format!("{}:orchestrator", app.state.project_name);
+            if app.state.tmux_ops.window_exists(&orch_target).unwrap_or(false) {
+                app.state.orchestrator_session = Some(orch_target);
+
+                // Catch up: notify orchestrator about tasks that completed while TUI was down
+                if let Some(ref db) = app.state.db {
+                    // Check existing notifications to avoid duplicates
+                    let existing: HashSet<String> = db.peek_notifications()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|n| n.message)
+                        .collect();
+
+                    for task in &app.state.board.tasks {
+                        if !matches!(task.status, TaskStatus::Planning | TaskStatus::Running) {
+                            continue;
+                        }
+                        let plugin = match &task.plugin {
+                            Some(name) => WorkflowPlugin::load(name, app.state.project_path.as_deref()).ok(),
+                            None => skills::load_bundled_plugin("agtx"),
+                        };
+                        if let Some(ref wt) = task.worktree_path {
+                            if phase_artifact_exists(wt, task.status, &plugin, task.cycle) {
+                                let short_id = if task.id.len() >= 8 { &task.id[..8] } else { &task.id };
+                                let message = format!(
+                                    "Task \"{}\" ({}) completed phase: {}",
+                                    task.title, short_id, task.status.as_str()
+                                );
+                                if !existing.contains(&message) {
+                                    let notif = crate::db::Notification::new(message);
+                                    let _ = db.create_notification(&notif);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(app)
     }
 
@@ -724,18 +764,6 @@ impl App {
                                 task.plugin = result.plugin;
                                 if let Some(status) = result.new_status {
                                     task.status = status;
-
-                                    // Notify orchestrator when a task enters Planning or Running
-                                    if matches!(status, TaskStatus::Planning | TaskStatus::Running) {
-                                        if self.state.orchestrator_session.is_some() {
-                                            let short_id = if task.id.len() >= 8 { &task.id[..8] } else { &task.id };
-                                            let notif = crate::db::Notification::new(format!(
-                                                "Task \"{}\" ({}) entered phase: {}",
-                                                task.title, short_id, status.as_str()
-                                            ));
-                                            let _ = db.create_notification(&notif);
-                                        }
-                                    }
                                 }
                                 task.updated_at = chrono::Utc::now();
                                 let _ = db.update_task(&task);
@@ -849,11 +877,19 @@ impl App {
         // Header
         let plugin_label = state.config.workflow_plugin.as_deref().unwrap_or("agtx");
         let left = Span::styled(format!(" {} ", state.project_name), Style::default().fg(Color::Cyan).bold());
-        let right_spans: Vec<Span> = vec![
+        let mut right_spans: Vec<Span> = Vec::new();
+        if state.flags.experimental {
+            let orch_active = state.orchestrator_session.is_some();
+            if orch_active {
+                right_spans.push(Span::styled("● ", Style::default().fg(Color::Green)));
+                right_spans.push(Span::styled("orchestrator ", Style::default().fg(Color::Green)));
+            }
+            right_spans.push(Span::styled("[O] ", Style::default().fg(hex_to_color(&state.config.theme.color_dimmed))));
+        }
+        right_spans.extend([
             Span::styled(format!("{} ", plugin_label), Style::default().fg(hex_to_color(&state.config.theme.color_accent))),
             Span::styled("[P] ", Style::default().fg(hex_to_color(&state.config.theme.color_dimmed))),
-            Span::styled("Plugins ", Style::default().fg(hex_to_color(&state.config.theme.color_dimmed))),
-        ];
+        ]);
         let left_len = state.project_name.len() + 2;
         let right_len: usize = right_spans.iter().map(|s| s.content.len()).sum();
         let padding = (chunks[0].width as usize).saturating_sub(left_len + right_len + 2); // 2 for borders
@@ -989,11 +1025,11 @@ impl App {
             if created.elapsed() < std::time::Duration::from_secs(5) {
                 (msg.clone(), Style::default().fg(Color::Yellow))
             } else {
-                (build_footer_text(state.input_mode, state.sidebar_focused, state.board.selected_column, has_cyclic_plugin, state.flags.experimental),
+                (build_footer_text(state.input_mode, state.sidebar_focused, state.board.selected_column, has_cyclic_plugin),
                  Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)))
             }
         } else {
-            (build_footer_text(state.input_mode, state.sidebar_focused, state.board.selected_column, has_cyclic_plugin, state.flags.experimental),
+            (build_footer_text(state.input_mode, state.sidebar_focused, state.board.selected_column, has_cyclic_plugin),
              Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)))
         };
 
@@ -3511,19 +3547,6 @@ impl App {
                 }
             }
 
-            // Notify orchestrator when a task enters Planning or Running
-            if matches!(new_status, TaskStatus::Planning | TaskStatus::Running) {
-                if self.state.orchestrator_session.is_some() {
-                    if let Some(db) = &self.state.db {
-                        let short_id = if task.id.len() >= 8 { &task.id[..8] } else { &task.id };
-                        let notif = crate::db::Notification::new(format!(
-                            "Task \"{}\" ({}) entered phase: {}",
-                            task.title, short_id, new_status.as_str()
-                        ));
-                        let _ = db.create_notification(&notif);
-                    }
-                }
-            }
         }
         self.refresh_tasks()?;
         Ok(())
@@ -4492,23 +4515,17 @@ impl App {
         popup.cached_content = capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
         self.state.shell_popup = Some(popup);
 
-        // Send the orchestrator skill content as the initial prompt in a background thread
-        let skill_body = skills::strip_frontmatter(skills::ORCHESTRATE_SKILL).to_string();
+        // Deploy orchestrate skill to project root so the agent can discover it
+        deploy_skill(&project_path, "agtx-orchestrate", skills::ORCHESTRATE_SKILL, &default_agent);
+
+        // Send the /agtx:orchestrate command once the agent is ready
+        let skill_cmd = skills::transform_plugin_command("/agtx:orchestrate", &default_agent)
+            .unwrap_or_else(|| "/agtx:orchestrate".to_string());
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
-        let agent_name = default_agent.clone();
         let target = orch_target;
         std::thread::spawn(move || {
             if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &target) {
-                send_skill_and_prompt(
-                    &tmux_ops,
-                    &ready_target,
-                    &None,           // no skill command — sending content directly
-                    &skill_body,     // prompt = skill body
-                    &None,           // no prompt trigger
-                    &String::new(),  // no task content
-                    &agent_name,
-                    &[],             // no auto-dismiss rules
-                );
+                let _ = tmux_ops.send_keys(&ready_target, &skill_cmd);
             }
         });
 
@@ -4674,8 +4691,10 @@ impl App {
                     .map_or(true, |(_, ts)| now.duration_since(*ts) >= CACHE_TTL)
             })
             .map(|t| {
+                // was_ready: true if previously Ready OR not in cache yet (first poll after startup).
+                // This avoids false "newly ready" notifications for tasks that were already done before restart.
                 let was_ready = self.state.phase_status_cache.get(&t.id)
-                    .map_or(false, |(prev, _)| *prev == PhaseStatus::Ready);
+                    .map_or(true, |(prev, _)| *prev == PhaseStatus::Ready);
                 (t.id.clone(), t.status, t.worktree_path.clone(), t.plugin.clone(), t.session_name.clone(), t.cycle, was_ready, t.agent.clone())
             })
             .collect();
@@ -4805,11 +4824,30 @@ impl App {
                 self.state.pane_content_hashes.remove(&task_status.task_id);
             }
 
+            let newly_ready = phase == PhaseStatus::Ready && !task_status.was_ready;
             self.state.phase_status_cache.insert(task_status.task_id.clone(), (phase, now));
+
+            // Notify orchestrator when a phase completes (newly Ready)
+            if newly_ready {
+                if self.state.orchestrator_session.is_some() {
+                    if let Some(db) = &self.state.db {
+                        let task_title = self.state.board.tasks.iter()
+                            .find(|t| t.id == task_status.task_id)
+                            .map(|t| t.title.as_str())
+                            .unwrap_or("unknown");
+                        let phase_name = if task_status.status == TaskStatus::Backlog { "research" } else { task_status.status.as_str() };
+                        let short_id = if task_status.task_id.len() >= 8 { &task_status.task_id[..8] } else { &task_status.task_id };
+                        let notif = crate::db::Notification::new(format!(
+                            "Task \"{}\" ({}) completed phase: {}",
+                            task_title, short_id, phase_name
+                        ));
+                        let _ = db.create_notification(&notif);
+                    }
+                }
+            }
 
             // Auto merge-conflict check for Review tasks
             if task_status.status == TaskStatus::Review && !self.state.merge_conflict_checked.contains(&task_status.task_id) {
-                let newly_ready = phase == PhaseStatus::Ready && !task_status.was_ready;
                 let should_check = match phase {
                     PhaseStatus::Ready => newly_ready,
                     PhaseStatus::Idle => {
@@ -4853,23 +4891,6 @@ impl App {
                                     Ok(false) | Err(_) => {}
                                 }
                             });
-                        }
-                    }
-
-                    // Queue notification for orchestrator
-                    if self.state.orchestrator_session.is_some() {
-                        if let Some(db) = &self.state.db {
-                            let task_title = self.state.board.tasks.iter()
-                                .find(|t| t.id == task_status.task_id)
-                                .map(|t| t.title.as_str())
-                                .unwrap_or("unknown");
-                            let phase_name = if task_status.status == TaskStatus::Backlog { "research" } else { task_status.status.as_str() };
-                            let short_id = if task_status.task_id.len() >= 8 { &task_status.task_id[..8] } else { &task_status.task_id };
-                            let notif = crate::db::Notification::new(format!(
-                                "Task \"{}\" ({}) completed phase: {}",
-                                task_title, short_id, phase_name
-                            ));
-                            let _ = db.create_notification(&notif);
                         }
                     }
                 }
@@ -6511,6 +6532,51 @@ fn write_skills_to_worktree(worktree_path: &str, project_path: &Path, plugin: &O
                     }
                 }
             }
+        }
+    }
+}
+
+/// Deploy a single skill to a target directory for the given agent.
+/// Writes both the canonical `.agtx/skills/` copy and the agent-native discovery path.
+fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, agent_name: &str) {
+    // Write canonical copy
+    let canonical_dir = target_dir.join(".agtx/skills").join(skill_name);
+    let _ = std::fs::create_dir_all(&canonical_dir);
+    let _ = std::fs::write(canonical_dir.join("SKILL.md"), content);
+
+    // Write to agent-native discovery path
+    if let Some((base_dir, namespace)) = skills::agent_native_skill_dir(agent_name) {
+        let native_dir = if namespace.is_empty() {
+            target_dir.join(base_dir)
+        } else {
+            target_dir.join(base_dir).join(namespace)
+        };
+        let _ = std::fs::create_dir_all(&native_dir);
+
+        match agent_name {
+            "claude" | "copilot" => {
+                let transformed = transform_skill_frontmatter(content);
+                let filename = skills::skill_dir_to_filename(skill_name, agent_name);
+                let _ = std::fs::write(native_dir.join(&filename), transformed);
+            }
+            "gemini" => {
+                let description = skills::extract_description(content)
+                    .unwrap_or_else(|| format!("agtx {} skill", skill_name));
+                let toml_content = skills::skill_to_gemini_toml(&description, content);
+                let filename = skills::skill_dir_to_filename(skill_name, agent_name);
+                let _ = std::fs::write(native_dir.join(&filename), toml_content);
+            }
+            "codex" => {
+                let skill_subdir = native_dir.join(skill_name);
+                let _ = std::fs::create_dir_all(&skill_subdir);
+                let _ = std::fs::write(skill_subdir.join("SKILL.md"), content);
+            }
+            "opencode" => {
+                let oc_content = transform_skill_for_opencode(content);
+                let filename = skills::skill_dir_to_filename(skill_name, agent_name);
+                let _ = std::fs::write(native_dir.join(&filename), oc_content);
+            }
+            _ => {}
         }
     }
 }
