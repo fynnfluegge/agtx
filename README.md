@@ -4,12 +4,12 @@
 
 # agtx
 
-#### An AI agent that manages other coding agents in a terminal kanban board
-
 [![CI](https://github.com/fynnfluegge/agtx/actions/workflows/ci.yml/badge.svg)](https://github.com/fynnfluegge/agtx/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/fynnfluegge/agtx)](https://github.com/fynnfluegge/agtx/releases)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![GitHub stars](https://img.shields.io/github/stars/fynnfluegge/agtx)](https://github.com/fynnfluegge/agtx/stargazers)
-[![GitHub issues](https://img.shields.io/github/issues/fynnfluegge/agtx)](https://github.com/fynnfluegge/agtx/issues)
+
+#### An AI agent that manages other coding agents in a terminal kanban board
 
 Let different AI coding agents collaborate on the same task, e.g.
 **Gemini → research** &nbsp; | &nbsp; **Claude → implement** &nbsp; | &nbsp; **Codex → review**
@@ -461,7 +461,7 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 
 ## Contributing
 
-Contributions are welcome! Whether it's a bug fix, new plugin, agent integration, or documentation improvement — we'd love your help.
+Contributions are welcome! Whether it's a bug fix, new plugin, agent integration, or documentation improvement.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide. Here's the short version:
 
@@ -471,8 +471,6 @@ git clone https://github.com/<you>/agtx && cd agtx
 
 # Build & test
 cargo build && cargo test --features test-mocks
-
-# Make your changes, then open a PR
 ```
 
 ### Good First Contributions
