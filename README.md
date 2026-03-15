@@ -487,15 +487,6 @@ Not sure where to start? Here are some ideas:
 - **Report bugs** — Open an [issue](https://github.com/fynnfluegge/agtx/issues). Reproduction steps are always appreciated
 - **Browse open issues** — Check the [`good first issue`](https://github.com/fynnfluegge/agtx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) label for beginner-friendly tasks
 
-### Roadmap
-
-Here's where agtx is heading — contributions in any of these areas are especially welcome:
-
-- **More orchestrator agents** — Support Gemini, Codex, and others as orchestrators (not just Claude)
-- **Reopen Done tasks** — Recreate worktrees from preserved branches for follow-up work
-- **Remote agents** — Run agents on remote machines / containers
-- **Webhooks & notifications** — Get notified (Slack, Discord, etc.) when tasks complete or need attention
-
 ## Development
 
 See [CLAUDE.md](CLAUDE.md) for full architecture docs and development patterns.
