@@ -4,18 +4,18 @@
 
 # agtx
 
+<div align="left">
+    
+> **An AI agent that manages other coding agents in a terminal kanban board** - Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates to multiple coding agents running in parallel. Come back to changes ready to merge.  
+> **Let different AI coding agents collaborate on the same task** - 
+**Gemini → research** &nbsp; | &nbsp; **Claude → implement** &nbsp; | &nbsp; **Codex → review**
+
+</div>
+
 [![CI](https://github.com/fynnfluegge/agtx/actions/workflows/ci.yml/badge.svg)](https://github.com/fynnfluegge/agtx/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/fynnfluegge/agtx)](https://github.com/fynnfluegge/agtx/releases)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-
-#### An AI agent that manages other coding agents in a terminal kanban board
-
-Let different AI coding agents collaborate on the same task, e.g.
-**Gemini → research** &nbsp; | &nbsp; **Claude → implement** &nbsp; | &nbsp; **Codex → review**
-
-Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates<br/>
-to multiple coding agents running in parallel. Come back to changes ready to merge.
 
 <br/>
 
@@ -36,6 +36,8 @@ to multiple coding agents running in parallel. Come back to changes ready to mer
 AI coding tools give you one agent, one task, one terminal. agtx gives you a **kanban board where multiple coding agents work in parallel** — each in its own git worktree, each in its own tmux window, each running autonomously through a spec-driven workflow managed by an orchestrator agent.
 
 With the orchestrator, you don't even manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, review and resolving conflicts — while you focus on what matters: research, defining tasks, and merging changes.
+
+> Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates to multiple coding agents running in parallel. Come back to changes ready to merge.
 
 ## Features
 
