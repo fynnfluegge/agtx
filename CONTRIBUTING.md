@@ -1,4 +1,4 @@
-# Contributing to agtx
+# Contributing
 
 Thanks for your interest in contributing to agtx! This guide will help you get started.
 
@@ -26,7 +26,7 @@ cargo test --features test-mocks
 
 ```bash
 # Run in any git repository
-cd your-project && cargo run --manifest-path /path/to/agtx/Cargo.toml
+cd agtx && cargo run --manifest-path /path/to/agtx/Cargo.toml
 
 # Or build and copy to PATH
 cargo build --release
