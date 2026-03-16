@@ -67,8 +67,11 @@ Backlog → Research → Planning → Running → Review
    what enters Planning/Running. Just advance what's there.
 5. **Error handling:** If `get_transition_status` shows an error, investigate
    and try a different approach.
-6. **When idle:** After processing all current work, simply wait for the next
-   notification to arrive. Do not poll in a loop.
+6. **When idle:** After processing all current work, output exactly
+   `[agtx:idle]` on its own line, then wait for the next notification.
+   Do not poll in a loop. You **must** output `[agtx:idle]` every time you
+   finish processing and have no more pending work — this is how the board
+   knows you are ready to receive the next notification.
 
 ## Rules
 
@@ -79,4 +82,5 @@ Backlog → Research → Planning → Running → Review
 - Only act on tasks in Planning or Running — never touch Backlog or Research tasks.
 - Always check `allowed_actions` before choosing a transition.
 - Do not move tasks beyond Review — merging is the user's responsibility.
-- When idle with no pending work, just wait — notifications will be pushed to you.
+- When idle with no pending work, output `[agtx:idle]` and wait — notifications
+  will be pushed to you. Never skip the idle signal.
