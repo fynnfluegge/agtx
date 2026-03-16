@@ -3902,3 +3902,94 @@ fn test_footer_text_description_shows_all_triggers() {
     assert!(text.contains("[!] tasks"), "Missing tasks trigger: {}", text);
 }
 
+// =============================================================================
+// Tests for check_orchestrator_idle
+// =============================================================================
+
+#[test]
+fn test_orchestrator_idle_signal_in_new_content() {
+    // Content changed AND contains [agtx:idle] → Idle
+    let result = check_orchestrator_idle(
+        "some output\n[agtx:idle]\n",
+        "previous content",
+        None,
+    );
+    assert_eq!(result, OrchestratorIdleResult::Idle);
+}
+
+#[test]
+fn test_orchestrator_busy_when_content_changed_no_signal() {
+    // Content changed but no idle signal → Busy
+    let result = check_orchestrator_idle(
+        "agent is working on something...",
+        "previous content",
+        None,
+    );
+    assert_eq!(result, OrchestratorIdleResult::Busy);
+}
+
+#[test]
+fn test_orchestrator_waiting_when_unchanged_no_stable_since() {
+    // Content unchanged, no stable_since yet → Waiting (start tracking)
+    let result = check_orchestrator_idle(
+        "same content",
+        "same content",
+        None,
+    );
+    assert_eq!(result, OrchestratorIdleResult::Waiting);
+}
+
+#[test]
+fn test_orchestrator_waiting_when_unchanged_under_threshold() {
+    // Content unchanged, stable for only 1 second → Waiting
+    let result = check_orchestrator_idle(
+        "same content",
+        "same content",
+        Some(Instant::now() - std::time::Duration::from_secs(1)),
+    );
+    assert_eq!(result, OrchestratorIdleResult::Waiting);
+}
+
+#[test]
+fn test_orchestrator_idle_fallback_after_threshold() {
+    // Content unchanged for longer than ORCHESTRATOR_IDLE_FALLBACK_SECS → Idle
+    let result = check_orchestrator_idle(
+        "same content",
+        "same content",
+        Some(Instant::now() - std::time::Duration::from_secs(ORCHESTRATOR_IDLE_FALLBACK_SECS + 1)),
+    );
+    assert_eq!(result, OrchestratorIdleResult::Idle);
+}
+
+#[test]
+fn test_orchestrator_idle_signal_takes_priority_over_content_change() {
+    // Even if content just changed, the idle signal means we're ready
+    let result = check_orchestrator_idle(
+        "new output with [agtx:idle] at the end",
+        "old output",
+        None,
+    );
+    assert_eq!(result, OrchestratorIdleResult::Idle);
+}
+
+#[test]
+fn test_orchestrator_idle_signal_in_unchanged_content() {
+    // Content unchanged but contains idle signal — still counts as Waiting
+    // because unchanged content goes through the stability timer path.
+    // The idle signal only fast-tracks on content *change*.
+    let content = "output\n[agtx:idle]\n";
+    let result = check_orchestrator_idle(
+        content,
+        content,
+        Some(Instant::now() - std::time::Duration::from_secs(1)),
+    );
+    assert_eq!(result, OrchestratorIdleResult::Waiting);
+}
+
+#[test]
+fn test_orchestrator_empty_content_both_sides() {
+    // Both empty (e.g. startup) → unchanged → Waiting
+    let result = check_orchestrator_idle("", "", None);
+    assert_eq!(result, OrchestratorIdleResult::Waiting);
+}
+

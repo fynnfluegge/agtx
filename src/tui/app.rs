@@ -4642,31 +4642,25 @@ impl App {
             .capture_pane(&orch_target)
             .unwrap_or_default();
 
-        // Check for explicit idle signal from the orchestrator agent.
-        // This is more reliable than content stabilization: the agent outputs
-        // "[agtx:idle]" when it has finished processing and is ready for input.
-        let has_idle_signal = current_content.contains("[agtx:idle]");
+        let result = check_orchestrator_idle(
+            &current_content,
+            &self.state.orchestrator_last_content,
+            self.state.orchestrator_stable_since,
+        );
 
-        if current_content != self.state.orchestrator_last_content {
-            // Content changed — update tracking
-            self.state.orchestrator_last_content = current_content;
-            self.state.orchestrator_stable_since = Some(Instant::now());
-            // If the new content contains the idle signal, fall through to deliver.
-            // Otherwise the agent is still working.
-            if !has_idle_signal {
+        match result {
+            OrchestratorIdleResult::Idle => {
+                // Fall through to deliver notifications
+            }
+            OrchestratorIdleResult::Busy => {
+                self.state.orchestrator_last_content = current_content;
+                self.state.orchestrator_stable_since = Some(Instant::now());
                 return;
             }
-        } else {
-            // Content unchanged — fall back to stability timer (≥15s)
-            let stable_since = match self.state.orchestrator_stable_since {
-                Some(t) => t,
-                None => {
+            OrchestratorIdleResult::Waiting => {
+                if self.state.orchestrator_stable_since.is_none() {
                     self.state.orchestrator_stable_since = Some(Instant::now());
-                    return;
                 }
-            };
-
-            if stable_since.elapsed() < std::time::Duration::from_secs(15) {
                 return;
             }
         }
@@ -4984,6 +4978,57 @@ impl Drop for App {
 }
 
 /// Ensure tmux session exists for a project
+// =============================================================================
+// Orchestrator idle detection (extracted for testability)
+// =============================================================================
+
+/// Result of checking whether the orchestrator is idle and ready for notifications.
+#[derive(Debug, PartialEq)]
+enum OrchestratorIdleResult {
+    /// Agent is idle — safe to deliver notifications.
+    Idle,
+    /// Content changed and no idle signal — agent is actively working.
+    Busy,
+    /// Content unchanged but not stable long enough — keep waiting.
+    Waiting,
+}
+
+/// Idle detection duration for the stability fallback (no `[agtx:idle]` signal).
+const ORCHESTRATOR_IDLE_FALLBACK_SECS: u64 = 15;
+
+/// Pure idle-detection logic for the orchestrator pane.
+///
+/// Checks two conditions (first match wins):
+/// 1. **Explicit signal**: pane content contains `[agtx:idle]` → `Idle`
+/// 2. **Stability fallback**: pane unchanged for ≥15s → `Idle`
+///
+/// Returns `Busy` when content changed without the idle signal,
+/// `Waiting` when content is unchanged but the timer hasn't elapsed.
+fn check_orchestrator_idle(
+    current_content: &str,
+    last_content: &str,
+    stable_since: Option<Instant>,
+) -> OrchestratorIdleResult {
+    let has_idle_signal = current_content.contains("[agtx:idle]");
+    let content_changed = current_content != last_content;
+
+    if content_changed {
+        if has_idle_signal {
+            OrchestratorIdleResult::Idle
+        } else {
+            OrchestratorIdleResult::Busy
+        }
+    } else {
+        // Content unchanged — check stability timer
+        match stable_since {
+            Some(t) if t.elapsed() >= std::time::Duration::from_secs(ORCHESTRATOR_IDLE_FALLBACK_SECS) => {
+                OrchestratorIdleResult::Idle
+            }
+            _ => OrchestratorIdleResult::Waiting,
+        }
+    }
+}
+
 fn ensure_project_tmux_session(project_name: &str, project_path: &Path, tmux_ops: &dyn TmuxOperations) {
     if !tmux_ops.has_session(project_name) {
         let _ = tmux_ops.create_session(project_name, &project_path.to_string_lossy());
