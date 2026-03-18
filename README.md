@@ -201,13 +201,13 @@ Commands are written once in canonical format and automatically translated per a
 |--------------------------|-----------------|-------|----------|--------|
 | `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` | `/agtx-plan` |
 
-|  | Claude | Codex | Gemini | Copilot | OpenCode | Cursor |
-|--|:------:|:-----:|:------:|:-------:|:--------:|:------:|
-| **agtx** | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
-| **gsd** | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
-| **spec-kit** | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
-| **openspec** | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
-| **bmad** | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
+|  | Claude | Codex | Gemini | OpenCode | Cursor | Copilot |
+|--|:------:|:-----:|:------:|:--------:|:------:|:-------:|
+| **agtx** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
+| **gsd** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| **spec-kit** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
+| **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
+| **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
