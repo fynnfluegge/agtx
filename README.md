@@ -18,7 +18,7 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-<br/>
+---
 
 <img width="840" src="https://github.com/user-attachments/assets/45858e09-ab61-422b-b708-db060c73a900" />
 
@@ -48,7 +48,7 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as you want, simultaneously
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — or define your own with a single TOML file
 - **Multi-project dashboard**: Manage agent sessions across all your projects from one place
-- **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode) | [Copilot](https://github.com/github/copilot-cli) | [Cursor Agent](https://cursor.com/docs/cli/overview)
+- **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode)  | [Cursor Agent](https://cursor.com/docs/cli/overview) | [Copilot](https://github.com/github/copilot-cli)
 
 ## Quick Start
 
