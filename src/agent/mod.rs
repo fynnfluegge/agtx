@@ -44,6 +44,7 @@ impl Agent {
                 "copilot" => "copilot --allow-all-tools".to_string(),
                 "gemini" => "gemini --approval-mode yolo".to_string(),
                 "opencode" => "opencode".to_string(),
+                "cursor" => "agent --yolo".to_string(),
                 _ => self.command.clone(),
             };
         }
@@ -55,6 +56,7 @@ impl Agent {
             "copilot" => format!("copilot --allow-all-tools -p '{}'", escaped_prompt),
             "gemini" => format!("gemini --approval-mode yolo -i '{}'", escaped_prompt),
             "opencode" => format!("opencode -p '{}'", escaped_prompt),
+            "cursor" => format!("agent --yolo '{}'", escaped_prompt),
             _ => format!("{} '{}'", self.command, escaped_prompt),
         }
     }
@@ -68,6 +70,7 @@ pub fn known_agents() -> Vec<Agent> {
         Agent::new("copilot", "copilot", "GitHub Copilot CLI", "GitHub Copilot <noreply@github.com>"),
         Agent::new("gemini", "gemini", "Google Gemini CLI", "Gemini <noreply@google.com>"),
         Agent::new("opencode", "opencode", "AI-powered coding assistant", "OpenCode <noreply@opencode.ai>"),
+        Agent::new("cursor", "agent", "Cursor Agent CLI", "Cursor Agent <noreply@cursor.com>"),
         // TODO: investigate CLI usage before enabling
         // Agent::new("aider", "aider", "AI pair programming in your terminal", "Aider <noreply@aider.chat>"),
         // Agent::new("cline", "cline", "AI coding assistant for VS Code", "Cline <noreply@cline.bot>"),

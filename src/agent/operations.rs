@@ -48,6 +48,7 @@ impl AgentOperations for CodingAgent {
             "codex" => ("codex", vec!["exec", "--full-auto", prompt]),
             "copilot" => ("copilot", vec!["-p", prompt]),
             "gemini" => ("gemini", vec!["-p", prompt]),
+            "cursor" => ("agent", vec!["--print", "--yolo", prompt]),
             _ => (self.agent.command.as_str(), vec![prompt]),
         };
 

@@ -38,6 +38,7 @@ pub fn agent_native_skill_dir(agent_name: &str) -> Option<(&'static str, &'stati
         "gemini" => Some((".gemini/commands", "agtx")),
         "opencode" => Some((".opencode/commands", "")),
         "codex" => Some((".codex/skills", "")),
+        "cursor" => Some((".cursor/skills", "")),
         "copilot" => Some((".github/agents", "agtx")),
         _ => None,
     }
@@ -100,6 +101,10 @@ pub fn transform_plugin_command(canonical_cmd: &str, agent_name: &str) -> Option
             } else {
                 Some(transformed)
             }
+        }
+        "cursor" => {
+            // /agtx:plan → /agtx-plan (slash kept, colon → hyphen)
+            Some(canonical_cmd.replacen(':', "-", 1))
         }
         _ => None,
     }
@@ -325,6 +330,27 @@ pub fn scan_agent_skills(agent_name: &str, project_path: &std::path::Path) -> Ve
                 let skill_file = dir_entry.path().join("SKILL.md");
                 if skill_file.exists() {
                     let command = format!("${}", dirname);
+                    let description = extract_description_from_file(&skill_file)
+                        .unwrap_or_else(|| dirname.replace('-', " "));
+                    results.push((command, description));
+                }
+            }
+        }
+        "cursor" => {
+            // Skill subdirectories with SKILL.md, invoked as /skill-name
+            let base = project_path.join(".cursor/skills");
+            let entries = match std::fs::read_dir(&base) {
+                Ok(e) => e,
+                Err(_) => return results,
+            };
+            for dir_entry in entries.flatten() {
+                if !dir_entry.path().is_dir() {
+                    continue;
+                }
+                let dirname = dir_entry.file_name().to_string_lossy().to_string();
+                let skill_file = dir_entry.path().join("SKILL.md");
+                if skill_file.exists() {
+                    let command = format!("/{}", dirname);
                     let description = extract_description_from_file(&skill_file)
                         .unwrap_or_else(|| dirname.replace('-', " "));
                     results.push((command, description));

@@ -3873,8 +3873,10 @@ impl App {
         };
         let Some(project_path) = self.state.project_path.clone() else { return Ok(()) };
 
-        // Stamp plugin on task for research
-        task.plugin = self.state.config.workflow_plugin.clone();
+        // Stamp plugin on task for research (only if not already set at task creation)
+        if task.plugin.is_none() {
+            task.plugin = self.state.config.workflow_plugin.clone();
+        }
         let plugin_name = task.plugin.clone();
         let plugin = self.load_task_plugin(&task);
 
@@ -4735,7 +4737,9 @@ impl App {
             for (task_id, status, worktree_path, task_plugin, session_name, cycle, was_ready, agent) in tasks_to_check {
                 let plugin = plugin_cache.entry(task_plugin.clone()).or_insert_with(|| {
                     match &task_plugin {
-                        Some(name) => WorkflowPlugin::load(name, project_path.as_deref()).ok(),
+                        Some(name) => WorkflowPlugin::load(name, project_path.as_deref())
+                            .ok()
+                            .or_else(|| skills::load_bundled_plugin(name)),
                         None => skills::load_bundled_plugin("agtx"),
                     }
                 });
@@ -5992,7 +5996,7 @@ fn send_skill_and_prompt(
     //   prompt, which gets lost or arrives too late.
     // Codex: skill mentions ($skill-name) are inline references that must be
     //   part of a message — sending just "$skill" standalone does nothing.
-    if matches!(agent_name, "gemini" | "codex") {
+    if matches!(agent_name, "gemini" | "codex" | "cursor") {
         let text_to_send = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
                 Some(format!("{}\n\n{}", cmd, prompt))
@@ -6281,13 +6285,24 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 }
 
 /// Known agent binary names as they appear in `pane_current_command`.
-const AGENT_COMMANDS: &[&str] = &["claude", "codex", "gemini", "copilot", "opencode", "node", "python3", "python"];
+/// Used by `is_pane_at_shell` to detect when an agent process is running.
+/// Does NOT include `node` — Node/Ink agents (Gemini, Cursor, OpenCode, Codex) are
+/// detected via `AGENT_ACTIVE_INDICATORS` instead, so Check 2 in `wait_for_agent_ready`
+/// can fire for them rather than Check 1 firing too early.
+/// Note: on systems where agents are installed via asdf/nvm, all agents run as `node`
+/// and Check 1 never fires — AGENT_ACTIVE_INDICATORS is the only reliable signal there.
+const AGENT_COMMANDS: &[&str] = &["claude", "codex", "gemini", "copilot", "opencode", "agent", "python3", "python"];
 
-/// Strings in pane content that indicate an agent TUI is active.
-/// Used by `is_agent_active` to detect agents like Gemini that run inside
-/// bash and don't change `pane_current_command`.
+/// Strings in pane content that indicate a Node/Ink agent TUI is active and ready.
+/// Used by `is_agent_active` to detect agents like Gemini and Cursor that run
+/// inside bash/node and don't change `pane_current_command` to their own name.
+/// Also used by `wait_for_agent_ready` (Check 2) to detect readiness for these agents.
 const AGENT_ACTIVE_INDICATORS: &[&str] = &[
+    "Claude Code",         // Claude
     "Type your message",   // Gemini
+    "Ask anything",        // OpenCode
+    "Cursor Agent",        // Cursor
+    "OpenAI Codex",        // Codex
 ];
 
 /// Check if the pane is running a shell (i.e. the agent has exited).
@@ -6346,6 +6361,7 @@ fn switch_agent_in_tmux(
     let exit_cmd = match current_agent {
         "codex" => None,   // Codex has no exit command — Ctrl+C is the only way
         "gemini" => Some("/quit"),
+        "cursor" => None,  // Ink/Node TUI — Ctrl+C is the only reliable exit
         _ => Some("/exit"), // claude, opencode, and others
     };
 
@@ -6405,42 +6421,37 @@ fn switch_agent_in_tmux(
     // 6. Wait for the new agent process to actually start (pane_current_command != shell).
     //    Without this, wait_for_agent_ready may see stale ">" from old pane content
     //    and return before the new agent has even launched.
-    for _ in 0..100 { // 10s max
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if !is_pane_at_shell(tmux_ops, target) {
-            break;
+    //    Includes `node` here so Gemini/Cursor (Node/Ink TUIs) are detected immediately.
+    for _ in 0..10 { // 10s max
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if let Some(cmd) = tmux_ops.pane_current_command(target) {
+            let process_started = AGENT_COMMANDS.iter().any(|a| cmd.contains(a)) || cmd.contains("node");
+            if process_started {
+                break;
+            }
         }
     }
 }
 
 /// Wait for an agent in a tmux pane to be ready for input.
-/// First waits for the agent process to start (pane_current_command != shell),
-/// then waits a fixed delay for the agent to fully initialize.
 /// Handles the bypass warning prompt (sends acceptance) during the wait.
 /// Always returns Some — the prompt is always sent (better late than never).
-/// Strings that indicate an agent's TUI is ready for input.
-const AGENT_READY_INDICATORS: &[&str] = &[
-    "Type your message",   // Gemini
-    "Yes, I accept",       // Claude bypass prompt
-    "I accept the risk",   // Claude bypass prompt (alt)
-];
-
-/// Number of consecutive stable polls (200ms each) before considering the agent ready.
+/// Number of consecutive stable polls (1s each) before considering the agent ready.
 /// 3s of no pane content changes = agent has finished loading its TUI.
-const CONTENT_STABLE_THRESHOLD: u32 = 15;
+const CONTENT_STABLE_THRESHOLD: u32 = 3;
 
 fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Option<String> {
-    // Poll until the agent is ready (up to 30s).
+    // Step 1: detect the ready signal (up to 30s).
     // Three detection methods, whichever fires first:
     //   1. Agent process detected via pane_current_command (Claude, Codex, Copilot)
     //   2. Known ready indicator in pane content (Gemini's "Type your message")
-    //   3. Content stabilization: pane unchanged for 3s (universal fallback)
+    //   3. Content stabilization: pane unchanged for 3s after >=3 changes (universal fallback)
     let mut last_content = String::new();
     let mut stable_ticks: u32 = 0;
     let mut change_count: u32 = 0;
 
-    for _ in 0..150 { // 30s (150 * 200ms)
-        std::thread::sleep(std::time::Duration::from_millis(200));
+    for _ in 0..30 { // 30s (30 * 1s)
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
         // Check 1: agent process detected via pane_current_command
         if !is_pane_at_shell(tmux_ops.as_ref(), target) {
@@ -6454,12 +6465,12 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
                 let _ = tmux_ops.send_keys_literal(target, "2");
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 let _ = tmux_ops.send_keys_literal(target, "Enter");
-                std::thread::sleep(std::time::Duration::from_millis(1000));
-                return Some(target.to_string());
+                // Fall through to settle wait below
+                break;
             }
 
-            // Check 2: known ready indicator
-            if AGENT_READY_INDICATORS.iter().any(|s| content.contains(s)) {
+            // Check 2: known ready indicator in pane content
+            if AGENT_ACTIVE_INDICATORS.iter().any(|s| content.contains(s)) {
                 break;
             }
 
@@ -6474,14 +6485,31 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
             } else if change_count >= 3 {
                 stable_ticks += 1;
                 if stable_ticks >= CONTENT_STABLE_THRESHOLD {
-                    break;
+                    return Some(target.to_string());
                 }
             }
         }
     }
 
-    // Short settle delay for the TUI to be fully interactive
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    // Step 2: ready signal detected — wait for pane content to stop changing (up to 30s).
+    // Needed for Node/Ink agents (Gemini, Cursor) where the process starts before the
+    // TUI has finished rendering. Avoids sending the prompt into a half-drawn screen.
+    let mut last_content = String::new();
+    let mut stable_ticks: u32 = 0;
+    for _ in 0..30 { // 30s hard timeout
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if let Ok(content) = tmux_ops.capture_pane(target) {
+            if content != last_content {
+                stable_ticks = 0;
+                last_content = content;
+            } else {
+                stable_ticks += 1;
+                if stable_ticks >= CONTENT_STABLE_THRESHOLD {
+                    break;
+                }
+            }
+        }
+    }
 
     Some(target.to_string())
 }
@@ -6583,8 +6611,8 @@ fn write_skills_to_worktree(worktree_path: &str, project_path: &Path, plugin: &O
                         let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
                         let _ = std::fs::write(native_dir.join(&filename), toml_content);
                     }
-                    "codex" => {
-                        // Codex uses SKILL.md in skill-name/ subdirectories
+                    "codex" | "cursor" => {
+                        // Codex/Cursor use SKILL.md in skill-name/ subdirectories
                         let skill_subdir = native_dir.join(skill_dir_name);
                         let _ = std::fs::create_dir_all(&skill_subdir);
                         let _ = std::fs::write(skill_subdir.join("SKILL.md"), &content);
@@ -6638,7 +6666,7 @@ fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, agent_name: 
                 let filename = skills::skill_dir_to_filename(skill_name, agent_name);
                 let _ = std::fs::write(native_dir.join(&filename), toml_content);
             }
-            "codex" => {
+            "codex" | "cursor" => {
                 let skill_subdir = native_dir.join(skill_name);
                 let _ = std::fs::create_dir_all(&skill_subdir);
                 let _ = std::fs::write(skill_subdir.join("SKILL.md"), content);

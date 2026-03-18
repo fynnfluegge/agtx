@@ -48,7 +48,7 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as you want, simultaneously
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — or define your own with a single TOML file
 - **Multi-project dashboard**: Manage agent sessions across all your projects from one place
-- **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode) | [Copilot](https://github.com/github/copilot-cli)
+- **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode) | [Copilot](https://github.com/github/copilot-cli) | [Cursor Agent](https://cursor.com/docs/cli/overview)
 
 ## Quick Start
 
@@ -197,19 +197,19 @@ Press `P` to switch plugins. Ships with 7 built-in:
 
 Commands are written once in canonical format and automatically translated per agent:
 
-| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode |
-|--------------------------|-----------------|-------|----------|
-| `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` |
+| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode | Cursor |
+|--------------------------|-----------------|-------|----------|--------|
+| `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` | `/agtx-plan` |
 
-|  | Claude | Codex | Gemini | Copilot | OpenCode |
-|--|:------:|:-----:|:------:|:-------:|:--------:|
-| **agtx** | ✅ | ✅ | ✅ | 🟡 | ✅ |
-| **gsd** | ✅ | ✅ | ✅ | ❌ | ✅ |
-| **spec-kit** | ✅ | ✅ | ✅ | 🟡 | ✅ |
-| **openspec** | ✅ | ✅ | ✅ | 🟡 | ✅ |
-| **bmad** | ✅ | ✅ | ✅ | 🟡 | ✅ |
-| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **void** | ✅ | ✅ | ✅ | ✅ | ✅ |
+|  | Claude | Codex | Gemini | Copilot | OpenCode | Cursor |
+|--|:------:|:-----:|:------:|:-------:|:--------:|:------:|
+| **agtx** | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
+| **gsd** | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| **spec-kit** | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
+| **openspec** | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
+| **bmad** | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
+| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
 

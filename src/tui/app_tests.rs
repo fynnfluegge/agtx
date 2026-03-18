@@ -2570,13 +2570,17 @@ fn test_is_pane_at_shell_returns_false_for_claude() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_is_pane_at_shell_returns_false_for_node() {
+fn test_is_pane_at_shell_returns_true_for_node() {
+    // `node` is intentionally NOT in AGENT_COMMANDS — Node/Ink agents (Gemini, Cursor,
+    // OpenCode, Codex) are detected via AGENT_ACTIVE_INDICATORS (Check 2) instead.
+    // If node were in AGENT_COMMANDS, Check 1 would fire the moment the node process
+    // starts, before the TUI has rendered, sending the prompt too early.
     let mut mock = MockTmuxOperations::new();
     mock.expect_pane_current_command()
         .withf(|t| t == "sess:win")
         .returning(|_| Some("node".to_string()));
 
-    assert!(!is_pane_at_shell(&mock, "sess:win"));
+    assert!(is_pane_at_shell(&mock, "sess:win"));
 }
 
 #[test]
@@ -6956,4 +6960,174 @@ fn test_wait_for_agent_ready_always_returns_some() {
     // Function always returns Some at end regardless.
     let result = wait_for_agent_ready(&(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>), "proj:task");
     assert_eq!(result, Some("proj:task".to_string()));
+}
+
+// =============================================================================
+// Tests for is_pane_at_shell and is_agent_active
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_true_for_shell_process() {
+    for shell in &["bash", "zsh", "sh", "fish"] {
+        let mut mock = MockTmuxOperations::new();
+        let shell_str = shell.to_string();
+        mock.expect_pane_current_command()
+            .returning(move |_| Some(shell_str.clone()));
+        assert!(is_pane_at_shell(&mock, "t"), "should be at shell for {}", shell);
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_returns_false_for_agent_processes() {
+    for agent in &["claude", "codex", "gemini", "copilot", "opencode", "agent"] {
+        let mut mock = MockTmuxOperations::new();
+        let agent_str = agent.to_string();
+        mock.expect_pane_current_command()
+            .returning(move |_| Some(agent_str.clone()));
+        assert!(!is_pane_at_shell(&mock, "t"), "should not be at shell for {}", agent);
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agent_active_detects_claude_via_indicator() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string())); // node/bash — Check 1 misses
+    mock.expect_capture_pane()
+        .returning(|_| Ok("Claude Code v2.1.72\n> ".to_string()));
+    assert!(is_agent_active(&mock, "t"), "Claude Code indicator should trigger is_agent_active");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agent_active_detects_gemini_via_indicator() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("some output\nType your message".to_string()));
+    assert!(is_agent_active(&mock, "t"), "Gemini indicator should trigger is_agent_active");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agent_active_detects_opencode_via_indicator() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("some output\nAsk anything".to_string()));
+    assert!(is_agent_active(&mock, "t"), "OpenCode indicator should trigger is_agent_active");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agent_active_detects_cursor_via_indicator() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("some output\nCursor Agent\n> ".to_string()));
+    assert!(is_agent_active(&mock, "t"), "Cursor indicator should trigger is_agent_active");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agent_active_detects_codex_via_indicator() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("some output\nOpenAI Codex".to_string()));
+    assert!(is_agent_active(&mock, "t"), "Codex indicator should trigger is_agent_active");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agent_active_returns_false_when_no_indicator() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("just some shell output".to_string()));
+    assert!(!is_agent_active(&mock, "t"), "no indicator should return false");
+}
+
+// =============================================================================
+// Tests for wait_for_agent_ready — new ready indicators
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_wait_for_agent_ready_detects_claude_via_banner() {
+    // node process (asdf install) — Check 1 misses, Check 2 fires on "Claude Code"
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("Claude Code v2.1.72\nsome context".to_string()));
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    assert_eq!(result, Some("proj:task".to_string()));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_wait_for_agent_ready_detects_cursor_via_banner() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("Cursor Agent\n> ".to_string()));
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    assert_eq!(result, Some("proj:task".to_string()));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_wait_for_agent_ready_detects_opencode_via_banner() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("Ask anything\n> ".to_string()));
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    assert_eq!(result, Some("proj:task".to_string()));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_wait_for_agent_ready_detects_codex_via_banner() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("OpenAI Codex\nsome output".to_string()));
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    assert_eq!(result, Some("proj:task".to_string()));
+}
+
+// =============================================================================
+// Tests for switch_agent_in_tmux — cursor exit behavior
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_switch_agent_cursor_sends_ctrl_c_not_exit() {
+    // Cursor is an Ink/Node TUI — uses Ctrl+C to exit, no /exit command
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_send_keys_literal()
+        .withf(|_, key: &str| key == "C-c")
+        .times(1)
+        .returning(|_, _| Ok(()));
+    mock_tmux.expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    mock_tmux.expect_send_keys()
+        .withf(|_, cmd: &str| cmd == "agent --yolo")
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    switch_agent_in_tmux(&mock_tmux, "proj:task", "cursor", "agent --yolo");
 }

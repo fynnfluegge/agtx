@@ -123,6 +123,7 @@ Skills are markdown files with YAML frontmatter deployed to agent-native discove
 - Claude: `.claude/commands/agtx/plan.md`
 - Gemini: `.gemini/commands/agtx/plan.toml` (converted to TOML format)
 - Codex: `.codex/skills/agtx-plan/SKILL.md`
+- Cursor: `.cursor/skills/agtx-plan/SKILL.md`
 - OpenCode: `.config/opencode/command/agtx-plan.md` (frontmatter stripped)
 - Copilot: `.github/agents/agtx/plan.md`
 
@@ -130,7 +131,7 @@ Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
 
 Commands are written once in canonical format (`/ns:command`) and auto-translated:
 - Claude/Gemini: `/ns:command` (unchanged)
-- OpenCode: `/ns-command` (colon → hyphen)
+- OpenCode/Cursor: `/ns-command` (colon → hyphen)
 - Codex: `$ns-command` (slash → dollar, colon → hyphen)
 - Copilot: no interactive skill invocation (prompt only, no commands sent)
 
