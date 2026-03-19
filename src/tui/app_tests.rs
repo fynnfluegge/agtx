@@ -5812,7 +5812,7 @@ fn test_toggle_orchestrator_spawns_new_session() {
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry.expect_get().returning(|_| {
         let mut ops = MockAgentOperations::new();
-        ops.expect_build_interactive_command().returning(|_| "claude".to_string());
+        ops.expect_build_orchestrator_command().returning(|_, _| "claude".to_string());
         Arc::new(ops)
     });
 
@@ -5885,7 +5885,7 @@ fn test_toggle_orchestrator_clears_stale_session_and_respawns() {
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry.expect_get().returning(|_| {
         let mut ops = MockAgentOperations::new();
-        ops.expect_build_interactive_command().returning(|_| "claude".to_string());
+        ops.expect_build_orchestrator_command().returning(|_, _| "claude".to_string());
         Arc::new(ops)
     });
 
