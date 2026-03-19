@@ -3585,9 +3585,18 @@ impl App {
             if !handled {
                 task.status = new_status;
                 task.updated_at = chrono::Utc::now();
+
+                // Clear context from previous phase on transition
+                task.escalation_note = None;
+
                 if let Some(db) = &self.state.db {
                     db.update_task(&task)?;
                 }
+
+                // Clear stale phase context
+                self.state.stuck_task_notified.remove(&task.id);
+                self.state.stuck_task_idle_since.remove(&task.id);
+                self.state.phase_status_cache.remove(&task.id);
             }
 
         }
