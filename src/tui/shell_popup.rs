@@ -11,6 +11,10 @@ pub struct ShellPopup {
     pub cached_content: Vec<u8>,
     /// Last known pane dimensions for resize detection
     pub last_pane_size: Option<(u16, u16)>,
+    /// Escalation note from the orchestrator, shown as a banner
+    pub escalation_note: Option<String>,
+    /// Task ID (used to clear escalation note on dismiss)
+    pub task_id: Option<String>,
 }
 
 impl ShellPopup {
@@ -21,6 +25,8 @@ impl ShellPopup {
             scroll_offset: 0,
             cached_content: Vec::new(),
             last_pane_size: None,
+            escalation_note: None,
+            task_id: None,
         }
     }
 
@@ -209,6 +215,8 @@ pub struct ShellPopupColors {
     pub header_bg: Color,
     pub footer_fg: Color,
     pub footer_bg: Color,
+    pub escalation_fg: Color,
+    pub escalation_bg: Color,
 }
 
 impl Default for ShellPopupColors {
@@ -219,6 +227,8 @@ impl Default for ShellPopupColors {
             header_bg: Color::Cyan,
             footer_fg: Color::Black,
             footer_bg: Color::Gray,
+            escalation_fg: Color::Black,
+            escalation_bg: Color::Yellow,
         }
     }
 }
@@ -246,13 +256,17 @@ pub fn render_shell_popup(
     let inner_area = border_block.inner(popup_area);
     frame.render_widget(border_block, popup_area);
 
-    // Layout: header, content, footer (inside the border)
+    // Layout: header, optional escalation banner, content, footer (inside the border)
+    let has_escalation = popup.escalation_note.is_some();
+    let escalation_height = if has_escalation { 2u16 } else { 0u16 };
+
     let popup_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Title bar
-            Constraint::Min(0),    // Shell content
-            Constraint::Length(1), // Footer
+            Constraint::Length(1),                  // Title bar
+            Constraint::Length(escalation_height),  // Escalation banner (0 if none)
+            Constraint::Min(0),                     // Shell content
+            Constraint::Length(1),                  // Footer
         ])
         .split(inner_area);
 
@@ -263,20 +277,31 @@ pub fn render_shell_popup(
         .style(Style::default().fg(colors.header_fg).bg(colors.header_bg));
     frame.render_widget(title_bar, popup_chunks[0]);
 
+    // Escalation banner (if present)
+    if let Some(ref note) = popup.escalation_note {
+        let banner_text = format!(" \u{26a0}  {} ", note);
+        let padded_banner = format!("{:<width$}", banner_text, width = popup_chunks[1].width as usize);
+        let hint = format!("{:<width$}", " Press any key to dismiss", width = popup_chunks[1].width as usize);
+        let banner_content = format!("{}\n{}", padded_banner, hint);
+        let banner = Paragraph::new(banner_content)
+            .style(Style::default().fg(colors.escalation_fg).bg(colors.escalation_bg));
+        frame.render_widget(banner, popup_chunks[1]);
+    }
+
     // Shell content
-    let visible_height = popup_chunks[1].height as usize;
+    let visible_height = popup_chunks[2].height as usize;
 
     // Use the testable helper to compute visible lines
     let (visible_lines, start_line, _total_lines) =
         compute_visible_lines(styled_lines, visible_height, popup.scroll_offset);
 
     let content = Paragraph::new(visible_lines);
-    frame.render_widget(content, popup_chunks[1]);
+    frame.render_widget(content, popup_chunks[2]);
 
     // Footer with scroll indicator (pad to fill width)
     let footer_text = build_footer_text(popup.scroll_offset, start_line);
-    let padded_footer = format!("{:<width$}", footer_text, width = popup_chunks[2].width as usize);
+    let padded_footer = format!("{:<width$}", footer_text, width = popup_chunks[3].width as usize);
     let footer = Paragraph::new(padded_footer)
         .style(Style::default().fg(colors.footer_fg).bg(colors.footer_bg));
-    frame.render_widget(footer, popup_chunks[2]);
+    frame.render_widget(footer, popup_chunks[3]);
 }

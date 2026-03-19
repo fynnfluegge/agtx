@@ -309,6 +309,8 @@ fn test_render_shell_popup_custom_colors() {
         header_bg: Color::Blue,
         footer_fg: Color::Yellow,
         footer_bg: Color::Magenta,
+        escalation_fg: Color::Black,
+        escalation_bg: Color::Yellow,
     };
 
     let lines: Vec<Line> = vec![Line::from("content")];

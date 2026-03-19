@@ -207,6 +207,7 @@ fn test_create_pr_with_content_success() {
         plugin: None,
         cycle: 1,
         referenced_tasks: None,
+        escalation_note: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -296,6 +297,7 @@ fn test_create_pr_with_content_no_changes() {
         plugin: None,
         cycle: 1,
         referenced_tasks: None,
+        escalation_note: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -355,6 +357,7 @@ fn test_create_pr_with_content_push_failure() {
         plugin: None,
         cycle: 1,
         referenced_tasks: None,
+        escalation_note: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -411,6 +414,7 @@ fn test_push_changes_to_existing_pr_success() {
         plugin: None,
         cycle: 1,
         referenced_tasks: None,
+        escalation_note: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -464,6 +468,7 @@ fn test_push_changes_to_existing_pr_no_changes() {
         plugin: None,
         cycle: 1,
         referenced_tasks: None,
+        escalation_note: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -500,6 +505,7 @@ fn test_push_changes_to_existing_pr_no_url() {
         plugin: None,
         cycle: 1,
         referenced_tasks: None,
+        escalation_note: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -6133,6 +6139,201 @@ fn test_deliver_orchestrator_notifications_noop_when_no_notifications() {
 
     app.deliver_orchestrator_notifications();
     // No panic = correct (send_keys not called)
+}
+
+// =============================================================================
+// Tests for stuck-task notification logic in apply_session_refresh
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_stuck_task_notification_fires_after_1_min_idle() {
+    // Task Idle for ≥60s with orchestrator active → notification written to DB
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    ).unwrap();
+
+    let db = app.state.db.as_ref().unwrap();
+    let mut task = Task::new("stuck task", "claude", "test-project");
+    task.id = "t1".to_string();
+    task.status = TaskStatus::Running;
+    db.create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
+
+    app.state.orchestrator_session = Some("orch-session".to_string());
+    // Simulate task has been Idle for 65 seconds
+    app.state.stuck_task_idle_since.insert(
+        "t1".to_string(),
+        Instant::now() - std::time::Duration::from_secs(65),
+    );
+
+    let result = SessionRefreshResult {
+        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Idle, false)],
+    };
+    app.apply_session_refresh(result);
+
+    let notifs = app.state.db.as_ref().unwrap().peek_notifications().unwrap();
+    assert!(!notifs.is_empty(), "should have created a stuck-task notification");
+    assert!(notifs[0].message.contains("stuck task"));
+    assert!(notifs[0].message.contains("running"));
+    assert!(notifs[0].message.contains("idle"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_stuck_task_notification_does_not_fire_before_1_min() {
+    // Task Idle for only 30s → no notification yet
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    ).unwrap();
+
+    let db = app.state.db.as_ref().unwrap();
+    let mut task = Task::new("pending task", "claude", "test-project");
+    task.id = "t1".to_string();
+    task.status = TaskStatus::Running;
+    db.create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
+
+    app.state.orchestrator_session = Some("orch-session".to_string());
+    app.state.stuck_task_idle_since.insert(
+        "t1".to_string(),
+        Instant::now() - std::time::Duration::from_secs(30),
+    );
+
+    let result = SessionRefreshResult {
+        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Idle, false)],
+    };
+    app.apply_session_refresh(result);
+
+    let notifs = app.state.db.as_ref().unwrap().peek_notifications().unwrap();
+    assert!(notifs.is_empty(), "should not have fired notification before 1 minute");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_stuck_task_notification_fires_once_per_phase() {
+    // Guard ensures notification fires only once even across multiple refreshes
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    ).unwrap();
+
+    let db = app.state.db.as_ref().unwrap();
+    let mut task = Task::new("my task", "claude", "test-project");
+    task.id = "t1".to_string();
+    task.status = TaskStatus::Running;
+    db.create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
+
+    app.state.orchestrator_session = Some("orch-session".to_string());
+    app.state.stuck_task_idle_since.insert(
+        "t1".to_string(),
+        Instant::now() - std::time::Duration::from_secs(65),
+    );
+
+    let make_result = || SessionRefreshResult {
+        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Idle, false)],
+    };
+
+    app.apply_session_refresh(make_result());
+    app.apply_session_refresh(make_result());
+    app.apply_session_refresh(make_result());
+
+    let notifs = app.state.db.as_ref().unwrap().peek_notifications().unwrap();
+    assert_eq!(notifs.len(), 1, "notification should fire exactly once");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_stuck_task_notification_not_fired_without_orchestrator() {
+    // No orchestrator_session → no notification even after 1+ min idle
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    ).unwrap();
+
+    let db = app.state.db.as_ref().unwrap();
+    let mut task = Task::new("my task", "claude", "test-project");
+    task.id = "t1".to_string();
+    task.status = TaskStatus::Running;
+    db.create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
+
+    // No orchestrator
+    app.state.orchestrator_session = None;
+    app.state.stuck_task_idle_since.insert(
+        "t1".to_string(),
+        Instant::now() - std::time::Duration::from_secs(65),
+    );
+
+    let result = SessionRefreshResult {
+        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Idle, false)],
+    };
+    app.apply_session_refresh(result);
+
+    let notifs = app.state.db.as_ref().unwrap().peek_notifications().unwrap();
+    assert!(notifs.is_empty(), "no notification without orchestrator");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_stuck_task_idle_since_cleared_when_not_idle() {
+    // Task transitions out of Idle → idle_since timer is cleared
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    ).unwrap();
+
+    let db = app.state.db.as_ref().unwrap();
+    let mut task = Task::new("my task", "claude", "test-project");
+    task.id = "t1".to_string();
+    task.status = TaskStatus::Running;
+    db.create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
+
+    app.state.orchestrator_session = Some("orch-session".to_string());
+    app.state.stuck_task_idle_since.insert(
+        "t1".to_string(),
+        Instant::now() - std::time::Duration::from_secs(30),
+    );
+
+    // Task is now Working (no longer Idle)
+    let result = SessionRefreshResult {
+        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Working, false)],
+    };
+    app.apply_session_refresh(result);
+
+    assert!(
+        !app.state.stuck_task_idle_since.contains_key("t1"),
+        "idle_since timer should be cleared when task is no longer Idle"
+    );
 }
 
 

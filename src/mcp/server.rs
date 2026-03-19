@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::Command;
 
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -36,11 +37,14 @@ pub struct MoveTaskParams {
     /// The task ID (UUID)
     #[schemars(description = "The task ID (UUID)")]
     pub task_id: String,
-    /// Action: "research", "move_forward", "move_to_planning", "move_to_running", "move_to_review", "move_to_done", "resume"
+    /// Action: "research", "move_forward", "move_to_planning", "move_to_running", "move_to_review", "move_to_done", "resume", "escalate_to_user"
     #[schemars(
-        description = "Action: research (start research for backlog task), move_forward, move_to_planning, move_to_running, move_to_review, move_to_done, resume"
+        description = "Action: research (start research for backlog task), move_forward, move_to_planning, move_to_running, move_to_review, move_to_done, resume, escalate_to_user"
     )]
     pub action: String,
+    /// Optional reason (used with escalate_to_user action)
+    #[schemars(description = "Optional reason, used with escalate_to_user action")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -59,6 +63,26 @@ pub struct CheckConflictsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetNotificationsParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadPaneParams {
+    /// The task ID (UUID)
+    #[schemars(description = "The task ID (UUID)")]
+    pub task_id: String,
+    /// Number of lines to read from the end of the pane (default 50)
+    #[schemars(description = "Number of lines to read from the end of the pane (default 50)")]
+    pub lines: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SendToTaskParams {
+    /// The task ID (UUID)
+    #[schemars(description = "The task ID (UUID)")]
+    pub task_id: String,
+    /// Message to send to the task's agent pane (followed by Enter)
+    #[schemars(description = "Message to send to the task's agent pane (followed by Enter)")]
+    pub message: String,
+}
 
 // === Response types ===
 
@@ -142,6 +166,22 @@ struct GetNotificationsResponse {
     notifications: Vec<NotificationItem>,
 }
 
+#[derive(Serialize)]
+struct ReadPaneResponse {
+    task_id: String,
+    session_name: String,
+    content: String,
+    lines_requested: i32,
+}
+
+#[derive(Serialize)]
+struct SendToTaskResponse {
+    task_id: String,
+    session_name: String,
+    success: bool,
+    message: String,
+}
+
 // === MCP Server ===
 
 #[derive(Debug, Clone)]
@@ -183,9 +223,11 @@ impl AgtxMcpServer {
             }
             TaskStatus::Planning => {
                 actions.push("move_forward".to_string());
+                actions.push("escalate_to_user".to_string());
             }
             TaskStatus::Running => {
                 actions.push("move_forward".to_string());
+                actions.push("escalate_to_user".to_string());
             }
             TaskStatus::Review => {
                 actions.push("move_to_done".to_string());
@@ -290,7 +332,7 @@ impl AgtxMcpServer {
         }
     }
 
-    #[tool(description = "Queue a task state transition. The agtx TUI will process it and execute all side effects (worktree creation, agent spawning, etc). Use get_transition_status to check completion. Actions: research (start research phase for backlog task), move_forward, move_to_planning, move_to_running, move_to_review, move_to_done, resume")]
+    #[tool(description = "Queue a task state transition. The agtx TUI will process it and execute all side effects (worktree creation, agent spawning, etc). Use get_transition_status to check completion. Actions: research (start research phase for backlog task), move_forward, move_to_planning, move_to_running, move_to_review, move_to_done, resume, escalate_to_user (flag task for user attention with an optional reason)")]
     fn move_task(&self, Parameters(params): Parameters<MoveTaskParams>) -> String {
         let valid_actions = [
             "research",
@@ -300,6 +342,7 @@ impl AgtxMcpServer {
             "move_to_review",
             "move_to_done",
             "resume",
+            "escalate_to_user",
         ];
         if !valid_actions.contains(&params.action.as_str()) {
             return format!(
@@ -318,7 +361,8 @@ impl AgtxMcpServer {
                     Err(e) => return format!("Error checking task: {}", e),
                 }
 
-                let req = TransitionRequest::new(&params.task_id, &params.action);
+                let mut req = TransitionRequest::new(&params.task_id, &params.action);
+                req.reason = params.reason.clone();
                 let request_id = req.id.clone();
 
                 match db.create_transition_request(&req) {
@@ -463,6 +507,102 @@ impl AgtxMcpServer {
                 Err(e) => format!("Error fetching notifications: {}", e),
             },
             Err(e) => e,
+        }
+    }
+
+    #[tool(description = "Read the last N lines of a task's agent tmux pane. Use this to understand what the agent is showing — e.g., when a task has been idle for a while. Returns pane content as text.")]
+    fn read_pane_content(&self, Parameters(params): Parameters<ReadPaneParams>) -> String {
+        let db = match self.open_project_db() {
+            Ok(db) => db,
+            Err(e) => return e,
+        };
+
+        let task = match db.get_task(&params.task_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => return format!("Task not found: {}", params.task_id),
+            Err(e) => return format!("Error getting task: {}", e),
+        };
+
+        let session_name = match task.session_name {
+            Some(ref s) => s.clone(),
+            None => return format!("Task {} has no active session", params.task_id),
+        };
+
+        let lines = params.lines.unwrap_or(50);
+        let lines_arg = format!("-{}", lines);
+
+        let output = Command::new("tmux")
+            .args(["-L", "agtx", "capture-pane", "-t", &session_name, "-p", "-S", &lines_arg])
+            .output();
+
+        match output {
+            Ok(out) => {
+                let content = String::from_utf8_lossy(&out.stdout).to_string();
+                let response = ReadPaneResponse {
+                    task_id: params.task_id,
+                    session_name,
+                    content,
+                    lines_requested: lines,
+                };
+                serde_json::to_string_pretty(&response)
+                    .unwrap_or_else(|e| format!("Error serializing: {}", e))
+            }
+            Err(e) => format!("Error reading pane content: {}", e),
+        }
+    }
+
+    #[tool(description = "Send a message to a task's agent pane (followed by Enter). Only works for tasks in Planning or Running status. Use this to nudge a stuck agent, answer a CLI prompt (e.g. 'y' for yes), or provide guidance.")]
+    fn send_to_task(&self, Parameters(params): Parameters<SendToTaskParams>) -> String {
+        let db = match self.open_project_db() {
+            Ok(db) => db,
+            Err(e) => return e,
+        };
+
+        let task = match db.get_task(&params.task_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => return format!("Task not found: {}", params.task_id),
+            Err(e) => return format!("Error getting task: {}", e),
+        };
+
+        // Only allow sending to active phases
+        if !matches!(task.status, TaskStatus::Planning | TaskStatus::Running) {
+            return format!(
+                "Error: task is not in an active phase (current: {}). send_to_task only works for Planning or Running tasks.",
+                task.status.as_str()
+            );
+        }
+
+        let session_name = match task.session_name {
+            Some(ref s) => s.clone(),
+            None => return format!("Task {} has no active session", params.task_id),
+        };
+
+        // Send the message text
+        let send_text = Command::new("tmux")
+            .args(["-L", "agtx", "send-keys", "-t", &session_name, &params.message])
+            .output();
+
+        if let Err(e) = send_text {
+            return format!("Error sending message: {}", e);
+        }
+
+        // Send Enter
+        let send_enter = Command::new("tmux")
+            .args(["-L", "agtx", "send-keys", "-t", &session_name, "Enter"])
+            .output();
+
+        match send_enter {
+            Ok(_) => {
+                let response = SendToTaskResponse {
+                    task_id: params.task_id,
+                    session_name,
+                    success: true,
+                    message: format!("Message sent: {}", params.message),
+                };
+                serde_json::to_string_pretty(&response)
+                    .unwrap_or_else(|e| format!("Error serializing: {}", e))
+            }
+            Err(e) => format!("Error sending Enter: {}", e),
         }
     }
 }

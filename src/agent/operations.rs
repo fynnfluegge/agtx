@@ -27,6 +27,14 @@ pub trait AgentOperations: Send + Sync {
     /// Build the shell command to start the agent interactively.
     /// When prompt is empty, the agent starts with no initial message.
     fn build_interactive_command(&self, prompt: &str) -> String;
+
+    /// Build the full shell command to run this agent as an orchestrator.
+    /// Includes MCP registration (if supported by the agent) and cleanup on exit.
+    /// Default implementation: no MCP, just launches the agent interactively.
+    fn build_orchestrator_command(&self, mcp_json: &str, agtx_bin: &str) -> String {
+        let _ = (mcp_json, agtx_bin);
+        self.build_interactive_command("")
+    }
 }
 
 /// Generic agent implementation that works with any Agent config
@@ -71,6 +79,18 @@ impl AgentOperations for CodingAgent {
 
     fn build_interactive_command(&self, prompt: &str) -> String {
         self.agent.build_interactive_command(prompt)
+    }
+
+    fn build_orchestrator_command(&self, mcp_json: &str, _agtx_bin: &str) -> String {
+        match self.agent.name.as_str() {
+            "claude" => format!(
+                "claude mcp add-json agtx '{}' --scope local && {}; claude mcp remove agtx --scope local",
+                mcp_json,
+                self.build_interactive_command("")
+            ),
+            // To add a new orchestrator agent, add a match arm here.
+            _ => self.build_interactive_command(""),
+        }
     }
 }
 

@@ -71,6 +71,7 @@ pub struct Task {
     pub plugin: Option<String>,
     pub cycle: i32,
     pub referenced_tasks: Option<String>,
+    pub escalation_note: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -94,6 +95,7 @@ impl Task {
             plugin: None,
             cycle: 1,
             referenced_tasks: None,
+            escalation_note: None,
             created_at: now,
             updated_at: now,
         }
@@ -150,6 +152,7 @@ pub struct TransitionRequest {
     pub id: String,
     pub task_id: String,
     pub action: String,
+    pub reason: Option<String>,
     pub requested_at: DateTime<Utc>,
     pub processed_at: Option<DateTime<Utc>>,
     pub error: Option<String>,
@@ -161,6 +164,7 @@ impl TransitionRequest {
             id: uuid::Uuid::new_v4().to_string(),
             task_id: task_id.into(),
             action: action.into(),
+            reason: None,
             requested_at: Utc::now(),
             processed_at: None,
             error: None,

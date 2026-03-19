@@ -235,6 +235,10 @@ struct AppState {
     pane_content_hashes: HashMap<String, (u64, Instant)>,
     // Guard: task IDs for which merge-conflict check has already been performed
     merge_conflict_checked: HashSet<String>,
+    // Guard: task IDs for which stuck-task notification has been fired (reset on phase advance)
+    stuck_task_notified: HashSet<String>,
+    // When each task first became Idle (for stuck-task detection)
+    stuck_task_idle_since: HashMap<String, Instant>,
     cached_plugin: Option<Option<WorkflowPlugin>>,
     // Transient warning message shown in footer (auto-clears after a few seconds)
     warning_message: Option<(String, Instant)>,
@@ -552,6 +556,8 @@ impl App {
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
                 merge_conflict_checked: HashSet::new(),
+                stuck_task_notified: HashSet::new(),
+                stuck_task_idle_since: HashMap::new(),
                 cached_plugin: None,
                 warning_message: None,
                 plugin_select_popup: None,
@@ -700,6 +706,8 @@ impl App {
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
                 merge_conflict_checked: HashSet::new(),
+                stuck_task_notified: HashSet::new(),
+                stuck_task_idle_since: HashMap::new(),
                 cached_plugin: None,
                 warning_message: None,
                 plugin_select_popup: None,
@@ -1781,6 +1789,8 @@ impl App {
             header_bg: hex_to_color(&theme.color_popup_header),
             footer_fg: Color::Black,
             footer_bg: hex_to_color(&theme.color_dimmed),
+            escalation_fg: Color::Black,
+            escalation_bg: Color::Yellow,
         };
 
         shell_popup::render_shell_popup(popup, frame, popup_area, styled_lines, &colors);
@@ -1838,7 +1848,13 @@ impl App {
                 Some((PhaseStatus::Exited, _)) => Span::styled("\u{2717} ", Style::default().fg(Color::Red)),
                 None => Span::raw(""),
             };
-            let title_spans = Line::from(vec![indicator, Span::styled(title, title_style)]);
+            // Escalation warning indicator
+            let warn_span = if task.escalation_note.is_some() {
+                Span::styled("\u{26a0} ", Style::default().fg(hex_to_color(&theme.color_accent)).bold())
+            } else {
+                Span::raw("")
+            };
+            let title_spans = Line::from(vec![indicator, warn_span, Span::styled(title, title_style)]);
             let title_line = Paragraph::new(title_spans);
             let title_area = Rect {
                 x: inner.x,
@@ -2580,6 +2596,27 @@ impl App {
         if let Some(ref mut popup) = self.state.shell_popup {
             let window_name = popup.window_name.clone();
             let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+            // Dismiss escalation note on any key press (before forwarding)
+            if popup.escalation_note.is_some() {
+                let task_id = popup.task_id.clone();
+                popup.escalation_note = None;
+                if let Some(id) = task_id {
+                    if let Some(db) = &self.state.db {
+                        if let Ok(Some(mut task)) = db.get_task(&id) {
+                            task.escalation_note = None;
+                            task.updated_at = chrono::Utc::now();
+                            let _ = db.update_task(&task);
+                        }
+                    }
+                    // Update the in-memory task list too
+                    if let Some(t) = self.state.board.tasks.iter_mut().find(|t| t.id == id) {
+                        t.escalation_note = None;
+                    }
+                }
+                // Return early so the keypress only dismisses the banner, not forwarded
+                return Ok(());
+            }
 
             match key.code {
                 // Ctrl+q = close popup
@@ -4346,6 +4383,20 @@ impl App {
                 }
                 self.move_review_to_running(&req.task_id)?;
             }
+            "escalate_to_user" => {
+                if !matches!(task.status, TaskStatus::Planning | TaskStatus::Running) {
+                    anyhow::bail!(
+                        "escalate_to_user is only valid for Planning or Running tasks (current: {})",
+                        task.status.as_str()
+                    );
+                }
+                task.escalation_note = req.reason.clone().or_else(|| Some("Needs attention".to_string()));
+                task.updated_at = chrono::Utc::now();
+                if let Some(db) = &self.state.db {
+                    db.update_task(&task)?;
+                }
+                self.refresh_tasks()?;
+            }
             other => {
                 anyhow::bail!("Unknown action: {}", other);
             }
@@ -4488,16 +4539,7 @@ impl App {
         });
         let mcp_json_str = mcp_json.to_string().replace('\'', "'\\''");
 
-        // Build agent command: register MCP in local scope, launch agent, clean up on exit
-        // --scope local stores in ~/.claude.json tied to project path (not in project files)
-        let agent_base = agent.build_interactive_command("");
-        let agent_cmd = match default_agent.as_str() {
-            "claude" => format!(
-                "claude mcp add-json agtx '{}' --scope local && {}; claude mcp remove agtx --scope local",
-                mcp_json_str, agent_base
-            ),
-            _ => agent_base,
-        };
+        let agent_cmd = agent.build_orchestrator_command(&mcp_json_str, &agtx_bin);
 
         // Ensure project tmux session exists
         ensure_project_tmux_session(&project_name, &project_path, self.state.tmux_ops.as_ref());
@@ -4547,7 +4589,11 @@ impl App {
     fn open_selected_task(&mut self) -> Result<()> {
         if let Some(task) = self.state.board.selected_task() {
             if let Some(window_name) = &task.session_name.clone() {
+                let task_id = task.id.clone();
+                let escalation_note = task.escalation_note.clone();
                 let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
+                popup.task_id = Some(task_id);
+                popup.escalation_note = escalation_note;
 
                 // Resize tmux window to match popup dimensions (uses same constants as draw_shell_popup)
                 if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
@@ -4917,6 +4963,40 @@ impl App {
                     }
                 }
             }
+
+            // Stuck-task notification: fire once when Planning/Running task has been Idle for 1+ min
+            if matches!(task_status.status, TaskStatus::Planning | TaskStatus::Running)
+                && phase == PhaseStatus::Idle
+                && self.state.orchestrator_session.is_some()
+            {
+                let stuck_key = format!("{}:{}", task_status.task_id, task_status.status.as_str());
+                if !self.state.stuck_task_notified.contains(&stuck_key) {
+                    // Track when this task first became Idle
+                    let idle_since = self.state.stuck_task_idle_since
+                        .entry(task_status.task_id.clone())
+                        .or_insert(now);
+
+                    if now.duration_since(*idle_since) >= std::time::Duration::from_secs(60) {
+                        self.state.stuck_task_notified.insert(stuck_key);
+
+                        if let Some(db) = &self.state.db {
+                            let task_title = self.state.board.tasks.iter()
+                                .find(|t| t.id == task_status.task_id)
+                                .map(|t| t.title.as_str())
+                                .unwrap_or("unknown");
+                            let short_id = if task_status.task_id.len() >= 8 { &task_status.task_id[..8] } else { &task_status.task_id };
+                            let notif = crate::db::Notification::new(format!(
+                                "Task \"{}\" ({}) has been idle for 1m in phase: {}",
+                                task_title, short_id, task_status.status.as_str()
+                            ));
+                            let _ = db.create_notification(&notif);
+                        }
+                    }
+                }
+            } else if phase != PhaseStatus::Idle {
+                // Task is no longer idle — reset the idle-since timer
+                self.state.stuck_task_idle_since.remove(&task_status.task_id);
+            }
         }
 
         self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
@@ -4960,6 +5040,8 @@ impl App {
 
         // Clear per-task caches from previous project
         self.state.merge_conflict_checked.clear();
+        self.state.stuck_task_notified.clear();
+        self.state.stuck_task_idle_since.clear();
 
         // Reload tasks for new project
         self.refresh_tasks()?;
