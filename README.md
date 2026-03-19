@@ -423,6 +423,8 @@ agtx --experimental   # then press O
 - Monitors tasks in Planning and Running
 - Advances tasks automatically as phases complete (Planning → Running → Review)
 - Respects plugin phase rules — checks `allowed_actions` before each transition
+- Detects stuck tasks (idle for 1+ minute without a phase artifact) and reads the agent pane to diagnose the cause
+- Nudges stuck agents, answers CLI prompts automatically, or escalates to you with a reason when human input is needed
 
 **You triage. It executes.** Move tasks from Backlog into Planning or Running — the orchestrator handles the rest. Merging is your call.
 
@@ -451,13 +453,17 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 | `get_transition_status` | Check if a queued transition completed or errored |
 | `check_conflicts` | Non-destructive merge conflict detection against the default branch |
 | `get_notifications` | Manually fetch pending notifications (backup — usually pushed automatically) |
+| `read_pane_content` | Read the last N lines of a task's agent tmux pane |
+| `send_to_task` | Send a message to a task's agent pane (Planning/Running only) |
 
 **How it works:**
 1. When you press `O`, the TUI registers the MCP server with the orchestrator agent via `claude mcp add-json --scope local`
 2. The orchestrator receives phase completion notifications pushed to its tmux pane when idle
 3. It reacts by calling `get_task` to check `allowed_actions`, then `move_task` to advance the task
 4. The TUI processes the transition request, executes all side effects (agent switching, skill deployment, prompt sending), and updates the database
-5. MCP registration is cleaned up when the orchestrator is stopped
+5. If a task has been idle for 1+ minute without a phase artifact, the orchestrator is notified — it reads the pane with `read_pane_content`, then either nudges the agent with `send_to_task` or calls `move_task` with `escalate_to_user` to flag it for your attention
+6. Escalated tasks show a `⚠` badge on the kanban board; opening the task popup shows the reason and dismisses the flag
+7. MCP registration is cleaned up when the orchestrator is stopped
 
 ## Contributing
 
