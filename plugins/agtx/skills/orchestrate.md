@@ -92,26 +92,108 @@ Backlog → Research → Planning → Running → Review
 
 When you receive a notification like:
 ```
-Task "fix-auth" (abc12345) has been idle for 5m in phase: running
+Task "fix-auth" (abc12345) has been idle for 1m in phase: running
 ```
 
 1. Call `read_pane_content(task_id)` to see what the agent is showing.
-2. Analyze what you see:
-   - **Agent asking a domain question** (ends with `?`, "Should I...", "Do you want to...",
-     "Which approach...", anything requiring the user's judgment about the project):
-     Call `move_task` with `action: "escalate_to_user"` and set `reason` to a brief
-     summary of what the agent is asking. **Do NOT answer domain questions on the user's behalf.**
-   - **CLI confirmation prompt** (`[y/N]`, `[Y/n]`, numbered menu like `1)`, `2)`, `3)`,
-     "Press Enter to continue", "Continue? (yes/no)"):
-     Call `send_to_task` with the appropriate response (e.g. `"y"`, `"1"`, `""`).
-     Then call `read_pane_content` again after a few seconds to verify it was dismissed.
-   - **Agent appears stuck on an error, in a loop, or confused**:
-     Compose a short nudge prompt summarizing what you see and suggesting the agent
-     tries a different approach. Call `send_to_task` with that nudge.
-     If a second idle notification arrives for the same task after your nudge,
-     escalate to the user with `escalate_to_user`.
+2. Classify what you see using the decision rules below, then act accordingly.
 3. After acting, output `[agtx:idle]` on its own line and wait for the next notification.
 
 **Important:** `escalate_to_user` shows a visible warning banner to the user in the TUI
 with your reason text. Keep the reason concise (one sentence). The user will see it when
 they open the task popup.
+
+---
+
+### Decision Rules
+
+#### Yes/No confirmation prompt
+
+Pattern: `[y/N]`, `[Y/n]`, `[y/n]`, `(yes/no)`, `Continue?`, `Press Enter to continue`
+
+- The **uppercase letter** is the default — send it.
+- `[Y/n]` → send `y`
+- `[y/N]` → send `n`
+- `[y/n]` (equal case) → send `y`
+- "Press Enter to continue" → send `""`
+
+After sending, call `read_pane_content` to confirm the prompt was dismissed.
+
+**Examples:**
+```
+Remove 14 packages? [y/N]
+→ send_to_task: "n"
+
+Proceed with installation? [Y/n]
+→ send_to_task: "y"
+
+Press Enter to continue
+→ send_to_task: ""
+```
+
+---
+
+#### Numbered option menu
+
+Pattern: A list of numbered options (`1)`, `2)`, etc.) with a question above.
+
+- If **one option is marked as recommended** (e.g. `(recommended)`, `[default]`, `*`,
+  `(default)`, highlighted with `>`): send that option's number.
+- If **no option is marked as recommended**: escalate to the user — do not guess.
+
+After sending a selection, call `read_pane_content` to confirm the prompt was dismissed.
+
+**Examples:**
+```
+? Select package manager
+  1) npm (recommended)
+  2) yarn
+  3) pnpm
+→ send_to_task: "1"
+
+? Choose database adapter
+  1) PostgreSQL
+  2) MySQL
+  3) SQLite
+→ escalate_to_user: "Agent is asking which database adapter to use — no default recommended"
+
+? Initialize git repository?
+> Yes (default)
+  No
+→ send_to_task: "1"
+```
+
+---
+
+#### Domain question from the agent
+
+Pattern: The agent (not a CLI tool) is asking a question that requires project knowledge,
+architectural judgment, or user preference. Indicators: the question is in prose, refers
+to the task's codebase, mentions trade-offs, or asks "Should I...", "Which approach...",
+"Do you want me to...".
+
+**Always escalate. Never answer domain questions on the user's behalf.**
+
+Call `move_task` with `action: "escalate_to_user"` and set `reason` to a one-sentence
+summary of what the agent is asking.
+
+**Examples:**
+```
+Should I split this into two separate modules or keep it in one file?
+→ escalate_to_user: "Agent is asking whether to split the module — needs user decision"
+
+I can implement this with either a REST API or GraphQL. Which do you prefer?
+→ escalate_to_user: "Agent is asking whether to use REST or GraphQL — needs user decision"
+```
+
+---
+
+#### Agent stuck on an error or in a loop
+
+Pattern: The same error message repeats, the agent is spinning, or the pane shows no
+progress despite prior nudges.
+
+- Compose a short nudge based on what you see (e.g. "The last approach failed with X.
+  Try Y instead.") and call `send_to_task`.
+- If a **second** idle notification arrives for the same task after your nudge,
+  escalate to the user with `escalate_to_user` — do not keep nudging indefinitely.
