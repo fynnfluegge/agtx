@@ -4974,9 +4974,14 @@ impl App {
             }
 
             // Stuck-task notification: fire once when Planning/Running task has been Idle for 1+ min
+            // Void plugin tasks are fully user-managed — no stuck notifications
+            let task_plugin = self.state.board.tasks.iter()
+                .find(|t| t.id == task_status.task_id)
+                .and_then(|t| t.plugin.as_deref());
             if matches!(task_status.status, TaskStatus::Planning | TaskStatus::Running)
                 && phase == PhaseStatus::Idle
                 && self.state.orchestrator_session.is_some()
+                && should_send_stuck_notification(task_plugin)
             {
                 let stuck_key = format!("{}:{}", task_status.task_id, task_status.status.as_str());
                 if !self.state.stuck_task_notified.contains(&stuck_key) {
@@ -6230,6 +6235,12 @@ fn wait_for_prompt_trigger(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, tri
         }
     }
     false
+}
+
+/// Returns true if a stuck-task notification should be sent for this task.
+/// Void plugin tasks are fully user-managed and never produce stuck notifications.
+fn should_send_stuck_notification(plugin_name: Option<&str>) -> bool {
+    plugin_name != Some("void")
 }
 
 /// Check if the phase artifact exists for a task in its worktree.

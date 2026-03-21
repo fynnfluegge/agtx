@@ -7332,3 +7332,19 @@ fn test_switch_agent_cursor_sends_ctrl_c_not_exit() {
 
     switch_agent_in_tmux(&mock_tmux, "proj:task", "cursor", "agent --yolo");
 }
+
+#[test]
+fn test_should_send_stuck_notification_void_plugin() {
+    // Void plugin tasks must never produce stuck notifications
+    assert!(!should_send_stuck_notification(Some("void")));
+}
+
+#[test]
+fn test_should_send_stuck_notification_other_plugins() {
+    // All non-void plugins should produce stuck notifications
+    assert!(should_send_stuck_notification(Some("agtx")));
+    assert!(should_send_stuck_notification(Some("gsd")));
+    assert!(should_send_stuck_notification(Some("bmad")));
+    // No plugin set (None) should also produce notifications
+    assert!(should_send_stuck_notification(None));
+}
