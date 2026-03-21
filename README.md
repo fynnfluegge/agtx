@@ -38,9 +38,6 @@ AI coding tools give you one agent, one task, one terminal. agtx gives you a **k
 
 With the orchestrator, you don't even manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, review and resolving conflicts — while you focus on what matters: research, defining tasks, and merging changes.
 
-> ![!NOTE]
-> agtx is designed to be agent- and workflow-agnostic. It works with any
-
 > [!TIP]
 > Check out the [Contributing](#contributing) section or have a look at [`good first issues`](https://github.com/fynnfluegge/agtx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) to get involved and become a contributor ⭐️ 
 
@@ -48,10 +45,14 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 
 - **Orchestrator agent**: A dedicated AI agent that autonomously manages your kanban board via [MCP](https://modelcontextprotocol.io) — delegates to coding agents, advances phases, checks for merge conflicts ([experimental](#orchestrator-agent-experimental))
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching
-- **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as you want, simultaneously
+- **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — or define your own with a single TOML file
-- **Multi-project dashboard**: Manage agent sessions across all your projects from one place
+- **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI
 - **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode)  | [Cursor Agent](https://cursor.com/docs/cli/overview) | [Copilot](https://github.com/github/copilot-cli)
+
+> [!NOTE]
+> Just need a plain coding agent session manager with **full human-in-the-loop control** and **no automatic spec-driven skill execution and orchestration** on advancing tasks?
+> Choose the **`void` plugin** and enjoy the kanban coding agent board - with full human control.
 
 ## Quick Start
 
