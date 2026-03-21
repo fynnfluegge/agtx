@@ -52,6 +52,7 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 
 > [!NOTE]
 > Just need a plain coding agent session manager with **full human-in-the-loop control** and **no automatic spec-driven skill execution and orchestration** on advancing tasks?
+>
 > Choose the **`void` plugin** and enjoy the kanban coding agent board - with full human control.
 
 ## Quick Start
