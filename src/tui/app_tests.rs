@@ -1544,6 +1544,7 @@ fn test_setup_task_worktree_success() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     );
 
     assert!(result.is_ok());
@@ -1597,6 +1598,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     )
     .unwrap();
 
@@ -1658,6 +1660,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     );
 
     // Should succeed despite worktree creation failure (uses fallback path)
@@ -1714,6 +1717,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     );
 
     // Should propagate the error
@@ -1766,6 +1770,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     );
 
     assert!(result.is_ok());
@@ -1821,6 +1826,7 @@ fn test_setup_task_worktree_passes_init_config() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     );
 
     assert!(result.is_ok());

@@ -473,3 +473,83 @@ fn test_consume_notifications_atomic_under_concurrent_consumers() {
         "DB must be drained after concurrent consume"
     );
 }
+
+// === Stable Hash and DB Permissions Tests (Fix 3, Fix 7) ===
+
+use tempfile::TempDir;
+use std::path::Path;
+
+#[test]
+fn test_open_project_same_path_returns_same_db() {
+    let temp_dir = TempDir::new().unwrap();
+    let project_path = temp_dir.path();
+
+    // Open twice with the same path — should get the same database (same tasks)
+    let db1 = Database::open_project(project_path).unwrap();
+    let task = Task::new("Persistence test", "claude", "proj");
+    db1.create_task(&task).unwrap();
+    drop(db1);
+
+    let db2 = Database::open_project(project_path).unwrap();
+    let retrieved = db2.get_task(&task.id).unwrap();
+    assert!(retrieved.is_some());
+    assert_eq!(retrieved.unwrap().title, "Persistence test");
+}
+
+#[test]
+fn test_open_project_different_paths_are_isolated() {
+    let temp1 = TempDir::new().unwrap();
+    let temp2 = TempDir::new().unwrap();
+
+    let db1 = Database::open_project(temp1.path()).unwrap();
+    let task = Task::new("Only in db1", "claude", "proj");
+    db1.create_task(&task).unwrap();
+    drop(db1);
+
+    let db2 = Database::open_project(temp2.path()).unwrap();
+    let tasks = db2.get_all_tasks().unwrap();
+    assert!(tasks.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_project_db_file_permissions_are_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().unwrap();
+    let _db = Database::open_project(temp_dir.path()).unwrap();
+
+    // Find the DB file in the config directory
+    let config_dir = directories::ProjectDirs::from("", "", "agtx")
+        .unwrap();
+    let projects_dir = config_dir.config_dir().join("projects");
+
+    if projects_dir.exists() {
+        for entry in std::fs::read_dir(&projects_dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().extension().map_or(false, |e| e == "db") {
+                let perms = std::fs::metadata(entry.path()).unwrap().permissions();
+                let mode = perms.mode() & 0o777;
+                assert_eq!(mode, 0o600, "DB file should be owner-only read/write");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_global_db_file_permissions_are_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _db = Database::open_global().unwrap();
+
+    let config_dir = directories::ProjectDirs::from("", "", "agtx")
+        .unwrap();
+    let db_path = config_dir.config_dir().join("index.db");
+
+    if db_path.exists() {
+        let perms = std::fs::metadata(&db_path).unwrap().permissions();
+        let mode = perms.mode() & 0o777;
+        assert_eq!(mode, 0o600, "Global DB file should be owner-only read/write");
+    }
+}

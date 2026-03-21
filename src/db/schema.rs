@@ -29,16 +29,46 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
 
+        // Migration: if the new-hash DB doesn't exist, check for an old-hash DB and rename it
+        if !db_path.exists() {
+            let old_hash = Self::hash_path_legacy(&path_str);
+            let old_db_path = config_dir
+                .config_dir()
+                .join("projects")
+                .join(format!("{}.db", old_hash));
+            if old_db_path.exists() {
+                let _ = std::fs::rename(&old_db_path, &db_path);
+            }
+        }
+
         let conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
+
+        // Harden file permissions: owner-only read/write
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
+        }
 
         let db = Self { conn };
         db.init_project_schema()?;
         Ok(db)
     }
 
-    /// Create a stable hash from a path string for database filename
+    /// Create a stable hash from a path string for database filename.
+    /// Uses SHA-256 (truncated to 16 hex chars) for cross-version stability.
     fn hash_path(path: &str) -> String {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(path.as_bytes());
+        let result = hasher.finalize();
+        // Take first 8 bytes (16 hex chars) — same length as the old DefaultHasher output
+        format!("{:016x}", u64::from_be_bytes(result[..8].try_into().unwrap()))
+    }
+
+    /// Legacy hash function (DefaultHasher). Used only for migration from pre-SHA256 databases.
+    fn hash_path_legacy(path: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -60,6 +90,13 @@ impl Database {
 
         let conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open global database at {:?}", db_path))?;
+
+        // Harden file permissions: owner-only read/write
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
+        }
 
         let db = Self { conn };
         db.init_global_schema()?;
@@ -95,6 +132,11 @@ impl Database {
     }
 
     fn init_project_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;",
+        )?;
+
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS tasks (
@@ -180,6 +222,11 @@ impl Database {
     }
 
     fn init_global_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;",
+        )?;
+
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS projects (

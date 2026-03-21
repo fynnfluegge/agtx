@@ -150,6 +150,18 @@ pub fn initialize_worktree(
     for dir_name in copy_dirs {
         let src = project_path.join(dir_name);
         if src.is_dir() {
+            // Validate path stays within project root
+            if let (Ok(canon_proj), Ok(canon_src)) =
+                (project_path.canonicalize(), src.canonicalize())
+            {
+                if !canon_src.starts_with(&canon_proj) {
+                    warnings.push(format!(
+                        "copy_dirs: '{}' resolves outside project root, skipping (path traversal blocked)",
+                        dir_name
+                    ));
+                    continue;
+                }
+            }
             let dst = worktree_path.join(dir_name);
             if let Err(e) = copy_dir_recursive(&src, &dst) {
                 warnings.push(format!("Failed to copy '{}' to worktree: {}", dir_name, e));
@@ -159,11 +171,24 @@ pub fn initialize_worktree(
 
     // Copy user-specified files/directories
     if let Some(files_str) = copy_files {
+        // Pre-compute canonical project path for traversal checks
+        let canonical_project = project_path.canonicalize().ok();
+
         for entry in files_str.split(',') {
             let file_name = entry.trim();
             if file_name.is_empty() {
                 continue;
             }
+
+            // Reject obvious traversal patterns before touching the filesystem
+            if file_name.contains("..") {
+                warnings.push(format!(
+                    "copy_files: '{}' contains '..', skipping (path traversal blocked)",
+                    file_name
+                ));
+                continue;
+            }
+
             let src = project_path.join(file_name);
             let dst = worktree_path.join(file_name);
 
@@ -173,6 +198,19 @@ pub fn initialize_worktree(
                     file_name
                 ));
                 continue;
+            }
+
+            // Validate resolved path stays within project root
+            if let Some(ref canon_proj) = canonical_project {
+                if let Ok(canon_src) = src.canonicalize() {
+                    if !canon_src.starts_with(canon_proj) {
+                        warnings.push(format!(
+                            "copy_files: '{}' resolves outside project root, skipping (path traversal blocked)",
+                            file_name
+                        ));
+                        continue;
+                    }
+                }
             }
 
             if src.is_dir() {
@@ -204,6 +242,11 @@ pub fn initialize_worktree(
     if let Some(script) = init_script {
         let script = script.trim();
         if !script.is_empty() {
+            tracing::info!(
+                script = script,
+                worktree = %worktree_path.display(),
+                "Executing project init_script"
+            );
             match run_worktree_script(script, worktree_path, &[]) {
                 Ok(result) => {
                     if !result.status.success() {
