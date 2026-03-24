@@ -9,7 +9,9 @@ You are in the **review phase** of an agtx-managed task.
 
 ## Instructions
 
-1. Review all changes made during execution (use git diff)
+1. Review all changes made during execution:
+   - Git: `git log -1 -p` or `git diff HEAD~1`
+   - Jujutsu (jj): `jj show --git` for all local changes in the current commit
 2. Check for:
    - Correctness and edge cases
    - Error handling
