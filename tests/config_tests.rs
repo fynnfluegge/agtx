@@ -115,7 +115,10 @@ fn test_merged_config_project_overrides() {
 
     assert_eq!(merged.default_agent, "codex");
     assert_eq!(merged.base_branch, "develop");
-    assert_eq!(merged.github_url, Some("https://github.com/user/repo".to_string()));
+    assert_eq!(
+        merged.github_url,
+        Some("https://github.com/user/repo".to_string())
+    );
     assert_eq!(merged.copy_files, Some(".env, .env.local".to_string()));
     assert_eq!(merged.init_script, Some("npm install".to_string()));
 }
@@ -176,10 +179,7 @@ fn test_first_run_new_user_prompt() {
 
 #[test]
 fn test_agent_for_phase_all_defaults() {
-    let config = MergedConfig::merge(
-        &GlobalConfig::default(),
-        &ProjectConfig::default(),
-    );
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
     assert_eq!(config.agent_for_phase("research"), "claude");
     assert_eq!(config.agent_for_phase("planning"), "claude");
     assert_eq!(config.agent_for_phase("running"), "claude");

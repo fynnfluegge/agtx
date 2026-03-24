@@ -95,10 +95,22 @@ fn test_build_interactive_command_cursor_escapes_single_quotes() {
 fn test_build_interactive_command_existing_agents_unchanged() {
     let agents = known_agents();
     let by_name = |n: &str| agents.iter().find(|a| a.name == n).unwrap().clone();
-    assert_eq!(by_name("claude").build_interactive_command(""), "claude --dangerously-skip-permissions");
-    assert_eq!(by_name("codex").build_interactive_command(""), "codex --full-auto");
-    assert_eq!(by_name("gemini").build_interactive_command(""), "gemini --approval-mode yolo");
-    assert_eq!(by_name("opencode").build_interactive_command(""), "opencode");
+    assert_eq!(
+        by_name("claude").build_interactive_command(""),
+        "claude --dangerously-skip-permissions"
+    );
+    assert_eq!(
+        by_name("codex").build_interactive_command(""),
+        "codex --full-auto"
+    );
+    assert_eq!(
+        by_name("gemini").build_interactive_command(""),
+        "gemini --approval-mode yolo"
+    );
+    assert_eq!(
+        by_name("opencode").build_interactive_command(""),
+        "opencode"
+    );
 }
 
 // =============================================================================

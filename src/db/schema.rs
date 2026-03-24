@@ -110,13 +110,28 @@ impl Database {
         )?;
 
         // Migration: add new columns if they don't exist
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN branch_name TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN pr_number INTEGER", []);
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN pr_url TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN plugin TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN cycle INTEGER NOT NULL DEFAULT 1", []);
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN referenced_tasks TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN escalation_note TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN branch_name TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN pr_number INTEGER", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN pr_url TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN plugin TEXT", []);
+        let _ = self.conn.execute(
+            "ALTER TABLE tasks ADD COLUMN cycle INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN referenced_tasks TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN escalation_note TEXT", []);
 
         // MCP transition request queue
         self.conn.execute_batch(
@@ -139,7 +154,9 @@ impl Database {
         )?;
 
         // Migration: add reason column to transition_requests if it doesn't exist
-        let _ = self.conn.execute("ALTER TABLE transition_requests ADD COLUMN reason TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE transition_requests ADD COLUMN reason TEXT", []);
 
         Ok(())
     }
@@ -278,13 +295,9 @@ impl Database {
     }
 
     pub fn get_task(&self, task_id: &str) -> Result<Option<Task>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM tasks WHERE id = ?1")?;
+        let mut stmt = self.conn.prepare("SELECT * FROM tasks WHERE id = ?1")?;
 
-        let task = stmt
-            .query_row(params![task_id], Self::task_from_row)
-            .ok();
+        let task = stmt.query_row(params![task_id], Self::task_from_row).ok();
 
         Ok(task)
     }
@@ -440,13 +453,11 @@ impl Database {
             )
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
-            processed_at: row
-                .get::<_, Option<String>>("processed_at")?
-                .and_then(|s| {
-                    chrono::DateTime::parse_from_rfc3339(&s)
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                        .ok()
-                }),
+            processed_at: row.get::<_, Option<String>>("processed_at")?.and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .ok()
+            }),
             error: row.get("error")?,
         })
     }

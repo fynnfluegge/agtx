@@ -8,13 +8,18 @@ use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
 use std::time::Instant;
 
 use crate::agent::{self, AgentOperations};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig, WorkflowPlugin};
 use crate::db::{Database, PhaseStatus, Task, TaskStatus, TransitionRequest};
-use crate::git::{self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps};
+use crate::git::{
+    self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps,
+};
 use crate::skills;
 use crate::tmux::{self, RealTmuxOps, TmuxOperations};
 use crate::AppMode;
@@ -31,7 +36,12 @@ fn hex_to_color(hex: &str) -> Color {
 }
 
 /// Build footer help text based on current UI state
-fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_column: usize, has_cyclic_plugin: bool) -> String {
+fn build_footer_text(
+    input_mode: InputMode,
+    sidebar_focused: bool,
+    selected_column: usize,
+    has_cyclic_plugin: bool,
+) -> String {
     match input_mode {
         InputMode::Normal => {
             if sidebar_focused {
@@ -48,8 +58,13 @@ fn build_footer_text(input_mode: InputMode, sidebar_focused: bool, selected_colu
             }
         }
         InputMode::InputTitle => " Enter task title... [Esc] cancel [Enter] next ".to_string(),
-        InputMode::SelectPlugin => " [j/k] select plugin  [Tab] cycle  [Enter] next  [Esc] cancel ".to_string(),
-        InputMode::InputDescription => " [#] files  [/] skills  [!] tasks  [Esc] cancel  [\\+Enter] newline  [Enter] save ".to_string(),
+        InputMode::SelectPlugin => {
+            " [j/k] select plugin  [Tab] cycle  [Enter] next  [Esc] cancel ".to_string()
+        }
+        InputMode::InputDescription => {
+            " [#] files  [/] skills  [!] tasks  [Esc] cancel  [\\+Enter] newline  [Enter] save "
+                .to_string()
+        }
     }
 }
 
@@ -72,7 +87,9 @@ impl ratatui::backend::Backend for AppBackend {
         match self {
             Self::Crossterm(b) => b.draw(content),
             #[cfg(feature = "test-mocks")]
-            Self::Test(b) => b.draw(content).map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Self::Test(b) => b
+                .draw(content)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
         }
     }
 
@@ -80,7 +97,9 @@ impl ratatui::backend::Backend for AppBackend {
         match self {
             Self::Crossterm(b) => b.hide_cursor(),
             #[cfg(feature = "test-mocks")]
-            Self::Test(b) => b.hide_cursor().map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Self::Test(b) => b
+                .hide_cursor()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
         }
     }
 
@@ -88,7 +107,9 @@ impl ratatui::backend::Backend for AppBackend {
         match self {
             Self::Crossterm(b) => b.show_cursor(),
             #[cfg(feature = "test-mocks")]
-            Self::Test(b) => b.show_cursor().map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Self::Test(b) => b
+                .show_cursor()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
         }
     }
 
@@ -96,16 +117,23 @@ impl ratatui::backend::Backend for AppBackend {
         match self {
             Self::Crossterm(b) => b.get_cursor_position(),
             #[cfg(feature = "test-mocks")]
-            Self::Test(b) => b.get_cursor_position().map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Self::Test(b) => b
+                .get_cursor_position()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
         }
     }
 
-    fn set_cursor_position<P: Into<ratatui::layout::Position>>(&mut self, position: P) -> io::Result<()> {
+    fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+        &mut self,
+        position: P,
+    ) -> io::Result<()> {
         match self {
             Self::Crossterm(b) => b.set_cursor_position(position),
             // TestBackend's set_cursor_position is also generic, so just forward
             #[cfg(feature = "test-mocks")]
-            Self::Test(b) => b.set_cursor_position(position).map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Self::Test(b) => b
+                .set_cursor_position(position)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
         }
     }
 
@@ -113,7 +141,9 @@ impl ratatui::backend::Backend for AppBackend {
         match self {
             Self::Crossterm(b) => b.clear(),
             #[cfg(feature = "test-mocks")]
-            Self::Test(b) => b.clear().map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Self::Test(b) => b
+                .clear()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
         }
     }
 
@@ -121,7 +151,9 @@ impl ratatui::backend::Backend for AppBackend {
         match self {
             Self::Crossterm(b) => b.clear_region(clear_type),
             #[cfg(feature = "test-mocks")]
-            Self::Test(b) => b.clear_region(clear_type).map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Self::Test(b) => b
+                .clear_region(clear_type)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
         }
     }
 
@@ -129,7 +161,9 @@ impl ratatui::backend::Backend for AppBackend {
         match self {
             Self::Crossterm(b) => b.size(),
             #[cfg(feature = "test-mocks")]
-            Self::Test(b) => b.size().map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Self::Test(b) => b
+                .size()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
         }
     }
 
@@ -137,7 +171,9 @@ impl ratatui::backend::Backend for AppBackend {
         match self {
             Self::Crossterm(b) => b.window_size(),
             #[cfg(feature = "test-mocks")]
-            Self::Test(b) => b.window_size().map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Self::Test(b) => b
+                .window_size()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
         }
     }
 
@@ -145,14 +181,16 @@ impl ratatui::backend::Backend for AppBackend {
         match self {
             Self::Crossterm(b) => b.flush(),
             #[cfg(feature = "test-mocks")]
-            Self::Test(b) => b.flush().map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Self::Test(b) => b
+                .flush()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
         }
     }
 }
 
 /// Shell popup dimensions - used for both rendering and tmux window sizing
-const SHELL_POPUP_WIDTH: u16 = 128;          // Total width including borders
-const SHELL_POPUP_CONTENT_WIDTH: u16 = 126;  // Content width (SHELL_POPUP_WIDTH - 2 for borders)
+const SHELL_POPUP_WIDTH: u16 = 128; // Total width including borders
+const SHELL_POPUP_CONTENT_WIDTH: u16 = 126; // Content width (SHELL_POPUP_WIDTH - 2 for borders)
 const SHELL_POPUP_HEIGHT_PERCENT: u16 = 75; // Percentage of terminal height
 
 /// Application state (separate from terminal for borrow checker)
@@ -381,14 +419,14 @@ struct FileSearchState {
     matches: Vec<String>,
     selected: usize,
     start_pos: usize,   // Position in input_buffer where trigger was typed
-    trigger_char: char,  // The character that triggered the search (# or @)
+    trigger_char: char, // The character that triggered the search (# or @)
 }
 
 /// A discovered skill command from an agent's native directory
 #[derive(Debug, Clone)]
 struct SkillEntry {
-    command: String,      // agent-native: "/agtx:plan" or "$agtx-plan"
-    description: String,  // from frontmatter or file stem
+    command: String,     // agent-native: "/agtx:plan" or "$agtx-plan"
+    description: String, // from frontmatter or file stem
 }
 
 /// State for skill search dropdown (triggered by `/`)
@@ -480,7 +518,12 @@ impl App {
 
         // Setup based on mode
         let (db, project_path, project_name, project_config) = match &mode {
-            AppMode::Dashboard => (None, None, "Dashboard".to_string(), ProjectConfig::default()),
+            AppMode::Dashboard => (
+                None,
+                None,
+                "Dashboard".to_string(),
+                ProjectConfig::default(),
+            ),
             AppMode::Project(path) => {
                 let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
                 let name = canonical
@@ -584,14 +627,20 @@ impl App {
         // Detect existing orchestrator session (survives agtx restarts)
         if app.state.flags.experimental {
             let orch_target = format!("{}:orchestrator", app.state.project_name);
-            if app.state.tmux_ops.window_exists(&orch_target).unwrap_or(false) {
+            if app
+                .state
+                .tmux_ops
+                .window_exists(&orch_target)
+                .unwrap_or(false)
+            {
                 app.state.orchestrator_session = Some(orch_target);
                 app.state.orchestrator_ready.store(true, Ordering::Release);
 
                 // Catch up: notify orchestrator about tasks that completed while TUI was down
                 if let Some(ref db) = app.state.db {
                     // Check existing notifications to avoid duplicates
-                    let existing: HashSet<String> = db.peek_notifications()
+                    let existing: HashSet<String> = db
+                        .peek_notifications()
                         .unwrap_or_default()
                         .into_iter()
                         .map(|n| n.message)
@@ -602,15 +651,23 @@ impl App {
                             continue;
                         }
                         let plugin = match &task.plugin {
-                            Some(name) => WorkflowPlugin::load(name, app.state.project_path.as_deref()).ok(),
+                            Some(name) => {
+                                WorkflowPlugin::load(name, app.state.project_path.as_deref()).ok()
+                            }
                             None => skills::load_bundled_plugin("agtx"),
                         };
                         if let Some(ref wt) = task.worktree_path {
                             if phase_artifact_exists(wt, task.status, &plugin, task.cycle) {
-                                let short_id = if task.id.len() >= 8 { &task.id[..8] } else { &task.id };
+                                let short_id = if task.id.len() >= 8 {
+                                    &task.id[..8]
+                                } else {
+                                    &task.id
+                                };
                                 let message = format!(
                                     "Task \"{}\" ({}) completed phase: {}",
-                                    task.title, short_id, task.status.as_str()
+                                    task.title,
+                                    short_id,
+                                    task.status.as_str()
                                 );
                                 if !existing.contains(&message) {
                                     let notif = crate::db::Notification::new(message);
@@ -801,7 +858,11 @@ impl App {
 
             // Refresh shell popup content periodically (every poll cycle when open)
             if let Some(ref mut popup) = self.state.shell_popup {
-                popup.cached_content = capture_tmux_pane_with_history(&popup.window_name, 500, self.state.tmux_ops.as_ref());
+                popup.cached_content = capture_tmux_pane_with_history(
+                    &popup.window_name,
+                    500,
+                    self.state.tmux_ops.as_ref(),
+                );
             }
 
             // Apply results from background session refresh (non-blocking)
@@ -890,27 +951,42 @@ impl App {
 
         // Header
         let plugin_label = state.config.workflow_plugin.as_deref().unwrap_or("agtx");
-        let left = Span::styled(format!(" {} ", state.project_name), Style::default().fg(Color::Cyan).bold());
+        let left = Span::styled(
+            format!(" {} ", state.project_name),
+            Style::default().fg(Color::Cyan).bold(),
+        );
         let mut right_spans: Vec<Span> = Vec::new();
         if state.flags.experimental {
             let orch_active = state.orchestrator_session.is_some();
             if orch_active {
                 right_spans.push(Span::styled("● ", Style::default().fg(Color::Green)));
-                right_spans.push(Span::styled("orchestrator ", Style::default().fg(Color::Green)));
+                right_spans.push(Span::styled(
+                    "orchestrator ",
+                    Style::default().fg(Color::Green),
+                ));
             }
-            right_spans.push(Span::styled("[O] ", Style::default().fg(hex_to_color(&state.config.theme.color_dimmed))));
+            right_spans.push(Span::styled(
+                "[O] ",
+                Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
+            ));
         }
         right_spans.extend([
-            Span::styled(format!("{} ", plugin_label), Style::default().fg(hex_to_color(&state.config.theme.color_accent))),
-            Span::styled("[P] ", Style::default().fg(hex_to_color(&state.config.theme.color_dimmed))),
+            Span::styled(
+                format!("{} ", plugin_label),
+                Style::default().fg(hex_to_color(&state.config.theme.color_accent)),
+            ),
+            Span::styled(
+                "[P] ",
+                Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
+            ),
         ]);
         let left_len = state.project_name.len() + 2;
         let right_len: usize = right_spans.iter().map(|s| s.content.len()).sum();
         let padding = (chunks[0].width as usize).saturating_sub(left_len + right_len + 2); // 2 for borders
         let mut spans = vec![left, Span::raw(" ".repeat(padding))];
         spans.extend(right_spans);
-        let header = Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::ALL));
+        let header =
+            Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL));
         frame.render_widget(header, chunks[0]);
 
         // Board columns (5 columns: Backlog, Planning, Running, Review, Done)
@@ -926,7 +1002,12 @@ impl App {
             .split(chunks[1]);
 
         for (i, status) in TaskStatus::columns().iter().enumerate() {
-            let tasks: Vec<&Task> = state.board.tasks.iter().filter(|t| t.status == *status).collect();
+            let tasks: Vec<&Task> = state
+                .board
+                .tasks
+                .iter()
+                .filter(|t| t.status == *status)
+                .collect();
 
             let is_selected_column = state.board.selected_column == i;
 
@@ -977,7 +1058,11 @@ impl App {
             frame.render_widget(column_block, columns[i]);
 
             // Render task cards with scroll offset
-            let visible_tasks: Vec<_> = tasks.iter().skip(scroll_offset).take(max_visible_cards).collect();
+            let visible_tasks: Vec<_> = tasks
+                .iter()
+                .skip(scroll_offset)
+                .take(max_visible_cards)
+                .collect();
             for (j, task) in visible_tasks.iter().enumerate() {
                 let actual_index = scroll_offset + j;
                 let is_selected = is_selected_column && state.board.selected_row == actual_index;
@@ -985,15 +1070,28 @@ impl App {
                 let card_area = Rect {
                     x: inner_area.x,
                     y: inner_area.y + (j as u16 * card_height),
-                    width: if needs_scrollbar { inner_area.width.saturating_sub(1) } else { inner_area.width },
-                    height: card_height.min(inner_area.height.saturating_sub(j as u16 * card_height)),
+                    width: if needs_scrollbar {
+                        inner_area.width.saturating_sub(1)
+                    } else {
+                        inner_area.width
+                    },
+                    height: card_height
+                        .min(inner_area.height.saturating_sub(j as u16 * card_height)),
                 };
 
                 if card_area.height < 3 {
                     break;
                 }
 
-                Self::draw_task_card(frame, task, card_area, is_selected, &state.config.theme, state.phase_status_cache.get(&task.id), state.spinner_frame);
+                Self::draw_task_card(
+                    frame,
+                    task,
+                    card_area,
+                    is_selected,
+                    &state.config.theme,
+                    state.phase_status_cache.get(&task.id),
+                    state.spinner_frame,
+                );
             }
 
             // Draw scrollbar if needed
@@ -1008,7 +1106,8 @@ impl App {
                 let total_tasks = tasks.len();
                 let scrollbar_height = inner_area.height as usize;
                 let thumb_height = (max_visible_cards * scrollbar_height / total_tasks).max(1);
-                let thumb_pos = (scroll_offset * scrollbar_height / total_tasks).min(scrollbar_height - thumb_height);
+                let thumb_pos = (scroll_offset * scrollbar_height / total_tasks)
+                    .min(scrollbar_height - thumb_height);
 
                 for y in 0..scrollbar_height {
                     let char = if y >= thumb_pos && y < thumb_pos + thumb_height {
@@ -1031,7 +1130,9 @@ impl App {
         }
 
         // Footer with help (or transient warning)
-        let has_cyclic_plugin = state.board.selected_task()
+        let has_cyclic_plugin = state
+            .board
+            .selected_task()
             .and_then(|t| t.plugin.as_ref())
             .and_then(|name| WorkflowPlugin::load(name, state.project_path.as_deref()).ok())
             .map_or(false, |p| p.cyclic);
@@ -1039,12 +1140,26 @@ impl App {
             if created.elapsed() < std::time::Duration::from_secs(5) {
                 (msg.clone(), Style::default().fg(Color::Yellow))
             } else {
-                (build_footer_text(state.input_mode, state.sidebar_focused, state.board.selected_column, has_cyclic_plugin),
-                 Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)))
+                (
+                    build_footer_text(
+                        state.input_mode,
+                        state.sidebar_focused,
+                        state.board.selected_column,
+                        has_cyclic_plugin,
+                    ),
+                    Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
+                )
             }
         } else {
-            (build_footer_text(state.input_mode, state.sidebar_focused, state.board.selected_column, has_cyclic_plugin),
-             Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)))
+            (
+                build_footer_text(
+                    state.input_mode,
+                    state.sidebar_focused,
+                    state.board.selected_column,
+                    has_cyclic_plugin,
+                ),
+                Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
+            )
         };
 
         let footer = Paragraph::new(footer_text.as_str())
@@ -1053,12 +1168,19 @@ impl App {
         frame.render_widget(footer, chunks[2]);
 
         // Input overlay if in input mode
-        if matches!(state.input_mode, InputMode::InputTitle | InputMode::SelectPlugin | InputMode::InputDescription) {
+        if matches!(
+            state.input_mode,
+            InputMode::InputTitle | InputMode::SelectPlugin | InputMode::InputDescription
+        ) {
             let input_area = centered_rect(55, 55, area);
             frame.render_widget(Clear, input_area);
 
             let is_editing = state.editing_task_id.is_some();
-            let block_title = if is_editing { " Edit Task " } else { " New Task " };
+            let block_title = if is_editing {
+                " Edit Task "
+            } else {
+                " New Task "
+            };
             let text_color = hex_to_color(&state.config.theme.color_text);
             let highlight_color = hex_to_color(&state.config.theme.color_accent);
             let dimmed_color = hex_to_color(&state.config.theme.color_dimmed);
@@ -1081,7 +1203,9 @@ impl App {
             breadcrumb_spans.push(Span::raw("  "));
             for (i, label) in step_labels.iter().enumerate() {
                 let style = if i == step {
-                    Style::default().fg(selected_color).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(selected_color)
+                        .add_modifier(Modifier::BOLD)
                 } else if i < step {
                     Style::default().fg(highlight_color)
                 } else {
@@ -1110,7 +1234,8 @@ impl App {
                 ]));
             }
             if step >= 2 {
-                let plugin_name = state.wizard_plugin_options
+                let plugin_name = state
+                    .wizard_plugin_options
                     .get(state.wizard_selected_plugin)
                     .map(|o| o.label.as_str())
                     .unwrap_or("agtx");
@@ -1119,16 +1244,23 @@ impl App {
                     Span::styled(plugin_name, Style::default().fg(text_color)),
                 ]));
             }
-            if step >= 1 { lines.push(Line::from("")); }
+            if step >= 1 {
+                lines.push(Line::from(""));
+            }
 
             // Active area content
             match state.input_mode {
                 InputMode::InputTitle => {
-                    let (before_cursor, after_cursor) = state.input_buffer.split_at(
-                        state.input_cursor.min(state.input_buffer.len())
-                    );
+                    let (before_cursor, after_cursor) = state
+                        .input_buffer
+                        .split_at(state.input_cursor.min(state.input_buffer.len()));
                     lines.push(Line::from(vec![
-                        Span::styled("  Title: ", Style::default().fg(selected_color).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "  Title: ",
+                            Style::default()
+                                .fg(selected_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(before_cursor, Style::default().fg(text_color)),
                         Span::styled("█", Style::default().fg(selected_color)),
                         Span::styled(after_cursor, Style::default().fg(text_color)),
@@ -1143,7 +1275,9 @@ impl App {
                             || opt.name == active_plugin;
                         let check = if is_project_default { " ✓" } else { "" };
                         let name_style = if is_sel {
-                            Style::default().fg(selected_color).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(selected_color)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(text_color)
                         };
@@ -1156,22 +1290,32 @@ impl App {
                     }
                 }
                 InputMode::InputDescription => {
-                    let (before_cursor, after_cursor) = state.input_buffer.split_at(
-                        state.input_cursor.min(state.input_buffer.len())
-                    );
+                    let (before_cursor, after_cursor) = state
+                        .input_buffer
+                        .split_at(state.input_cursor.min(state.input_buffer.len()));
                     let full_text = format!("  Prompt: {}█{}", before_cursor, after_cursor);
                     // Split on newlines to handle multi-line descriptions
                     for part in full_text.split('\n') {
                         if !state.highlighted_references.is_empty() {
-                            let styled = build_highlighted_text(part, &state.highlighted_references, text_color, highlight_color);
+                            let styled = build_highlighted_text(
+                                part,
+                                &state.highlighted_references,
+                                text_color,
+                                highlight_color,
+                            );
                             for line in styled.lines {
-                                let owned_spans: Vec<Span<'static>> = line.spans.into_iter()
+                                let owned_spans: Vec<Span<'static>> = line
+                                    .spans
+                                    .into_iter()
                                     .map(|s| Span::styled(s.content.into_owned(), s.style))
                                     .collect();
                                 lines.push(Line::from(owned_spans));
                             }
                         } else {
-                            lines.push(Line::from(Span::styled(part.to_string(), Style::default().fg(text_color))));
+                            lines.push(Line::from(Span::styled(
+                                part.to_string(),
+                                Style::default().fg(text_color),
+                            )));
                         }
                     }
                 }
@@ -1201,13 +1345,22 @@ impl App {
                             width: input_area.width.saturating_sub(4),
                             height: dropdown_height,
                         };
-                        let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height {
-                            Rect { y: input_area.y.saturating_sub(dropdown_height), ..dropdown_area }
-                        } else { dropdown_area };
+                        let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height
+                        {
+                            Rect {
+                                y: input_area.y.saturating_sub(dropdown_height),
+                                ..dropdown_area
+                            }
+                        } else {
+                            dropdown_area
+                        };
 
                         frame.render_widget(Clear, dropdown_area);
                         let file_selected_color = hex_to_color(&state.config.theme.color_selected);
-                        let items: Vec<ListItem> = search.matches.iter().enumerate()
+                        let items: Vec<ListItem> = search
+                            .matches
+                            .iter()
+                            .enumerate()
                             .map(|(i, path)| {
                                 let style = if i == search.selected {
                                     Style::default().bg(file_selected_color).fg(Color::Black)
@@ -1215,7 +1368,8 @@ impl App {
                                     Style::default().fg(Color::White)
                                 };
                                 ListItem::new(format!(" {} ", path)).style(style)
-                            }).collect();
+                            })
+                            .collect();
                         let list = List::new(items).block(
                             Block::default()
                                 .title(" Files [↑↓] select [Tab/Enter] insert [Esc] cancel ")
@@ -1236,28 +1390,43 @@ impl App {
                             width: input_area.width.saturating_sub(4),
                             height: dropdown_height,
                         };
-                        let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height {
-                            Rect { y: input_area.y.saturating_sub(dropdown_height), ..dropdown_area }
-                        } else { dropdown_area };
+                        let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height
+                        {
+                            Rect {
+                                y: input_area.y.saturating_sub(dropdown_height),
+                                ..dropdown_area
+                            }
+                        } else {
+                            dropdown_area
+                        };
 
                         frame.render_widget(Clear, dropdown_area);
                         let skill_sel_color = hex_to_color(&state.config.theme.color_selected);
                         let accent = hex_to_color(&state.config.theme.color_accent);
                         let dim = hex_to_color(&state.config.theme.color_dimmed);
-                        let items: Vec<ListItem> = search.matches.iter().enumerate()
+                        let items: Vec<ListItem> = search
+                            .matches
+                            .iter()
+                            .enumerate()
                             .map(|(i, entry)| {
                                 let (style, cmd_style, dsc_style) = if i == search.selected {
                                     let s = Style::default().bg(skill_sel_color).fg(Color::Black);
                                     (s, s, s)
                                 } else {
-                                    (Style::default(), Style::default().fg(accent), Style::default().fg(dim))
+                                    (
+                                        Style::default(),
+                                        Style::default().fg(accent),
+                                        Style::default().fg(dim),
+                                    )
                                 };
                                 let cmd_padded = format!(" {:<24}", entry.command);
                                 ListItem::new(Line::from(vec![
                                     Span::styled(cmd_padded, cmd_style),
                                     Span::styled(&entry.description, dsc_style),
-                                ])).style(style)
-                            }).collect();
+                                ]))
+                                .style(style)
+                            })
+                            .collect();
                         let list = List::new(items).block(
                             Block::default()
                                 .title(" Skills [↑↓] select [Tab/Enter] insert [Esc] cancel ")
@@ -1278,28 +1447,43 @@ impl App {
                             width: input_area.width.saturating_sub(4),
                             height: dropdown_height,
                         };
-                        let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height {
-                            Rect { y: input_area.y.saturating_sub(dropdown_height), ..dropdown_area }
-                        } else { dropdown_area };
+                        let dropdown_area = if dropdown_area.y + dropdown_area.height > area.height
+                        {
+                            Rect {
+                                y: input_area.y.saturating_sub(dropdown_height),
+                                ..dropdown_area
+                            }
+                        } else {
+                            dropdown_area
+                        };
 
                         frame.render_widget(Clear, dropdown_area);
                         let task_sel_color = hex_to_color(&state.config.theme.color_selected);
                         let accent = hex_to_color(&state.config.theme.color_accent);
                         let dim = hex_to_color(&state.config.theme.color_dimmed);
-                        let items: Vec<ListItem> = search.matches.iter().enumerate()
+                        let items: Vec<ListItem> = search
+                            .matches
+                            .iter()
+                            .enumerate()
                             .map(|(i, (_, title, status))| {
                                 let (style, title_style, status_style) = if i == search.selected {
                                     let s = Style::default().bg(task_sel_color).fg(Color::Black);
                                     (s, s, s)
                                 } else {
-                                    (Style::default(), Style::default().fg(accent), Style::default().fg(dim))
+                                    (
+                                        Style::default(),
+                                        Style::default().fg(accent),
+                                        Style::default().fg(dim),
+                                    )
                                 };
                                 let status_badge = format!("  [{}]", status.as_str());
                                 ListItem::new(Line::from(vec![
                                     Span::styled(format!(" {}", title), title_style),
                                     Span::styled(status_badge, status_style),
-                                ])).style(style)
-                            }).collect();
+                                ]))
+                                .style(style)
+                            })
+                            .collect();
                         let list = List::new(items).block(
                             Block::default()
                                 .title(" Tasks [↑↓] select [Tab/Enter] insert [Esc] cancel ")
@@ -1344,7 +1528,8 @@ impl App {
             frame.render_widget(input, popup_chunks[0]);
 
             // Results list
-            let items: Vec<ListItem> = search.matches
+            let items: Vec<ListItem> = search
+                .matches
                 .iter()
                 .enumerate()
                 .map(|(i, (_, title, status))| {
@@ -1367,13 +1552,14 @@ impl App {
                 })
                 .collect();
 
-            let list = List::new(items)
-                .block(
-                    Block::default()
-                        .title(" [↑↓] select [Enter] jump [Esc] cancel ")
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_dimmed))),
-                );
+            let list = List::new(items).block(
+                Block::default()
+                    .title(" [↑↓] select [Enter] jump [Esc] cancel ")
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
+                    ),
+            );
             frame.render_widget(list, popup_chunks[1]);
         }
 
@@ -1387,7 +1573,9 @@ impl App {
                 let main_block = Block::default()
                     .title(" Create Pull Request ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_selected)));
+                    .border_style(
+                        Style::default().fg(hex_to_color(&state.config.theme.color_selected)),
+                    );
                 frame.render_widget(main_block, popup_area);
 
                 // Spinner animation based on frame count
@@ -1395,11 +1583,16 @@ impl App {
                 let spinner_idx = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_millis() / 100) as usize % spinner_chars.len();
+                    .as_millis()
+                    / 100) as usize
+                    % spinner_chars.len();
                 let spinner = spinner_chars[spinner_idx];
 
                 let agent_name = state.config.default_agent.clone();
-                let loading_text = format!("{} Generating PR description with {}...", spinner, agent_name);
+                let loading_text = format!(
+                    "{} Generating PR description with {}...",
+                    spinner, agent_name
+                );
                 let loading = Paragraph::new(loading_text)
                     .style(Style::default().fg(Color::Cyan))
                     .alignment(ratatui::layout::Alignment::Center);
@@ -1407,16 +1600,16 @@ impl App {
                 // Center vertically within the popup
                 let inner = popup_area.inner(ratatui::layout::Margin {
                     horizontal: 2,
-                    vertical: popup_area.height.saturating_sub(3) / 2
+                    vertical: popup_area.height.saturating_sub(3) / 2,
                 });
                 frame.render_widget(loading, inner);
             } else {
                 let popup_chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Length(3),  // Title input
-                        Constraint::Min(0),     // Body input
-                        Constraint::Length(1),  // Help line
+                        Constraint::Length(3), // Title input
+                        Constraint::Min(0),    // Body input
+                        Constraint::Length(1), // Help line
                     ])
                     .margin(1)
                     .split(popup_area);
@@ -1425,7 +1618,9 @@ impl App {
                 let main_block = Block::default()
                     .title(" Create Pull Request ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)));
+                    .border_style(
+                        Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)),
+                    );
                 frame.render_widget(main_block, popup_area);
 
                 // Title input
@@ -1486,8 +1681,14 @@ impl App {
             frame.render_widget(Clear, popup_area);
 
             let (title, border_color) = match popup.status {
-                PrCreationStatus::Creating => (" Creating Pull Request ", hex_to_color(&state.config.theme.color_selected)),
-                PrCreationStatus::Pushing => (" Pushing Changes ", hex_to_color(&state.config.theme.color_selected)),
+                PrCreationStatus::Creating => (
+                    " Creating Pull Request ",
+                    hex_to_color(&state.config.theme.color_selected),
+                ),
+                PrCreationStatus::Pushing => (
+                    " Pushing Changes ",
+                    hex_to_color(&state.config.theme.color_selected),
+                ),
                 PrCreationStatus::Success => (" Pull Request Created ", Color::Green),
                 PrCreationStatus::Error => (" Error Creating PR ", Color::Red),
             };
@@ -1498,7 +1699,10 @@ impl App {
                 .border_style(Style::default().fg(border_color));
             frame.render_widget(main_block, popup_area);
 
-            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 2,
+            });
 
             match popup.status {
                 PrCreationStatus::Creating => {
@@ -1506,7 +1710,9 @@ impl App {
                     let spinner_idx = (std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
-                        .as_millis() / 100) as usize % spinner_chars.len();
+                        .as_millis()
+                        / 100) as usize
+                        % spinner_chars.len();
                     let spinner = spinner_chars[spinner_idx];
 
                     let text = format!("{} Pushing branch and creating PR...", spinner);
@@ -1520,7 +1726,9 @@ impl App {
                     let spinner_idx = (std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
-                        .as_millis() / 100) as usize % spinner_chars.len();
+                        .as_millis()
+                        / 100) as usize
+                        % spinner_chars.len();
                     let spinner = spinner_chars[spinner_idx];
 
                     let text = format!("{} PR exists. Pushing changes...", spinner);
@@ -1562,10 +1770,15 @@ impl App {
             let main_block = Block::default()
                 .title(" Move to Done? ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_selected)));
+                .border_style(
+                    Style::default().fg(hex_to_color(&state.config.theme.color_selected)),
+                );
             frame.render_widget(main_block, popup_area);
 
-            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 2,
+            });
             let text = match popup.pr_state {
                 DoneConfirmPrState::Open => format!(
                     "PR #{} is still open.\n\nAre you sure you want to move this task to Done?\n\nWorktree will be deleted, tmux coding session killed.\nBranch kept locally.\n\n[y] Yes, move to Done    [n/Esc] Cancel",
@@ -1608,10 +1821,15 @@ impl App {
             let main_block = Block::default()
                 .title(format!(" {} Phase Incomplete ", phase_name))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_selected)));
+                .border_style(
+                    Style::default().fg(hex_to_color(&state.config.theme.color_selected)),
+                );
             frame.render_widget(main_block, popup_area);
 
-            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 2,
+            });
             let text = format!(
                 "The agent is still working and the {} artifact\nhas not been created yet.\n\nAre you sure you want to move this task forward?\n\n[y] Yes, move    [n/Esc] Cancel",
                 phase_name.to_lowercase()
@@ -1634,7 +1852,10 @@ impl App {
                 .border_style(Style::default().fg(Color::Red));
             frame.render_widget(main_block, popup_area);
 
-            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 2,
+            });
             let text = format!(
                 "Are you sure you want to delete:\n\n\"{}\"\n\nThis will also remove the worktree and tmux session.\n\n[y] Yes, delete    [n/Esc] Cancel",
                 popup.task_title
@@ -1654,10 +1875,15 @@ impl App {
             let main_block = Block::default()
                 .title(" Move to Review ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)));
+                .border_style(
+                    Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)),
+                );
             frame.render_widget(main_block, popup_area);
 
-            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 2 });
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 2,
+            });
             let text = format!(
                 "Moving task to Review:\n\n\"{}\"\n\nDo you want to create a Pull Request?\n\n[y] Yes, create PR    [n] No, just move    [Esc] Cancel",
                 popup.task_title
@@ -1677,10 +1903,15 @@ impl App {
             let main_block = Block::default()
                 .title(" Select Workflow Plugin ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)));
+                .border_style(
+                    Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)),
+                );
             frame.render_widget(main_block, popup_area);
 
-            let inner = popup_area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 1 });
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 1,
+            });
             let mut lines: Vec<Line> = Vec::new();
 
             for (i, opt) in popup.options.iter().enumerate() {
@@ -1689,7 +1920,9 @@ impl App {
                 let check = if opt.active { " ✓" } else { "" };
 
                 let name_style = if is_selected {
-                    Style::default().fg(hex_to_color(&state.config.theme.color_selected)).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(hex_to_color(&state.config.theme.color_selected))
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(hex_to_color(&state.config.theme.color_text))
                 };
@@ -1700,8 +1933,12 @@ impl App {
                     Span::styled(check, Style::default().fg(Color::Green)),
                 ]));
 
-                let desc_style = Style::default().fg(hex_to_color(&state.config.theme.color_description));
-                lines.push(Line::from(Span::styled(format!("  {}", opt.description), desc_style)));
+                let desc_style =
+                    Style::default().fg(hex_to_color(&state.config.theme.color_description));
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", opt.description),
+                    desc_style,
+                )));
                 lines.push(Line::from(""));
             }
 
@@ -1730,12 +1967,16 @@ impl App {
 
             // Title bar
             let title = format!(" Diff: {} ", popup.task_title);
-            let title_bar = Paragraph::new(title)
-                .style(Style::default().fg(Color::Black).bg(hex_to_color(&state.config.theme.color_popup_header)));
+            let title_bar = Paragraph::new(title).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(hex_to_color(&state.config.theme.color_popup_header)),
+            );
             frame.render_widget(title_bar, popup_chunks[0]);
 
             // Diff content with syntax highlighting
-            let lines: Vec<Line> = popup.diff_content
+            let lines: Vec<Line> = popup
+                .diff_content
                 .lines()
                 .skip(popup.scroll_offset)
                 .take(popup_chunks[1].height.saturating_sub(2) as usize)
@@ -1755,12 +1996,10 @@ impl App {
                 })
                 .collect();
 
-            let diff_content = Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border))),
-                );
+            let diff_content =
+                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(
+                    Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)),
+                ));
             frame.render_widget(diff_content, popup_chunks[1]);
 
             // Footer with scroll info
@@ -1770,14 +2009,18 @@ impl App {
                 popup.scroll_offset + 1,
                 total_lines
             );
-            let footer = Paragraph::new(footer_text)
-                .style(Style::default().fg(Color::Black).bg(hex_to_color(&state.config.theme.color_dimmed)));
+            let footer = Paragraph::new(footer_text).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(hex_to_color(&state.config.theme.color_dimmed)),
+            );
             frame.render_widget(footer, popup_chunks[2]);
         }
     }
 
     fn draw_shell_popup(popup: &ShellPopup, frame: &mut Frame, area: Rect, theme: &ThemeConfig) {
-        let popup_area = centered_rect_fixed_width(SHELL_POPUP_WIDTH, SHELL_POPUP_HEIGHT_PERCENT, area);
+        let popup_area =
+            centered_rect_fixed_width(SHELL_POPUP_WIDTH, SHELL_POPUP_HEIGHT_PERCENT, area);
 
         // Parse ANSI escape sequences for colors
         let styled_lines = parse_ansi_to_lines(&popup.cached_content);
@@ -1796,7 +2039,15 @@ impl App {
         shell_popup::render_shell_popup(popup, frame, popup_area, styled_lines, &colors);
     }
 
-    fn draw_task_card(frame: &mut Frame, task: &Task, area: Rect, is_selected: bool, theme: &ThemeConfig, phase_status: Option<&(PhaseStatus, Instant)>, spinner_frame: usize) {
+    fn draw_task_card(
+        frame: &mut Frame,
+        task: &Task,
+        area: Rect,
+        is_selected: bool,
+        theme: &ThemeConfig,
+        phase_status: Option<&(PhaseStatus, Instant)>,
+        spinner_frame: usize,
+    ) {
         let border_style = if is_selected {
             Style::default().fg(hex_to_color(&theme.color_selected))
         } else {
@@ -1804,7 +2055,9 @@ impl App {
         };
 
         let title_style = if is_selected {
-            Style::default().fg(hex_to_color(&theme.color_selected)).bold()
+            Style::default()
+                .fg(hex_to_color(&theme.color_selected))
+                .bold()
         } else {
             Style::default().fg(hex_to_color(&theme.color_text)).bold()
         };
@@ -1812,7 +2065,11 @@ impl App {
         // Truncate title to fit (char-safe for UTF-8)
         let max_title_len = area.width.saturating_sub(4) as usize;
         let title: String = if task.title.chars().count() > max_title_len {
-            let truncated: String = task.title.chars().take(max_title_len.saturating_sub(3)).collect();
+            let truncated: String = task
+                .title
+                .chars()
+                .take(max_title_len.saturating_sub(3))
+                .collect();
             format!("{}...", truncated)
         } else {
             task.title.clone()
@@ -1832,29 +2089,47 @@ impl App {
         frame.render_widget(card_block, area);
 
         // Title line with optional phase indicator
-        let show_indicator = matches!(task.status,
-            TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review)
-            || (task.status == TaskStatus::Backlog && task.session_name.is_some());
+        let show_indicator = matches!(
+            task.status,
+            TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review
+        ) || (task.status == TaskStatus::Backlog
+            && task.session_name.is_some());
 
         if show_indicator {
-            const SPINNER_FRAMES: &[&str] = &["\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}"];
+            const SPINNER_FRAMES: &[&str] = &[
+                "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
+                "\u{2827}", "\u{2807}", "\u{280f}",
+            ];
             let indicator = match phase_status {
-                Some((PhaseStatus::Ready, _)) => Span::styled("\u{2713} ", Style::default().fg(Color::Green)),
+                Some((PhaseStatus::Ready, _)) => {
+                    Span::styled("\u{2713} ", Style::default().fg(Color::Green))
+                }
                 Some((PhaseStatus::Working, _)) => {
                     let spinner = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
                     Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow))
                 }
-                Some((PhaseStatus::Idle, _)) => Span::styled("\u{23f8} ", Style::default().fg(hex_to_color(&theme.color_dimmed))),
-                Some((PhaseStatus::Exited, _)) => Span::styled("\u{2717} ", Style::default().fg(Color::Red)),
+                Some((PhaseStatus::Idle, _)) => Span::styled(
+                    "\u{23f8} ",
+                    Style::default().fg(hex_to_color(&theme.color_dimmed)),
+                ),
+                Some((PhaseStatus::Exited, _)) => {
+                    Span::styled("\u{2717} ", Style::default().fg(Color::Red))
+                }
                 None => Span::raw(""),
             };
             // Escalation warning indicator
             let warn_span = if task.escalation_note.is_some() {
-                Span::styled("\u{26a0} ", Style::default().fg(hex_to_color(&theme.color_accent)).bold())
+                Span::styled(
+                    "\u{26a0} ",
+                    Style::default()
+                        .fg(hex_to_color(&theme.color_accent))
+                        .bold(),
+                )
             } else {
                 Span::raw("")
             };
-            let title_spans = Line::from(vec![indicator, warn_span, Span::styled(title, title_style)]);
+            let title_spans =
+                Line::from(vec![indicator, warn_span, Span::styled(title, title_style)]);
             let title_line = Paragraph::new(title_spans);
             let title_area = Rect {
                 x: inner.x,
@@ -1876,7 +2151,11 @@ impl App {
 
         // Footer line with agent name (for active tasks)
         let show_agent = task.status != TaskStatus::Backlog || task.session_name.is_some();
-        let footer_height = if show_agent && inner.height > 2 { 1u16 } else { 0u16 };
+        let footer_height = if show_agent && inner.height > 2 {
+            1u16
+        } else {
+            0u16
+        };
 
         // Preview area (below title) - always show description
         if inner.height > 1 + footer_height {
@@ -1893,13 +2172,23 @@ impl App {
             // Truncate description to fit preview area
             let max_chars = (preview_area.width as usize) * (preview_area.height as usize);
             let truncated: String = if preview_text.chars().count() > max_chars {
-                format!("{}...", preview_text.chars().take(max_chars.saturating_sub(3)).collect::<String>())
+                format!(
+                    "{}...",
+                    preview_text
+                        .chars()
+                        .take(max_chars.saturating_sub(3))
+                        .collect::<String>()
+                )
             } else {
                 preview_text.to_string()
             };
 
             let preview = Paragraph::new(truncated)
-                .style(Style::default().fg(hex_to_color(&theme.color_description)).italic())
+                .style(
+                    Style::default()
+                        .fg(hex_to_color(&theme.color_description))
+                        .italic(),
+                )
                 .wrap(Wrap { trim: true });
             frame.render_widget(preview, preview_area);
         }
@@ -1913,10 +2202,10 @@ impl App {
                 height: 1,
             };
             let agent_style = match task.agent.as_str() {
-                "claude" => Style::default().fg(Color::Rgb(227, 148, 62)),  // orange
+                "claude" => Style::default().fg(Color::Rgb(227, 148, 62)), // orange
                 "gemini" => Style::default().fg(Color::Rgb(234, 130, 180)), // pink
                 "opencode" => Style::default().fg(Color::White).bg(Color::Rgb(80, 80, 80)), // white on grey
-                "codex" => Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 20)),   // white on black
+                "codex" => Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 20)), // white on black
                 _ => Style::default().fg(Color::White),
             };
             let agent_label = Paragraph::new(format!(" {} ", task.agent))
@@ -1928,7 +2217,10 @@ impl App {
 
     fn draw_sidebar(state: &AppState, frame: &mut Frame, area: Rect) {
         // Show projects from database
-        let current_path = state.project_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        let current_path = state
+            .project_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
 
         let items: Vec<ListItem> = state
             .projects
@@ -1939,7 +2231,9 @@ impl App {
                 let is_current = current_path.as_ref() == Some(&project.path);
 
                 let style = if is_selected {
-                    Style::default().bg(hex_to_color(&state.config.theme.color_selected)).fg(Color::Black)
+                    Style::default()
+                        .bg(hex_to_color(&state.config.theme.color_selected))
+                        .fg(Color::Black)
                 } else if is_current {
                     Style::default().fg(hex_to_color(&state.config.theme.color_selected))
                 } else {
@@ -1975,8 +2269,8 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(10), // Logo + subtitle
-                Constraint::Min(0),    // Project list or options
-                Constraint::Length(3), // Footer
+                Constraint::Min(0),     // Project list or options
+                Constraint::Length(3),  // Footer
             ])
             .split(area);
 
@@ -1984,17 +2278,37 @@ impl App {
         let logo_color = Color::Rgb(234, 212, 154); // #ead49a
         let logo = vec![
             Line::from(""),
-            Line::from(Span::styled(" █████╗  ██████╗████████╗██╗  ██╗", Style::default().fg(logo_color).bold())),
-            Line::from(Span::styled("██╔══██╗██╔════╝╚══██╔══╝╚██╗██╔╝", Style::default().fg(logo_color).bold())),
-            Line::from(Span::styled("███████║██║  ███╗  ██║    ╚███╔╝ ", Style::default().fg(logo_color).bold())),
-            Line::from(Span::styled("██╔══██║██║   ██║  ██║    ██╔██╗ ", Style::default().fg(logo_color).bold())),
-            Line::from(Span::styled("██║  ██║╚██████╔╝  ██║   ██╔╝ ██╗", Style::default().fg(logo_color).bold())),
-            Line::from(Span::styled("╚═╝  ╚═╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝", Style::default().fg(logo_color).bold())),
+            Line::from(Span::styled(
+                " █████╗  ██████╗████████╗██╗  ██╗",
+                Style::default().fg(logo_color).bold(),
+            )),
+            Line::from(Span::styled(
+                "██╔══██╗██╔════╝╚══██╔══╝╚██╗██╔╝",
+                Style::default().fg(logo_color).bold(),
+            )),
+            Line::from(Span::styled(
+                "███████║██║  ███╗  ██║    ╚███╔╝ ",
+                Style::default().fg(logo_color).bold(),
+            )),
+            Line::from(Span::styled(
+                "██╔══██║██║   ██║  ██║    ██╔██╗ ",
+                Style::default().fg(logo_color).bold(),
+            )),
+            Line::from(Span::styled(
+                "██║  ██║╚██████╔╝  ██║   ██╔╝ ██╗",
+                Style::default().fg(logo_color).bold(),
+            )),
+            Line::from(Span::styled(
+                "╚═╝  ╚═╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝",
+                Style::default().fg(logo_color).bold(),
+            )),
             Line::from(""),
-            Line::from(Span::styled("Autonomous multi-session spec-driven AI coding orchestration in the terminal", Style::default().fg(dimmed_color))),
+            Line::from(Span::styled(
+                "Autonomous multi-session spec-driven AI coding orchestration in the terminal",
+                Style::default().fg(dimmed_color),
+            )),
         ];
-        let logo_widget = Paragraph::new(logo)
-            .alignment(Alignment::Center);
+        let logo_widget = Paragraph::new(logo).alignment(Alignment::Center);
         frame.render_widget(logo_widget, chunks[0]);
 
         // Project list or options
@@ -2025,7 +2339,12 @@ impl App {
             let options = Paragraph::new(
                 "\n  [p] Open existing project\n  [n] Create new project in current directory\n",
             )
-            .block(Block::default().title(" Options ").borders(Borders::ALL).border_style(Style::default().fg(dimmed_color)));
+            .block(
+                Block::default()
+                    .title(" Options ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(dimmed_color)),
+            );
             frame.render_widget(options, chunks[1]);
         }
 
@@ -2040,7 +2359,9 @@ impl App {
         // Handle PR status popup if open (loading/success/error)
         if let Some(ref popup) = self.state.pr_status_popup {
             // Only allow closing if not in Creating/Pushing state
-            if popup.status != PrCreationStatus::Creating && popup.status != PrCreationStatus::Pushing {
+            if popup.status != PrCreationStatus::Creating
+                && popup.status != PrCreationStatus::Pushing
+            {
                 if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
                     self.state.pr_status_popup = None;
                 }
@@ -2096,14 +2417,12 @@ impl App {
         // Handle based on mode (Dashboard vs Project)
         match &self.state.mode {
             AppMode::Dashboard => self.handle_dashboard_key(key.code),
-            AppMode::Project(_) => {
-                match self.state.input_mode {
-                    InputMode::Normal => self.handle_normal_key(key.code),
-                    InputMode::InputTitle => self.handle_title_input(key),
-                    InputMode::SelectPlugin => self.handle_plugin_select_wizard(key),
-                    InputMode::InputDescription => self.handle_description_input(key),
-                }
-            }
+            AppMode::Project(_) => match self.state.input_mode {
+                InputMode::Normal => self.handle_normal_key(key.code),
+                InputMode::InputTitle => self.handle_title_input(key),
+                InputMode::SelectPlugin => self.handle_plugin_select_wizard(key),
+                InputMode::InputDescription => self.handle_description_input(key),
+            },
         }
     }
 
@@ -2185,7 +2504,12 @@ impl App {
     }
 
     fn open_plugin_select_popup(&mut self) {
-        let current = self.state.config.workflow_plugin.as_deref().unwrap_or("agtx");
+        let current = self
+            .state
+            .config
+            .workflow_plugin
+            .as_deref()
+            .unwrap_or("agtx");
         let mut options = vec![PluginOption {
             name: "agtx".to_string(),
             label: "agtx".to_string(),
@@ -2193,7 +2517,9 @@ impl App {
             active: current == "agtx",
         }];
         for (name, desc, _content) in skills::BUNDLED_PLUGINS {
-            if *name == "agtx" { continue; }
+            if *name == "agtx" {
+                continue;
+            }
             options.push(PluginOption {
                 name: name.to_string(),
                 label: name.to_string(),
@@ -2249,10 +2575,7 @@ impl App {
                 .iter()
                 .find(|(n, _, _)| *n == plugin_name)
             {
-                let plugin_dir = project_path
-                    .join(".agtx")
-                    .join("plugins")
-                    .join(plugin_name);
+                let plugin_dir = project_path.join(".agtx").join("plugins").join(plugin_name);
                 let _ = std::fs::create_dir_all(&plugin_dir);
                 let _ = std::fs::write(plugin_dir.join("plugin.toml"), content);
             }
@@ -2294,8 +2617,13 @@ impl App {
                 let task_id = task.id.clone();
                 std::thread::spawn(move || {
                     cleanup_task_resources(
-                        &task_id, &branch_name, &session_name, &worktree_path,
-                        &project_path, tmux_ops.as_ref(), git_ops.as_ref(),
+                        &task_id,
+                        &branch_name,
+                        &session_name,
+                        &worktree_path,
+                        &project_path,
+                        tmux_ops.as_ref(),
+                        git_ops.as_ref(),
                     );
                 });
             }
@@ -2325,7 +2653,10 @@ impl App {
                 let title_for_thread = task_title.clone();
                 let worktree_for_thread = worktree_path.clone();
                 let git_ops = Arc::clone(&self.state.git_ops);
-                let agent_ops = self.state.agent_registry.get(&self.state.config.default_agent);
+                let agent_ops = self
+                    .state
+                    .agent_registry
+                    .get(&self.state.config.default_agent);
                 std::thread::spawn(move || {
                     let (pr_title, pr_body) = generate_pr_description(
                         &title_for_thread,
@@ -2372,7 +2703,9 @@ impl App {
                         let pr_title = popup.pr_title.clone();
                         let pr_body = popup.pr_body.clone();
                         self.state.pr_confirm_popup = None;
-                        self.create_pr_and_move_to_review_with_content(&task_id, &pr_title, &pr_body)?;
+                        self.create_pr_and_move_to_review_with_content(
+                            &task_id, &pr_title, &pr_body,
+                        )?;
                     }
                 }
                 KeyCode::Enter => {
@@ -2404,7 +2737,12 @@ impl App {
         Ok(())
     }
 
-    fn create_pr_and_move_to_review_with_content(&mut self, task_id: &str, pr_title: &str, pr_body: &str) -> Result<()> {
+    fn create_pr_and_move_to_review_with_content(
+        &mut self,
+        task_id: &str,
+        pr_title: &str,
+        pr_body: &str,
+    ) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, self.state.project_path.clone()) {
             if let Some(mut task) = db.get_task(task_id)? {
                 // Keep tmux window open - session_name stays set for resume
@@ -2423,7 +2761,10 @@ impl App {
                 let pr_body_clone = pr_body.to_string();
                 let git_ops = Arc::clone(&self.state.git_ops);
                 let git_provider_ops = Arc::clone(&self.state.git_provider_ops);
-                let agent_ops = self.state.agent_registry.get(&self.state.config.default_agent);
+                let agent_ops = self
+                    .state
+                    .agent_registry
+                    .get(&self.state.config.default_agent);
 
                 // Create channel for result
                 let (tx, rx) = mpsc::channel();
@@ -2475,13 +2816,21 @@ impl App {
             KeyCode::Enter => {
                 // Jump to selected task and open it
                 if let Some(ref search) = self.state.task_search {
-                    if let Some((task_id, _, status)) = search.matches.get(search.selected).cloned() {
+                    if let Some((task_id, _, status)) = search.matches.get(search.selected).cloned()
+                    {
                         // Find column index for this status
-                        let col_idx = TaskStatus::columns().iter().position(|s| *s == status).unwrap_or(0);
+                        let col_idx = TaskStatus::columns()
+                            .iter()
+                            .position(|s| *s == status)
+                            .unwrap_or(0);
                         self.state.board.selected_column = col_idx;
 
                         // Find row index for this task
-                        let tasks_in_col: Vec<_> = self.state.board.tasks.iter()
+                        let tasks_in_col: Vec<_> = self
+                            .state
+                            .board
+                            .tasks
+                            .iter()
                             .filter(|t| t.status == status)
                             .collect();
                         if let Some(row_idx) = tasks_in_col.iter().position(|t| t.id == task_id) {
@@ -2510,7 +2859,9 @@ impl App {
                 }
                 false
             }
-            KeyCode::Char('k') | KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('k') | KeyCode::Char('p')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 if let Some(ref mut search) = self.state.task_search {
                     if search.selected > 0 {
                         search.selected -= 1;
@@ -2518,7 +2869,9 @@ impl App {
                 }
                 false
             }
-            KeyCode::Char('j') | KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('j') | KeyCode::Char('n')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 if let Some(ref mut search) = self.state.task_search {
                     if search.selected < search.matches.len().saturating_sub(1) {
                         search.selected += 1;
@@ -2530,7 +2883,12 @@ impl App {
                 if let Some(ref mut search) = self.state.task_search {
                     search.query.pop();
                 }
-                let query = self.state.task_search.as_ref().map(|s| s.query.clone()).unwrap_or_default();
+                let query = self
+                    .state
+                    .task_search
+                    .as_ref()
+                    .map(|s| s.query.clone())
+                    .unwrap_or_default();
                 let matches = self.get_all_task_matches(&query);
                 if let Some(ref mut search) = self.state.task_search {
                     search.matches = matches;
@@ -2542,7 +2900,12 @@ impl App {
                 if let Some(ref mut search) = self.state.task_search {
                     search.query.push(c);
                 }
-                let query = self.state.task_search.as_ref().map(|s| s.query.clone()).unwrap_or_default();
+                let query = self
+                    .state
+                    .task_search
+                    .as_ref()
+                    .map(|s| s.query.clone())
+                    .unwrap_or_default();
                 let matches = self.get_all_task_matches(&query);
                 if let Some(ref mut search) = self.state.task_search {
                     search.matches = matches;
@@ -2563,7 +2926,10 @@ impl App {
     fn get_all_task_matches(&self, query: &str) -> Vec<(String, String, TaskStatus)> {
         let query_lower = query.to_lowercase();
 
-        let mut matches: Vec<(String, String, TaskStatus, i32)> = self.state.board.tasks
+        let mut matches: Vec<(String, String, TaskStatus, i32)> = self
+            .state
+            .board
+            .tasks
             .iter()
             .filter_map(|task| {
                 let title_lower = task.title.to_lowercase();
@@ -2584,7 +2950,8 @@ impl App {
         // Sort by score (higher is better)
         matches.sort_by(|a, b| b.3.cmp(&a.3));
 
-        matches.into_iter()
+        matches
+            .into_iter()
             .take(10)
             .map(|(id, title, status, _)| (id, title, status))
             .collect()
@@ -2653,7 +3020,11 @@ impl App {
                     // Forward all other keys to tmux window (including Esc)
                     send_key_to_tmux(&window_name, key.code, self.state.tmux_ops.as_ref());
                     // After sending a key, refresh content to show the result
-                    popup.cached_content = capture_tmux_pane_with_history(&window_name, 500, self.state.tmux_ops.as_ref());
+                    popup.cached_content = capture_tmux_pane_with_history(
+                        &window_name,
+                        500,
+                        self.state.tmux_ops.as_ref(),
+                    );
                 }
             }
         }
@@ -2707,7 +3078,12 @@ impl App {
                     }
                 }
                 KeyCode::Enter => {
-                    if let Some(project) = self.state.projects.get(self.state.selected_project).cloned() {
+                    if let Some(project) = self
+                        .state
+                        .projects
+                        .get(self.state.selected_project)
+                        .cloned()
+                    {
                         self.switch_to_project(&project)?;
                         self.state.mode = AppMode::Project(PathBuf::from(&project.path));
                         self.state.sidebar_visible = false;
@@ -2766,7 +3142,12 @@ impl App {
                     if self.state.selected_project < self.state.projects.len().saturating_sub(1) {
                         self.state.selected_project += 1;
                         // Switch to project immediately on cursor move
-                        if let Some(project) = self.state.projects.get(self.state.selected_project).cloned() {
+                        if let Some(project) = self
+                            .state
+                            .projects
+                            .get(self.state.selected_project)
+                            .cloned()
+                        {
                             self.switch_to_project_keep_sidebar(&project)?;
                         }
                     }
@@ -2775,7 +3156,12 @@ impl App {
                     if self.state.selected_project > 0 {
                         self.state.selected_project -= 1;
                         // Switch to project immediately on cursor move
-                        if let Some(project) = self.state.projects.get(self.state.selected_project).cloned() {
+                        if let Some(project) = self
+                            .state
+                            .projects
+                            .get(self.state.selected_project)
+                            .cloned()
+                        {
                             self.switch_to_project_keep_sidebar(&project)?;
                         }
                     }
@@ -2908,22 +3294,28 @@ impl App {
                 }
             }
             KeyCode::Left if has_alt => {
-                self.state.input_cursor = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+                self.state.input_cursor =
+                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Right if has_alt => {
-                self.state.input_cursor = word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+                self.state.input_cursor =
+                    word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
             }
             // macOS: Option+Left/Right sends Alt+b / Alt+f
             KeyCode::Char('b') if has_alt => {
-                self.state.input_cursor = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+                self.state.input_cursor =
+                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Char('f') if has_alt => {
-                self.state.input_cursor = word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+                self.state.input_cursor =
+                    word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
             }
             // Alt+Backspace: delete word backward (macOS Option+Delete)
             KeyCode::Backspace if has_alt => {
                 let new_pos = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
-                self.state.input_buffer.drain(new_pos..self.state.input_cursor);
+                self.state
+                    .input_buffer
+                    .drain(new_pos..self.state.input_cursor);
                 self.state.input_cursor = new_pos;
             }
             KeyCode::Left => {
@@ -2964,7 +3356,9 @@ impl App {
 
     fn handle_plugin_select_wizard(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Esc => { self.cancel_wizard(); }
+            KeyCode::Esc => {
+                self.cancel_wizard();
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 let max = self.state.wizard_plugin_options.len().saturating_sub(1);
                 if self.state.wizard_selected_plugin < max {
@@ -2979,7 +3373,8 @@ impl App {
             KeyCode::Tab => {
                 let len = self.state.wizard_plugin_options.len();
                 if len > 0 {
-                    self.state.wizard_selected_plugin = (self.state.wizard_selected_plugin + 1) % len;
+                    self.state.wizard_selected_plugin =
+                        (self.state.wizard_selected_plugin + 1) % len;
                 }
             }
             KeyCode::Enter => {
@@ -3004,7 +3399,9 @@ impl App {
                     self.state.task_ref_search = None;
                 }
                 KeyCode::Enter | KeyCode::Tab => {
-                    if let Some((task_id, title, _status)) = search.matches.get(search.selected).cloned() {
+                    if let Some((task_id, title, _status)) =
+                        search.matches.get(search.selected).cloned()
+                    {
                         // Replace `!` + pattern with ![task-title]
                         let pattern_end = search.start_pos + 1 + search.pattern.len();
                         let suffix = self.state.input_buffer[pattern_end..].to_string();
@@ -3056,7 +3453,12 @@ impl App {
                     }
                     self.state.input_buffer.insert(self.state.input_cursor, c);
                     self.state.input_cursor += 1;
-                    let query = self.state.task_ref_search.as_ref().map(|s| s.pattern.clone()).unwrap_or_default();
+                    let query = self
+                        .state
+                        .task_ref_search
+                        .as_ref()
+                        .map(|s| s.pattern.clone())
+                        .unwrap_or_default();
                     let matches = self.get_all_task_matches(&query);
                     if let Some(ref mut search) = self.state.task_ref_search {
                         search.matches = matches;
@@ -3103,12 +3505,20 @@ impl App {
                         search.selected += 1;
                     }
                 }
-                KeyCode::Char('k') | KeyCode::Char('p') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                KeyCode::Char('k') | KeyCode::Char('p')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
                     if search.selected > 0 {
                         search.selected -= 1;
                     }
                 }
-                KeyCode::Char('j') | KeyCode::Char('n') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                KeyCode::Char('j') | KeyCode::Char('n')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
                     if search.selected < search.matches.len().saturating_sub(1) {
                         search.selected += 1;
                     }
@@ -3168,12 +3578,20 @@ impl App {
                         search.selected += 1;
                     }
                 }
-                KeyCode::Char('k') | KeyCode::Char('p') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                KeyCode::Char('k') | KeyCode::Char('p')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
                     if search.selected > 0 {
                         search.selected -= 1;
                     }
                 }
-                KeyCode::Char('j') | KeyCode::Char('n') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                KeyCode::Char('j') | KeyCode::Char('n')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
                     if search.selected < search.matches.len().saturating_sub(1) {
                         search.selected += 1;
                     }
@@ -3220,22 +3638,28 @@ impl App {
                 }
             }
             KeyCode::Left if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
-                self.state.input_cursor = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+                self.state.input_cursor =
+                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Right if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
-                self.state.input_cursor = word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+                self.state.input_cursor =
+                    word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
             }
             // macOS: Option+Left/Right sends Alt+b / Alt+f
             KeyCode::Char('b') if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
-                self.state.input_cursor = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+                self.state.input_cursor =
+                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Char('f') if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
-                self.state.input_cursor = word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+                self.state.input_cursor =
+                    word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
             }
             // Alt+Backspace: delete word backward (macOS Option+Delete)
             KeyCode::Backspace if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
                 let new_pos = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
-                self.state.input_buffer.drain(new_pos..self.state.input_cursor);
+                self.state
+                    .input_buffer
+                    .drain(new_pos..self.state.input_cursor);
                 self.state.input_cursor = new_pos;
             }
             KeyCode::Left => {
@@ -3267,9 +3691,15 @@ impl App {
             }
             KeyCode::Char('#') | KeyCode::Char('@') => {
                 // Start file search at cursor position
-                let trigger = if let KeyCode::Char(c) = key.code { c } else { '#' };
+                let trigger = if let KeyCode::Char(c) = key.code {
+                    c
+                } else {
+                    '#'
+                };
                 let start_pos = self.state.input_cursor;
-                self.state.input_buffer.insert(self.state.input_cursor, trigger);
+                self.state
+                    .input_buffer
+                    .insert(self.state.input_cursor, trigger);
                 self.state.input_cursor += 1;
                 self.state.file_search = Some(FileSearchState {
                     pattern: String::new(),
@@ -3280,7 +3710,16 @@ impl App {
                 });
                 self.update_file_search_matches();
             }
-            KeyCode::Char('/') if self.state.input_cursor == 0 || matches!(self.state.input_buffer.as_bytes().get(self.state.input_cursor.wrapping_sub(1)), Some(&b'\n') | Some(&b' ')) => {
+            KeyCode::Char('/')
+                if self.state.input_cursor == 0
+                    || matches!(
+                        self.state
+                            .input_buffer
+                            .as_bytes()
+                            .get(self.state.input_cursor.wrapping_sub(1)),
+                        Some(&b'\n') | Some(&b' ')
+                    ) =>
+            {
                 // Start skill search at cursor position (at start of line or after space)
                 let start_pos = self.state.input_cursor;
                 self.state.input_buffer.insert(self.state.input_cursor, '/');
@@ -3288,19 +3727,28 @@ impl App {
 
                 // Start with bundled skills (always available, no filesystem needed)
                 let mut seen = std::collections::HashSet::new();
-                let mut all_skills: Vec<SkillEntry> = skills::enumerate_available_skills(&self.state.config.default_agent)
-                    .into_iter()
-                    .map(|(command, description)| {
-                        seen.insert(command.clone());
-                        SkillEntry { command, description }
-                    })
-                    .collect();
+                let mut all_skills: Vec<SkillEntry> =
+                    skills::enumerate_available_skills(&self.state.config.default_agent)
+                        .into_iter()
+                        .map(|(command, description)| {
+                            seen.insert(command.clone());
+                            SkillEntry {
+                                command,
+                                description,
+                            }
+                        })
+                        .collect();
 
                 // Merge filesystem-discovered skills (project root), dedup by command
                 if let Some(ref project_path) = self.state.project_path {
-                    for (command, description) in skills::scan_agent_skills(&self.state.config.default_agent, project_path) {
+                    for (command, description) in
+                        skills::scan_agent_skills(&self.state.config.default_agent, project_path)
+                    {
                         if seen.insert(command.clone()) {
-                            all_skills.push(SkillEntry { command, description });
+                            all_skills.push(SkillEntry {
+                                command,
+                                description,
+                            });
                         }
                     }
                 }
@@ -3313,7 +3761,21 @@ impl App {
                     start_pos,
                 });
             }
-            KeyCode::Char('!') if self.state.input_cursor == 0 || self.state.input_buffer.as_bytes().get(self.state.input_cursor.wrapping_sub(1)) == Some(&b'\n') || self.state.input_buffer.as_bytes().get(self.state.input_cursor.wrapping_sub(1)) == Some(&b' ') => {
+            KeyCode::Char('!')
+                if self.state.input_cursor == 0
+                    || self
+                        .state
+                        .input_buffer
+                        .as_bytes()
+                        .get(self.state.input_cursor.wrapping_sub(1))
+                        == Some(&b'\n')
+                    || self
+                        .state
+                        .input_buffer
+                        .as_bytes()
+                        .get(self.state.input_cursor.wrapping_sub(1))
+                        == Some(&b' ') =>
+            {
                 // Start task reference search at cursor position (at start of line or after space)
                 let start_pos = self.state.input_cursor;
                 self.state.input_buffer.insert(self.state.input_cursor, '!');
@@ -3337,9 +3799,12 @@ impl App {
     }
 
     fn update_file_search_matches(&mut self) {
-        if let (Some(ref mut search), Some(ref project_path)) = (&mut self.state.file_search, &self.state.project_path) {
+        if let (Some(ref mut search), Some(ref project_path)) =
+            (&mut self.state.file_search, &self.state.project_path)
+        {
             let pattern = &search.pattern;
-            search.matches = fuzzy_find_files(project_path, pattern, 10, self.state.git_ops.as_ref());
+            search.matches =
+                fuzzy_find_files(project_path, pattern, 10, self.state.git_ops.as_ref());
             search.selected = 0;
         }
     }
@@ -3350,12 +3815,18 @@ impl App {
             if pattern.is_empty() {
                 search.matches = search.all_skills.clone();
             } else {
-                let mut scored: Vec<_> = search.all_skills.iter()
+                let mut scored: Vec<_> = search
+                    .all_skills
+                    .iter()
                     .filter_map(|entry| {
                         let cmd_score = fuzzy_score(&entry.command.to_lowercase(), &pattern);
                         let desc_score = fuzzy_score(&entry.description.to_lowercase(), &pattern);
                         let score = std::cmp::max(cmd_score, desc_score);
-                        if score > 0 { Some((entry.clone(), score)) } else { None }
+                        if score > 0 {
+                            Some((entry.clone(), score))
+                        } else {
+                            None
+                        }
                     })
                     .collect();
                 scored.sort_by(|a, b| b.1.cmp(&a.1));
@@ -3368,15 +3839,28 @@ impl App {
     fn save_task(&mut self) -> Result<()> {
         if let Some(db) = &self.state.db {
             let agent = self.state.config.default_agent.clone();
-            let plugin_name = self.state.wizard_plugin_options
+            let plugin_name = self
+                .state
+                .wizard_plugin_options
                 .get(self.state.wizard_selected_plugin)
                 .map(|o| o.name.clone())
                 .unwrap_or_default();
-            let plugin = if plugin_name.is_empty() { None } else { Some(plugin_name) };
+            let plugin = if plugin_name.is_empty() {
+                None
+            } else {
+                Some(plugin_name)
+            };
             let refs = if self.state.wizard_referenced_task_ids.is_empty() {
                 None
             } else {
-                Some(self.state.wizard_referenced_task_ids.iter().cloned().collect::<Vec<_>>().join(","))
+                Some(
+                    self.state
+                        .wizard_referenced_task_ids
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
             };
 
             if let Some(task_id) = &self.state.editing_task_id {
@@ -3417,13 +3901,20 @@ impl App {
     /// Initialize plugin selection options for the wizard, filtered by selected agent.
     fn init_plugin_selection(&mut self) {
         let current = if let Some(task_id) = &self.state.editing_task_id {
-            self.state.db.as_ref()
+            self.state
+                .db
+                .as_ref()
                 .and_then(|db| db.get_task(task_id).ok().flatten())
                 .and_then(|t| t.plugin.clone())
                 .or_else(|| self.state.config.workflow_plugin.clone())
                 .unwrap_or_else(|| "agtx".to_string())
         } else {
-            self.state.config.workflow_plugin.as_deref().unwrap_or("agtx").to_string()
+            self.state
+                .config
+                .workflow_plugin
+                .as_deref()
+                .unwrap_or("agtx")
+                .to_string()
         };
 
         let selected_agent_name = &self.state.config.default_agent;
@@ -3435,10 +3926,14 @@ impl App {
             active: current == "agtx",
         }];
         for (name, desc, content) in skills::BUNDLED_PLUGINS {
-            if *name == "agtx" { continue; }
+            if *name == "agtx" {
+                continue;
+            }
             // Filter by agent compatibility
             if let Ok(plugin) = toml::from_str::<WorkflowPlugin>(content) {
-                if !plugin.supports_agent(selected_agent_name) { continue; }
+                if !plugin.supports_agent(selected_agent_name) {
+                    continue;
+                }
             }
             options.push(PluginOption {
                 name: name.to_string(),
@@ -3459,9 +3954,15 @@ impl App {
                 if let Ok(Some(task)) = db.get_task(task_id) {
                     self.state.input_buffer = task.description.unwrap_or_default();
                     // Restore referenced task IDs if editing
-                    self.state.wizard_referenced_task_ids = task.referenced_tasks
+                    self.state.wizard_referenced_task_ids = task
+                        .referenced_tasks
                         .as_deref()
-                        .map(|s| s.split(',').filter(|id| !id.is_empty()).map(String::from).collect())
+                        .map(|s| {
+                            s.split(',')
+                                .filter(|id| !id.is_empty())
+                                .map(String::from)
+                                .collect()
+                        })
                         .unwrap_or_default();
                 } else {
                     self.state.input_buffer.clear();
@@ -3534,10 +4035,15 @@ impl App {
             let diff_content = if let Some(worktree_path) = &task.worktree_path {
                 let mut exclude_prefixes: Vec<&str> = crate::git::AGENT_CONFIG_DIRS.to_vec();
                 let plugin = self.load_task_plugin(task);
-                let plugin_dirs: Vec<String> = plugin.map_or_else(Vec::new, |p| p.copy_dirs.clone());
+                let plugin_dirs: Vec<String> =
+                    plugin.map_or_else(Vec::new, |p| p.copy_dirs.clone());
                 let plugin_dir_refs: Vec<&str> = plugin_dirs.iter().map(|s| s.as_str()).collect();
                 exclude_prefixes.extend(plugin_dir_refs);
-                collect_task_diff(worktree_path, self.state.git_ops.as_ref(), &exclude_prefixes)
+                collect_task_diff(
+                    worktree_path,
+                    self.state.git_ops.as_ref(),
+                    &exclude_prefixes,
+                )
             } else {
                 "(task has no worktree yet)".to_string()
             };
@@ -3575,10 +4081,18 @@ impl App {
             }
 
             let handled = match (current_status, new_status) {
-                (TaskStatus::Backlog, TaskStatus::Planning) => self.transition_to_planning(&mut task, &project_path)?,
-                (TaskStatus::Planning, TaskStatus::Running) => self.transition_to_running(&mut task)?,
-                (TaskStatus::Running, TaskStatus::Review) => self.transition_to_review(&mut task, &project_path)?,
-                (TaskStatus::Review, TaskStatus::Done) => self.transition_to_done(&mut task, &project_path)?,
+                (TaskStatus::Backlog, TaskStatus::Planning) => {
+                    self.transition_to_planning(&mut task, &project_path)?
+                }
+                (TaskStatus::Planning, TaskStatus::Running) => {
+                    self.transition_to_running(&mut task)?
+                }
+                (TaskStatus::Running, TaskStatus::Review) => {
+                    self.transition_to_review(&mut task, &project_path)?
+                }
+                (TaskStatus::Review, TaskStatus::Done) => {
+                    self.transition_to_done(&mut task, &project_path)?
+                }
                 _ => false,
             };
 
@@ -3598,7 +4112,6 @@ impl App {
                 self.state.stuck_task_idle_since.remove(&task.id);
                 self.state.phase_status_cache.remove(&task.id);
             }
-
         }
         self.refresh_tasks()?;
         Ok(())
@@ -3606,15 +4119,25 @@ impl App {
 
     /// Check if the current phase is incomplete (artifact missing + agent still running).
     /// Returns true if a confirmation popup was shown and the caller should return early.
-    fn check_phase_incomplete(&mut self, task: &Task, current_status: TaskStatus, new_status: TaskStatus) -> bool {
+    fn check_phase_incomplete(
+        &mut self,
+        task: &Task,
+        current_status: TaskStatus,
+        new_status: TaskStatus,
+    ) -> bool {
         if self.state.skip_move_confirm {
             return false;
         }
-        if !matches!(current_status, TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review) {
+        if !matches!(
+            current_status,
+            TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review
+        ) {
             return false;
         }
         let plugin = self.load_task_plugin(task);
-        let Some(ref wt_path) = task.worktree_path else { return false };
+        let Some(ref wt_path) = task.worktree_path else {
+            return false;
+        };
         if phase_artifact_exists(wt_path, current_status, &plugin, task.cycle) {
             return false;
         }
@@ -3642,10 +4165,14 @@ impl App {
         let plugin = self.load_task_plugin(task);
 
         // Block if planning phase doesn't accept {task} and no prior phase artifact exists
-        if plugin.as_ref().map_or(false, |p| !p.phase_accepts_task("planning")) {
-            let has_research = task.worktree_path.as_ref().map_or(false, |wt| {
-                research_artifact_exists(wt, &task.id, &plugin)
-            });
+        if plugin
+            .as_ref()
+            .map_or(false, |p| !p.phase_accepts_task("planning"))
+        {
+            let has_research = task
+                .worktree_path
+                .as_ref()
+                .map_or(false, |wt| research_artifact_exists(wt, &task.id, &plugin));
             if !has_research {
                 self.state.warning_message = Some((
                     format!("Research phase required first — press R to start research"),
@@ -3655,7 +4182,8 @@ impl App {
             }
         }
 
-        let (planning_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "planning");
+        let (planning_agent, agent_switch) =
+            needs_agent_switch(&self.state.config, task, "planning");
 
         let has_live_session = task.session_name.as_ref().map_or(false, |s| {
             self.state.tmux_ops.window_exists(s).unwrap_or(false)
@@ -3665,16 +4193,38 @@ impl App {
             // Reuse existing session from research
             let target = task.session_name.clone().unwrap();
             let task_content = task.content_text();
-            let planning_phase = determine_phase_variant("planning", task.worktree_path.as_deref(), &task.id, &plugin, task.cycle);
-            let skill_cmd = resolve_skill_command(&plugin, planning_phase, &planning_agent, &task_content, task.cycle);
-            let prompt = resolve_prompt(&plugin, planning_phase, &task_content, &task.id, task.cycle);
+            let planning_phase = determine_phase_variant(
+                "planning",
+                task.worktree_path.as_deref(),
+                &task.id,
+                &plugin,
+                task.cycle,
+            );
+            let skill_cmd = resolve_skill_command(
+                &plugin,
+                planning_phase,
+                &planning_agent,
+                &task_content,
+                task.cycle,
+            );
+            let prompt =
+                resolve_prompt(&plugin, planning_phase, &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, planning_phase);
-            let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+            let auto_dismiss = plugin
+                .as_ref()
+                .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
-                target, task.agent.clone(), planning_agent.clone(), agent_switch,
-                skill_cmd, prompt, prompt_trigger, task_content, auto_dismiss,
+                target,
+                task.agent.clone(),
+                planning_agent.clone(),
+                agent_switch,
+                skill_cmd,
+                prompt,
+                prompt_trigger,
+                task_content,
+                auto_dismiss,
             );
             task.agent = planning_agent;
             return Ok(false);
@@ -3687,10 +4237,17 @@ impl App {
         // Create worktree + tmux window from scratch (non-blocking)
         let task_content = task.content_text();
         let prompt = resolve_prompt(&plugin, "planning", &task_content, &task.id, task.cycle);
-        let skill_cmd = resolve_skill_command(&plugin, "planning", &planning_agent, &task_content, task.cycle);
+        let skill_cmd = resolve_skill_command(
+            &plugin,
+            "planning",
+            &planning_agent,
+            &task_content,
+            task.cycle,
+        );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
         let all_agents = collect_phase_agents(&self.state.config);
         let project_name = self.state.project_name.clone();
+        let base_branch = self.state.config.base_branch.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -3700,21 +4257,31 @@ impl App {
         let task_title = task.title.clone();
         let plugin_name = task.plugin.clone();
         let planning_agent_clone = planning_agent.clone();
-        let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+        let auto_dismiss = plugin
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
         let project_path = project_path.to_path_buf();
 
         // Pre-fetch referenced task info (DB isn't Send, so fetch before spawning thread)
-        let referenced_tasks: Vec<ReferencedTaskInfo> = task.referenced_tasks.as_deref()
+        let referenced_tasks: Vec<ReferencedTaskInfo> = task
+            .referenced_tasks
+            .as_deref()
             .map(|refs_str| {
-                refs_str.split(',').filter(|s| !s.is_empty()).filter_map(|ref_id| {
-                    self.state.db.as_ref()
-                        .and_then(|db| db.get_task(ref_id).ok().flatten())
-                        .map(|ref_task| ReferencedTaskInfo {
-                            slug: generate_task_slug(&ref_task.id, &ref_task.title),
-                            branch_name: ref_task.branch_name.clone(),
-                            worktree_path: ref_task.worktree_path.clone(),
-                        })
-                }).collect()
+                refs_str
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|ref_id| {
+                        self.state
+                            .db
+                            .as_ref()
+                            .and_then(|db| db.get_task(ref_id).ok().flatten())
+                            .map(|ref_task| ReferencedTaskInfo {
+                                slug: generate_task_slug(&ref_task.id, &ref_task.title),
+                                branch_name: ref_task.branch_name.clone(),
+                                worktree_path: ref_task.worktree_path.clone(),
+                            })
+                    })
+                    .collect()
             })
             .unwrap_or_default();
 
@@ -3727,9 +4294,19 @@ impl App {
             tmp_task.plugin = plugin_name.clone();
 
             let result = setup_task_worktree(
-                &mut tmp_task, &project_path, &project_name, &prompt,
-                copy_files, init_script, &plugin, &planning_agent_clone, &all_agents,
-                tmux_ops.as_ref(), git_ops.as_ref(), agent_ops.as_ref(),
+                &mut tmp_task,
+                &project_path,
+                &project_name,
+                &prompt,
+                &base_branch,
+                copy_files,
+                init_script,
+                &plugin,
+                &planning_agent_clone,
+                &all_agents,
+                tmux_ops.as_ref(),
+                git_ops.as_ref(),
+                agent_ops.as_ref(),
                 &referenced_tasks,
             );
 
@@ -3746,7 +4323,16 @@ impl App {
                         error: None,
                     });
                     if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
-                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &planning_agent_clone, &auto_dismiss);
+                        send_skill_and_prompt(
+                            &tmux_ops,
+                            &target,
+                            &skill_cmd,
+                            &prompt,
+                            &prompt_trigger,
+                            &task_content,
+                            &planning_agent_clone,
+                            &auto_dismiss,
+                        );
                     }
                 }
                 Err(e) => {
@@ -3772,18 +4358,40 @@ impl App {
     fn transition_to_running(&mut self, task: &mut Task) -> Result<bool> {
         if let Some(session_name) = &task.session_name {
             let plugin = self.load_task_plugin(task);
-            let (running_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "running");
+            let (running_agent, agent_switch) =
+                needs_agent_switch(&self.state.config, task, "running");
             let task_content = task.content_text();
-            let run_phase = determine_phase_variant("running", task.worktree_path.as_deref(), &task.id, &plugin, task.cycle);
-            let skill_cmd = resolve_skill_command(&plugin, run_phase, &running_agent, &task_content, task.cycle);
+            let run_phase = determine_phase_variant(
+                "running",
+                task.worktree_path.as_deref(),
+                &task.id,
+                &plugin,
+                task.cycle,
+            );
+            let skill_cmd = resolve_skill_command(
+                &plugin,
+                run_phase,
+                &running_agent,
+                &task_content,
+                task.cycle,
+            );
             let prompt = resolve_prompt(&plugin, run_phase, &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, run_phase);
-            let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+            let auto_dismiss = plugin
+                .as_ref()
+                .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
-                session_name.clone(), task.agent.clone(), running_agent.clone(), agent_switch,
-                skill_cmd, prompt, prompt_trigger, task_content, auto_dismiss,
+                session_name.clone(),
+                task.agent.clone(),
+                running_agent.clone(),
+                agent_switch,
+                skill_cmd,
+                prompt,
+                prompt_trigger,
+                task_content,
+                auto_dismiss,
             );
             task.agent = running_agent;
         }
@@ -3797,15 +4405,25 @@ impl App {
         if let Some(session_name) = &task.session_name {
             let plugin = self.load_task_plugin(task);
             let task_content = task.content_text();
-            let skill_cmd = resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle);
+            let skill_cmd =
+                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle);
             let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
-            let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+            let auto_dismiss = plugin
+                .as_ref()
+                .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
-                session_name.clone(), task.agent.clone(), review_agent.clone(), agent_switch,
-                skill_cmd, prompt, prompt_trigger, task_content, auto_dismiss,
+                session_name.clone(),
+                task.agent.clone(),
+                review_agent.clone(),
+                agent_switch,
+                skill_cmd,
+                prompt,
+                prompt_trigger,
+                task_content,
+                auto_dismiss,
             );
         }
         task.agent = review_agent.clone();
@@ -3827,7 +4445,8 @@ impl App {
             self.state.pr_creation_rx = Some(rx);
 
             std::thread::spawn(move || {
-                let result = push_changes_to_existing_pr(&task_clone, git_ops.as_ref(), agent_ops.as_ref());
+                let result =
+                    push_changes_to_existing_pr(&task_clone, git_ops.as_ref(), agent_ops.as_ref());
                 match result {
                     Ok(pr_url) => {
                         if let Ok(db) = crate::db::Database::open_project(&project_path_clone) {
@@ -3859,7 +4478,10 @@ impl App {
     /// Returns Ok(true) if a confirmation popup was shown, Ok(false) to continue with db update.
     fn transition_to_done(&mut self, task: &mut Task, project_path: &Path) -> Result<bool> {
         if let Some(pr_number) = task.pr_number {
-            let pr_state = self.state.git_provider_ops.get_pr_state(project_path, pr_number)?;
+            let pr_state = self
+                .state
+                .git_provider_ops
+                .get_pr_state(project_path, pr_number)?;
             let confirm_state = match pr_state {
                 PullRequestState::Merged => DoneConfirmPrState::Merged,
                 PullRequestState::Closed => DoneConfirmPrState::Closed,
@@ -3875,9 +4497,10 @@ impl App {
         }
 
         // No PR — check for uncommitted changes
-        let has_uncommitted = task.worktree_path.as_ref().map_or(false, |wt| {
-            self.state.git_ops.has_changes(Path::new(wt))
-        });
+        let has_uncommitted = task
+            .worktree_path
+            .as_ref()
+            .map_or(false, |wt| self.state.git_ops.has_changes(Path::new(wt)));
         if has_uncommitted {
             self.state.done_confirm_popup = Some(DoneConfirmPopup {
                 task_id: task.id.clone(),
@@ -3900,8 +4523,13 @@ impl App {
         let project_path_clone = project_path.to_path_buf();
         std::thread::spawn(move || {
             cleanup_task_resources(
-                &task_id_clone, &branch_name, &session_name, &worktree_path,
-                &project_path_clone, tmux_ops.as_ref(), git_ops.as_ref(),
+                &task_id_clone,
+                &branch_name,
+                &session_name,
+                &worktree_path,
+                &project_path_clone,
+                tmux_ops.as_ref(),
+                git_ops.as_ref(),
             );
         });
         Ok(false)
@@ -3910,14 +4538,22 @@ impl App {
     /// Start a research session for a Backlog task (creates worktree, reused in planning)
     fn start_research(&mut self, task_id: &str) -> Result<()> {
         // Don't start if a setup is already in progress
-        if self.state.setup_rx.is_some() { return Ok(()) }
+        if self.state.setup_rx.is_some() {
+            return Ok(());
+        }
 
         let mut task = {
-            let Some(db) = &self.state.db else { return Ok(()) };
-            let Some(task) = db.get_task(task_id)? else { return Ok(()) };
+            let Some(db) = &self.state.db else {
+                return Ok(());
+            };
+            let Some(task) = db.get_task(task_id)? else {
+                return Ok(());
+            };
             task
         };
-        let Some(project_path) = self.state.project_path.clone() else { return Ok(()) };
+        let Some(project_path) = self.state.project_path.clone() else {
+            return Ok(());
+        };
 
         // Stamp plugin on task for research (only if not already set at task creation)
         if task.plugin.is_none() {
@@ -3927,8 +4563,9 @@ impl App {
         let plugin = self.load_task_plugin(&task);
 
         // Block if plugin has no research command (e.g. OpenSpec uses planning as first phase)
-        let has_research_cmd = plugin.as_ref()
-            .map_or(false, |p| p.commands.research.is_some() || p.commands.preresearch.is_some());
+        let has_research_cmd = plugin.as_ref().map_or(false, |p| {
+            p.commands.research.is_some() || p.commands.preresearch.is_some()
+        });
         if !has_research_cmd {
             self.state.warning_message = Some((
                 "This plugin has no research phase — move to Planning instead".to_string(),
@@ -3943,6 +4580,7 @@ impl App {
 
         let all_agents = collect_phase_agents(&self.state.config);
         let project_name = self.state.project_name.clone();
+        let base_branch = self.state.config.base_branch.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
 
@@ -3953,7 +4591,9 @@ impl App {
         let task_id = task.id.clone();
         let task_title = task.title.clone();
         let task_cycle = task.cycle;
-        let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+        let auto_dismiss = plugin
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
@@ -3971,6 +4611,7 @@ impl App {
                 &project_path,
                 &project_name,
                 "",
+                &base_branch,
                 copy_files,
                 init_script,
                 &plugin,
@@ -3991,14 +4632,32 @@ impl App {
                     let use_preresearch = plugin.as_ref().map_or(false, |p| {
                         p.commands.preresearch.is_some()
                             && !p.artifacts.preresearch.is_empty()
-                            && !p.artifacts.preresearch.iter().all(|a| {
-                                Path::new(&worktree_path).join(a).exists()
-                            })
+                            && !p
+                                .artifacts
+                                .preresearch
+                                .iter()
+                                .all(|a| Path::new(&worktree_path).join(a).exists())
                     });
-                    let research_phase = if use_preresearch { "preresearch" } else { "research" };
+                    let research_phase = if use_preresearch {
+                        "preresearch"
+                    } else {
+                        "research"
+                    };
 
-                    let prompt = resolve_prompt(&plugin, research_phase, &task_content, &task_id, task_cycle);
-                    let skill_cmd = resolve_skill_command(&plugin, research_phase, &agent_name, &task_content, task_cycle);
+                    let prompt = resolve_prompt(
+                        &plugin,
+                        research_phase,
+                        &task_content,
+                        &task_id,
+                        task_cycle,
+                    );
+                    let skill_cmd = resolve_skill_command(
+                        &plugin,
+                        research_phase,
+                        &agent_name,
+                        &task_content,
+                        task_cycle,
+                    );
                     let prompt_trigger = resolve_prompt_trigger(&plugin, research_phase);
 
                     let _ = tx.send(SetupResult {
@@ -4014,7 +4673,16 @@ impl App {
 
                     // Wait for agent ready and send skill+prompt
                     if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
-                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &agent_name, &auto_dismiss);
+                        send_skill_and_prompt(
+                            &tmux_ops,
+                            &target,
+                            &skill_cmd,
+                            &prompt,
+                            &prompt_trigger,
+                            &task_content,
+                            &agent_name,
+                            &auto_dismiss,
+                        );
                     }
                 }
                 Err(e) => {
@@ -4051,7 +4719,10 @@ impl App {
         }
 
         let (mut task, project_path) = match (
-            self.state.db.as_ref().and_then(|db| db.get_task(task_id).ok().flatten()),
+            self.state
+                .db
+                .as_ref()
+                .and_then(|db| db.get_task(task_id).ok().flatten()),
             self.state.project_path.clone(),
         ) {
             (Some(t), Some(p)) => (t, p),
@@ -4059,7 +4730,10 @@ impl App {
         };
 
         if task.status != TaskStatus::Backlog {
-            anyhow::bail!("Task must be in Backlog to move to Running (current: {})", task.status.as_str());
+            anyhow::bail!(
+                "Task must be in Backlog to move to Running (current: {})",
+                task.status.as_str()
+            );
         }
 
         // Stamp plugin on task before checking research requirement
@@ -4069,7 +4743,10 @@ impl App {
 
         // Block if running phase doesn't accept {task} and no prior phase artifact exists
         let plugin_check = self.load_task_plugin(&task);
-        if plugin_check.as_ref().map_or(false, |p| !p.phase_accepts_task("running")) {
+        if plugin_check
+            .as_ref()
+            .map_or(false, |p| !p.phase_accepts_task("running"))
+        {
             let has_prior = task.worktree_path.as_ref().map_or(false, |wt| {
                 research_artifact_exists(wt, &task.id, &plugin_check)
                     || phase_artifact_exists(wt, TaskStatus::Planning, &plugin_check, task.cycle)
@@ -4091,9 +4768,16 @@ impl App {
         let running_agent = self.state.config.agent_for_phase("running").to_string();
         let all_agents = collect_phase_agents(&self.state.config);
         let prompt = resolve_prompt(&plugin, "running", &task_content, &task.id, task.cycle);
-        let skill_cmd = resolve_skill_command(&plugin, "running", &running_agent, &task_content, task.cycle);
+        let skill_cmd = resolve_skill_command(
+            &plugin,
+            "running",
+            &running_agent,
+            &task_content,
+            task.cycle,
+        );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
         let project_name = self.state.project_name.clone();
+        let base_branch = self.state.config.base_branch.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -4102,7 +4786,9 @@ impl App {
         let task_id = task.id.clone();
         let task_title = task.title.clone();
         let running_agent_clone = running_agent.clone();
-        let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+        let auto_dismiss = plugin
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
@@ -4117,6 +4803,7 @@ impl App {
                 &project_path,
                 &project_name,
                 &prompt,
+                &base_branch,
                 copy_files,
                 init_script,
                 &plugin,
@@ -4142,7 +4829,16 @@ impl App {
                     });
 
                     if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
-                        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &running_agent_clone, &auto_dismiss);
+                        send_skill_and_prompt(
+                            &tmux_ops,
+                            &target,
+                            &skill_cmd,
+                            &prompt,
+                            &prompt_trigger,
+                            &task_content,
+                            &running_agent_clone,
+                            &auto_dismiss,
+                        );
                     }
                 }
                 Err(e) => {
@@ -4173,7 +4869,8 @@ impl App {
                 }
 
                 // Switch agent if running phase uses a different agent than review
-                let (running_agent, agent_switch) = needs_agent_switch(&self.state.config, &task, "running");
+                let (running_agent, agent_switch) =
+                    needs_agent_switch(&self.state.config, &task, "running");
                 if agent_switch {
                     if let Some(session_name) = &task.session_name {
                         let session_clone = session_name.clone();
@@ -4184,7 +4881,12 @@ impl App {
                         std::thread::spawn(move || {
                             let agent_ops = agent_registry.get(&running_agent_clone);
                             let new_cmd = agent_ops.build_interactive_command("");
-                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
+                            switch_agent_in_tmux(
+                                tmux_ops.as_ref(),
+                                &session_clone,
+                                &current_agent_clone,
+                                &new_cmd,
+                            );
                         });
                     }
                 }
@@ -4210,13 +4912,25 @@ impl App {
                 task.cycle += 1;
 
                 // Switch agent if planning phase uses a different agent than review
-                let (planning_agent, agent_switch) = needs_agent_switch(&self.state.config, &task, "planning");
+                let (planning_agent, agent_switch) =
+                    needs_agent_switch(&self.state.config, &task, "planning");
                 let plugin = self.load_task_plugin(&task);
 
                 // Resolve skill command and prompt for the new planning phase
-                let task_content = task.description.as_deref().unwrap_or(&task.title).to_string();
-                let skill_cmd = resolve_skill_command(&plugin, "planning", &planning_agent, &task_content, task.cycle);
-                let prompt = resolve_prompt(&plugin, "planning", &task_content, &task.id, task.cycle);
+                let task_content = task
+                    .description
+                    .as_deref()
+                    .unwrap_or(&task.title)
+                    .to_string();
+                let skill_cmd = resolve_skill_command(
+                    &plugin,
+                    "planning",
+                    &planning_agent,
+                    &task_content,
+                    task.cycle,
+                );
+                let prompt =
+                    resolve_prompt(&plugin, "planning", &task_content, &task.id, task.cycle);
                 let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
 
                 if let Some(session_name) = &task.session_name {
@@ -4226,15 +4940,31 @@ impl App {
                     let planning_agent_clone = planning_agent.clone();
                     let current_agent_clone = task.agent.clone();
                     let task_content_clone = task_content.clone();
-                    let auto_dismiss = plugin.as_ref().map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+                    let auto_dismiss = plugin
+                        .as_ref()
+                        .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
                     std::thread::spawn(move || {
                         if agent_switch {
                             let agent_ops = agent_registry.get(&planning_agent_clone);
                             let new_cmd = agent_ops.build_interactive_command("");
-                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
+                            switch_agent_in_tmux(
+                                tmux_ops.as_ref(),
+                                &session_clone,
+                                &current_agent_clone,
+                                &new_cmd,
+                            );
                             let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
                         }
-                        send_skill_and_prompt(&tmux_ops, &session_clone, &skill_cmd, &prompt, &prompt_trigger, &task_content_clone, &planning_agent_clone, &auto_dismiss);
+                        send_skill_and_prompt(
+                            &tmux_ops,
+                            &session_clone,
+                            &skill_cmd,
+                            &prompt,
+                            &prompt_trigger,
+                            &task_content_clone,
+                            &planning_agent_clone,
+                            &auto_dismiss,
+                        );
                     });
                 }
 
@@ -4256,7 +4986,8 @@ impl App {
                 }
 
                 // Switch agent if planning phase uses a different agent than running
-                let (planning_agent, agent_switch) = needs_agent_switch(&self.state.config, &task, "planning");
+                let (planning_agent, agent_switch) =
+                    needs_agent_switch(&self.state.config, &task, "planning");
                 if agent_switch {
                     if let Some(session_name) = &task.session_name {
                         let session_clone = session_name.clone();
@@ -4267,7 +4998,12 @@ impl App {
                         std::thread::spawn(move || {
                             let agent_ops = agent_registry.get(&planning_agent_clone);
                             let new_cmd = agent_ops.build_interactive_command("");
-                            switch_agent_in_tmux(tmux_ops.as_ref(), &session_clone, &current_agent_clone, &new_cmd);
+                            switch_agent_in_tmux(
+                                tmux_ops.as_ref(),
+                                &session_clone,
+                                &current_agent_clone,
+                                &new_cmd,
+                            );
                         });
                     }
                 }
@@ -4286,7 +5022,9 @@ impl App {
 
     /// Poll the transition_requests table for unprocessed requests and execute them.
     fn process_transition_requests(&mut self) -> Result<()> {
-        let Some(db) = &self.state.db else { return Ok(()) };
+        let Some(db) = &self.state.db else {
+            return Ok(());
+        };
         let pending = db.get_pending_transition_requests()?;
         if pending.is_empty() {
             return Ok(());
@@ -4336,7 +5074,9 @@ impl App {
                     );
                 }
                 if task.session_name.is_some() {
-                    anyhow::bail!("Task already has an active session (research may already be running)");
+                    anyhow::bail!(
+                        "Task already has an active session (research may already be running)"
+                    );
                 }
                 self.start_research(&req.task_id)?;
             }
@@ -4399,7 +5139,10 @@ impl App {
                         task.status.as_str()
                     );
                 }
-                task.escalation_note = req.reason.clone().or_else(|| Some("Needs attention".to_string()));
+                task.escalation_note = req
+                    .reason
+                    .clone()
+                    .or_else(|| Some("Needs attention".to_string()));
                 task.updated_at = chrono::Utc::now();
                 if let Some(db) = &self.state.db {
                     db.update_task(&task)?;
@@ -4463,8 +5206,7 @@ impl App {
             let task_content = task.content_text();
             let skill_cmd =
                 resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle);
-            let prompt =
-                resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
+            let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
             let auto_dismiss = plugin
                 .as_ref()
@@ -4511,23 +5253,35 @@ impl App {
 
         // If orchestrator is running, open the popup to view it
         if let Some(ref orch_target) = self.state.orchestrator_session {
-            if self.state.tmux_ops.window_exists(orch_target).unwrap_or(false) {
+            if self
+                .state
+                .tmux_ops
+                .window_exists(orch_target)
+                .unwrap_or(false)
+            {
                 let mut popup = ShellPopup::new("Orchestrator".to_string(), orch_target.clone());
                 if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
                     let pane_width = SHELL_POPUP_CONTENT_WIDTH;
-                    let popup_height = (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
+                    let popup_height =
+                        (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
                     let pane_height = popup_height.saturating_sub(4);
-                    let _ = self.state.tmux_ops.resize_window(orch_target, pane_width, pane_height);
+                    let _ = self
+                        .state
+                        .tmux_ops
+                        .resize_window(orch_target, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
                     std::thread::sleep(std::time::Duration::from_millis(200));
                 }
-                popup.cached_content = capture_tmux_pane_with_history(orch_target, 500, self.state.tmux_ops.as_ref());
+                popup.cached_content =
+                    capture_tmux_pane_with_history(orch_target, 500, self.state.tmux_ops.as_ref());
                 self.state.shell_popup = Some(popup);
                 return Ok(());
             } else {
                 // Window gone, clear the session
                 self.state.orchestrator_session = None;
-                self.state.orchestrator_ready.store(false, Ordering::Release);
+                self.state
+                    .orchestrator_ready
+                    .store(false, Ordering::Release);
             }
         }
 
@@ -4562,22 +5316,34 @@ impl App {
         )?;
 
         self.state.orchestrator_session = Some(orch_target.clone());
-        self.state.orchestrator_ready.store(false, Ordering::Release);
+        self.state
+            .orchestrator_ready
+            .store(false, Ordering::Release);
 
         // Open the popup immediately so the user can see the orchestrator starting
         let mut popup = ShellPopup::new("Orchestrator".to_string(), orch_target.clone());
         if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
             let pane_width = SHELL_POPUP_CONTENT_WIDTH;
-            let popup_height = (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
+            let popup_height =
+                (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
             let pane_height = popup_height.saturating_sub(4);
-            let _ = self.state.tmux_ops.resize_window(&orch_target, pane_width, pane_height);
+            let _ = self
+                .state
+                .tmux_ops
+                .resize_window(&orch_target, pane_width, pane_height);
             popup.last_pane_size = Some((pane_width, pane_height));
         }
-        popup.cached_content = capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
+        popup.cached_content =
+            capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
         self.state.shell_popup = Some(popup);
 
         // Deploy orchestrate skill to project root so the agent can discover it
-        deploy_skill(&project_path, "agtx-orchestrate", skills::ORCHESTRATE_SKILL, &default_agent);
+        deploy_skill(
+            &project_path,
+            "agtx-orchestrate",
+            skills::ORCHESTRATE_SKILL,
+            &default_agent,
+        );
 
         // Send the /agtx:orchestrate command once the agent is ready
         let skill_cmd = skills::transform_plugin_command("/agtx:orchestrate", &default_agent)
@@ -4607,21 +5373,26 @@ impl App {
                 // Resize tmux window to match popup dimensions (uses same constants as draw_shell_popup)
                 if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
                     let pane_width = SHELL_POPUP_CONTENT_WIDTH;
-                    let popup_height = (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
+                    let popup_height =
+                        (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
                     let pane_height = popup_height.saturating_sub(4); // -4 for borders + header/footer
 
                     let target = format!("{}:{}", self.state.project_name, window_name);
                     // TODO the resize should be done on target which is
                     // session_name:window_name, but for some reason that doesn't work
                     // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
-                    let _ = self.state.tmux_ops.resize_window(&window_name, pane_width, pane_height);
+                    let _ =
+                        self.state
+                            .tmux_ops
+                            .resize_window(&window_name, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
                     // Give TUI apps (OpenCode, Gemini Ink) time to re-render after resize
                     std::thread::sleep(std::time::Duration::from_millis(200));
                 }
 
                 // Capture initial content
-                popup.cached_content = capture_tmux_pane_with_history(window_name, 500, self.state.tmux_ops.as_ref());
+                popup.cached_content =
+                    capture_tmux_pane_with_history(window_name, 500, self.state.tmux_ops.as_ref());
 
                 self.state.shell_popup = Some(popup);
             }
@@ -4632,7 +5403,11 @@ impl App {
     /// Load the plugin that a specific task was created with.
     /// Falls back to bundled agtx plugin for tasks with no explicit plugin.
     fn load_task_plugin(&self, task: &Task) -> Option<WorkflowPlugin> {
-        load_task_plugin(task, self.state.project_path.as_deref(), &self.state.config.default_agent)
+        load_task_plugin(
+            task,
+            self.state.project_path.as_deref(),
+            &self.state.config.default_agent,
+        )
     }
 
     pub fn refresh_tasks(&mut self) -> Result<()> {
@@ -4662,7 +5437,12 @@ impl App {
         // Find current project in list and select it
         if let Some(project_path) = &self.state.project_path {
             let current_path = project_path.to_string_lossy();
-            if let Some(pos) = self.state.projects.iter().position(|p| p.path == current_path) {
+            if let Some(pos) = self
+                .state
+                .projects
+                .iter()
+                .position(|p| p.path == current_path)
+            {
                 self.state.selected_project = pos;
             }
         }
@@ -4690,12 +5470,19 @@ impl App {
         }
 
         // Check window still exists
-        if !self.state.tmux_ops.window_exists(&orch_target).unwrap_or(false) {
+        if !self
+            .state
+            .tmux_ops
+            .window_exists(&orch_target)
+            .unwrap_or(false)
+        {
             return;
         }
 
         // Capture current pane content (bottom portion for comparison)
-        let current_content = self.state.tmux_ops
+        let current_content = self
+            .state
+            .tmux_ops
             .capture_pane(&orch_target)
             .unwrap_or_default();
 
@@ -4755,22 +5542,42 @@ impl App {
         const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
         // Collect tasks that need checking (cache expired or never checked)
-        let tasks_to_check: Vec<_> = self.state.board.tasks.iter()
+        let tasks_to_check: Vec<_> = self
+            .state
+            .board
+            .tasks
+            .iter()
             .filter(|t| {
-                matches!(t.status, TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review)
-                || (t.status == TaskStatus::Backlog && t.session_name.is_some())
+                matches!(
+                    t.status,
+                    TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review
+                ) || (t.status == TaskStatus::Backlog && t.session_name.is_some())
             })
             .filter(|t| t.worktree_path.is_some() || t.session_name.is_some())
             .filter(|t| {
-                self.state.phase_status_cache.get(&t.id)
+                self.state
+                    .phase_status_cache
+                    .get(&t.id)
                     .map_or(true, |(_, ts)| now.duration_since(*ts) >= CACHE_TTL)
             })
             .map(|t| {
                 // was_ready: true if previously Ready OR not in cache yet (first poll after startup).
                 // This avoids false "newly ready" notifications for tasks that were already done before restart.
-                let was_ready = self.state.phase_status_cache.get(&t.id)
+                let was_ready = self
+                    .state
+                    .phase_status_cache
+                    .get(&t.id)
                     .map_or(true, |(prev, _)| *prev == PhaseStatus::Ready);
-                (t.id.clone(), t.status, t.worktree_path.clone(), t.plugin.clone(), t.session_name.clone(), t.cycle, was_ready, t.agent.clone())
+                (
+                    t.id.clone(),
+                    t.status,
+                    t.worktree_path.clone(),
+                    t.plugin.clone(),
+                    t.session_name.clone(),
+                    t.cycle,
+                    was_ready,
+                    t.agent.clone(),
+                )
             })
             .collect();
 
@@ -4789,22 +5596,34 @@ impl App {
             let mut plugin_cache: HashMap<Option<String>, Option<WorkflowPlugin>> = HashMap::new();
             let mut statuses = Vec::new();
 
-            for (task_id, status, worktree_path, task_plugin, session_name, cycle, was_ready, agent) in tasks_to_check {
-                let plugin = plugin_cache.entry(task_plugin.clone()).or_insert_with(|| {
-                    match &task_plugin {
-                        Some(name) => WorkflowPlugin::load(name, project_path.as_deref())
-                            .ok()
-                            .or_else(|| skills::load_bundled_plugin(name)),
-                        None => skills::load_bundled_plugin("agtx"),
-                    }
-                });
+            for (
+                task_id,
+                status,
+                worktree_path,
+                task_plugin,
+                session_name,
+                cycle,
+                was_ready,
+                agent,
+            ) in tasks_to_check
+            {
+                let plugin =
+                    plugin_cache
+                        .entry(task_plugin.clone())
+                        .or_insert_with(|| match &task_plugin {
+                            Some(name) => WorkflowPlugin::load(name, project_path.as_deref())
+                                .ok()
+                                .or_else(|| skills::load_bundled_plugin(name)),
+                            None => skills::load_bundled_plugin("agtx"),
+                        });
 
                 let phase_status = if status == TaskStatus::Backlog {
                     // Preresearch copy-back
                     if let (Some(ref wt), Some(ref pp)) = (&worktree_path, &project_path) {
                         if let Some(ref p) = plugin {
                             if let Some(entries) = p.copy_back.get("preresearch") {
-                                let all_at_root = !entries.is_empty() && entries.iter().all(|e| pp.join(e).exists());
+                                let all_at_root = !entries.is_empty()
+                                    && entries.iter().all(|e| pp.join(e).exists());
                                 if !all_at_root && !p.artifacts.preresearch.is_empty() {
                                     let any_artifact = p.artifacts.preresearch.iter().all(|a| {
                                         let path = Path::new(wt).join(a);
@@ -4822,10 +5641,14 @@ impl App {
                         }
                     }
 
-                    let found = worktree_path.as_ref().map_or(false, |wt| {
-                        research_artifact_exists(wt, &task_id, plugin)
-                    });
-                    if found { PhaseStatus::Ready } else { PhaseStatus::Working }
+                    let found = worktree_path
+                        .as_ref()
+                        .map_or(false, |wt| research_artifact_exists(wt, &task_id, plugin));
+                    if found {
+                        PhaseStatus::Ready
+                    } else {
+                        PhaseStatus::Working
+                    }
                 } else if let Some(ref wt) = worktree_path {
                     if phase_artifact_exists(wt, status, plugin, cycle) {
                         PhaseStatus::Ready
@@ -4839,7 +5662,11 @@ impl App {
                 // Copy-back on Working → Ready transition
                 if phase_status == PhaseStatus::Ready && !was_ready {
                     if let (Some(ref wt), Some(ref pp)) = (&worktree_path, &project_path) {
-                        let phase_name = if status == TaskStatus::Backlog { "research" } else { status.as_str() };
+                        let phase_name = if status == TaskStatus::Backlog {
+                            "research"
+                        } else {
+                            status.as_str()
+                        };
                         if let Some(ref p) = plugin {
                             if let Some(entries) = p.copy_back.get(phase_name) {
                                 copy_back_to_project(Path::new(wt), pp, entries);
@@ -4888,7 +5715,9 @@ impl App {
             if phase == PhaseStatus::Working {
                 // Idle detection: check if content hash has been stable for 15s
                 if let Some(hash) = task_status.content_hash {
-                    let entry = self.state.pane_content_hashes
+                    let entry = self
+                        .state
+                        .pane_content_hashes
                         .entry(task_status.task_id.clone())
                         .or_insert((hash, now));
                     if entry.0 != hash {
@@ -4902,18 +5731,32 @@ impl App {
             }
 
             let newly_ready = phase == PhaseStatus::Ready && !task_status.was_ready;
-            self.state.phase_status_cache.insert(task_status.task_id.clone(), (phase, now));
+            self.state
+                .phase_status_cache
+                .insert(task_status.task_id.clone(), (phase, now));
 
             // Notify orchestrator when a phase completes (newly Ready)
             if newly_ready {
                 if self.state.orchestrator_session.is_some() {
                     if let Some(db) = &self.state.db {
-                        let task_title = self.state.board.tasks.iter()
+                        let task_title = self
+                            .state
+                            .board
+                            .tasks
+                            .iter()
                             .find(|t| t.id == task_status.task_id)
                             .map(|t| t.title.as_str())
                             .unwrap_or("unknown");
-                        let phase_name = if task_status.status == TaskStatus::Backlog { "research" } else { task_status.status.as_str() };
-                        let short_id = if task_status.task_id.len() >= 8 { &task_status.task_id[..8] } else { &task_status.task_id };
+                        let phase_name = if task_status.status == TaskStatus::Backlog {
+                            "research"
+                        } else {
+                            task_status.status.as_str()
+                        };
+                        let short_id = if task_status.task_id.len() >= 8 {
+                            &task_status.task_id[..8]
+                        } else {
+                            &task_status.task_id
+                        };
                         let notif = crate::db::Notification::new(format!(
                             "Task \"{}\" ({}) completed phase: {}",
                             task_title, short_id, phase_name
@@ -4924,22 +5767,32 @@ impl App {
             }
 
             // Auto merge-conflict check for Review tasks
-            if task_status.status == TaskStatus::Review && !self.state.merge_conflict_checked.contains(&task_status.task_id) {
+            if task_status.status == TaskStatus::Review
+                && !self
+                    .state
+                    .merge_conflict_checked
+                    .contains(&task_status.task_id)
+            {
                 let should_check = match phase {
                     PhaseStatus::Ready => newly_ready,
-                    PhaseStatus::Idle => {
-                        self.state.pane_content_hashes.get(&task_status.task_id)
-                            .map_or(false, |(_, last_change)| {
-                                now.duration_since(*last_change) >= std::time::Duration::from_secs(30)
-                            })
-                    }
+                    PhaseStatus::Idle => self
+                        .state
+                        .pane_content_hashes
+                        .get(&task_status.task_id)
+                        .map_or(false, |(_, last_change)| {
+                            now.duration_since(*last_change) >= std::time::Duration::from_secs(30)
+                        }),
                     _ => false,
                 };
 
                 if should_check {
-                    if let (Some(ref wt), Some(ref sn)) = (&task_status.worktree_path, &task_status.session_name) {
+                    if let (Some(ref wt), Some(ref sn)) =
+                        (&task_status.worktree_path, &task_status.session_name)
+                    {
                         if self.state.tmux_ops.window_exists(sn).unwrap_or(false) {
-                            self.state.merge_conflict_checked.insert(task_status.task_id.clone());
+                            self.state
+                                .merge_conflict_checked
+                                .insert(task_status.task_id.clone());
 
                             let git_ops = Arc::clone(&self.state.git_ops);
                             let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -4975,18 +5828,26 @@ impl App {
 
             // Stuck-task notification: fire once when Planning/Running task has been Idle for 1+ min
             // Void plugin tasks are fully user-managed — no stuck notifications
-            let task_plugin = self.state.board.tasks.iter()
+            let task_plugin = self
+                .state
+                .board
+                .tasks
+                .iter()
                 .find(|t| t.id == task_status.task_id)
                 .and_then(|t| t.plugin.as_deref());
-            if matches!(task_status.status, TaskStatus::Planning | TaskStatus::Running)
-                && phase == PhaseStatus::Idle
+            if matches!(
+                task_status.status,
+                TaskStatus::Planning | TaskStatus::Running
+            ) && phase == PhaseStatus::Idle
                 && self.state.orchestrator_session.is_some()
                 && should_send_stuck_notification(task_plugin)
             {
                 let stuck_key = format!("{}:{}", task_status.task_id, task_status.status.as_str());
                 if !self.state.stuck_task_notified.contains(&stuck_key) {
                     // Track when this task first became Idle
-                    let idle_since = self.state.stuck_task_idle_since
+                    let idle_since = self
+                        .state
+                        .stuck_task_idle_since
                         .entry(task_status.task_id.clone())
                         .or_insert(now);
 
@@ -4994,14 +5855,24 @@ impl App {
                         self.state.stuck_task_notified.insert(stuck_key);
 
                         if let Some(db) = &self.state.db {
-                            let task_title = self.state.board.tasks.iter()
+                            let task_title = self
+                                .state
+                                .board
+                                .tasks
+                                .iter()
                                 .find(|t| t.id == task_status.task_id)
                                 .map(|t| t.title.as_str())
                                 .unwrap_or("unknown");
-                            let short_id = if task_status.task_id.len() >= 8 { &task_status.task_id[..8] } else { &task_status.task_id };
+                            let short_id = if task_status.task_id.len() >= 8 {
+                                &task_status.task_id[..8]
+                            } else {
+                                &task_status.task_id
+                            };
                             let notif = crate::db::Notification::new(format!(
                                 "Task \"{}\" ({}) has been idle for 1m in phase: {}",
-                                task_title, short_id, task_status.status.as_str()
+                                task_title,
+                                short_id,
+                                task_status.status.as_str()
                             ));
                             let _ = db.create_notification(&notif);
                         }
@@ -5009,7 +5880,9 @@ impl App {
                 }
             } else if phase != PhaseStatus::Idle {
                 // Task is no longer idle — reset the idle-since timer
-                self.state.stuck_task_idle_since.remove(&task_status.task_id);
+                self.state
+                    .stuck_task_idle_since
+                    .remove(&task_status.task_id);
             }
         }
 
@@ -5121,7 +5994,10 @@ fn check_orchestrator_idle(
     } else {
         // Content unchanged — check stability timer
         match stable_since {
-            Some(t) if t.elapsed() >= std::time::Duration::from_secs(ORCHESTRATOR_IDLE_FALLBACK_SECS) => {
+            Some(t)
+                if t.elapsed()
+                    >= std::time::Duration::from_secs(ORCHESTRATOR_IDLE_FALLBACK_SECS) =>
+            {
                 OrchestratorIdleResult::Idle
             }
             _ => OrchestratorIdleResult::Waiting,
@@ -5129,7 +6005,11 @@ fn check_orchestrator_idle(
     }
 }
 
-fn ensure_project_tmux_session(project_name: &str, project_path: &Path, tmux_ops: &dyn TmuxOperations) {
+fn ensure_project_tmux_session(
+    project_name: &str,
+    project_path: &Path,
+    tmux_ops: &dyn TmuxOperations,
+) {
     if !tmux_ops.has_session(project_name) {
         let _ = tmux_ops.create_session(project_name, &project_path.to_string_lossy());
     }
@@ -5160,7 +6040,13 @@ fn copy_back_to_project(worktree: &Path, project_root: &Path, entries: &[String]
 fn generate_task_slug(task_id: &str, title: &str) -> String {
     let title_slug: String = title
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .take(30)
         .collect();
     let title_slug = title_slug.trim_matches('-').to_string();
@@ -5182,7 +6068,9 @@ fn cleanup_task_for_done(
     if let Some(worktree) = &task.worktree_path {
         let artifacts_dir = Path::new(worktree).join(".agtx");
         if artifacts_dir.exists() {
-            let slug = task.branch_name.as_deref()
+            let slug = task
+                .branch_name
+                .as_deref()
                 .and_then(|b| b.strip_prefix("task/"))
                 .unwrap_or(&task.id);
             let archive_dir = project_path.join(".agtx").join("archive").join(slug);
@@ -5227,7 +6115,8 @@ fn cleanup_task_resources(
     if let Some(worktree) = worktree_path {
         let artifacts_dir = Path::new(worktree).join(".agtx");
         if artifacts_dir.exists() {
-            let slug = branch_name.as_deref()
+            let slug = branch_name
+                .as_deref()
                 .and_then(|b| b.strip_prefix("task/"))
                 .unwrap_or(task_id);
             let archive_dir = project_path.join(".agtx").join("archive").join(slug);
@@ -5265,6 +6154,7 @@ fn setup_task_worktree(
     project_path: &Path,
     project_name: &str,
     prompt: &str,
+    base_branch: &str,
     copy_files: Option<String>,
     init_script: Option<String>,
     plugin: &Option<WorkflowPlugin>,
@@ -5279,20 +6169,26 @@ fn setup_task_worktree(
     let window_name = format!("task-{}", unique_slug);
     let target = format!("{}:{}", project_name, window_name);
 
-    // Create git worktree from main branch
-    let worktree_path_str = match git_ops.create_worktree(project_path, &unique_slug) {
+    // Create git worktree from the configured base branch
+    let worktree_path_str = match git_ops.create_worktree(project_path, &unique_slug, base_branch) {
         Ok(path) => path,
         Err(e) => {
             eprintln!("Failed to create worktree: {}", e);
-            project_path.join(".agtx").join("worktrees").join(&unique_slug)
-                .to_string_lossy().to_string()
+            project_path
+                .join(".agtx")
+                .join("worktrees")
+                .join(&unique_slug)
+                .to_string_lossy()
+                .to_string()
         }
     };
 
     // Initialize worktree: copy files and run init script
     // Merge plugin-level copy_files with project-level copy_files
     let worktree_path = Path::new(&worktree_path_str);
-    let copy_dirs = plugin.as_ref().map_or_else(Vec::new, |p| p.copy_dirs.clone());
+    let copy_dirs = plugin
+        .as_ref()
+        .map_or_else(Vec::new, |p| p.copy_dirs.clone());
     let merged_copy_files = {
         let mut parts: Vec<String> = Vec::new();
         if let Some(ref cf) = copy_files {
@@ -5305,7 +6201,11 @@ fn setup_task_worktree(
                 parts.push(p.copy_files.join(","));
             }
         }
-        if parts.is_empty() { None } else { Some(parts.join(",")) }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(","))
+        }
     };
     let init_warnings = git_ops.initialize_worktree(
         project_path,
@@ -5365,7 +6265,8 @@ fn setup_task_worktree(
         if let Some(ref script) = p.init_script {
             let script = script.replace("{agent}", agent_name);
             let output = std::process::Command::new("sh")
-                .arg("-c").arg(&script)
+                .arg("-c")
+                .arg(&script)
                 .current_dir(&worktree_path_str)
                 .output();
             match output {
@@ -5388,7 +6289,8 @@ fn setup_task_worktree(
 
     // Build the interactive command. For agents with skill/command support,
     // start with no prompt — the skill command and task content are sent via send_keys.
-    let has_skill_support = resolve_skill_command(plugin, "planning", agent_name, "", task.cycle).is_some();
+    let has_skill_support =
+        resolve_skill_command(plugin, "planning", agent_name, "", task.cycle).is_some();
     let agent_cmd = if has_skill_support {
         agent_ops.build_interactive_command("")
     } else {
@@ -5436,7 +6338,11 @@ fn delete_task_resources(
 
 /// Collect git diff content from a worktree
 /// Returns formatted diff sections (unstaged, staged, untracked)
-fn collect_task_diff(worktree_path: &str, git_ops: &dyn GitOperations, exclude_prefixes: &[&str]) -> String {
+fn collect_task_diff(
+    worktree_path: &str,
+    git_ops: &dyn GitOperations,
+    exclude_prefixes: &[&str],
+) -> String {
     let worktree = Path::new(worktree_path);
     let mut sections = Vec::new();
 
@@ -5462,7 +6368,10 @@ fn collect_task_diff(worktree_path: &str, git_ops: &dyn GitOperations, exclude_p
                 continue;
             }
             // Skip files in copied directories (agent configs, plugin dirs)
-            if exclude_prefixes.iter().any(|prefix| file.starts_with(&format!("{}/", prefix.trim_end_matches('/')))) {
+            if exclude_prefixes
+                .iter()
+                .any(|prefix| file.starts_with(&format!("{}/", prefix.trim_end_matches('/'))))
+            {
                 continue;
             }
             // Show diff for untracked file (as if adding new file)
@@ -5531,7 +6440,11 @@ fn centered_rect_fixed_width(fixed_width: u16, percent_y: u16, r: Rect) -> Rect 
 }
 
 /// Capture content from a tmux pane with history (with ANSI escape sequences)
-fn capture_tmux_pane_with_history(window_name: &str, history_lines: i32, tmux_ops: &dyn TmuxOperations) -> Vec<u8> {
+fn capture_tmux_pane_with_history(
+    window_name: &str,
+    history_lines: i32,
+    tmux_ops: &dyn TmuxOperations,
+) -> Vec<u8> {
     let content = tmux_ops.capture_pane_with_history(window_name, history_lines);
 
     // Get the cursor position and pane height to know where the "real" content ends
@@ -5603,7 +6516,11 @@ fn create_pr_with_content(
 
     // Commit if there are staged changes
     if has_changes {
-        let commit_msg = format!("{}\n\nCo-Authored-By: {}", pr_title, agent_ops.co_author_string());
+        let commit_msg = format!(
+            "{}\n\nCo-Authored-By: {}",
+            pr_title,
+            agent_ops.co_author_string()
+        );
         git_ops.commit(worktree_path, &commit_msg)?;
     }
 
@@ -5638,7 +6555,10 @@ fn push_changes_to_existing_pr(
 
     // Commit if there are staged changes
     if has_changes {
-        let commit_msg = format!("Address review comments\n\nCo-Authored-By: {}", agent_ops.co_author_string());
+        let commit_msg = format!(
+            "Address review comments\n\nCo-Authored-By: {}",
+            agent_ops.co_author_string()
+        );
         git_ops.commit(worktree_path, &commit_msg)?;
     }
 
@@ -5648,7 +6568,10 @@ fn push_changes_to_existing_pr(
     }
 
     // Return the existing PR URL
-    Ok(task.pr_url.clone().unwrap_or_else(|| "Changes pushed to existing PR".to_string()))
+    Ok(task
+        .pr_url
+        .clone()
+        .unwrap_or_else(|| "Changes pushed to existing PR".to_string()))
 }
 
 /// Send a key to a tmux pane
@@ -5739,10 +6662,7 @@ fn parse_sgr(seq: &str, mut style: Style) -> Style {
         return Style::default();
     }
 
-    let codes: Vec<u8> = seq
-        .split(';')
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    let codes: Vec<u8> = seq.split(';').filter_map(|s| s.parse().ok()).collect();
 
     let mut i = 0;
     while i < codes.len() {
@@ -5899,7 +6819,12 @@ fn build_highlighted_text<'a>(
 }
 
 /// Fuzzy find files in a directory (respects .gitignore)
-fn fuzzy_find_files(project_path: &Path, pattern: &str, max_results: usize, git_ops: &dyn GitOperations) -> Vec<String> {
+fn fuzzy_find_files(
+    project_path: &Path,
+    pattern: &str,
+    max_results: usize,
+    git_ops: &dyn GitOperations,
+) -> Vec<String> {
     // Use git ls-files to get tracked files (respects .gitignore)
     let files = git_ops.list_files(project_path);
 
@@ -5931,7 +6856,11 @@ fn fuzzy_find_files(project_path: &Path, pattern: &str, max_results: usize, git_
     // Sort by score (higher is better)
     matches.sort_by(|a, b| b.1.cmp(&a.1));
 
-    matches.into_iter().take(max_results).map(|(path, _)| path).collect()
+    matches
+        .into_iter()
+        .take(max_results)
+        .map(|(path, _)| path)
+        .collect()
 }
 
 /// Calculate fuzzy match score (higher is better, 0 means no match)
@@ -5980,24 +6909,36 @@ fn fuzzy_score(haystack: &str, needle: &str) -> i32 {
 
 /// Resolve the task prompt for a given phase transition, using plugin prompt template.
 /// Substitutes {task}, {task_id}, and {phase} placeholders. Returns empty if no template is configured.
-fn resolve_prompt(plugin: &Option<WorkflowPlugin>, phase: &str, task_content: &str, task_id: &str, cycle: i32) -> String {
+fn resolve_prompt(
+    plugin: &Option<WorkflowPlugin>,
+    phase: &str,
+    task_content: &str,
+    task_id: &str,
+    cycle: i32,
+) -> String {
     let template = match phase {
-        "preresearch" | "research" => plugin.as_ref()
+        "preresearch" | "research" => plugin
+            .as_ref()
             .and_then(|p| p.prompts.research.as_deref())
             .unwrap_or(""),
-        "planning" => plugin.as_ref()
+        "planning" => plugin
+            .as_ref()
             .and_then(|p| p.prompts.planning.as_deref())
             .unwrap_or(""),
-        "planning_with_research" => plugin.as_ref()
+        "planning_with_research" => plugin
+            .as_ref()
             .and_then(|p| p.prompts.planning_with_research.as_deref())
             .unwrap_or(""),
-        "running" => plugin.as_ref()
+        "running" => plugin
+            .as_ref()
             .and_then(|p| p.prompts.running.as_deref())
             .unwrap_or(""),
-        "running_with_research_or_planning" => plugin.as_ref()
+        "running_with_research_or_planning" => plugin
+            .as_ref()
             .and_then(|p| p.prompts.running_with_research_or_planning.as_deref())
             .unwrap_or(""),
-        "review" => plugin.as_ref()
+        "review" => plugin
+            .as_ref()
             .and_then(|p| p.prompts.review.as_deref())
             .unwrap_or(""),
         _ => return task_content.to_string(),
@@ -6015,13 +6956,22 @@ fn resolve_prompt(plugin: &Option<WorkflowPlugin>, phase: &str, task_content: &s
 
 /// Resolve the skill command to send via send_keys for a given phase.
 /// Returns the plugin command transformed for the target agent, or None if no command is configured.
-fn resolve_skill_command(plugin: &Option<WorkflowPlugin>, phase: &str, agent_name: &str, task_content: &str, cycle: i32) -> Option<String> {
+fn resolve_skill_command(
+    plugin: &Option<WorkflowPlugin>,
+    phase: &str,
+    agent_name: &str,
+    task_content: &str,
+    cycle: i32,
+) -> Option<String> {
     let p = plugin.as_ref()?;
 
     // Commands are stored in canonical form (Claude/Gemini syntax) and transformed per agent
     // Commands may contain {task} and {phase} placeholders
     let cmd = match phase {
-        "preresearch" => p.commands.preresearch.as_deref()
+        "preresearch" => p
+            .commands
+            .preresearch
+            .as_deref()
             .or(p.commands.research.as_deref()),
         "research" => p.commands.research.as_deref(),
         "planning" | "planning_with_research" => p.commands.planning.as_deref(),
@@ -6036,13 +6986,19 @@ fn resolve_skill_command(plugin: &Option<WorkflowPlugin>, phase: &str, agent_nam
     }
 
     // When a prior phase was done, strip {task} — agent already has context
-    let expanded = if phase == "planning_with_research" || phase == "running_with_research_or_planning" {
-        cmd.replace("{task}", "").trim().to_string()
-    } else {
-        // Collapse task content to single line for commands (newlines → spaces)
-        let task_oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-        cmd.replace("{task}", &task_oneline)
-    };
+    let expanded =
+        if phase == "planning_with_research" || phase == "running_with_research_or_planning" {
+            cmd.replace("{task}", "").trim().to_string()
+        } else {
+            // Collapse task content to single line for commands (newlines → spaces)
+            let task_oneline = task_content
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            cmd.replace("{task}", &task_oneline)
+        };
     let expanded = expanded.replace("{phase}", &cycle.to_string());
     skills::transform_plugin_command(&expanded, agent_name)
 }
@@ -6069,7 +7025,16 @@ fn spawn_send_to_agent(
             switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_agent, &new_cmd);
             let _ = wait_for_agent_ready(&tmux_ops, &target);
         }
-        send_skill_and_prompt(&tmux_ops, &target, &skill_cmd, &prompt, &prompt_trigger, &task_content, &target_agent, &auto_dismiss);
+        send_skill_and_prompt(
+            &tmux_ops,
+            &target,
+            &skill_cmd,
+            &prompt,
+            &prompt_trigger,
+            &task_content,
+            &target_agent,
+            &auto_dismiss,
+        );
     });
 }
 
@@ -6102,15 +7067,25 @@ fn send_skill_and_prompt(
         } else if !prompt.is_empty() {
             Some(prompt.to_string())
         } else {
-            let oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-            if !oneline.is_empty() { Some(oneline) } else { None }
+            let oneline = task_content
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !oneline.is_empty() {
+                Some(oneline)
+            } else {
+                None
+            }
         };
 
         if let Some(text) = text_to_send {
             let _ = tmux_ops.send_keys_literal(target, &text);
             // Wait for text to appear in pane before sending Enter (Ink TUIs need time to render)
             let check_str = text.lines().next().unwrap_or(&text);
-            for _ in 0..20 { // up to 4s
+            for _ in 0..20 {
+                // up to 4s
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 if let Ok(content) = tmux_ops.capture_pane(target) {
                     if content.contains(check_str) {
@@ -6146,7 +7121,8 @@ fn send_skill_and_prompt(
                 let mut last_content = String::new();
                 let mut stable_ticks = 0u32;
                 let mut change_count = 0u32;
-                for _ in 0..75 { // 15s max
+                for _ in 0..75 {
+                    // 15s max
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     if let Ok(content) = tmux_ops.capture_pane(target) {
                         if content != last_content {
@@ -6155,7 +7131,8 @@ fn send_skill_and_prompt(
                             last_content = content;
                         } else if change_count >= 1 {
                             stable_ticks += 1;
-                            if stable_ticks >= 10 { // 2s of no changes after agent responded
+                            if stable_ticks >= 10 {
+                                // 2s of no changes after agent responded
                                 break;
                             }
                         }
@@ -6170,7 +7147,12 @@ fn send_skill_and_prompt(
                 let _ = tmux_ops.send_keys(target, prompt);
             } else {
                 // No command and no prompt (e.g. void plugin): prefill task in input
-                let oneline = task_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+                let oneline = task_content
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 if !oneline.is_empty() {
                     let _ = tmux_ops.send_keys_literal(target, &oneline);
                 }
@@ -6182,26 +7164,33 @@ fn send_skill_and_prompt(
 /// Resolve the prompt trigger text for a given phase.
 /// When set, the system polls the tmux pane for this text before sending the prompt.
 fn resolve_prompt_trigger(plugin: &Option<WorkflowPlugin>, phase: &str) -> Option<String> {
-    plugin.as_ref().and_then(|p| {
-        match phase {
+    plugin
+        .as_ref()
+        .and_then(|p| match phase {
             "preresearch" | "research" => p.prompt_triggers.research.clone(),
             "planning" | "planning_with_research" => p.prompt_triggers.planning.clone(),
             "running" | "running_with_research_or_planning" => p.prompt_triggers.running.clone(),
             "review" => p.prompt_triggers.review.clone(),
             _ => None,
-        }
-    }).filter(|s| !s.is_empty())
+        })
+        .filter(|s| !s.is_empty())
 }
 
 /// Wait for a specific text to appear in a tmux pane, then return.
 /// Returns true if the trigger was found, false if timed out.
 /// Auto-dismiss rules are checked while waiting: when all detect patterns match
 /// and the pane is stable for ~2s, the response keystrokes are sent automatically.
-fn wait_for_prompt_trigger(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, trigger: &str, auto_dismiss: &[crate::config::AutoDismiss]) -> bool {
+fn wait_for_prompt_trigger(
+    tmux_ops: &Arc<dyn TmuxOperations>,
+    target: &str,
+    trigger: &str,
+    auto_dismiss: &[crate::config::AutoDismiss],
+) -> bool {
     let mut last_content = String::new();
     let mut stable_ticks = 0u32;
 
-    for _ in 0..600 { // ~5 minutes (600 * 500ms)
+    for _ in 0..600 {
+        // ~5 minutes (600 * 500ms)
         std::thread::sleep(std::time::Duration::from_millis(500));
         if let Ok(content) = tmux_ops.capture_pane(target) {
             if content == last_content {
@@ -6225,7 +7214,9 @@ fn wait_for_prompt_trigger(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, tri
                         break;
                     }
                 }
-                if last_content.is_empty() { continue; }
+                if last_content.is_empty() {
+                    continue;
+                }
             }
 
             // Trigger as soon as the text is present in the pane.
@@ -6245,7 +7236,12 @@ fn should_send_stuck_notification(plugin_name: Option<&str>) -> bool {
 
 /// Check if the phase artifact exists for a task in its worktree.
 /// Tries both zero-padded (e.g. "01") and non-padded (e.g. "1") {phase} substitution.
-fn phase_artifact_exists(worktree_path: &str, status: TaskStatus, plugin: &Option<WorkflowPlugin>, cycle: i32) -> bool {
+fn phase_artifact_exists(
+    worktree_path: &str,
+    status: TaskStatus,
+    plugin: &Option<WorkflowPlugin>,
+    cycle: i32,
+) -> bool {
     let rel_template = plugin.as_ref().and_then(|p| match status {
         TaskStatus::Planning => p.artifacts.planning.as_deref(),
         TaskStatus::Running => p.artifacts.running.as_deref(),
@@ -6253,14 +7249,23 @@ fn phase_artifact_exists(worktree_path: &str, status: TaskStatus, plugin: &Optio
         _ => None,
     });
 
-    let Some(rel_template) = rel_template else { return false; };
+    let Some(rel_template) = rel_template else {
+        return false;
+    };
     artifact_path_exists(worktree_path, rel_template, cycle)
 }
 
 /// Check if the research artifact exists for a task.
 /// Tries both zero-padded (e.g. "01") and non-padded (e.g. "1") {phase} substitution.
-fn research_artifact_exists(worktree_path: &str, task_id: &str, plugin: &Option<WorkflowPlugin>) -> bool {
-    let Some(template) = plugin.as_ref().and_then(|p| p.artifacts.research.as_deref()) else {
+fn research_artifact_exists(
+    worktree_path: &str,
+    task_id: &str,
+    plugin: &Option<WorkflowPlugin>,
+) -> bool {
+    let Some(template) = plugin
+        .as_ref()
+        .and_then(|p| p.artifacts.research.as_deref())
+    else {
         return false;
     };
     let rel_template = template.replace("{task_id}", task_id);
@@ -6279,17 +7284,24 @@ fn determine_phase_variant(
 ) -> &'static str {
     match phase {
         "planning" => {
-            let has_research = worktree_path.map_or(false, |wt| {
-                research_artifact_exists(wt, task_id, plugin)
-            });
-            if has_research { "planning_with_research" } else { "planning" }
+            let has_research =
+                worktree_path.map_or(false, |wt| research_artifact_exists(wt, task_id, plugin));
+            if has_research {
+                "planning_with_research"
+            } else {
+                "planning"
+            }
         }
         "running" => {
             let has_prior = worktree_path.map_or(false, |wt| {
                 research_artifact_exists(wt, task_id, plugin)
                     || phase_artifact_exists(wt, TaskStatus::Planning, plugin, cycle)
             });
-            if has_prior { "running_with_research_or_planning" } else { "running" }
+            if has_prior {
+                "running_with_research_or_planning"
+            } else {
+                "running"
+            }
         }
         _ => {
             // Phases without variants leak the &str — use a known static
@@ -6393,18 +7405,20 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 /// can fire for them rather than Check 1 firing too early.
 /// Note: on systems where agents are installed via asdf/nvm, all agents run as `node`
 /// and Check 1 never fires — AGENT_ACTIVE_INDICATORS is the only reliable signal there.
-const AGENT_COMMANDS: &[&str] = &["claude", "codex", "gemini", "copilot", "opencode", "agent", "python3", "python"];
+const AGENT_COMMANDS: &[&str] = &[
+    "claude", "codex", "gemini", "copilot", "opencode", "agent", "python3", "python",
+];
 
 /// Strings in pane content that indicate a Node/Ink agent TUI is active and ready.
 /// Used by `is_agent_active` to detect agents like Gemini and Cursor that run
 /// inside bash/node and don't change `pane_current_command` to their own name.
 /// Also used by `wait_for_agent_ready` (Check 2) to detect readiness for these agents.
 const AGENT_ACTIVE_INDICATORS: &[&str] = &[
-    "Claude Code",         // Claude
-    "Type your message",   // Gemini
-    "Ask anything",        // OpenCode
-    "Cursor Agent",        // Cursor
-    "OpenAI Codex",        // Codex
+    "Claude Code",       // Claude
+    "Type your message", // Gemini
+    "Ask anything",      // OpenCode
+    "Cursor Agent",      // Cursor
+    "OpenAI Codex",      // Codex
 ];
 
 /// Check if the pane is running a shell (i.e. the agent has exited).
@@ -6434,7 +7448,10 @@ fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
         let bottom = lines.len().saturating_sub(5);
         let tail = &lines[bottom..];
         let tail_text = tail.join("\n");
-        if AGENT_ACTIVE_INDICATORS.iter().any(|s| tail_text.contains(s)) {
+        if AGENT_ACTIVE_INDICATORS
+            .iter()
+            .any(|s| tail_text.contains(s))
+        {
             return true;
         }
     }
@@ -6461,9 +7478,9 @@ fn switch_agent_in_tmux(
 ) {
     // 1. Send the graceful exit command for the current agent.
     let exit_cmd = match current_agent {
-        "codex" => None,   // Codex has no exit command — Ctrl+C is the only way
+        "codex" => None, // Codex has no exit command — Ctrl+C is the only way
         "gemini" => Some("/quit"),
-        "cursor" => None,  // Ink/Node TUI — Ctrl+C is the only reliable exit
+        "cursor" => None,   // Ink/Node TUI — Ctrl+C is the only reliable exit
         _ => Some("/exit"), // claude, opencode, and others
     };
 
@@ -6476,7 +7493,8 @@ fn switch_agent_in_tmux(
     // 2. Poll for shell (agent exited). If the agent was busy, the exit command
     //    may have been queued — so we wait up to 3s for it to take effect.
     let mut found_shell = false;
-    for _ in 0..30 { // 3s
+    for _ in 0..30 {
+        // 3s
         std::thread::sleep(std::time::Duration::from_millis(100));
         if is_pane_at_shell(tmux_ops, target) {
             found_shell = true;
@@ -6494,7 +7512,8 @@ fn switch_agent_in_tmux(
         }
 
         // Wait for shell after retry
-        for _ in 0..50 { // 5s
+        for _ in 0..50 {
+            // 5s
             std::thread::sleep(std::time::Duration::from_millis(100));
             if is_pane_at_shell(tmux_ops, target) {
                 found_shell = true;
@@ -6506,7 +7525,8 @@ fn switch_agent_in_tmux(
     // 4. Last resort: Ctrl+D to force exit
     if !found_shell {
         let _ = tmux_ops.send_keys_literal(target, "C-d");
-        for _ in 0..20 { // 2s
+        for _ in 0..20 {
+            // 2s
             std::thread::sleep(std::time::Duration::from_millis(100));
             if is_pane_at_shell(tmux_ops, target) {
                 break;
@@ -6524,10 +7544,12 @@ fn switch_agent_in_tmux(
     //    Without this, wait_for_agent_ready may see stale ">" from old pane content
     //    and return before the new agent has even launched.
     //    Includes `node` here so Gemini/Cursor (Node/Ink TUIs) are detected immediately.
-    for _ in 0..10 { // 10s max
+    for _ in 0..10 {
+        // 10s max
         std::thread::sleep(std::time::Duration::from_secs(1));
         if let Some(cmd) = tmux_ops.pane_current_command(target) {
-            let process_started = AGENT_COMMANDS.iter().any(|a| cmd.contains(a)) || cmd.contains("node");
+            let process_started =
+                AGENT_COMMANDS.iter().any(|a| cmd.contains(a)) || cmd.contains("node");
             if process_started {
                 break;
             }
@@ -6552,7 +7574,8 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
     let mut stable_ticks: u32 = 0;
     let mut change_count: u32 = 0;
 
-    for _ in 0..30 { // 30s (30 * 1s)
+    for _ in 0..30 {
+        // 30s (30 * 1s)
         std::thread::sleep(std::time::Duration::from_secs(1));
 
         // Check 1: agent process detected via pane_current_command
@@ -6598,7 +7621,8 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
     // TUI has finished rendering. Avoids sending the prompt into a half-drawn screen.
     let mut last_content = String::new();
     let mut stable_ticks: u32 = 0;
-    for _ in 0..30 { // 30s hard timeout
+    for _ in 0..30 {
+        // 30s hard timeout
         std::thread::sleep(std::time::Duration::from_secs(1));
         if let Ok(content) = tmux_ops.capture_pane(target) {
             if content != last_content {
@@ -6618,7 +7642,11 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
 
 /// Load the workflow plugin for a task, checking agent compatibility.
 /// Tries disk first (project-local → global), then falls back to bundled plugins.
-fn load_task_plugin(task: &Task, project_path: Option<&Path>, default_agent: &str) -> Option<WorkflowPlugin> {
+fn load_task_plugin(
+    task: &Task,
+    project_path: Option<&Path>,
+    default_agent: &str,
+) -> Option<WorkflowPlugin> {
     let plugin = match &task.plugin {
         Some(name) => WorkflowPlugin::load(name, project_path)
             .ok()
@@ -6634,7 +7662,10 @@ fn load_task_plugin(task: &Task, project_path: Option<&Path>, default_agent: &st
 }
 
 /// Load workflow plugin if configured
-fn load_plugin_if_configured(config: &MergedConfig, project_path: Option<&Path>) -> Option<WorkflowPlugin> {
+fn load_plugin_if_configured(
+    config: &MergedConfig,
+    project_path: Option<&Path>,
+) -> Option<WorkflowPlugin> {
     // For bundled plugins, always write the latest version to disk so updates ship with new releases
     if let (Some(name), Some(pp)) = (config.workflow_plugin.as_ref(), project_path) {
         if let Some((_name, _desc, content)) = skills::BUNDLED_PLUGINS
@@ -6646,7 +7677,9 @@ fn load_plugin_if_configured(config: &MergedConfig, project_path: Option<&Path>)
             let _ = std::fs::write(plugin_dir.join("plugin.toml"), content);
         }
     }
-    config.workflow_plugin.as_ref()
+    config
+        .workflow_plugin
+        .as_ref()
         .and_then(|name| WorkflowPlugin::load(name, project_path).ok())
         .or_else(|| skills::load_bundled_plugin("agtx"))
 }
@@ -6654,7 +7687,12 @@ fn load_plugin_if_configured(config: &MergedConfig, project_path: Option<&Path>)
 /// Write skill files to a worktree's .agtx/skills/ directory and agent-native discovery paths.
 /// `agent_names` determines which native paths to use (e.g. `.claude/commands/agtx/` for Claude).
 /// When multiple agents are configured for different phases, skills are deployed for all of them.
-fn write_skills_to_worktree(worktree_path: &str, project_path: &Path, plugin: &Option<WorkflowPlugin>, agent_names: &[&str]) {
+fn write_skills_to_worktree(
+    worktree_path: &str,
+    project_path: &Path,
+    plugin: &Option<WorkflowPlugin>,
+    agent_names: &[&str],
+) {
     let agtx_dir = Path::new(worktree_path).join(".agtx");
     let _ = std::fs::create_dir_all(&agtx_dir);
 
@@ -6702,7 +7740,8 @@ fn write_skills_to_worktree(worktree_path: &str, project_path: &Path, plugin: &O
             let _ = std::fs::create_dir_all(&native_dir);
 
             for (skill_dir_name, default_content) in skills::BUILTIN_SKILLS {
-                let content = resolve_skill_content(plugin, skill_dir_name, project_path, default_content);
+                let content =
+                    resolve_skill_content(plugin, skill_dir_name, project_path, default_content);
 
                 match *agent_name {
                     "gemini" => {
@@ -6804,14 +7843,19 @@ fn transform_skill_frontmatter(content: &str) -> String {
 /// OpenCode uses flat command files and hyphen-separated names (no colon namespace)
 fn transform_skill_for_opencode(content: &str) -> String {
     // OpenCode commands use description frontmatter + prompt body
-    let description = skills::extract_description(content)
-        .unwrap_or_else(|| "agtx skill".to_string());
+    let description =
+        skills::extract_description(content).unwrap_or_else(|| "agtx skill".to_string());
     let body = skills::strip_frontmatter(content);
     format!("---\ndescription: \"{}\"\n---\n{}", description, body)
 }
 
 /// Resolve skill content: check plugin override, then fall back to default
-fn resolve_skill_content(plugin: &Option<WorkflowPlugin>, skill_name: &str, project_path: &Path, default: &str) -> String {
+fn resolve_skill_content(
+    plugin: &Option<WorkflowPlugin>,
+    skill_name: &str,
+    project_path: &Path,
+    default: &str,
+) -> String {
     if let Some(ref p) = plugin {
         if let Some(plugin_dir) = WorkflowPlugin::plugin_dir(&p.name, Some(project_path)) {
             let src = plugin_dir.join(skill_name).join("SKILL.md");

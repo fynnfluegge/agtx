@@ -77,7 +77,11 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn new(title: impl Into<String>, agent: impl Into<String>, project_id: impl Into<String>) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        agent: impl Into<String>,
+        project_id: impl Into<String>,
+    ) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
         Self {
@@ -103,7 +107,10 @@ impl Task {
 
     /// Returns the task description if present, otherwise the title.
     pub fn content_text(&self) -> String {
-        self.description.as_deref().unwrap_or(&self.title).to_string()
+        self.description
+            .as_deref()
+            .unwrap_or(&self.title)
+            .to_string()
     }
 
     /// Generate tmux session name: task-{id}--{project}--{slug}

@@ -1,4 +1,4 @@
-use agtx::db::{Database, Notification, Task, TaskStatus, Project};
+use agtx::db::{Database, Notification, Project, Task, TaskStatus};
 
 // === TaskStatus Tests ===
 

@@ -71,10 +71,14 @@ impl GitProviderOperations for RealGitHubOps {
         let output = std::process::Command::new("gh")
             .current_dir(project_path)
             .args([
-                "pr", "create",
-                "--title", title,
-                "--body", body,
-                "--head", head_branch,
+                "pr",
+                "create",
+                "--title",
+                title,
+                "--body",
+                body,
+                "--head",
+                head_branch,
             ])
             .output()?;
 

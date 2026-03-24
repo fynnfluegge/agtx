@@ -62,7 +62,9 @@ pub fn skill_name_to_command(skill_name: &str) -> String {
 pub fn skill_dir_to_filename(skill_dir_name: &str, agent_name: &str) -> String {
     match agent_name {
         "gemini" => {
-            let short = skill_dir_name.strip_prefix("agtx-").unwrap_or(skill_dir_name);
+            let short = skill_dir_name
+                .strip_prefix("agtx-")
+                .unwrap_or(skill_dir_name);
             format!("{}.toml", short)
         }
         "opencode" => {
@@ -70,7 +72,9 @@ pub fn skill_dir_to_filename(skill_dir_name: &str, agent_name: &str) -> String {
             format!("{}.md", skill_dir_name)
         }
         _ => {
-            let short = skill_dir_name.strip_prefix("agtx-").unwrap_or(skill_dir_name);
+            let short = skill_dir_name
+                .strip_prefix("agtx-")
+                .unwrap_or(skill_dir_name);
             format!("{}.md", short)
         }
     }
@@ -199,8 +203,8 @@ pub fn enumerate_available_skills(agent_name: &str) -> Vec<(String, String)> {
             Some(cmd) => cmd,
             None => canonical,
         };
-        let description = extract_description(skill_content)
-            .unwrap_or_else(|| skill_name.replace('-', " "));
+        let description =
+            extract_description(skill_content).unwrap_or_else(|| skill_name.replace('-', " "));
         results.push((command, description));
     }
     results
@@ -239,7 +243,10 @@ fn extract_description_from_toml(path: &std::path::Path) -> Option<String> {
 
 /// Scan the active agent's native command directory for available skills.
 /// Returns `(command, description)` tuples in agent-native invocation format.
-pub fn scan_agent_skills(agent_name: &str, project_path: &std::path::Path) -> Vec<(String, String)> {
+pub fn scan_agent_skills(
+    agent_name: &str,
+    project_path: &std::path::Path,
+) -> Vec<(String, String)> {
     let mut results = Vec::new();
 
     match agent_name {

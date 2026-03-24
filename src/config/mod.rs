@@ -243,7 +243,10 @@ impl GlobalConfig {
     /// Always uses ~/.config/agtx/ on all platforms
     pub fn config_path() -> Result<PathBuf> {
         let home = std::env::var("HOME").context("Could not determine home directory")?;
-        Ok(PathBuf::from(home).join(".config").join("agtx").join("config.toml"))
+        Ok(PathBuf::from(home)
+            .join(".config")
+            .join("agtx")
+            .join("config.toml"))
     }
 
     /// Get the path to the global data directory
@@ -506,15 +509,18 @@ impl WorkflowPlugin {
     /// Check if the given agent is supported by this plugin.
     /// Returns true if supported_agents is empty (all agents allowed) or contains the agent.
     pub fn supports_agent(&self, agent_name: &str) -> bool {
-        self.supported_agents.is_empty()
-            || self.supported_agents.iter().any(|a| a == agent_name)
+        self.supported_agents.is_empty() || self.supported_agents.iter().any(|a| a == agent_name)
     }
 
     /// Load a plugin by name, checking project-local then global directories
     pub fn load(name: &str, project_path: Option<&Path>) -> Result<Self> {
         // 1. Check project-local
         if let Some(pp) = project_path {
-            let local_path = pp.join(".agtx").join("plugins").join(name).join("plugin.toml");
+            let local_path = pp
+                .join(".agtx")
+                .join("plugins")
+                .join(name)
+                .join("plugin.toml");
             if local_path.exists() {
                 let content = std::fs::read_to_string(&local_path)?;
                 return toml::from_str(&content).context("Failed to parse plugin.toml");

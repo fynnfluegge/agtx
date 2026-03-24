@@ -230,7 +230,9 @@ fn test_create_pr_with_content_success() {
     mock_git
         .expect_commit()
         .withf(|path: &Path, msg: &str| {
-            path == Path::new("/tmp/worktree") && msg.contains("Test PR") && msg.contains("Co-Authored-By")
+            path == Path::new("/tmp/worktree")
+                && msg.contains("Test PR")
+                && msg.contains("Co-Authored-By")
         })
         .times(1)
         .returning(|_, _| Ok(()));
@@ -253,7 +255,10 @@ fn test_create_pr_with_content_success() {
     mock_git_provider
         .expect_create_pr()
         .withf(|path: &Path, title: &str, body: &str, branch: &str| {
-            path == Path::new("/project") && title == "Test PR" && body == "Test body" && branch == "feature/test"
+            path == Path::new("/project")
+                && title == "Test PR"
+                && body == "Test body"
+                && branch == "feature/test"
         })
         .times(1)
         .returning(|_, _, _, _| Ok((42, "https://github.com/org/repo/pull/42".to_string())));
@@ -302,20 +307,14 @@ fn test_create_pr_with_content_no_changes() {
         updated_at: chrono::Utc::now(),
     };
 
-    mock_git
-        .expect_add_all()
-        .returning(|_| Ok(()));
+    mock_git.expect_add_all().returning(|_| Ok(()));
 
     // No changes to commit
-    mock_git
-        .expect_has_changes()
-        .returning(|_| false);
+    mock_git.expect_has_changes().returning(|_| false);
 
     // commit should NOT be called (no expectation set)
 
-    mock_git
-        .expect_push()
-        .returning(|_, _, _| Ok(()));
+    mock_git.expect_push().returning(|_, _, _| Ok(()));
 
     mock_git_provider
         .expect_create_pr()
@@ -385,7 +384,10 @@ fn test_create_pr_with_content_push_failure() {
     );
 
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Permission denied"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Permission denied"));
 }
 
 // =============================================================================
@@ -530,15 +532,15 @@ fn test_push_changes_to_existing_pr_no_url() {
 fn test_fuzzy_find_files_basic() {
     let mut mock_git = MockGitOperations::new();
 
-    mock_git
-        .expect_list_files()
-        .returning(|_| vec![
+    mock_git.expect_list_files().returning(|_| {
+        vec![
             "src/main.rs".to_string(),
             "src/lib.rs".to_string(),
             "src/tui/app.rs".to_string(),
             "src/tui/board.rs".to_string(),
             "Cargo.toml".to_string(),
-        ]);
+        ]
+    });
 
     let results = fuzzy_find_files(Path::new("/project"), "app", 10, &mock_git);
 
@@ -552,15 +554,15 @@ fn test_fuzzy_find_files_basic() {
 fn test_fuzzy_find_files_empty_pattern() {
     let mut mock_git = MockGitOperations::new();
 
-    mock_git
-        .expect_list_files()
-        .returning(|_| vec![
+    mock_git.expect_list_files().returning(|_| {
+        vec![
             "a.rs".to_string(),
             "b.rs".to_string(),
             "c.rs".to_string(),
             "d.rs".to_string(),
             "e.rs".to_string(),
-        ]);
+        ]
+    });
 
     let results = fuzzy_find_files(Path::new("/project"), "", 3, &mock_git);
 
@@ -604,15 +606,15 @@ fn test_fuzzy_find_files_empty_list() {
 fn test_fuzzy_find_files_max_results() {
     let mut mock_git = MockGitOperations::new();
 
-    mock_git
-        .expect_list_files()
-        .returning(|_| vec![
+    mock_git.expect_list_files().returning(|_| {
+        vec![
             "src/app1.rs".to_string(),
             "src/app2.rs".to_string(),
             "src/app3.rs".to_string(),
             "src/app4.rs".to_string(),
             "src/app5.rs".to_string(),
-        ]);
+        ]
+    });
 
     let results = fuzzy_find_files(Path::new("/project"), "app", 2, &mock_git);
 
@@ -718,7 +720,10 @@ fn test_send_key_to_tmux_special_keys() {
     // Test Escape
     mock_tmux
         .expect_send_keys_literal()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("Escape"))
+        .with(
+            mockall::predicate::eq("win"),
+            mockall::predicate::eq("Escape"),
+        )
         .returning(|_, _| Ok(()));
 
     send_key_to_tmux("win", KeyCode::Esc, &mock_tmux);
@@ -727,7 +732,10 @@ fn test_send_key_to_tmux_special_keys() {
     let mut mock_tmux2 = MockTmuxOperations::new();
     mock_tmux2
         .expect_send_keys_literal()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("BSpace"))
+        .with(
+            mockall::predicate::eq("win"),
+            mockall::predicate::eq("BSpace"),
+        )
         .returning(|_, _| Ok(()));
 
     send_key_to_tmux("win", KeyCode::Backspace, &mock_tmux2);
@@ -759,7 +767,10 @@ fn test_capture_tmux_pane_with_history() {
 
     mock_tmux
         .expect_capture_pane_with_history()
-        .with(mockall::predicate::eq("test-window"), mockall::predicate::eq(500))
+        .with(
+            mockall::predicate::eq("test-window"),
+            mockall::predicate::eq(500),
+        )
         .returning(|_, _| b"Line 1\nLine 2\nLine 3\n".to_vec());
 
     mock_tmux
@@ -902,12 +913,7 @@ fn test_cleanup_task_for_done_with_resources() {
     task.worktree_path = Some("/tmp/worktree".to_string());
     task.status = TaskStatus::Review;
 
-    cleanup_task_for_done(
-        &mut task,
-        Path::new("/project"),
-        &mock_tmux,
-        &mock_git,
-    );
+    cleanup_task_for_done(&mut task, Path::new("/project"), &mock_tmux, &mock_git);
 
     assert!(task.session_name.is_none());
     assert!(task.worktree_path.is_none());
@@ -927,12 +933,7 @@ fn test_cleanup_task_for_done_no_resources() {
     let mut task = Task::new("Test task", "claude", "project-1");
     // No session_name or worktree_path set
 
-    cleanup_task_for_done(
-        &mut task,
-        Path::new("/project"),
-        &mock_tmux,
-        &mock_git,
-    );
+    cleanup_task_for_done(&mut task, Path::new("/project"), &mock_tmux, &mock_git);
 
     assert_eq!(task.status, TaskStatus::Done);
 }
@@ -975,12 +976,7 @@ fn test_delete_task_resources_full_cleanup() {
     task.worktree_path = Some("/tmp/worktree".to_string());
     task.branch_name = Some("task/abc-feature".to_string());
 
-    delete_task_resources(
-        &task,
-        Path::new("/project"),
-        &mock_tmux,
-        &mock_git,
-    );
+    delete_task_resources(&task, Path::new("/project"), &mock_tmux, &mock_git);
 }
 
 /// Test delete_task_resources handles task without resources
@@ -996,12 +992,7 @@ fn test_delete_task_resources_no_resources() {
     let task = Task::new("Simple task", "claude", "project-1");
     // No session_name, worktree_path, or branch_name
 
-    delete_task_resources(
-        &task,
-        Path::new("/project"),
-        &mock_tmux,
-        &mock_git,
-    );
+    delete_task_resources(&task, Path::new("/project"), &mock_tmux, &mock_git);
 }
 
 // =============================================================================
@@ -1045,7 +1036,9 @@ fn test_collect_task_diff_no_changes() {
 
     mock_git.expect_diff().returning(|_| String::new());
     mock_git.expect_diff_cached().returning(|_| String::new());
-    mock_git.expect_list_untracked_files().returning(|_| String::new());
+    mock_git
+        .expect_list_untracked_files()
+        .returning(|_| String::new());
 
     let result = collect_task_diff("/tmp/worktree", &mock_git, &[]);
 
@@ -1064,7 +1057,9 @@ fn test_collect_task_diff_only_unstaged() {
         .returning(|_| "diff --git a/modified.rs".to_string());
 
     mock_git.expect_diff_cached().returning(|_| String::new());
-    mock_git.expect_list_untracked_files().returning(|_| String::new());
+    mock_git
+        .expect_list_untracked_files()
+        .returning(|_| String::new());
 
     let result = collect_task_diff("/tmp/worktree", &mock_git, &[]);
 
@@ -1106,7 +1101,10 @@ fn test_build_highlighted_text_single_path() {
     assert_eq!(lines[0].spans[1].content, "src/main.rs");
     assert_eq!(lines[0].spans[2].content, " for me");
     // The highlighted span should be bold
-    assert!(lines[0].spans[1].style.add_modifier.contains(Modifier::BOLD));
+    assert!(lines[0].spans[1]
+        .style
+        .add_modifier
+        .contains(Modifier::BOLD));
 }
 
 /// Test build_highlighted_text with multiple file paths on one line
@@ -1129,7 +1127,12 @@ fn test_build_highlighted_text_multiple_paths() {
 fn test_build_highlighted_text_multiline() {
     let mut paths = HashSet::new();
     paths.insert("app.rs".to_string());
-    let text = build_highlighted_text("line1\nfix app.rs\nline3", &paths, Color::White, Color::Cyan);
+    let text = build_highlighted_text(
+        "line1\nfix app.rs\nline3",
+        &paths,
+        Color::White,
+        Color::Cyan,
+    );
     let lines: Vec<&Line> = text.lines.iter().collect();
     assert_eq!(lines.len(), 3);
     // First line: no highlight
@@ -1167,7 +1170,10 @@ fn test_build_highlighted_text_path_is_entire_line() {
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].spans.len(), 1);
     assert_eq!(lines[0].spans[0].content, "Cargo.toml");
-    assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::BOLD));
+    assert!(lines[0].spans[0]
+        .style
+        .add_modifier
+        .contains(Modifier::BOLD));
 }
 
 // =============================================================================
@@ -1362,7 +1368,7 @@ fn test_setup_task_worktree_success() {
     // Expect worktree creation
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
 
     // Expect worktree initialization
     mock_git
@@ -1375,9 +1381,7 @@ fn test_setup_task_worktree_success() {
         .returning(|prompt| format!("claude --dangerously-skip-permissions '{}'", prompt));
 
     // Expect tmux session check and window creation
-    mock_tmux
-        .expect_has_session()
-        .returning(|_| true);
+    mock_tmux.expect_has_session().returning(|_| true);
 
     mock_tmux
         .expect_create_window()
@@ -1391,6 +1395,7 @@ fn test_setup_task_worktree_success() {
         Path::new("/project"),
         "my-project",
         "implement this",
+        "main",
         None,
         None,
         &None,
@@ -1423,7 +1428,7 @@ fn test_setup_task_worktree_sets_task_fields() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -1431,7 +1436,9 @@ fn test_setup_task_worktree_sets_task_fields() {
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
     mock_tmux.expect_has_session().returning(|_| true);
-    mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
+    mock_tmux
+        .expect_create_window()
+        .returning(|_, _, _, _| Ok(()));
 
     let mut task = Task::new("Fix bug", "claude", "project-1");
 
@@ -1440,6 +1447,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         Path::new("/project"),
         "my-project",
         "fix the bug",
+        "main",
         Some("CLAUDE.md".to_string()),
         Some("./init.sh".to_string()),
         &None,
@@ -1449,12 +1457,17 @@ fn test_setup_task_worktree_sets_task_fields() {
         &mock_git,
         &mock_agent,
         &[],
-    ).unwrap();
+    )
+    .unwrap();
 
     // session_name should be the returned target
     assert_eq!(task.session_name.as_ref().unwrap(), &target);
     // worktree_path should contain the slug
-    assert!(task.worktree_path.as_ref().unwrap().contains(".agtx/worktrees/"));
+    assert!(task
+        .worktree_path
+        .as_ref()
+        .unwrap()
+        .contains(".agtx/worktrees/"));
     // branch_name should be task/{slug}
     let slug = &task.branch_name.as_ref().unwrap()["task/".len()..];
     assert!(task.worktree_path.as_ref().unwrap().ends_with(slug));
@@ -1473,7 +1486,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     // Worktree creation fails
     mock_git
         .expect_create_worktree()
-        .returning(|_, _| Err(anyhow::anyhow!("worktree already exists")));
+        .returning(|_, _, _| Err(anyhow::anyhow!("worktree already exists")));
 
     // Should still initialize and create window with fallback path
     mock_git
@@ -1483,7 +1496,9 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
     mock_tmux.expect_has_session().returning(|_| true);
-    mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
+    mock_tmux
+        .expect_create_window()
+        .returning(|_, _, _, _| Ok(()));
 
     let mut task = Task::new("Test task", "claude", "project-1");
 
@@ -1492,6 +1507,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         Path::new("/project"),
         "my-project",
         "do something",
+        "main",
         None,
         None,
         &None,
@@ -1506,7 +1522,11 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     // Should succeed despite worktree creation failure (uses fallback path)
     assert!(result.is_ok());
     assert!(task.worktree_path.is_some());
-    assert!(task.worktree_path.as_ref().unwrap().contains(".agtx/worktrees/"));
+    assert!(task
+        .worktree_path
+        .as_ref()
+        .unwrap()
+        .contains(".agtx/worktrees/"));
 }
 
 /// Test setup_task_worktree fails when tmux window creation fails
@@ -1521,7 +1541,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -1542,6 +1562,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         Path::new("/project"),
         "my-project",
         "do something",
+        "main",
         None,
         None,
         &None,
@@ -1570,7 +1591,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -1579,12 +1600,8 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         .returning(|prompt| format!("claude '{}'", prompt));
 
     // Session doesn't exist yet
-    mock_tmux
-        .expect_has_session()
-        .returning(|_| false);
-    mock_tmux
-        .expect_create_session()
-        .returning(|_, _| Ok(()));
+    mock_tmux.expect_has_session().returning(|_| false);
+    mock_tmux.expect_create_session().returning(|_, _| Ok(()));
     mock_tmux
         .expect_create_window()
         .returning(|_, _, _, _| Ok(()));
@@ -1596,6 +1613,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         Path::new("/project"),
         "my-project",
         "do work",
+        "main",
         None,
         None,
         &None,
@@ -1622,7 +1640,8 @@ fn test_setup_task_worktree_passes_init_config() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .withf(|_, _, base_branch| base_branch == "development")
+        .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
 
     // Verify copy_files and init_script are passed through
     mock_git
@@ -1637,7 +1656,9 @@ fn test_setup_task_worktree_passes_init_config() {
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
     mock_tmux.expect_has_session().returning(|_| true);
-    mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
+    mock_tmux
+        .expect_create_window()
+        .returning(|_, _, _, _| Ok(()));
 
     let mut task = Task::new("Task with config", "claude", "project-1");
 
@@ -1646,6 +1667,7 @@ fn test_setup_task_worktree_passes_init_config() {
         Path::new("/project"),
         "my-project",
         "implement feature",
+        "development",
         Some("CLAUDE.md,.env".to_string()),
         Some("./setup.sh".to_string()),
         &None,
@@ -1665,57 +1687,138 @@ fn test_setup_task_worktree_passes_init_config() {
 #[test]
 fn test_skill_name_to_command() {
     assert_eq!(skills::skill_name_to_command("agtx-plan"), "agtx:plan");
-    assert_eq!(skills::skill_name_to_command("agtx-execute"), "agtx:execute");
+    assert_eq!(
+        skills::skill_name_to_command("agtx-execute"),
+        "agtx:execute"
+    );
     assert_eq!(skills::skill_name_to_command("agtx-review"), "agtx:review");
-    assert_eq!(skills::skill_name_to_command("agtx-research"), "agtx:research");
+    assert_eq!(
+        skills::skill_name_to_command("agtx-research"),
+        "agtx:research"
+    );
     assert_eq!(skills::skill_name_to_command("simple"), "simple");
 }
 
 #[test]
 fn test_skill_dir_to_filename() {
     // Claude/default: .md files with prefix stripped
-    assert_eq!(skills::skill_dir_to_filename("agtx-plan", "claude"), "plan.md");
-    assert_eq!(skills::skill_dir_to_filename("agtx-execute", "claude"), "execute.md");
-    assert_eq!(skills::skill_dir_to_filename("agtx-review", "claude"), "review.md");
-    assert_eq!(skills::skill_dir_to_filename("custom", "claude"), "custom.md");
+    assert_eq!(
+        skills::skill_dir_to_filename("agtx-plan", "claude"),
+        "plan.md"
+    );
+    assert_eq!(
+        skills::skill_dir_to_filename("agtx-execute", "claude"),
+        "execute.md"
+    );
+    assert_eq!(
+        skills::skill_dir_to_filename("agtx-review", "claude"),
+        "review.md"
+    );
+    assert_eq!(
+        skills::skill_dir_to_filename("custom", "claude"),
+        "custom.md"
+    );
     // Gemini: .toml files with prefix stripped
-    assert_eq!(skills::skill_dir_to_filename("agtx-plan", "gemini"), "plan.toml");
-    assert_eq!(skills::skill_dir_to_filename("agtx-execute", "gemini"), "execute.toml");
+    assert_eq!(
+        skills::skill_dir_to_filename("agtx-plan", "gemini"),
+        "plan.toml"
+    );
+    assert_eq!(
+        skills::skill_dir_to_filename("agtx-execute", "gemini"),
+        "execute.toml"
+    );
     // OpenCode: .md files with full name (flat directory, no namespace)
-    assert_eq!(skills::skill_dir_to_filename("agtx-plan", "opencode"), "agtx-plan.md");
-    assert_eq!(skills::skill_dir_to_filename("agtx-execute", "opencode"), "agtx-execute.md");
+    assert_eq!(
+        skills::skill_dir_to_filename("agtx-plan", "opencode"),
+        "agtx-plan.md"
+    );
+    assert_eq!(
+        skills::skill_dir_to_filename("agtx-execute", "opencode"),
+        "agtx-execute.md"
+    );
     // Copilot: .md files with prefix stripped (same as Claude default)
-    assert_eq!(skills::skill_dir_to_filename("agtx-plan", "copilot"), "plan.md");
-    assert_eq!(skills::skill_dir_to_filename("agtx-execute", "copilot"), "execute.md");
+    assert_eq!(
+        skills::skill_dir_to_filename("agtx-plan", "copilot"),
+        "plan.md"
+    );
+    assert_eq!(
+        skills::skill_dir_to_filename("agtx-execute", "copilot"),
+        "execute.md"
+    );
 }
 
 #[test]
 fn test_agent_native_skill_dir() {
-    assert_eq!(skills::agent_native_skill_dir("claude"), Some((".claude/commands", "agtx")));
-    assert_eq!(skills::agent_native_skill_dir("gemini"), Some((".gemini/commands", "agtx")));
-    assert_eq!(skills::agent_native_skill_dir("opencode"), Some((".opencode/commands", "")));
-    assert_eq!(skills::agent_native_skill_dir("codex"), Some((".codex/skills", "")));
-    assert_eq!(skills::agent_native_skill_dir("copilot"), Some((".github/agents", "agtx")));
+    assert_eq!(
+        skills::agent_native_skill_dir("claude"),
+        Some((".claude/commands", "agtx"))
+    );
+    assert_eq!(
+        skills::agent_native_skill_dir("gemini"),
+        Some((".gemini/commands", "agtx"))
+    );
+    assert_eq!(
+        skills::agent_native_skill_dir("opencode"),
+        Some((".opencode/commands", ""))
+    );
+    assert_eq!(
+        skills::agent_native_skill_dir("codex"),
+        Some((".codex/skills", ""))
+    );
+    assert_eq!(
+        skills::agent_native_skill_dir("copilot"),
+        Some((".github/agents", "agtx"))
+    );
     assert_eq!(skills::agent_native_skill_dir("unknown"), None);
 }
 
 #[test]
 fn test_transform_plugin_command() {
     // Claude/Gemini: canonical form unchanged
-    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "claude"), Some("/gsd:plan-phase 1".to_string()));
-    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "gemini"), Some("/gsd:plan-phase 1".to_string()));
+    assert_eq!(
+        skills::transform_plugin_command("/gsd:plan-phase 1", "claude"),
+        Some("/gsd:plan-phase 1".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/gsd:plan-phase 1", "gemini"),
+        Some("/gsd:plan-phase 1".to_string())
+    );
     // OpenCode: colon → hyphen
-    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "opencode"), Some("/gsd-plan-phase 1".to_string()));
-    assert_eq!(skills::transform_plugin_command("/gsd:discuss-phase 1", "opencode"), Some("/gsd-discuss-phase 1".to_string()));
+    assert_eq!(
+        skills::transform_plugin_command("/gsd:plan-phase 1", "opencode"),
+        Some("/gsd-plan-phase 1".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/gsd:discuss-phase 1", "opencode"),
+        Some("/gsd-discuss-phase 1".to_string())
+    );
     // Codex: slash → dollar, colon → hyphen
-    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "codex"), Some("$gsd-plan-phase 1".to_string()));
-    assert_eq!(skills::transform_plugin_command("/gsd:execute-phase 1", "codex"), Some("$gsd-execute-phase 1".to_string()));
+    assert_eq!(
+        skills::transform_plugin_command("/gsd:plan-phase 1", "codex"),
+        Some("$gsd-plan-phase 1".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/gsd:execute-phase 1", "codex"),
+        Some("$gsd-execute-phase 1".to_string())
+    );
     // Spec-kit style (dot separator, no colon): transform only affects colon
-    assert_eq!(skills::transform_plugin_command("/speckit.plan", "opencode"), Some("/speckit.plan".to_string()));
-    assert_eq!(skills::transform_plugin_command("/speckit.plan", "codex"), Some("$speckit.plan".to_string()));
+    assert_eq!(
+        skills::transform_plugin_command("/speckit.plan", "opencode"),
+        Some("/speckit.plan".to_string())
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/speckit.plan", "codex"),
+        Some("$speckit.plan".to_string())
+    );
     // Unsupported agents
-    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "copilot"), None);
-    assert_eq!(skills::transform_plugin_command("/gsd:plan-phase 1", "unknown"), None);
+    assert_eq!(
+        skills::transform_plugin_command("/gsd:plan-phase 1", "copilot"),
+        None
+    );
+    assert_eq!(
+        skills::transform_plugin_command("/gsd:plan-phase 1", "unknown"),
+        None
+    );
 }
 
 #[test]
@@ -1729,7 +1832,10 @@ fn test_strip_frontmatter() {
 
 #[test]
 fn test_skill_to_gemini_toml() {
-    let toml = skills::skill_to_gemini_toml("Plan a task", "---\nname: agtx-plan\n---\n# Planning\nDo stuff");
+    let toml = skills::skill_to_gemini_toml(
+        "Plan a task",
+        "---\nname: agtx-plan\n---\n# Planning\nDo stuff",
+    );
     assert!(toml.contains("description = \"Plan a task\""));
     assert!(toml.contains("prompt = \"\"\""));
     assert!(toml.contains("# Planning"));
@@ -1741,7 +1847,10 @@ fn test_skill_to_gemini_toml() {
 #[test]
 fn test_extract_description() {
     let content = "---\nname: agtx-plan\ndescription: Plan a task implementation.\n---\n# Content";
-    assert_eq!(skills::extract_description(content), Some("Plan a task implementation.".to_string()));
+    assert_eq!(
+        skills::extract_description(content),
+        Some("Plan a task implementation.".to_string())
+    );
 
     let no_desc = "---\nname: agtx-plan\n---\n# Content";
     assert_eq!(skills::extract_description(no_desc), None);
@@ -1777,7 +1886,13 @@ fn test_resolve_prompt_agtx_no_prompts() {
     assert!(prompt.is_empty());
     let prompt = resolve_prompt(&plugin, "running", "my task", "task-123", 1);
     assert!(prompt.is_empty());
-    let prompt = resolve_prompt(&plugin, "running_with_research_or_planning", "my task", "task-123", 1);
+    let prompt = resolve_prompt(
+        &plugin,
+        "running_with_research_or_planning",
+        "my task",
+        "task-123",
+        1,
+    );
     assert!(prompt.is_empty());
 }
 
@@ -1807,18 +1922,33 @@ fn test_resolve_prompt_no_plugin_returns_empty() {
 #[test]
 fn test_agtx_plugin_artifacts() {
     let plugin = skills::load_bundled_plugin("agtx").expect("agtx plugin should load");
-    assert_eq!(plugin.artifacts.research.as_deref(), Some(".agtx/research.md"));
+    assert_eq!(
+        plugin.artifacts.research.as_deref(),
+        Some(".agtx/research.md")
+    );
     assert_eq!(plugin.artifacts.planning.as_deref(), Some(".agtx/plan.md"));
-    assert_eq!(plugin.artifacts.running.as_deref(), Some(".agtx/execute.md"));
+    assert_eq!(
+        plugin.artifacts.running.as_deref(),
+        Some(".agtx/execute.md")
+    );
     assert_eq!(plugin.artifacts.review.as_deref(), Some(".agtx/review.md"));
 }
 
 #[test]
 fn test_agtx_plugin_has_commands() {
     let plugin = skills::load_bundled_plugin("agtx").expect("agtx plugin should load");
-    assert_eq!(plugin.commands.research.as_deref(), Some("/agtx:research {task}"));
-    assert_eq!(plugin.commands.planning.as_deref(), Some("/agtx:plan {task}"));
-    assert_eq!(plugin.commands.running.as_deref(), Some("/agtx:execute {task}"));
+    assert_eq!(
+        plugin.commands.research.as_deref(),
+        Some("/agtx:research {task}")
+    );
+    assert_eq!(
+        plugin.commands.planning.as_deref(),
+        Some("/agtx:plan {task}")
+    );
+    assert_eq!(
+        plugin.commands.running.as_deref(),
+        Some("/agtx:execute {task}")
+    );
     assert_eq!(plugin.commands.review.as_deref(), Some("/agtx:review"));
 }
 
@@ -1858,16 +1988,33 @@ fn test_enumerate_available_skills_opencode() {
 #[test]
 fn test_resolve_skill_command_no_plugin() {
     // No plugin: no commands, returns None for all agents/phases
-    assert_eq!(resolve_skill_command(&None, "planning", "claude", "", 1), None);
-    assert_eq!(resolve_skill_command(&None, "running", "codex", "", 1), None);
-    assert_eq!(resolve_skill_command(&None, "review", "gemini", "", 1), None);
-    assert_eq!(resolve_skill_command(&None, "planning", "opencode", "", 1), None);
-    assert_eq!(resolve_skill_command(&None, "planning", "copilot", "", 1), None);
+    assert_eq!(
+        resolve_skill_command(&None, "planning", "claude", "", 1),
+        None
+    );
+    assert_eq!(
+        resolve_skill_command(&None, "running", "codex", "", 1),
+        None
+    );
+    assert_eq!(
+        resolve_skill_command(&None, "review", "gemini", "", 1),
+        None
+    );
+    assert_eq!(
+        resolve_skill_command(&None, "planning", "opencode", "", 1),
+        None
+    );
+    assert_eq!(
+        resolve_skill_command(&None, "planning", "copilot", "", 1),
+        None
+    );
 }
 
 #[test]
 fn test_resolve_skill_command_with_plugin() {
-    use crate::config::{WorkflowPlugin, PluginArtifacts, PluginCommands, PluginPrompts, PluginPromptTriggers};
+    use crate::config::{
+        PluginArtifacts, PluginCommands, PluginPromptTriggers, PluginPrompts, WorkflowPlugin,
+    };
     let plugin = Some(WorkflowPlugin {
         name: "gsd".to_string(),
         description: None,
@@ -1890,18 +2037,45 @@ fn test_resolve_skill_command_with_plugin() {
         auto_dismiss: vec![],
     });
     // Claude/Gemini: canonical form unchanged
-    assert_eq!(resolve_skill_command(&plugin, "planning", "claude", "", 1), Some("/gsd:plan-phase 1".to_string()));
-    assert_eq!(resolve_skill_command(&plugin, "running", "claude", "", 1), Some("/gsd:execute-phase 1".to_string()));
-    assert_eq!(resolve_skill_command(&plugin, "review", "gemini", "", 1), Some("/gsd:verify-work 1".to_string()));
-    assert_eq!(resolve_skill_command(&plugin, "research", "claude", "", 1), Some("/gsd:discuss-phase 1".to_string()));
+    assert_eq!(
+        resolve_skill_command(&plugin, "planning", "claude", "", 1),
+        Some("/gsd:plan-phase 1".to_string())
+    );
+    assert_eq!(
+        resolve_skill_command(&plugin, "running", "claude", "", 1),
+        Some("/gsd:execute-phase 1".to_string())
+    );
+    assert_eq!(
+        resolve_skill_command(&plugin, "review", "gemini", "", 1),
+        Some("/gsd:verify-work 1".to_string())
+    );
+    assert_eq!(
+        resolve_skill_command(&plugin, "research", "claude", "", 1),
+        Some("/gsd:discuss-phase 1".to_string())
+    );
     // OpenCode: colon → hyphen
-    assert_eq!(resolve_skill_command(&plugin, "planning", "opencode", "", 1), Some("/gsd-plan-phase 1".to_string()));
-    assert_eq!(resolve_skill_command(&plugin, "research", "opencode", "", 1), Some("/gsd-discuss-phase 1".to_string()));
+    assert_eq!(
+        resolve_skill_command(&plugin, "planning", "opencode", "", 1),
+        Some("/gsd-plan-phase 1".to_string())
+    );
+    assert_eq!(
+        resolve_skill_command(&plugin, "research", "opencode", "", 1),
+        Some("/gsd-discuss-phase 1".to_string())
+    );
     // Codex: slash → dollar, colon → hyphen
-    assert_eq!(resolve_skill_command(&plugin, "planning", "codex", "", 1), Some("$gsd-plan-phase 1".to_string()));
-    assert_eq!(resolve_skill_command(&plugin, "running", "codex", "", 1), Some("$gsd-execute-phase 1".to_string()));
+    assert_eq!(
+        resolve_skill_command(&plugin, "planning", "codex", "", 1),
+        Some("$gsd-plan-phase 1".to_string())
+    );
+    assert_eq!(
+        resolve_skill_command(&plugin, "running", "codex", "", 1),
+        Some("$gsd-execute-phase 1".to_string())
+    );
     // Unsupported agents: None (will use file-path fallback in prompt)
-    assert_eq!(resolve_skill_command(&plugin, "planning", "copilot", "", 1), None);
+    assert_eq!(
+        resolve_skill_command(&plugin, "planning", "copilot", "", 1),
+        None
+    );
 }
 
 #[test]
@@ -1933,7 +2107,12 @@ fn test_plugin_supports_agent() {
         name: "gsd".to_string(),
         description: None,
         init_script: None,
-        supported_agents: vec!["claude".into(), "codex".into(), "gemini".into(), "opencode".into()],
+        supported_agents: vec![
+            "claude".into(),
+            "codex".into(),
+            "gemini".into(),
+            "opencode".into(),
+        ],
         artifacts: Default::default(),
         commands: Default::default(),
         prompts: Default::default(),
@@ -1986,7 +2165,7 @@ fn test_glob_path_exists() {
 
 #[test]
 fn test_phase_artifact_exists_with_glob() {
-    use crate::config::{WorkflowPlugin, PluginArtifacts, PluginCommands, PluginPrompts};
+    use crate::config::{PluginArtifacts, PluginCommands, PluginPrompts, WorkflowPlugin};
 
     let tmp = std::env::temp_dir().join("agtx_test_artifact_glob");
     let _ = std::fs::remove_dir_all(&tmp);
@@ -2019,14 +2198,34 @@ fn test_phase_artifact_exists_with_glob() {
     let worktree = tmp.to_string_lossy().to_string();
 
     // Planning artifact exists (glob matches)
-    assert!(phase_artifact_exists(&worktree, TaskStatus::Planning, &plugin, 1));
+    assert!(phase_artifact_exists(
+        &worktree,
+        TaskStatus::Planning,
+        &plugin,
+        1
+    ));
 
     // Research artifact doesn't exist yet (no spec.md)
-    assert!(!phase_artifact_exists(&worktree, TaskStatus::Backlog, &plugin, 1));
+    assert!(!phase_artifact_exists(
+        &worktree,
+        TaskStatus::Backlog,
+        &plugin,
+        1
+    ));
 
     // Running/Review fall back to agtx defaults (don't exist)
-    assert!(!phase_artifact_exists(&worktree, TaskStatus::Running, &plugin, 1));
-    assert!(!phase_artifact_exists(&worktree, TaskStatus::Review, &plugin, 1));
+    assert!(!phase_artifact_exists(
+        &worktree,
+        TaskStatus::Running,
+        &plugin,
+        1
+    ));
+    assert!(!phase_artifact_exists(
+        &worktree,
+        TaskStatus::Review,
+        &plugin,
+        1
+    ));
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -2066,7 +2265,9 @@ fn test_plugin_select_popup_construction_no_active() {
         active: current.is_empty(),
     }];
     for (name, desc, _) in skills::BUNDLED_PLUGINS {
-        if *name == "agtx" { continue; }
+        if *name == "agtx" {
+            continue;
+        }
         options.push(PluginOption {
             name: name.to_string(),
             label: name.to_string(),
@@ -2091,7 +2292,9 @@ fn test_plugin_select_popup_construction_gsd_active() {
         active: current.is_empty(),
     }];
     for (name, desc, _) in skills::BUNDLED_PLUGINS {
-        if *name == "agtx" { continue; }
+        if *name == "agtx" {
+            continue;
+        }
         options.push(PluginOption {
             name: name.to_string(),
             label: name.to_string(),
@@ -2131,7 +2334,11 @@ fn test_install_plugin_writes_files() {
     project_config.save(&tmp).unwrap();
 
     // Verify plugin.toml was written
-    let plugin_toml = tmp.join(".agtx").join("plugins").join("gsd").join("plugin.toml");
+    let plugin_toml = tmp
+        .join(".agtx")
+        .join("plugins")
+        .join("gsd")
+        .join("plugin.toml");
     assert!(plugin_toml.exists());
     let content = std::fs::read_to_string(&plugin_toml).unwrap();
     assert!(content.contains("name = \"gsd\""));
@@ -2269,15 +2476,24 @@ fn test_gsd_plugin_toml_has_research_command() {
         .find(|(n, _, _)| *n == "gsd")
         .expect("gsd plugin should be bundled");
     let plugin: WorkflowPlugin = toml::from_str(content).unwrap();
-    assert_eq!(plugin.commands.preresearch, Some("/gsd:new-project".to_string()));
-    assert_eq!(plugin.commands.research, Some("/gsd:discuss-phase {phase}".to_string()));
-    assert_eq!(plugin.commands.planning, Some("/gsd:plan-phase {phase}".to_string()));
+    assert_eq!(
+        plugin.commands.preresearch,
+        Some("/gsd:new-project".to_string())
+    );
+    assert_eq!(
+        plugin.commands.research,
+        Some("/gsd:discuss-phase {phase}".to_string())
+    );
+    assert_eq!(
+        plugin.commands.planning,
+        Some("/gsd:plan-phase {phase}".to_string())
+    );
     assert!(plugin.cyclic);
 }
 
 #[test]
 fn test_resolve_prompt_trigger_with_gsd() {
-    use crate::config::{WorkflowPlugin, PluginPromptTriggers};
+    use crate::config::{PluginPromptTriggers, WorkflowPlugin};
     let plugin = Some(WorkflowPlugin {
         name: "gsd".to_string(),
         description: None,
@@ -2315,7 +2531,7 @@ fn test_resolve_prompt_trigger_no_plugin() {
 
 #[test]
 fn test_resolve_prompt_trigger_empty_string_filtered() {
-    use crate::config::{WorkflowPlugin, PluginPromptTriggers};
+    use crate::config::{PluginPromptTriggers, WorkflowPlugin};
     let plugin = Some(WorkflowPlugin {
         name: "test".to_string(),
         description: None,
@@ -2350,11 +2566,13 @@ fn test_scan_agent_skills_claude() {
     std::fs::write(
         cmd_dir.join("plan.md"),
         "---\nname: agtx-plan\ndescription: Plan a task implementation\n---\nBody here\n",
-    ).unwrap();
+    )
+    .unwrap();
     std::fs::write(
         cmd_dir.join("execute.md"),
         "---\nname: agtx-execute\ndescription: Execute the plan\n---\nBody\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let results = crate::skills::scan_agent_skills("claude", base);
     assert_eq!(results.len(), 2);
@@ -2374,7 +2592,8 @@ fn test_scan_agent_skills_codex() {
     std::fs::write(
         skill_dir.join("SKILL.md"),
         "---\nname: agtx-plan\ndescription: Plan implementation\n---\nContent\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let results = crate::skills::scan_agent_skills("codex", base);
     assert_eq!(results.len(), 1);
@@ -2391,7 +2610,8 @@ fn test_scan_agent_skills_gemini() {
     std::fs::write(
         cmd_dir.join("plan.toml"),
         "description = \"Plan a task\"\n\nprompt = \"\"\"Do the planning\"\"\"\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let results = crate::skills::scan_agent_skills("gemini", base);
     assert_eq!(results.len(), 1);
@@ -2445,7 +2665,7 @@ fn test_skill_fuzzy_matching() {
 
 #[test]
 fn test_needs_agent_switch_no_config_keeps_current() {
-    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
     use crate::db::Task;
 
     // No [agents] section — should keep whatever agent is running
@@ -2459,7 +2679,7 @@ fn test_needs_agent_switch_no_config_keeps_current() {
 
 #[test]
 fn test_needs_agent_switch_no_config_falls_back_to_default() {
-    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
     use crate::db::Task;
 
     // No review agent configured, task is running codex (set by explicit running override).
@@ -2477,7 +2697,7 @@ fn test_needs_agent_switch_no_config_falls_back_to_default() {
 
 #[test]
 fn test_needs_agent_switch_explicit_override() {
-    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
     use crate::db::Task;
 
     let mut global = GlobalConfig::default();
@@ -2492,7 +2712,7 @@ fn test_needs_agent_switch_explicit_override() {
 
 #[test]
 fn test_needs_agent_switch_explicit_same_as_current() {
-    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
     use crate::db::Task;
 
     // Explicit override exists but matches current agent — no switch needed
@@ -2509,7 +2729,7 @@ fn test_needs_agent_switch_explicit_same_as_current() {
 
 #[test]
 fn test_collect_phase_agents_all_same() {
-    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
 
     let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
     let agents = collect_phase_agents(&config);
@@ -2518,14 +2738,21 @@ fn test_collect_phase_agents_all_same() {
 
 #[test]
 fn test_collect_phase_agents_mixed() {
-    use crate::config::{GlobalConfig, ProjectConfig, MergedConfig};
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
 
     let mut global = GlobalConfig::default();
     global.agents.running = Some("codex".to_string());
     global.agents.review = Some("gemini".to_string());
     let config = MergedConfig::merge(&global, &ProjectConfig::default());
     let agents = collect_phase_agents(&config);
-    assert_eq!(agents, vec!["claude".to_string(), "codex".to_string(), "gemini".to_string()]);
+    assert_eq!(
+        agents,
+        vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string()
+        ]
+    );
 }
 
 // === is_pane_at_shell tests ===
@@ -2629,22 +2856,30 @@ fn test_switch_agent_claude_sends_exit() {
     let new_agent_sent_c = new_agent_sent.clone();
 
     // Claude uses /exit
-    mock.expect_send_keys()
-        .returning(move |_, k| {
-            if k == "/exit" { exit_sent_c.store(true, Ordering::SeqCst); }
-            if k == "codex" { new_agent_sent_c.store(true, Ordering::SeqCst); }
-            Ok(())
-        });
+    mock.expect_send_keys().returning(move |_, k| {
+        if k == "/exit" {
+            exit_sent_c.store(true, Ordering::SeqCst);
+        }
+        if k == "codex" {
+            new_agent_sent_c.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    });
     mock.expect_send_keys_literal().returning(|_, _| Ok(()));
     // Return shell immediately so polling exits fast
     mock.expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
-    mock.expect_capture_pane()
-        .returning(|_| Ok(String::new()));
+    mock.expect_capture_pane().returning(|_| Ok(String::new()));
 
     switch_agent_in_tmux(&mock, "sess:win", "claude", "codex");
-    assert!(exit_sent.load(Ordering::SeqCst), "/exit should be sent for claude");
-    assert!(new_agent_sent.load(Ordering::SeqCst), "new agent command should be sent");
+    assert!(
+        exit_sent.load(Ordering::SeqCst),
+        "/exit should be sent for claude"
+    );
+    assert!(
+        new_agent_sent.load(Ordering::SeqCst),
+        "new agent command should be sent"
+    );
 }
 
 #[test]
@@ -2657,19 +2892,22 @@ fn test_switch_agent_gemini_sends_quit() {
     let quit_sent = Arc::new(AtomicBool::new(false));
     let quit_sent_c = quit_sent.clone();
 
-    mock.expect_send_keys()
-        .returning(move |_, k| {
-            if k == "/quit" { quit_sent_c.store(true, Ordering::SeqCst); }
-            Ok(())
-        });
+    mock.expect_send_keys().returning(move |_, k| {
+        if k == "/quit" {
+            quit_sent_c.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    });
     mock.expect_send_keys_literal().returning(|_, _| Ok(()));
     mock.expect_pane_current_command()
         .returning(|_| Some("zsh".to_string()));
-    mock.expect_capture_pane()
-        .returning(|_| Ok(String::new()));
+    mock.expect_capture_pane().returning(|_| Ok(String::new()));
 
     switch_agent_in_tmux(&mock, "sess:win", "gemini", "claude");
-    assert!(quit_sent.load(Ordering::SeqCst), "/quit should be sent for gemini");
+    assert!(
+        quit_sent.load(Ordering::SeqCst),
+        "/quit should be sent for gemini"
+    );
 }
 
 #[test]
@@ -2683,18 +2921,21 @@ fn test_switch_agent_codex_sends_ctrl_c() {
     let ctrl_c_sent_c = ctrl_c_sent.clone();
 
     mock.expect_send_keys().returning(|_, _| Ok(()));
-    mock.expect_send_keys_literal()
-        .returning(move |_, k| {
-            if k == "C-c" { ctrl_c_sent_c.store(true, Ordering::SeqCst); }
-            Ok(())
-        });
+    mock.expect_send_keys_literal().returning(move |_, k| {
+        if k == "C-c" {
+            ctrl_c_sent_c.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    });
     mock.expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
-    mock.expect_capture_pane()
-        .returning(|_| Ok(String::new()));
+    mock.expect_capture_pane().returning(|_| Ok(String::new()));
 
     switch_agent_in_tmux(&mock, "sess:win", "codex", "claude");
-    assert!(ctrl_c_sent.load(Ordering::SeqCst), "Ctrl+C should be sent for codex");
+    assert!(
+        ctrl_c_sent.load(Ordering::SeqCst),
+        "Ctrl+C should be sent for codex"
+    );
 }
 
 // =============================================================================
@@ -2703,7 +2944,7 @@ fn test_switch_agent_codex_sends_ctrl_c() {
 
 #[test]
 fn test_resolve_skill_command_phase_substitution() {
-    use crate::config::{WorkflowPlugin, PluginCommands};
+    use crate::config::{PluginCommands, WorkflowPlugin};
     let plugin_toml = r#"
         name = "gsd"
         init_script = "echo test"
@@ -2720,22 +2961,43 @@ fn test_resolve_skill_command_phase_substitution() {
     let p = Some(plugin);
 
     // Cycle 1: {phase} → "1"
-    assert_eq!(resolve_skill_command(&p, "planning", "claude", "", 1), Some("/gsd:plan-phase 1".to_string()));
-    assert_eq!(resolve_skill_command(&p, "running", "claude", "", 1), Some("/gsd:execute-phase 1".to_string()));
-    assert_eq!(resolve_skill_command(&p, "review", "claude", "", 1), Some("/gsd:verify-work 1".to_string()));
+    assert_eq!(
+        resolve_skill_command(&p, "planning", "claude", "", 1),
+        Some("/gsd:plan-phase 1".to_string())
+    );
+    assert_eq!(
+        resolve_skill_command(&p, "running", "claude", "", 1),
+        Some("/gsd:execute-phase 1".to_string())
+    );
+    assert_eq!(
+        resolve_skill_command(&p, "review", "claude", "", 1),
+        Some("/gsd:verify-work 1".to_string())
+    );
 
     // Cycle 2: {phase} → "2"
-    assert_eq!(resolve_skill_command(&p, "planning", "claude", "", 2), Some("/gsd:plan-phase 2".to_string()));
-    assert_eq!(resolve_skill_command(&p, "running", "claude", "", 2), Some("/gsd:execute-phase 2".to_string()));
-    assert_eq!(resolve_skill_command(&p, "review", "claude", "", 2), Some("/gsd:verify-work 2".to_string()));
+    assert_eq!(
+        resolve_skill_command(&p, "planning", "claude", "", 2),
+        Some("/gsd:plan-phase 2".to_string())
+    );
+    assert_eq!(
+        resolve_skill_command(&p, "running", "claude", "", 2),
+        Some("/gsd:execute-phase 2".to_string())
+    );
+    assert_eq!(
+        resolve_skill_command(&p, "review", "claude", "", 2),
+        Some("/gsd:verify-work 2".to_string())
+    );
 
     // preresearch also gets {phase} substitution (falls back to research command)
-    assert_eq!(resolve_skill_command(&p, "preresearch", "claude", "", 1), Some("/gsd:new-project".to_string()));
+    assert_eq!(
+        resolve_skill_command(&p, "preresearch", "claude", "", 1),
+        Some("/gsd:new-project".to_string())
+    );
 }
 
 #[test]
 fn test_phase_artifact_exists_with_phase_substitution() {
-    use crate::config::{WorkflowPlugin, PluginArtifacts};
+    use crate::config::{PluginArtifacts, WorkflowPlugin};
 
     let tmp = std::env::temp_dir().join("agtx_test_phase_artifact");
     let _ = std::fs::remove_dir_all(&tmp);
@@ -2836,7 +3098,10 @@ fn test_determine_phase_variant_running_with_planning() {
 
 #[test]
 fn test_determine_phase_variant_review_passthrough() {
-    assert_eq!(determine_phase_variant("review", None, "t", &None, 1), "review");
+    assert_eq!(
+        determine_phase_variant("review", None, "t", &None, 1),
+        "review"
+    );
 }
 
 #[test]
@@ -2860,7 +3125,10 @@ fn test_resolve_skill_command_preresearch_fallback() {
     use crate::config::WorkflowPlugin;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
     let p = Some(plugin);
-    assert_eq!(resolve_skill_command(&p, "preresearch", "claude", "", 1), Some("/test:discuss".to_string()));
+    assert_eq!(
+        resolve_skill_command(&p, "preresearch", "claude", "", 1),
+        Some("/test:discuss".to_string())
+    );
 }
 
 #[test]
@@ -2923,22 +3191,28 @@ fn test_send_skill_and_prompt_gemini_combined() {
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
 
-    mock.expect_send_keys_literal()
-        .returning(move |_, text| {
-            literal_c.lock().unwrap().push(text.to_string());
-            Ok(())
-        });
+    mock.expect_send_keys_literal().returning(move |_, text| {
+        literal_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
     mock.expect_capture_pane()
         .returning(|_| Ok("/agtx:plan\n\nmy task".to_string()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
-        &tmux, "sess:win",
-        &Some("/agtx:plan".to_string()), "my task",
-        &None, "my task", "gemini", &[],
+        &tmux,
+        "sess:win",
+        &Some("/agtx:plan".to_string()),
+        "my task",
+        &None,
+        "my task",
+        "gemini",
+        &[],
     );
     let calls = literal_calls.lock().unwrap();
-    assert!(calls.iter().any(|c| c.contains("/agtx:plan") && c.contains("my task")));
+    assert!(calls
+        .iter()
+        .any(|c| c.contains("/agtx:plan") && c.contains("my task")));
     assert!(calls.iter().any(|c| c == "Enter"));
 }
 
@@ -2949,22 +3223,28 @@ fn test_send_skill_and_prompt_codex_combined() {
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
 
-    mock.expect_send_keys_literal()
-        .returning(move |_, text| {
-            literal_c.lock().unwrap().push(text.to_string());
-            Ok(())
-        });
+    mock.expect_send_keys_literal().returning(move |_, text| {
+        literal_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
     mock.expect_capture_pane()
         .returning(|_| Ok("$agtx-plan\n\ndo the thing".to_string()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
-        &tmux, "sess:win",
-        &Some("$agtx-plan".to_string()), "do the thing",
-        &None, "do the thing", "codex", &[],
+        &tmux,
+        "sess:win",
+        &Some("$agtx-plan".to_string()),
+        "do the thing",
+        &None,
+        "do the thing",
+        "codex",
+        &[],
     );
     let calls = literal_calls.lock().unwrap();
-    assert!(calls.iter().any(|c| c.contains("$agtx-plan") && c.contains("do the thing")));
+    assert!(calls
+        .iter()
+        .any(|c| c.contains("$agtx-plan") && c.contains("do the thing")));
     assert!(calls.iter().any(|c| c == "Enter"));
 }
 
@@ -2975,11 +3255,10 @@ fn test_send_skill_and_prompt_claude_with_trigger() {
     let keys_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let keys_c = keys_calls.clone();
 
-    mock.expect_send_keys()
-        .returning(move |_, k| {
-            keys_c.lock().unwrap().push(k.to_string());
-            Ok(())
-        });
+    mock.expect_send_keys().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
     mock.expect_send_keys_literal().returning(|_, _| Ok(()));
     // Return trigger text immediately
     mock.expect_capture_pane()
@@ -2987,13 +3266,24 @@ fn test_send_skill_and_prompt_claude_with_trigger() {
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
-        &tmux, "sess:win",
-        &Some("/agtx:plan".to_string()), "implement this",
-        &Some("Ready for input".to_string()), "implement this", "claude", &[],
+        &tmux,
+        "sess:win",
+        &Some("/agtx:plan".to_string()),
+        "implement this",
+        &Some("Ready for input".to_string()),
+        "implement this",
+        "claude",
+        &[],
     );
     let calls = keys_calls.lock().unwrap();
-    assert!(calls.iter().any(|c| c == "/agtx:plan"), "skill should be sent");
-    assert!(calls.iter().any(|c| c == "implement this"), "prompt should be sent after trigger");
+    assert!(
+        calls.iter().any(|c| c == "/agtx:plan"),
+        "skill should be sent"
+    );
+    assert!(
+        calls.iter().any(|c| c == "implement this"),
+        "prompt should be sent after trigger"
+    );
 }
 
 #[test]
@@ -3003,17 +3293,21 @@ fn test_send_skill_and_prompt_prompt_only() {
     let keys_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let keys_c = keys_calls.clone();
 
-    mock.expect_send_keys()
-        .returning(move |_, k| {
-            keys_c.lock().unwrap().push(k.to_string());
-            Ok(())
-        });
+    mock.expect_send_keys().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
-        &tmux, "sess:win",
-        &None, "just a prompt",
-        &None, "just a prompt", "claude", &[],
+        &tmux,
+        "sess:win",
+        &None,
+        "just a prompt",
+        &None,
+        "just a prompt",
+        "claude",
+        &[],
     );
     let calls = keys_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
@@ -3027,17 +3321,21 @@ fn test_send_skill_and_prompt_void_prefill() {
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
 
-    mock.expect_send_keys_literal()
-        .returning(move |_, text| {
-            literal_c.lock().unwrap().push(text.to_string());
-            Ok(())
-        });
+    mock.expect_send_keys_literal().returning(move |_, text| {
+        literal_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
-        &tmux, "sess:win",
-        &None, "",
-        &None, "fix the login bug", "claude", &[],
+        &tmux,
+        "sess:win",
+        &None,
+        "",
+        &None,
+        "fix the login bug",
+        "claude",
+        &[],
     );
     let calls = literal_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
@@ -3070,20 +3368,20 @@ fn test_wait_for_prompt_trigger_auto_dismiss_then_trigger() {
     let dismiss_sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dismiss_c = dismiss_sent.clone();
 
-    mock.expect_capture_pane()
-        .returning(move |_| {
-            let n = call_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if n < 8 {
-                Ok("Do you accept? [y/n]".to_string())
-            } else {
-                Ok("Ready for input >".to_string())
-            }
-        });
-    mock.expect_send_keys_literal()
-        .returning(move |_, k| {
-            if k == "y" { dismiss_c.store(true, std::sync::atomic::Ordering::SeqCst); }
-            Ok(())
-        });
+    mock.expect_capture_pane().returning(move |_| {
+        let n = call_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < 8 {
+            Ok("Do you accept? [y/n]".to_string())
+        } else {
+            Ok("Ready for input >".to_string())
+        }
+    });
+    mock.expect_send_keys_literal().returning(move |_, k| {
+        if k == "y" {
+            dismiss_c.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    });
 
     let auto_dismiss = vec![AutoDismiss {
         detect: vec!["Do you accept?".to_string()],
@@ -3138,17 +3436,19 @@ fn test_wait_for_agent_ready_claude_bypass_accept() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Do you trust this? Yes, I accept the terms".to_string()));
-    mock.expect_send_keys_literal()
-        .returning(move |_, k| {
-            literal_c.lock().unwrap().push(k.to_string());
-            Ok(())
-        });
+    mock.expect_send_keys_literal().returning(move |_, k| {
+        literal_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     let result = wait_for_agent_ready(&tmux, "sess:win");
     assert_eq!(result, Some("sess:win".to_string()));
     let calls = literal_calls.lock().unwrap();
-    assert!(calls.contains(&"2".to_string()), "should send '2' to accept");
+    assert!(
+        calls.contains(&"2".to_string()),
+        "should send '2' to accept"
+    );
     assert!(calls.contains(&"Enter".to_string()), "should send Enter");
 }
 
@@ -3165,15 +3465,27 @@ fn test_write_skills_to_worktree_claude() {
 
     // Canonical skills
     assert!(dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists());
-    assert!(dir.path().join(".agtx/skills/agtx-execute/SKILL.md").exists());
-    assert!(dir.path().join(".agtx/skills/agtx-review/SKILL.md").exists());
-    assert!(dir.path().join(".agtx/skills/agtx-research/SKILL.md").exists());
+    assert!(dir
+        .path()
+        .join(".agtx/skills/agtx-execute/SKILL.md")
+        .exists());
+    assert!(dir
+        .path()
+        .join(".agtx/skills/agtx-review/SKILL.md")
+        .exists());
+    assert!(dir
+        .path()
+        .join(".agtx/skills/agtx-research/SKILL.md")
+        .exists());
 
     // Claude-native paths
     assert!(dir.path().join(".claude/commands/agtx/plan.md").exists());
     assert!(dir.path().join(".claude/commands/agtx/execute.md").exists());
     assert!(dir.path().join(".claude/commands/agtx/review.md").exists());
-    assert!(dir.path().join(".claude/commands/agtx/research.md").exists());
+    assert!(dir
+        .path()
+        .join(".claude/commands/agtx/research.md")
+        .exists());
 }
 
 #[test]
@@ -3186,8 +3498,14 @@ fn test_write_skills_to_worktree_gemini_toml() {
     let toml_path = dir.path().join(".gemini/commands/agtx/plan.toml");
     assert!(toml_path.exists());
     let content = std::fs::read_to_string(&toml_path).unwrap();
-    assert!(content.contains("description"), "Gemini TOML should have description field");
-    assert!(content.contains("prompt"), "Gemini TOML should have prompt field");
+    assert!(
+        content.contains("description"),
+        "Gemini TOML should have description field"
+    );
+    assert!(
+        content.contains("prompt"),
+        "Gemini TOML should have prompt field"
+    );
 }
 
 #[test]
@@ -3199,7 +3517,10 @@ fn test_write_skills_to_worktree_codex() {
 
     // Codex uses subdirectories with SKILL.md
     assert!(dir.path().join(".codex/skills/agtx-plan/SKILL.md").exists());
-    assert!(dir.path().join(".codex/skills/agtx-execute/SKILL.md").exists());
+    assert!(dir
+        .path()
+        .join(".codex/skills/agtx-execute/SKILL.md")
+        .exists());
 }
 
 #[test]
@@ -3212,7 +3533,10 @@ fn test_write_skills_to_worktree_opencode() {
     let md_path = dir.path().join(".opencode/commands/agtx-plan.md");
     assert!(md_path.exists());
     let content = std::fs::read_to_string(&md_path).unwrap();
-    assert!(content.starts_with("---\ndescription:"), "OpenCode should have description frontmatter");
+    assert!(
+        content.starts_with("---\ndescription:"),
+        "OpenCode should have description frontmatter"
+    );
 }
 
 // =============================================================================
@@ -3233,12 +3557,16 @@ fn test_load_task_plugin_from_disk() {
     let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join(".agtx").join("plugins").join("test-plug");
     std::fs::create_dir_all(&plugin_dir).unwrap();
-    std::fs::write(plugin_dir.join("plugin.toml"), r#"
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        r#"
         name = "test-plug"
         [commands]
         [prompts]
         [artifacts]
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
 
     let mut task = crate::db::Task::new("Test", "claude", "proj");
     task.plugin = Some("test-plug".to_string());
@@ -3253,13 +3581,17 @@ fn test_load_task_plugin_unsupported_agent_returns_none() {
     let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join(".agtx").join("plugins").join("claude-only");
     std::fs::create_dir_all(&plugin_dir).unwrap();
-    std::fs::write(plugin_dir.join("plugin.toml"), r#"
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        r#"
         name = "claude-only"
         supported_agents = ["claude"]
         [commands]
         [prompts]
         [artifacts]
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
 
     let mut task = crate::db::Task::new("Test", "gemini", "proj");
     task.plugin = Some("claude-only".to_string());
@@ -3290,54 +3622,81 @@ fn test_load_task_plugin_bundled_fallback() {
 #[test]
 fn test_phase_accepts_task_with_task_placeholder() {
     use crate::config::WorkflowPlugin;
-    let plugin: WorkflowPlugin = toml::from_str(r#"
+    let plugin: WorkflowPlugin = toml::from_str(
+        r#"
         name = "test"
         [commands]
         planning = "/test:plan {task}"
         [prompts]
         [artifacts]
-    "#).unwrap();
-    assert!(plugin.phase_accepts_task("planning"), "command with {{task}} should be accepted");
+    "#,
+    )
+    .unwrap();
+    assert!(
+        plugin.phase_accepts_task("planning"),
+        "command with {{task}} should be accepted"
+    );
 }
 
 #[test]
 fn test_phase_accepts_task_without_task_placeholder() {
     use crate::config::WorkflowPlugin;
-    let plugin: WorkflowPlugin = toml::from_str(r#"
+    let plugin: WorkflowPlugin = toml::from_str(
+        r#"
         name = "test"
         [commands]
         planning = "/test:plan {phase}"
         [prompts]
         [artifacts]
-    "#).unwrap();
-    assert!(!plugin.phase_accepts_task("planning"), "command without {{task}} should be blocked");
+    "#,
+    )
+    .unwrap();
+    assert!(
+        !plugin.phase_accepts_task("planning"),
+        "command without {{task}} should be blocked"
+    );
 }
 
 #[test]
 fn test_phase_accepts_task_void_plugin_ungated() {
     use crate::config::WorkflowPlugin;
     // Void plugin: no commands, no prompts — should be ungated
-    let plugin: WorkflowPlugin = toml::from_str(r#"
+    let plugin: WorkflowPlugin = toml::from_str(
+        r#"
         name = "void"
         [commands]
         [prompts]
         [artifacts]
-    "#).unwrap();
-    assert!(plugin.phase_accepts_task("planning"), "void plugin should be ungated for planning");
-    assert!(plugin.phase_accepts_task("running"), "void plugin should be ungated for running");
+    "#,
+    )
+    .unwrap();
+    assert!(
+        plugin.phase_accepts_task("planning"),
+        "void plugin should be ungated for planning"
+    );
+    assert!(
+        plugin.phase_accepts_task("running"),
+        "void plugin should be ungated for running"
+    );
 }
 
 #[test]
 fn test_phase_accepts_task_prompt_with_task() {
     use crate::config::WorkflowPlugin;
-    let plugin: WorkflowPlugin = toml::from_str(r#"
+    let plugin: WorkflowPlugin = toml::from_str(
+        r#"
         name = "test"
         [commands]
         [prompts]
         planning = "Task: {task}"
         [artifacts]
-    "#).unwrap();
-    assert!(plugin.phase_accepts_task("planning"), "prompt with {{task}} should be accepted");
+    "#,
+    )
+    .unwrap();
+    assert!(
+        plugin.phase_accepts_task("planning"),
+        "prompt with {{task}} should be accepted"
+    );
 }
 
 // === App Integration Tests ===
@@ -3359,7 +3718,8 @@ fn make_test_app() -> App {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 /// Helper: simulate a key press on the App.
@@ -3368,7 +3728,8 @@ fn press_key(app: &mut App, code: KeyCode) {
     app.handle_key(crossterm::event::KeyEvent::new(
         code,
         crossterm::event::KeyModifiers::NONE,
-    )).unwrap();
+    ))
+    .unwrap();
 }
 
 /// Helper: simulate typing a string into the App (character by character).
@@ -3399,7 +3760,8 @@ fn test_app_new_for_test_dashboard_mode() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(app.state.project_name, "Dashboard");
     assert!(app.state.db.is_none());
 }
@@ -3447,7 +3809,10 @@ fn test_create_task_full_flow() {
     assert_eq!(app.state.board.tasks.len(), 1);
     let task = &app.state.board.tasks[0];
     assert_eq!(task.title, "Fix login bug");
-    assert_eq!(task.description.as_deref(), Some("Users report 500 error on the login page"));
+    assert_eq!(
+        task.description.as_deref(),
+        Some("Users report 500 error on the login page")
+    );
     assert_eq!(task.status, TaskStatus::Backlog);
 }
 
@@ -3489,8 +3854,10 @@ fn test_board_navigation_with_tasks() {
 
     // Create two tasks
     let db = app.state.db.as_ref().unwrap();
-    db.create_task(&Task::new("Task 1", "claude", "test-project")).unwrap();
-    db.create_task(&Task::new("Task 2", "claude", "test-project")).unwrap();
+    db.create_task(&Task::new("Task 1", "claude", "test-project"))
+        .unwrap();
+    db.create_task(&Task::new("Task 2", "claude", "test-project"))
+        .unwrap();
     app.refresh_tasks().unwrap();
     assert_eq!(app.state.board.tasks.len(), 2);
 
@@ -3524,7 +3891,8 @@ fn test_delete_task_confirm() {
 
     // Create a task
     let db = app.state.db.as_ref().unwrap();
-    db.create_task(&Task::new("Delete me", "claude", "test-project")).unwrap();
+    db.create_task(&Task::new("Delete me", "claude", "test-project"))
+        .unwrap();
     app.refresh_tasks().unwrap();
     assert_eq!(app.state.board.tasks.len(), 1);
 
@@ -3544,7 +3912,8 @@ fn test_delete_task_cancel() {
     let mut app = make_test_app();
 
     let db = app.state.db.as_ref().unwrap();
-    db.create_task(&Task::new("Keep me", "claude", "test-project")).unwrap();
+    db.create_task(&Task::new("Keep me", "claude", "test-project"))
+        .unwrap();
     app.refresh_tasks().unwrap();
 
     press_key(&mut app, KeyCode::Char('x'));
@@ -3569,7 +3938,10 @@ fn test_quit_sets_should_quit() {
 
 #[test]
 fn test_merge_conflicts_skill_name_to_command() {
-    assert_eq!(skills::skill_name_to_command("agtx-merge-conflicts"), "agtx:merge-conflicts");
+    assert_eq!(
+        skills::skill_name_to_command("agtx-merge-conflicts"),
+        "agtx:merge-conflicts"
+    );
 }
 
 #[test]
@@ -3600,7 +3972,9 @@ fn test_merge_conflicts_transform_plugin_command() {
 fn test_merge_conflicts_skill_registered() {
     // Verify the merge-conflicts skill is in BUILTIN_SKILLS
     assert!(
-        skills::BUILTIN_SKILLS.iter().any(|(name, _)| *name == "agtx-merge-conflicts"),
+        skills::BUILTIN_SKILLS
+            .iter()
+            .any(|(name, _)| *name == "agtx-merge-conflicts"),
         "agtx-merge-conflicts should be registered in BUILTIN_SKILLS"
     );
 }
@@ -3620,12 +3994,23 @@ fn make_test_app_with_agents() -> App {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Inject 2 agents so wizard doesn't auto-skip
     app.state.available_agents = vec![
-        crate::agent::Agent::new("claude", "claude", "Anthropic Claude", "Claude <noreply@anthropic.com>"),
-        crate::agent::Agent::new("codex", "codex", "OpenAI Codex", "Codex <noreply@openai.com>"),
+        crate::agent::Agent::new(
+            "claude",
+            "claude",
+            "Anthropic Claude",
+            "Claude <noreply@anthropic.com>",
+        ),
+        crate::agent::Agent::new(
+            "codex",
+            "codex",
+            "OpenAI Codex",
+            "Codex <noreply@openai.com>",
+        ),
     ];
     app
 }
@@ -3715,7 +4100,9 @@ fn test_wizard_saves_with_selected_plugin() {
 
     // Move to a non-default plugin (index 1 should be gsd or similar)
     press_key(&mut app, KeyCode::Char('j'));
-    let selected_plugin = app.state.wizard_plugin_options[app.state.wizard_selected_plugin].name.clone();
+    let selected_plugin = app.state.wizard_plugin_options[app.state.wizard_selected_plugin]
+        .name
+        .clone();
     press_key(&mut app, KeyCode::Enter);
     assert_eq!(app.state.input_mode, InputMode::InputDescription);
     press_key(&mut app, KeyCode::Enter); // save with no description
@@ -3825,7 +4212,8 @@ fn test_task_ref_search_exclamation_trigger() {
     let mut app = make_test_app();
     // Add a task to the board so search has results
     let db = app.state.db.as_ref().unwrap();
-    db.create_task(&Task::new("Setup auth", "claude", "test-project")).unwrap();
+    db.create_task(&Task::new("Setup auth", "claude", "test-project"))
+        .unwrap();
     app.refresh_tasks().unwrap();
     assert_eq!(app.state.board.tasks.len(), 1);
 
@@ -3848,7 +4236,8 @@ fn test_task_ref_inserts_reference() {
     let mut app = make_test_app();
     // Add a task to the board
     let db = app.state.db.as_ref().unwrap();
-    db.create_task(&Task::new("Setup auth", "claude", "test-project")).unwrap();
+    db.create_task(&Task::new("Setup auth", "claude", "test-project"))
+        .unwrap();
     app.refresh_tasks().unwrap();
 
     press_key(&mut app, KeyCode::Char('o'));
@@ -3865,7 +4254,11 @@ fn test_task_ref_inserts_reference() {
     assert!(app.state.task_ref_search.is_none()); // search closed
 
     // Buffer should contain ![Setup auth]
-    assert!(app.state.input_buffer.contains("![Setup auth]"), "Buffer: {}", app.state.input_buffer);
+    assert!(
+        app.state.input_buffer.contains("![Setup auth]"),
+        "Buffer: {}",
+        app.state.input_buffer
+    );
     // Referenced task ID should be tracked
     assert!(!app.state.wizard_referenced_task_ids.is_empty());
     // Highlighted references should contain the reference text
@@ -3877,7 +4270,8 @@ fn test_task_ref_inserts_reference() {
 fn test_task_ref_after_space() {
     let mut app = make_test_app();
     let db = app.state.db.as_ref().unwrap();
-    db.create_task(&Task::new("Other task", "claude", "test-project")).unwrap();
+    db.create_task(&Task::new("Other task", "claude", "test-project"))
+        .unwrap();
     app.refresh_tasks().unwrap();
 
     press_key(&mut app, KeyCode::Char('o'));
@@ -3907,9 +4301,21 @@ fn test_footer_text_select_plugin() {
 #[cfg(feature = "test-mocks")]
 fn test_footer_text_description_shows_all_triggers() {
     let text = build_footer_text(InputMode::InputDescription, false, 0, false);
-    assert!(text.contains("[#] files"), "Missing files trigger: {}", text);
-    assert!(text.contains("[/] skills"), "Missing skills trigger: {}", text);
-    assert!(text.contains("[!] tasks"), "Missing tasks trigger: {}", text);
+    assert!(
+        text.contains("[#] files"),
+        "Missing files trigger: {}",
+        text
+    );
+    assert!(
+        text.contains("[/] skills"),
+        "Missing skills trigger: {}",
+        text
+    );
+    assert!(
+        text.contains("[!] tasks"),
+        "Missing tasks trigger: {}",
+        text
+    );
 }
 
 // =============================================================================
@@ -3919,33 +4325,22 @@ fn test_footer_text_description_shows_all_triggers() {
 #[test]
 fn test_orchestrator_idle_signal_in_new_content() {
     // Content changed AND contains [agtx:idle] → Idle
-    let result = check_orchestrator_idle(
-        "some output\n[agtx:idle]\n",
-        "previous content",
-        None,
-    );
+    let result = check_orchestrator_idle("some output\n[agtx:idle]\n", "previous content", None);
     assert_eq!(result, OrchestratorIdleResult::Idle);
 }
 
 #[test]
 fn test_orchestrator_busy_when_content_changed_no_signal() {
     // Content changed but no idle signal → Busy
-    let result = check_orchestrator_idle(
-        "agent is working on something...",
-        "previous content",
-        None,
-    );
+    let result =
+        check_orchestrator_idle("agent is working on something...", "previous content", None);
     assert_eq!(result, OrchestratorIdleResult::Busy);
 }
 
 #[test]
 fn test_orchestrator_waiting_when_unchanged_no_stable_since() {
     // Content unchanged, no stable_since yet → Waiting (start tracking)
-    let result = check_orchestrator_idle(
-        "same content",
-        "same content",
-        None,
-    );
+    let result = check_orchestrator_idle("same content", "same content", None);
     assert_eq!(result, OrchestratorIdleResult::Waiting);
 }
 
@@ -3974,11 +4369,8 @@ fn test_orchestrator_idle_fallback_after_threshold() {
 #[test]
 fn test_orchestrator_idle_signal_takes_priority_over_content_change() {
     // Even if content just changed, the idle signal means we're ready
-    let result = check_orchestrator_idle(
-        "new output with [agtx:idle] at the end",
-        "old output",
-        None,
-    );
+    let result =
+        check_orchestrator_idle("new output with [agtx:idle] at the end", "old output", None);
     assert_eq!(result, OrchestratorIdleResult::Idle);
 }
 
@@ -4029,7 +4421,8 @@ fn test_check_phase_incomplete_skip_move_confirm() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
     app.state.skip_move_confirm = true;
 
     let task = make_test_task("t1", "My task", TaskStatus::Planning);
@@ -4049,7 +4442,8 @@ fn test_check_phase_incomplete_backlog_returns_false() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let task = make_test_task("t1", "My task", TaskStatus::Backlog);
     let result = app.check_phase_incomplete(&task, TaskStatus::Backlog, TaskStatus::Planning);
@@ -4068,7 +4462,8 @@ fn test_check_phase_incomplete_no_worktree_returns_false() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Planning);
     task.worktree_path = None;
@@ -4095,7 +4490,8 @@ fn test_check_phase_incomplete_artifact_exists_returns_false() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Planning);
     task.worktree_path = Some(tmp.to_string_lossy().to_string());
@@ -4114,9 +4510,7 @@ fn test_check_phase_incomplete_no_tmux_window_returns_false() {
     std::fs::create_dir_all(&tmp).unwrap();
 
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_window_exists()
-        .returning(|_| Ok(false));
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -4124,7 +4518,8 @@ fn test_check_phase_incomplete_no_tmux_window_returns_false() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Planning);
     task.worktree_path = Some(tmp.to_string_lossy().to_string());
@@ -4145,9 +4540,7 @@ fn test_check_phase_incomplete_agent_running_sets_popup() {
     std::fs::create_dir_all(&tmp).unwrap();
 
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_window_exists()
-        .returning(|_| Ok(true));
+    mock_tmux.expect_window_exists().returning(|_| Ok(true));
     // is_agent_active checks pane_current_command first
     mock_tmux
         .expect_pane_current_command()
@@ -4159,7 +4552,8 @@ fn test_check_phase_incomplete_agent_running_sets_popup() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Planning);
     task.worktree_path = Some(tmp.to_string_lossy().to_string());
@@ -4191,7 +4585,8 @@ fn test_transition_to_planning_stamps_plugin() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
     // Set the project workflow plugin
     app.state.config.workflow_plugin = Some("agtx".to_string());
 
@@ -4216,7 +4611,8 @@ fn test_transition_to_planning_warning_when_research_required() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Backlog);
     // Use gsd plugin — planning phase requires prior research artifact
@@ -4235,13 +4631,15 @@ fn test_transition_to_planning_warning_when_research_required() {
 fn test_transition_to_planning_reuses_live_session() {
     // Task has a live session → reuses it (returns Ok(false) to continue with db update)
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_window_exists()
-        .returning(|_| Ok(true));
+    mock_tmux.expect_window_exists().returning(|_| Ok(true));
     // spawn_send_to_agent may call these; allow any number of calls
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
-    mock_tmux.expect_send_keys_literal().returning(|_, _| Ok(()));
-    mock_tmux.expect_capture_pane().returning(|_| Ok(String::new()));
+    mock_tmux
+        .expect_send_keys_literal()
+        .returning(|_, _| Ok(()));
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok(String::new()));
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry
@@ -4254,7 +4652,8 @@ fn test_transition_to_planning_reuses_live_session() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Backlog);
     task.session_name = Some("test-project:task-t1--test-project--my-task".to_string());
@@ -4276,7 +4675,8 @@ fn test_transition_to_planning_returns_true_when_setup_in_progress() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Pre-set a setup_rx to simulate in-progress setup
     let (_tx, rx) = std::sync::mpsc::channel::<SetupResult>();
@@ -4311,7 +4711,8 @@ fn test_transition_to_planning_spawns_background_setup() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Backlog);
     task.plugin = Some("agtx".to_string());
@@ -4337,7 +4738,8 @@ fn test_transition_to_running_no_session_returns_false() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Planning);
     task.session_name = None;
@@ -4354,8 +4756,12 @@ fn test_transition_to_running_with_session_returns_false() {
     // Task has a session → spawns send_to_agent (background), still returns Ok(false)
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
-    mock_tmux.expect_send_keys_literal().returning(|_, _| Ok(()));
-    mock_tmux.expect_capture_pane().returning(|_| Ok(String::new()));
+    mock_tmux
+        .expect_send_keys_literal()
+        .returning(|_, _| Ok(()));
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok(String::new()));
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry
@@ -4368,7 +4774,8 @@ fn test_transition_to_running_with_session_returns_false() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Planning);
     task.session_name = Some("test-project:task-t1".to_string());
@@ -4390,8 +4797,12 @@ fn test_transition_to_review_no_pr_sets_review_confirm_popup() {
     // No existing PR → shows review confirm popup (to ask if user wants to create PR)
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
-    mock_tmux.expect_send_keys_literal().returning(|_, _| Ok(()));
-    mock_tmux.expect_capture_pane().returning(|_| Ok(String::new()));
+    mock_tmux
+        .expect_send_keys_literal()
+        .returning(|_, _| Ok(()));
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok(String::new()));
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry
@@ -4404,7 +4815,8 @@ fn test_transition_to_review_no_pr_sets_review_confirm_popup() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "Implement feature", TaskStatus::Running);
     task.pr_number = None;
@@ -4425,8 +4837,12 @@ fn test_transition_to_review_existing_pr_spawns_push() {
     // PR already exists → sets pr_status_popup (Pushing) and spawns push thread
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
-    mock_tmux.expect_send_keys_literal().returning(|_, _| Ok(()));
-    mock_tmux.expect_capture_pane().returning(|_| Ok(String::new()));
+    mock_tmux
+        .expect_send_keys_literal()
+        .returning(|_, _| Ok(()));
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok(String::new()));
 
     let mut mock_git = MockGitOperations::new();
     // push_changes_to_existing_pr calls add_all, has_changes, push
@@ -4436,7 +4852,9 @@ fn test_transition_to_review_existing_pr_spawns_push() {
 
     let mut mock_registry = MockAgentRegistry::new();
     let mut mock_agent_ops = MockAgentOperations::new();
-    mock_agent_ops.expect_co_author_string().return_const("Test <test@test.com>".to_string());
+    mock_agent_ops
+        .expect_co_author_string()
+        .return_const("Test <test@test.com>".to_string());
     let mock_agent_arc: Arc<dyn AgentOperations> = Arc::new(mock_agent_ops);
     mock_registry
         .expect_get()
@@ -4448,7 +4866,8 @@ fn test_transition_to_review_existing_pr_spawns_push() {
         Arc::new(mock_git),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "Implement feature", TaskStatus::Running);
     task.pr_number = Some(42);
@@ -4484,7 +4903,8 @@ fn test_transition_to_done_merged_pr_shows_popup() {
         Arc::new(MockGitOperations::new()),
         Arc::new(mock_git_provider),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Review);
     task.pr_number = Some(5);
@@ -4506,9 +4926,7 @@ fn test_transition_to_done_uncommitted_changes_shows_popup() {
     let mock_tmux = MockTmuxOperations::new();
 
     let mut mock_git = MockGitOperations::new();
-    mock_git
-        .expect_has_changes()
-        .returning(|_| true);
+    mock_git.expect_has_changes().returning(|_| true);
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -4516,7 +4934,8 @@ fn test_transition_to_done_uncommitted_changes_shows_popup() {
         Arc::new(mock_git),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Review);
     task.pr_number = None;
@@ -4528,7 +4947,10 @@ fn test_transition_to_done_uncommitted_changes_shows_popup() {
     assert_eq!(result.unwrap(), true);
     assert!(app.state.done_confirm_popup.is_some());
     let popup = app.state.done_confirm_popup.as_ref().unwrap();
-    assert!(matches!(popup.pr_state, DoneConfirmPrState::UncommittedChanges));
+    assert!(matches!(
+        popup.pr_state,
+        DoneConfirmPrState::UncommittedChanges
+    ));
 }
 
 #[test]
@@ -4540,9 +4962,7 @@ fn test_transition_to_done_clean_clears_session_and_worktree() {
     mock_tmux.expect_kill_window().returning(|_| Ok(()));
 
     let mut mock_git = MockGitOperations::new();
-    mock_git
-        .expect_has_changes()
-        .returning(|_| false);
+    mock_git.expect_has_changes().returning(|_| false);
     // cleanup_task_resources may call remove_worktree
     mock_git.expect_remove_worktree().returning(|_, _| Ok(()));
 
@@ -4552,7 +4972,8 @@ fn test_transition_to_done_clean_clears_session_and_worktree() {
         Arc::new(mock_git),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut task = make_test_task("t1", "My task", TaskStatus::Review);
     task.pr_number = None;
@@ -4563,7 +4984,7 @@ fn test_transition_to_done_clean_clears_session_and_worktree() {
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), false); // Ok(false) → continue with db update
-    // Task fields cleared synchronously before background thread
+                                        // Task fields cleared synchronously before background thread
     assert!(task.session_name.is_none());
     assert!(task.worktree_path.is_none());
     // No popup shown
@@ -4600,7 +5021,12 @@ fn test_apply_session_refresh_working_inserts_cache() {
     // Working status → stored in phase_status_cache as Working
     let mut app = make_test_app();
     let result = SessionRefreshResult {
-        statuses: vec![make_session_task_status("t1", TaskStatus::Planning, PhaseStatus::Working, false)],
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Planning,
+            PhaseStatus::Working,
+            false,
+        )],
     };
     app.apply_session_refresh(result);
     let (phase, _) = app.state.phase_status_cache["t1"];
@@ -4613,10 +5039,17 @@ fn test_apply_session_refresh_ready_inserts_cache() {
     // Ready status → stored as Ready, clears idle hash
     let mut app = make_test_app();
     // Pre-populate a content hash so we can verify it gets removed
-    app.state.pane_content_hashes.insert("t1".to_string(), (42, std::time::Instant::now()));
+    app.state
+        .pane_content_hashes
+        .insert("t1".to_string(), (42, std::time::Instant::now()));
 
     let result = SessionRefreshResult {
-        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Ready, false)],
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Running,
+            PhaseStatus::Ready,
+            false,
+        )],
     };
     app.apply_session_refresh(result);
     let (phase, _) = app.state.phase_status_cache["t1"];
@@ -4631,7 +5064,9 @@ fn test_apply_session_refresh_working_becomes_idle_after_15s() {
     // Working with same content hash stable for ≥15s → promoted to Idle
     let mut app = make_test_app();
     let old_instant = std::time::Instant::now() - std::time::Duration::from_secs(20);
-    app.state.pane_content_hashes.insert("t1".to_string(), (99, old_instant));
+    app.state
+        .pane_content_hashes
+        .insert("t1".to_string(), (99, old_instant));
 
     let result = SessionRefreshResult {
         statuses: vec![SessionTaskStatus {
@@ -4656,7 +5091,9 @@ fn test_apply_session_refresh_working_stays_working_hash_changed() {
     // Working with changed content hash → still Working (timer resets)
     let mut app = make_test_app();
     let old_instant = std::time::Instant::now() - std::time::Duration::from_secs(20);
-    app.state.pane_content_hashes.insert("t1".to_string(), (99, old_instant));
+    app.state
+        .pane_content_hashes
+        .insert("t1".to_string(), (99, old_instant));
 
     let result = SessionRefreshResult {
         statuses: vec![SessionTaskStatus {
@@ -4687,7 +5124,8 @@ fn test_apply_session_refresh_newly_ready_notifies_orchestrator() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Add a task so the notification message can include its title
     let db = app.state.db.as_ref().unwrap();
@@ -4701,14 +5139,22 @@ fn test_apply_session_refresh_newly_ready_notifies_orchestrator() {
     app.state.orchestrator_session = Some("orch-session".to_string());
 
     let result = SessionRefreshResult {
-        statuses: vec![make_session_task_status("t1", TaskStatus::Planning, PhaseStatus::Ready, false)],
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Planning,
+            PhaseStatus::Ready,
+            false,
+        )],
     };
     app.apply_session_refresh(result);
 
     // Notification should have been written to the DB
     let db = app.state.db.as_ref().unwrap();
     let notifs = db.peek_notifications().unwrap();
-    assert!(!notifs.is_empty(), "should have created an orchestrator notification");
+    assert!(
+        !notifs.is_empty(),
+        "should have created an orchestrator notification"
+    );
     assert!(notifs[0].message.contains("My feature"));
     assert!(notifs[0].message.contains("planning"));
 }
@@ -4725,11 +5171,17 @@ fn test_apply_session_refresh_already_ready_no_notification() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
     app.state.orchestrator_session = Some("orch-session".to_string());
 
     let result = SessionRefreshResult {
-        statuses: vec![make_session_task_status("t1", TaskStatus::Planning, PhaseStatus::Ready, true)],
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Planning,
+            PhaseStatus::Ready,
+            true,
+        )],
     };
     app.apply_session_refresh(result);
 
@@ -4776,7 +5228,8 @@ fn test_handle_done_confirm_y_force_moves_to_done() {
         Arc::new(mock_git),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Create a task in the DB so force_move_to_done can find it
     let db = app.state.db.as_ref().unwrap();
@@ -4792,12 +5245,20 @@ fn test_handle_done_confirm_y_force_moves_to_done() {
         pr_state: DoneConfirmPrState::UncommittedChanges,
     });
 
-    let key = crossterm::event::KeyEvent::new(KeyCode::Char('y'), crossterm::event::KeyModifiers::NONE);
+    let key =
+        crossterm::event::KeyEvent::new(KeyCode::Char('y'), crossterm::event::KeyModifiers::NONE);
     app.handle_done_confirm_key(key).unwrap();
 
     assert!(app.state.done_confirm_popup.is_none());
     // Task should be Done in DB
-    let updated = app.state.db.as_ref().unwrap().get_task("t1").unwrap().unwrap();
+    let updated = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task("t1")
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.status, TaskStatus::Done);
 }
 
@@ -4811,7 +5272,8 @@ fn test_handle_done_confirm_n_cancels() {
         pr_state: DoneConfirmPrState::UncommittedChanges,
     });
 
-    let key = crossterm::event::KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::NONE);
+    let key =
+        crossterm::event::KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::NONE);
     app.handle_done_confirm_key(key).unwrap();
 
     assert!(app.state.done_confirm_popup.is_none()); // popup dismissed
@@ -4843,7 +5305,9 @@ fn test_handle_move_confirm_y_clears_popup_and_moves() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -4851,7 +5315,8 @@ fn test_handle_move_confirm_y_clears_popup_and_moves() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     let db = app.state.db.as_ref().unwrap();
     let mut task = Task::new("My task", "claude", "test-project");
@@ -4865,7 +5330,8 @@ fn test_handle_move_confirm_y_clears_popup_and_moves() {
         to_status: TaskStatus::Planning,
     });
 
-    let key = crossterm::event::KeyEvent::new(KeyCode::Char('y'), crossterm::event::KeyModifiers::NONE);
+    let key =
+        crossterm::event::KeyEvent::new(KeyCode::Char('y'), crossterm::event::KeyModifiers::NONE);
     app.handle_move_confirm_key(key).unwrap();
 
     assert!(app.state.move_confirm_popup.is_none());
@@ -4883,7 +5349,8 @@ fn test_handle_move_confirm_n_only_clears_popup() {
         to_status: TaskStatus::Running,
     });
 
-    let key = crossterm::event::KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::NONE);
+    let key =
+        crossterm::event::KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::NONE);
     app.handle_move_confirm_key(key).unwrap();
 
     assert!(app.state.move_confirm_popup.is_none());
@@ -4913,13 +5380,19 @@ fn test_handle_move_confirm_esc_clears_popup() {
 fn test_handle_review_confirm_y_starts_pr_generation() {
     // y → calls move_running_to_review_with_pr → opens pr_confirm_popup (generating=true)
     let mut mock_git = MockGitOperations::new();
-    mock_git.expect_diff_stat_from_main().returning(|_| String::new());
+    mock_git
+        .expect_diff_stat_from_main()
+        .returning(|_| String::new());
 
     let mut mock_registry = MockAgentRegistry::new();
     let mut mock_agent_ops = MockAgentOperations::new();
-    mock_agent_ops.expect_generate_text().returning(|_, _| Ok(String::new()));
+    mock_agent_ops
+        .expect_generate_text()
+        .returning(|_, _| Ok(String::new()));
     let ops_arc: Arc<dyn AgentOperations> = Arc::new(mock_agent_ops);
-    mock_registry.expect_get().returning(move |_| Arc::clone(&ops_arc));
+    mock_registry
+        .expect_get()
+        .returning(move |_| Arc::clone(&ops_arc));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -4927,7 +5400,8 @@ fn test_handle_review_confirm_y_starts_pr_generation() {
         Arc::new(mock_git),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Create a Running task in the DB
     let db = app.state.db.as_ref().unwrap();
@@ -4942,7 +5416,8 @@ fn test_handle_review_confirm_y_starts_pr_generation() {
         task_title: "My feature".to_string(),
     });
 
-    let key = crossterm::event::KeyEvent::new(KeyCode::Char('y'), crossterm::event::KeyModifiers::NONE);
+    let key =
+        crossterm::event::KeyEvent::new(KeyCode::Char('y'), crossterm::event::KeyModifiers::NONE);
     app.handle_review_confirm_key(key).unwrap();
 
     assert!(app.state.review_confirm_popup.is_none());
@@ -4963,7 +5438,8 @@ fn test_handle_review_confirm_n_moves_without_pr() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let db = app.state.db.as_ref().unwrap();
     let mut task = Task::new("My feature", "claude", "test-project");
@@ -4977,13 +5453,21 @@ fn test_handle_review_confirm_n_moves_without_pr() {
         task_title: "My feature".to_string(),
     });
 
-    let key = crossterm::event::KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::NONE);
+    let key =
+        crossterm::event::KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::NONE);
     app.handle_review_confirm_key(key).unwrap();
 
     assert!(app.state.review_confirm_popup.is_none());
     assert!(app.state.pr_confirm_popup.is_none()); // no PR popup
-    // Task should be in Review now
-    let updated = app.state.db.as_ref().unwrap().get_task("t1").unwrap().unwrap();
+                                                   // Task should be in Review now
+    let updated = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task("t1")
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.status, TaskStatus::Review);
 }
 
@@ -5037,7 +5521,8 @@ fn test_handle_pr_confirm_char_appends_to_active_field() {
         generating: false,
     });
 
-    let key = crossterm::event::KeyEvent::new(KeyCode::Char('X'), crossterm::event::KeyModifiers::NONE);
+    let key =
+        crossterm::event::KeyEvent::new(KeyCode::Char('X'), crossterm::event::KeyModifiers::NONE);
     app.handle_pr_confirm_key(key).unwrap();
     assert_eq!(app.state.pr_confirm_popup.as_ref().unwrap().pr_title, "TiX");
 
@@ -5045,7 +5530,8 @@ fn test_handle_pr_confirm_char_appends_to_active_field() {
     let tab = crossterm::event::KeyEvent::new(KeyCode::Tab, crossterm::event::KeyModifiers::NONE);
     app.handle_pr_confirm_key(tab).unwrap();
 
-    let key2 = crossterm::event::KeyEvent::new(KeyCode::Char('Z'), crossterm::event::KeyModifiers::NONE);
+    let key2 =
+        crossterm::event::KeyEvent::new(KeyCode::Char('Z'), crossterm::event::KeyModifiers::NONE);
     app.handle_pr_confirm_key(key2).unwrap();
     assert_eq!(app.state.pr_confirm_popup.as_ref().unwrap().pr_body, "Z");
 }
@@ -5062,7 +5548,8 @@ fn test_handle_pr_confirm_backspace_removes_char() {
         generating: false,
     });
 
-    let key = crossterm::event::KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::NONE);
+    let key =
+        crossterm::event::KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::NONE);
     app.handle_pr_confirm_key(key).unwrap();
     assert_eq!(app.state.pr_confirm_popup.as_ref().unwrap().pr_title, "AB");
 }
@@ -5098,7 +5585,10 @@ fn test_handle_pr_confirm_enter_in_body_adds_newline() {
 
     let key = crossterm::event::KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE);
     app.handle_pr_confirm_key(key).unwrap();
-    assert_eq!(app.state.pr_confirm_popup.as_ref().unwrap().pr_body, "Line1\n");
+    assert_eq!(
+        app.state.pr_confirm_popup.as_ref().unwrap().pr_body,
+        "Line1\n"
+    );
 }
 
 #[test]
@@ -5128,13 +5618,19 @@ fn test_handle_pr_confirm_ctrl_s_submits_pr() {
     mock_git.expect_push().returning(|_, _, _| Ok(()));
 
     let mut mock_git_provider = MockGitProviderOperations::new();
-    mock_git_provider.expect_create_pr().returning(|_, _, _, _| Ok((1, "https://github.com/pr/1".to_string())));
+    mock_git_provider
+        .expect_create_pr()
+        .returning(|_, _, _, _| Ok((1, "https://github.com/pr/1".to_string())));
 
     let mut mock_registry = MockAgentRegistry::new();
     let mut mock_agent_ops = MockAgentOperations::new();
-    mock_agent_ops.expect_co_author_string().return_const("Test <t@t.com>".to_string());
+    mock_agent_ops
+        .expect_co_author_string()
+        .return_const("Test <t@t.com>".to_string());
     let ops_arc: Arc<dyn AgentOperations> = Arc::new(mock_agent_ops);
-    mock_registry.expect_get().returning(move |_| Arc::clone(&ops_arc));
+    mock_registry
+        .expect_get()
+        .returning(move |_| Arc::clone(&ops_arc));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -5142,7 +5638,8 @@ fn test_handle_pr_confirm_ctrl_s_submits_pr() {
         Arc::new(mock_git),
         Arc::new(mock_git_provider),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Create task in DB
     let db = app.state.db.as_ref().unwrap();
@@ -5210,7 +5707,9 @@ fn test_execute_transition_request_move_forward_backlog_to_planning() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -5218,7 +5717,8 @@ fn test_execute_transition_request_move_forward_backlog_to_planning() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     let db = app.state.db.as_ref().unwrap();
     let mut task = Task::new("Plan this", "claude", "test-project");
@@ -5249,7 +5749,10 @@ fn test_execute_transition_request_move_to_running_from_wrong_status_errors() {
     let req = crate::db::TransitionRequest::new("t1", "move_to_running");
     let result = app.execute_transition_request(&req);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Backlog or Planning"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Backlog or Planning"));
 }
 
 #[test]
@@ -5266,7 +5769,10 @@ fn test_execute_transition_request_move_to_done_from_wrong_status_errors() {
     let req = crate::db::TransitionRequest::new("t1", "move_to_done");
     let result = app.execute_transition_request(&req);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Review to move to Done"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Review to move to Done"));
 }
 
 #[test]
@@ -5296,7 +5802,8 @@ fn test_execute_transition_request_resume_moves_review_to_running() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let db = app.state.db.as_ref().unwrap();
     let mut task = Task::new("Resume me", "claude", "test-project");
@@ -5308,7 +5815,14 @@ fn test_execute_transition_request_resume_moves_review_to_running() {
     let req = crate::db::TransitionRequest::new("t1", "resume");
     app.execute_transition_request(&req).unwrap();
 
-    let updated = app.state.db.as_ref().unwrap().get_task("t1").unwrap().unwrap();
+    let updated = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task("t1")
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.status, TaskStatus::Running);
 }
 
@@ -5327,7 +5841,8 @@ fn test_execute_transition_request_move_to_done_calls_force_move() {
         Arc::new(mock_git),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let db = app.state.db.as_ref().unwrap();
     let mut task = Task::new("Done task", "claude", "test-project");
@@ -5339,7 +5854,14 @@ fn test_execute_transition_request_move_to_done_calls_force_move() {
     let req = crate::db::TransitionRequest::new("t1", "move_to_done");
     app.execute_transition_request(&req).unwrap();
 
-    let updated = app.state.db.as_ref().unwrap().get_task("t1").unwrap().unwrap();
+    let updated = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task("t1")
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.status, TaskStatus::Done);
 }
 
@@ -5358,7 +5880,8 @@ fn test_process_transition_requests_marks_processed() {
         Arc::new(mock_git),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     {
         let db = app.state.db.as_ref().unwrap();
@@ -5379,7 +5902,16 @@ fn test_process_transition_requests_marks_processed() {
     app.process_transition_requests().unwrap();
 
     // Should have 0 pending (request was processed)
-    assert_eq!(app.state.db.as_ref().unwrap().get_pending_transition_requests().unwrap().len(), 0);
+    assert_eq!(
+        app.state
+            .db
+            .as_ref()
+            .unwrap()
+            .get_pending_transition_requests()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 // =============================================================================
@@ -5440,7 +5972,10 @@ fn test_parse_ansi_bold() {
     let lines = parse_ansi_to_lines(input);
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].spans[0].content, "bold text");
-    assert!(lines[0].spans[0].style.add_modifier.contains(ratatui::style::Modifier::BOLD));
+    assert!(lines[0].spans[0]
+        .style
+        .add_modifier
+        .contains(ratatui::style::Modifier::BOLD));
 }
 
 #[test]
@@ -5456,7 +5991,12 @@ fn test_parse_ansi_foreground_colors() {
     ];
     for (input, expected_color) in cases {
         let lines = parse_ansi_to_lines(input);
-        assert_eq!(lines[0].spans[0].style.fg, Some(*expected_color), "input: {:?}", input);
+        assert_eq!(
+            lines[0].spans[0].style.fg,
+            Some(*expected_color),
+            "input: {:?}",
+            input
+        );
     }
 }
 
@@ -5518,8 +6058,12 @@ fn test_parse_sgr_rgb_bg() {
 fn test_parse_sgr_dim_italic_underline() {
     let style = parse_sgr("2;3;4", ratatui::style::Style::default());
     assert!(style.add_modifier.contains(ratatui::style::Modifier::DIM));
-    assert!(style.add_modifier.contains(ratatui::style::Modifier::ITALIC));
-    assert!(style.add_modifier.contains(ratatui::style::Modifier::UNDERLINED));
+    assert!(style
+        .add_modifier
+        .contains(ratatui::style::Modifier::ITALIC));
+    assert!(style
+        .add_modifier
+        .contains(ratatui::style::Modifier::UNDERLINED));
 }
 
 #[test]
@@ -5554,9 +6098,15 @@ fn test_parse_ansi_mixed_text_and_colors() {
 
 /// Build a test App with a task already in the DB and board, plus configurable mocks.
 #[cfg(feature = "test-mocks")]
-fn make_app_with_task(task: &Task, mock_tmux: MockTmuxOperations, mock_git: MockGitOperations) -> App {
+fn make_app_with_task(
+    task: &Task,
+    mock_tmux: MockTmuxOperations,
+    mock_git: MockGitOperations,
+) -> App {
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -5564,7 +6114,8 @@ fn make_app_with_task(task: &Task, mock_tmux: MockTmuxOperations, mock_git: Mock
         Arc::new(mock_git),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     app.state.db.as_ref().unwrap().create_task(task).unwrap();
     app.refresh_tasks().unwrap();
@@ -5780,7 +6331,9 @@ fn test_toggle_orchestrator_warns_in_dashboard_mode() {
     mock_tmux.expect_has_session().returning(|_| false);
 
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         None, // dashboard mode — no project path
@@ -5788,7 +6341,8 @@ fn test_toggle_orchestrator_warns_in_dashboard_mode() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     app.toggle_orchestrator().unwrap();
 
@@ -5804,15 +6358,20 @@ fn test_toggle_orchestrator_spawns_new_session() {
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
     mock_tmux.expect_create_session().returning(|_, _| Ok(()));
-    mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
+    mock_tmux
+        .expect_create_window()
+        .returning(|_, _, _, _| Ok(()));
     mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
-    mock_tmux.expect_capture_pane_with_history().returning(|_, _| vec![]);
+    mock_tmux
+        .expect_capture_pane_with_history()
+        .returning(|_, _| vec![]);
     mock_tmux.expect_get_cursor_info().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry.expect_get().returning(|_| {
         let mut ops = MockAgentOperations::new();
-        ops.expect_build_orchestrator_command().returning(|_, _| "claude".to_string());
+        ops.expect_build_orchestrator_command()
+            .returning(|_, _| "claude".to_string());
         Arc::new(ops)
     });
 
@@ -5822,7 +6381,8 @@ fn test_toggle_orchestrator_spawns_new_session() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     app.toggle_orchestrator().unwrap();
 
@@ -5839,11 +6399,15 @@ fn test_toggle_orchestrator_opens_popup_when_already_running() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
     mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
-    mock_tmux.expect_capture_pane_with_history().returning(|_, _| vec![]);
+    mock_tmux
+        .expect_capture_pane_with_history()
+        .returning(|_, _| vec![]);
     mock_tmux.expect_get_cursor_info().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -5851,7 +6415,8 @@ fn test_toggle_orchestrator_opens_popup_when_already_running() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Simulate already-running orchestrator
     app.state.orchestrator_session = Some("test-project:orchestrator".to_string());
@@ -5877,15 +6442,20 @@ fn test_toggle_orchestrator_clears_stale_session_and_respawns() {
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
     mock_tmux.expect_create_session().returning(|_, _| Ok(()));
-    mock_tmux.expect_create_window().returning(|_, _, _, _| Ok(()));
+    mock_tmux
+        .expect_create_window()
+        .returning(|_, _, _, _| Ok(()));
     mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
-    mock_tmux.expect_capture_pane_with_history().returning(|_, _| vec![]);
+    mock_tmux
+        .expect_capture_pane_with_history()
+        .returning(|_, _| vec![]);
     mock_tmux.expect_get_cursor_info().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry.expect_get().returning(|_| {
         let mut ops = MockAgentOperations::new();
-        ops.expect_build_orchestrator_command().returning(|_, _| "claude".to_string());
+        ops.expect_build_orchestrator_command()
+            .returning(|_, _| "claude".to_string());
         Arc::new(ops)
     });
 
@@ -5895,7 +6465,8 @@ fn test_toggle_orchestrator_clears_stale_session_and_respawns() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Stale session — window no longer exists
     app.state.orchestrator_session = Some("test-project:orchestrator".to_string());
@@ -5918,10 +6489,14 @@ fn test_deliver_orchestrator_notifications_throttled() {
     let mut mock_tmux = MockTmuxOperations::new();
     // send_keys must NOT be called — any call would panic with mockall
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
-    mock_tmux.expect_capture_pane().returning(|_| Ok("[agtx:idle]".to_string()));
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok("[agtx:idle]".to_string()));
 
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -5929,7 +6504,8 @@ fn test_deliver_orchestrator_notifications_throttled() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     app.state.orchestrator_session = Some("proj:orchestrator".to_string());
     app.state.orchestrator_ready.store(true, Ordering::Release);
@@ -5949,7 +6525,9 @@ fn test_deliver_orchestrator_notifications_returns_early_no_session() {
     // window_exists must NOT be called
 
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -5957,7 +6535,8 @@ fn test_deliver_orchestrator_notifications_returns_early_no_session() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Expire the throttle
     app.state.orchestrator_last_check = Instant::now() - std::time::Duration::from_secs(10);
@@ -5976,7 +6555,9 @@ fn test_deliver_orchestrator_notifications_returns_early_not_ready() {
     // window_exists must NOT be called
 
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -5984,7 +6565,8 @@ fn test_deliver_orchestrator_notifications_returns_early_not_ready() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     app.state.orchestrator_last_check = Instant::now() - std::time::Duration::from_secs(10);
     app.state.orchestrator_session = Some("proj:orchestrator".to_string());
@@ -6000,11 +6582,15 @@ fn test_deliver_orchestrator_notifications_busy_when_content_changed() {
     // Content changed, no idle signal → state updated to Busy (stable_since set), nothing sent
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
-    mock_tmux.expect_capture_pane().returning(|_| Ok("new content here".to_string()));
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok("new content here".to_string()));
     // send_keys must NOT be called
 
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -6012,7 +6598,8 @@ fn test_deliver_orchestrator_notifications_busy_when_content_changed() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     app.state.orchestrator_last_check = Instant::now() - std::time::Duration::from_secs(10);
     app.state.orchestrator_session = Some("proj:orchestrator".to_string());
@@ -6031,14 +6618,19 @@ fn test_deliver_orchestrator_notifications_delivers_when_idle_signal() {
     // Content changed AND has [agtx:idle] → sends combined notification
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
-    mock_tmux.expect_capture_pane().returning(|_| Ok("stuff [agtx:idle]".to_string()));
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok("stuff [agtx:idle]".to_string()));
+    mock_tmux
+        .expect_send_keys()
         .withf(|_target, msg| msg.starts_with("[agtx]"))
         .times(1)
         .returning(|_, _| Ok(()));
 
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -6046,7 +6638,8 @@ fn test_deliver_orchestrator_notifications_delivers_when_idle_signal() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     app.state.orchestrator_last_check = Instant::now() - std::time::Duration::from_secs(10);
     app.state.orchestrator_session = Some("proj:orchestrator".to_string());
@@ -6056,7 +6649,8 @@ fn test_deliver_orchestrator_notifications_delivers_when_idle_signal() {
     // Insert a notification into the DB
     {
         let db = app.state.db.as_ref().unwrap();
-        db.create_notification(&crate::db::Notification::new("task X completed planning")).unwrap();
+        db.create_notification(&crate::db::Notification::new("task X completed planning"))
+            .unwrap();
     }
 
     app.deliver_orchestrator_notifications();
@@ -6075,14 +6669,19 @@ fn test_deliver_orchestrator_notifications_delivers_via_stability_fallback() {
     // Content unchanged, timer ≥15s → Idle via fallback, delivers notification
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
-    mock_tmux.expect_capture_pane().returning(|_| Ok("same content".to_string()));
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok("same content".to_string()));
+    mock_tmux
+        .expect_send_keys()
         .withf(|_target, msg| msg.starts_with("[agtx]"))
         .times(1)
         .returning(|_, _| Ok(()));
 
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -6090,7 +6689,8 @@ fn test_deliver_orchestrator_notifications_delivers_via_stability_fallback() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     app.state.orchestrator_last_check = Instant::now() - std::time::Duration::from_secs(10);
     app.state.orchestrator_session = Some("proj:orchestrator".to_string());
@@ -6102,7 +6702,8 @@ fn test_deliver_orchestrator_notifications_delivers_via_stability_fallback() {
 
     {
         let db = app.state.db.as_ref().unwrap();
-        db.create_notification(&crate::db::Notification::new("task Y completed running")).unwrap();
+        db.create_notification(&crate::db::Notification::new("task Y completed running"))
+            .unwrap();
     }
 
     app.deliver_orchestrator_notifications();
@@ -6117,11 +6718,15 @@ fn test_deliver_orchestrator_notifications_noop_when_no_notifications() {
     // Idle orchestrator but DB has no notifications → send_keys NOT called
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
-    mock_tmux.expect_capture_pane().returning(|_| Ok("stuff [agtx:idle]".to_string()));
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok("stuff [agtx:idle]".to_string()));
     // send_keys must NOT be called — mockall will panic if it is
 
     let mut mock_registry = MockAgentRegistry::new();
-    mock_registry.expect_get().returning(|_| Arc::new(MockAgentOperations::new()));
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -6129,7 +6734,8 @@ fn test_deliver_orchestrator_notifications_noop_when_no_notifications() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(mock_registry),
-    ).unwrap();
+    )
+    .unwrap();
 
     app.state.orchestrator_last_check = Instant::now() - std::time::Duration::from_secs(10);
     app.state.orchestrator_session = Some("proj:orchestrator".to_string());
@@ -6157,7 +6763,8 @@ fn test_stuck_task_notification_fires_after_1_min_idle() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let db = app.state.db.as_ref().unwrap();
     let mut task = Task::new("stuck task", "claude", "test-project");
@@ -6174,12 +6781,20 @@ fn test_stuck_task_notification_fires_after_1_min_idle() {
     );
 
     let result = SessionRefreshResult {
-        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Idle, false)],
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Running,
+            PhaseStatus::Idle,
+            false,
+        )],
     };
     app.apply_session_refresh(result);
 
     let notifs = app.state.db.as_ref().unwrap().peek_notifications().unwrap();
-    assert!(!notifs.is_empty(), "should have created a stuck-task notification");
+    assert!(
+        !notifs.is_empty(),
+        "should have created a stuck-task notification"
+    );
     assert!(notifs[0].message.contains("stuck task"));
     assert!(notifs[0].message.contains("running"));
     assert!(notifs[0].message.contains("idle"));
@@ -6197,7 +6812,8 @@ fn test_stuck_task_notification_does_not_fire_before_1_min() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let db = app.state.db.as_ref().unwrap();
     let mut task = Task::new("pending task", "claude", "test-project");
@@ -6213,12 +6829,20 @@ fn test_stuck_task_notification_does_not_fire_before_1_min() {
     );
 
     let result = SessionRefreshResult {
-        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Idle, false)],
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Running,
+            PhaseStatus::Idle,
+            false,
+        )],
     };
     app.apply_session_refresh(result);
 
     let notifs = app.state.db.as_ref().unwrap().peek_notifications().unwrap();
-    assert!(notifs.is_empty(), "should not have fired notification before 1 minute");
+    assert!(
+        notifs.is_empty(),
+        "should not have fired notification before 1 minute"
+    );
 }
 
 #[test]
@@ -6233,7 +6857,8 @@ fn test_stuck_task_notification_fires_once_per_phase() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let db = app.state.db.as_ref().unwrap();
     let mut task = Task::new("my task", "claude", "test-project");
@@ -6249,7 +6874,12 @@ fn test_stuck_task_notification_fires_once_per_phase() {
     );
 
     let make_result = || SessionRefreshResult {
-        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Idle, false)],
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Running,
+            PhaseStatus::Idle,
+            false,
+        )],
     };
 
     app.apply_session_refresh(make_result());
@@ -6272,7 +6902,8 @@ fn test_stuck_task_notification_not_fired_without_orchestrator() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let db = app.state.db.as_ref().unwrap();
     let mut task = Task::new("my task", "claude", "test-project");
@@ -6289,7 +6920,12 @@ fn test_stuck_task_notification_not_fired_without_orchestrator() {
     );
 
     let result = SessionRefreshResult {
-        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Idle, false)],
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Running,
+            PhaseStatus::Idle,
+            false,
+        )],
     };
     app.apply_session_refresh(result);
 
@@ -6309,7 +6945,8 @@ fn test_stuck_task_idle_since_cleared_when_not_idle() {
         Arc::new(MockGitOperations::new()),
         Arc::new(MockGitProviderOperations::new()),
         Arc::new(MockAgentRegistry::new()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let db = app.state.db.as_ref().unwrap();
     let mut task = Task::new("my task", "claude", "test-project");
@@ -6326,7 +6963,12 @@ fn test_stuck_task_idle_since_cleared_when_not_idle() {
 
     // Task is now Working (no longer Idle)
     let result = SessionRefreshResult {
-        statuses: vec![make_session_task_status("t1", TaskStatus::Running, PhaseStatus::Working, false)],
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Running,
+            PhaseStatus::Working,
+            false,
+        )],
     };
     app.apply_session_refresh(result);
 
@@ -6335,7 +6977,6 @@ fn test_stuck_task_idle_since_cleared_when_not_idle() {
         "idle_since timer should be cleared when task is no longer Idle"
     );
 }
-
 
 // =============================================================================
 // Tests for pure functions: fuzzy_score, word_boundary_left/right,
@@ -6426,7 +7067,11 @@ fn test_word_boundary_right_empty_string() {
 fn test_generate_task_slug_basic() {
     let slug = generate_task_slug("abcdefgh-1234-5678", "My Task");
     assert!(slug.starts_with("abcdefgh-"), "slug={}", slug);
-    assert!(slug.contains("My-Task") || slug.contains("my-task") || slug.contains("My"), "slug={}", slug);
+    assert!(
+        slug.contains("My-Task") || slug.contains("my-task") || slug.contains("My"),
+        "slug={}",
+        slug
+    );
 }
 
 #[test]
@@ -6435,7 +7080,11 @@ fn test_generate_task_slug_truncates_long_title() {
     let slug = generate_task_slug("id12345678", &long_title);
     // slug part should be <= 30 chars for the title portion
     let after_prefix = slug.trim_start_matches("id123456-");
-    assert!(after_prefix.len() <= 30, "slug title part too long: {}", after_prefix);
+    assert!(
+        after_prefix.len() <= 30,
+        "slug title part too long: {}",
+        after_prefix
+    );
 }
 
 #[test]
@@ -6460,7 +7109,12 @@ fn test_generate_task_slug_id_prefix_is_8_chars() {
 #[test]
 fn test_centered_rect_basic() {
     use ratatui::layout::Rect;
-    let area = Rect { x: 0, y: 0, width: 100, height: 50 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 50,
+    };
     let popup = centered_rect(60, 40, area);
     // x should be centered
     assert_eq!(popup.x, 20); // (100 - 60) / 2
@@ -6471,7 +7125,12 @@ fn test_centered_rect_basic() {
 #[test]
 fn test_centered_rect_full_size() {
     use ratatui::layout::Rect;
-    let area = Rect { x: 0, y: 0, width: 80, height: 24 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+    };
     let popup = centered_rect(100, 100, area);
     assert_eq!(popup.width, 80);
     assert_eq!(popup.height, 24);
@@ -6482,7 +7141,12 @@ fn test_centered_rect_full_size() {
 #[test]
 fn test_centered_rect_fixed_width_basic() {
     use ratatui::layout::Rect;
-    let area = Rect { x: 0, y: 0, width: 100, height: 50 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 50,
+    };
     let popup = centered_rect_fixed_width(60, 50, area);
     assert_eq!(popup.width, 60);
     // should be centered horizontally
@@ -6493,7 +7157,12 @@ fn test_centered_rect_fixed_width_basic() {
 fn test_centered_rect_fixed_width_capped_to_terminal() {
     use ratatui::layout::Rect;
     // fixed_width wider than terminal → capped at width - 4
-    let area = Rect { x: 0, y: 0, width: 40, height: 24 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 24,
+    };
     let popup = centered_rect_fixed_width(100, 50, area);
     assert_eq!(popup.width, 36); // 40 - 4
 }
@@ -6532,7 +7201,11 @@ fn test_transform_skill_for_opencode_strips_frontmatter() {
     let result = transform_skill_for_opencode(content);
     // Should produce OpenCode format: description frontmatter + body
     assert!(result.contains("description:"), "result={}", result);
-    assert!(result.contains("Do the planning work."), "result={}", result);
+    assert!(
+        result.contains("Do the planning work."),
+        "result={}",
+        result
+    );
     // Original name: field should not appear
     assert!(!result.contains("name: agtx-plan"), "result={}", result);
 }
@@ -6556,7 +7229,8 @@ fn test_transform_skill_for_opencode_uses_description_from_frontmatter() {
 #[cfg(feature = "test-mocks")]
 fn test_is_pane_at_shell_returns_true_for_shell_command() {
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
     assert!(is_pane_at_shell(&mock_tmux, "proj:task"));
 }
@@ -6565,8 +7239,7 @@ fn test_is_pane_at_shell_returns_true_for_shell_command() {
 #[cfg(feature = "test-mocks")]
 fn test_is_pane_at_shell_returns_false_when_no_command() {
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_pane_current_command()
-        .returning(|_| None);
+    mock_tmux.expect_pane_current_command().returning(|_| None);
     assert!(!is_pane_at_shell(&mock_tmux, "proj:task"));
 }
 
@@ -6576,7 +7249,8 @@ fn test_is_pane_at_shell_returns_false_when_no_command() {
 #[cfg(feature = "test-mocks")]
 fn test_is_agent_active_true_when_agent_process_running() {
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("claude".to_string()));
     assert!(is_agent_active(&mock_tmux, "proj:task"));
 }
@@ -6586,9 +7260,11 @@ fn test_is_agent_active_true_when_agent_process_running() {
 fn test_is_agent_active_true_when_gemini_indicator_in_pane() {
     // Gemini runs inside bash — detected via pane content indicator
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
-    mock_tmux.expect_capture_pane()
+    mock_tmux
+        .expect_capture_pane()
         .returning(|_| Ok("some output\nType your message\n".to_string()));
     assert!(is_agent_active(&mock_tmux, "proj:task"));
 }
@@ -6597,9 +7273,11 @@ fn test_is_agent_active_true_when_gemini_indicator_in_pane() {
 #[cfg(feature = "test-mocks")]
 fn test_is_agent_active_false_when_at_shell_no_indicator() {
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
-    mock_tmux.expect_capture_pane()
+    mock_tmux
+        .expect_capture_pane()
         .returning(|_| Ok("$ ".to_string()));
     assert!(!is_agent_active(&mock_tmux, "proj:task"));
 }
@@ -6610,9 +7288,13 @@ fn test_is_agent_active_false_when_at_shell_no_indicator() {
 #[cfg(feature = "test-mocks")]
 fn test_collect_task_diff_shows_unstaged_changes() {
     let mut mock_git = MockGitOperations::new();
-    mock_git.expect_diff().returning(|_| "diff --git a/foo.rs\n-old\n+new\n".to_string());
+    mock_git
+        .expect_diff()
+        .returning(|_| "diff --git a/foo.rs\n-old\n+new\n".to_string());
     mock_git.expect_diff_cached().returning(|_| String::new());
-    mock_git.expect_list_untracked_files().returning(|_| String::new());
+    mock_git
+        .expect_list_untracked_files()
+        .returning(|_| String::new());
 
     let result = collect_task_diff("/tmp/wt", &mock_git, &[]);
     assert!(result.contains("Unstaged Changes"), "result={}", result);
@@ -6624,8 +7306,12 @@ fn test_collect_task_diff_shows_unstaged_changes() {
 fn test_collect_task_diff_shows_staged_changes() {
     let mut mock_git = MockGitOperations::new();
     mock_git.expect_diff().returning(|_| String::new());
-    mock_git.expect_diff_cached().returning(|_| "diff --git a/bar.rs\n+added\n".to_string());
-    mock_git.expect_list_untracked_files().returning(|_| String::new());
+    mock_git
+        .expect_diff_cached()
+        .returning(|_| "diff --git a/bar.rs\n+added\n".to_string());
+    mock_git
+        .expect_list_untracked_files()
+        .returning(|_| String::new());
 
     let result = collect_task_diff("/tmp/wt", &mock_git, &[]);
     assert!(result.contains("Staged Changes"), "result={}", result);
@@ -6637,16 +7323,26 @@ fn test_collect_task_diff_untracked_excluded_by_prefix() {
     let mut mock_git = MockGitOperations::new();
     mock_git.expect_diff().returning(|_| String::new());
     mock_git.expect_diff_cached().returning(|_| String::new());
-    mock_git.expect_list_untracked_files()
+    mock_git
+        .expect_list_untracked_files()
         .returning(|_| ".claude/settings.json\nsrc/new_file.rs\n".to_string());
     // diff_untracked_file only called for non-excluded files
-    mock_git.expect_diff_untracked_file()
+    mock_git
+        .expect_diff_untracked_file()
         .withf(|_, file: &str| file == "src/new_file.rs")
         .returning(|_, _| "+new content\n".to_string());
 
     let result = collect_task_diff("/tmp/wt", &mock_git, &[".claude"]);
-    assert!(!result.contains("settings.json"), "excluded file appeared: {}", result);
-    assert!(result.contains("new_file.rs") || result.contains("Untracked"), "result={}", result);
+    assert!(
+        !result.contains("settings.json"),
+        "excluded file appeared: {}",
+        result
+    );
+    assert!(
+        result.contains("new_file.rs") || result.contains("Untracked"),
+        "result={}",
+        result
+    );
 }
 
 // --- cleanup_task_for_done ---
@@ -6655,13 +7351,15 @@ fn test_collect_task_diff_untracked_excluded_by_prefix() {
 #[cfg(feature = "test-mocks")]
 fn test_cleanup_task_for_done_clears_session_and_worktree() {
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_kill_window()
+    mock_tmux
+        .expect_kill_window()
         .withf(|name: &str| name == "proj:task-1")
         .times(1)
         .returning(|_| Ok(()));
 
     let mut mock_git = MockGitOperations::new();
-    mock_git.expect_remove_worktree()
+    mock_git
+        .expect_remove_worktree()
         .times(1)
         .returning(|_, _| Ok(()));
 
@@ -6718,7 +7416,12 @@ fn test_cleanup_task_for_done_archives_md_files() {
     cleanup_task_for_done(&mut task, project_dir.path(), &mock_tmux, &mock_git);
 
     // Archived file should exist under .agtx/archive/my-slug/plan.md
-    let archive = project_dir.path().join(".agtx").join("archive").join("my-slug").join("plan.md");
+    let archive = project_dir
+        .path()
+        .join(".agtx")
+        .join("archive")
+        .join("my-slug")
+        .join("plan.md");
     assert!(archive.exists(), "archive not created at {:?}", archive);
 }
 
@@ -6728,12 +7431,14 @@ fn test_cleanup_task_for_done_archives_md_files() {
 #[cfg(feature = "test-mocks")]
 fn test_cleanup_task_resources_kills_window_and_removes_worktree() {
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_kill_window()
+    mock_tmux
+        .expect_kill_window()
         .times(1)
         .returning(|_| Ok(()));
 
     let mut mock_git = MockGitOperations::new();
-    mock_git.expect_remove_worktree()
+    mock_git
+        .expect_remove_worktree()
         .times(1)
         .returning(|_, _| Ok(()));
 
@@ -6772,15 +7477,18 @@ fn test_cleanup_task_resources_noop_when_no_session_or_worktree() {
 #[cfg(feature = "test-mocks")]
 fn test_delete_task_resources_kills_window_removes_worktree_and_deletes_branch() {
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_kill_window()
+    mock_tmux
+        .expect_kill_window()
         .times(1)
         .returning(|_| Ok(()));
 
     let mut mock_git = MockGitOperations::new();
-    mock_git.expect_remove_worktree()
+    mock_git
+        .expect_remove_worktree()
         .times(1)
         .returning(|_, _| Ok(()));
-    mock_git.expect_delete_branch()
+    mock_git
+        .expect_delete_branch()
         .times(1)
         .returning(|_, _| Ok(()));
 
@@ -6814,14 +7522,12 @@ fn test_save_task_creates_new_task_in_db() {
     app.state.pending_task_title = "New Task Title".to_string();
     app.state.input_buffer = "Task description here".to_string();
     app.state.editing_task_id = None;
-    app.state.wizard_plugin_options = vec![
-        crate::tui::app::PluginOption {
-            name: "agtx".to_string(),
-            label: "agtx".to_string(),
-            description: "".to_string(),
-            active: true,
-        }
-    ];
+    app.state.wizard_plugin_options = vec![crate::tui::app::PluginOption {
+        name: "agtx".to_string(),
+        label: "agtx".to_string(),
+        description: "".to_string(),
+        active: true,
+    }];
     app.state.wizard_selected_plugin = 0;
 
     app.save_task().unwrap();
@@ -6842,26 +7548,36 @@ fn test_save_task_updates_existing_task() {
 
     // Create a task in the DB first
     let original = make_test_task("edit-me", "Original Title", TaskStatus::Backlog);
-    app.state.db.as_ref().unwrap().create_task(&original).unwrap();
+    app.state
+        .db
+        .as_ref()
+        .unwrap()
+        .create_task(&original)
+        .unwrap();
     app.refresh_tasks().unwrap();
 
     // Set up wizard state for editing
     app.state.pending_task_title = "Updated Title".to_string();
     app.state.input_buffer = "Updated description".to_string();
     app.state.editing_task_id = Some("edit-me".to_string());
-    app.state.wizard_plugin_options = vec![
-        crate::tui::app::PluginOption {
-            name: "gsd".to_string(),
-            label: "gsd".to_string(),
-            description: "".to_string(),
-            active: true,
-        }
-    ];
+    app.state.wizard_plugin_options = vec![crate::tui::app::PluginOption {
+        name: "gsd".to_string(),
+        label: "gsd".to_string(),
+        description: "".to_string(),
+        active: true,
+    }];
     app.state.wizard_selected_plugin = 0;
 
     app.save_task().unwrap();
 
-    let updated = app.state.db.as_ref().unwrap().get_task("edit-me").unwrap().unwrap();
+    let updated = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task("edit-me")
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.title, "Updated Title");
     assert_eq!(updated.description.as_deref(), Some("Updated description"));
     assert_eq!(updated.plugin.as_deref(), Some("gsd"));
@@ -6877,14 +7593,12 @@ fn test_save_task_empty_description_stored_as_none() {
     app.state.pending_task_title = "Title only".to_string();
     app.state.input_buffer = String::new(); // empty
     app.state.editing_task_id = None;
-    app.state.wizard_plugin_options = vec![
-        crate::tui::app::PluginOption {
-            name: "agtx".to_string(),
-            label: "agtx".to_string(),
-            description: "".to_string(),
-            active: true,
-        }
-    ];
+    app.state.wizard_plugin_options = vec![crate::tui::app::PluginOption {
+        name: "agtx".to_string(),
+        label: "agtx".to_string(),
+        description: "".to_string(),
+        active: true,
+    }];
     app.state.wizard_selected_plugin = 0;
 
     app.save_task().unwrap();
@@ -6900,7 +7614,12 @@ fn test_save_task_empty_description_stored_as_none() {
 fn test_init_plugin_selection_includes_agtx() {
     let mut app = make_test_app();
     app.init_plugin_selection();
-    let names: Vec<&str> = app.state.wizard_plugin_options.iter().map(|o| o.name.as_str()).collect();
+    let names: Vec<&str> = app
+        .state
+        .wizard_plugin_options
+        .iter()
+        .map(|o| o.name.as_str())
+        .collect();
     assert!(names.contains(&"agtx"), "options={:?}", names);
 }
 
@@ -6924,7 +7643,11 @@ fn test_init_plugin_selection_selected_index_matches_active() {
     app.init_plugin_selection();
 
     let idx = app.state.wizard_selected_plugin;
-    assert!(app.state.wizard_plugin_options[idx].active, "selected idx {} not active", idx);
+    assert!(
+        app.state.wizard_plugin_options[idx].active,
+        "selected idx {} not active",
+        idx
+    );
 }
 
 // =============================================================================
@@ -6939,20 +7662,28 @@ fn test_switch_agent_claude_sends_exit_then_new_cmd() {
     // Claude: sends /exit, shell found immediately, then sends new agent cmd
     let mut mock_tmux = MockTmuxOperations::new();
     // /exit sent to current agent
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "/exit")
         .times(1)
         .returning(|_, _| Ok(()));
     // pane_current_command returns "bash" on first poll → shell found
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
     // new agent command sent after shell found
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "claude --dangerously-skip-permissions")
         .times(1)
         .returning(|_, _| Ok(()));
 
-    switch_agent_in_tmux(&mock_tmux, "proj:task", "claude", "claude --dangerously-skip-permissions");
+    switch_agent_in_tmux(
+        &mock_tmux,
+        "proj:task",
+        "claude",
+        "claude --dangerously-skip-permissions",
+    );
 }
 
 #[test]
@@ -6961,13 +7692,16 @@ fn test_switch_agent_codex_sends_ctrl_c_not_exit() {
     // Codex has no exit command — sends C-c instead
     let mut mock_tmux = MockTmuxOperations::new();
     // C-c via send_keys_literal (not send_keys)
-    mock_tmux.expect_send_keys_literal()
+    mock_tmux
+        .expect_send_keys_literal()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "codex --full-auto")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -6984,24 +7718,30 @@ fn test_switch_agent_retries_with_ctrl_c_when_shell_not_found() {
 
     let mut mock_tmux = MockTmuxOperations::new();
     // Initial /exit
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "/exit")
         .returning(|_, _| Ok(()));
     // pane_current_command: returns "claude" for first 30 polls (shell not found),
     // then "bash" for the retry polls
-    mock_tmux.expect_pane_current_command()
-        .returning(move |_| {
-            let mut n = seq2.lock().unwrap();
-            *n += 1;
-            if *n <= 30 { Some("claude".to_string()) } else { Some("bash".to_string()) }
-        });
+    mock_tmux.expect_pane_current_command().returning(move |_| {
+        let mut n = seq2.lock().unwrap();
+        *n += 1;
+        if *n <= 30 {
+            Some("claude".to_string())
+        } else {
+            Some("bash".to_string())
+        }
+    });
     // C-c sent on retry
-    mock_tmux.expect_send_keys_literal()
+    mock_tmux
+        .expect_send_keys_literal()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
     // new agent cmd always sent at end
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "newagent")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -7014,24 +7754,29 @@ fn test_switch_agent_retries_with_ctrl_c_when_shell_not_found() {
 fn test_switch_agent_sends_ctrl_d_as_last_resort() {
     // Shell never found → C-d last resort, but new agent cmd still sent
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "/exit")
         .returning(|_, _| Ok(()));
     // Always returns agent process — shell never found
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("claude".to_string()));
     // C-c on retry
-    mock_tmux.expect_send_keys_literal()
+    mock_tmux
+        .expect_send_keys_literal()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
     // C-d as last resort
-    mock_tmux.expect_send_keys_literal()
+    mock_tmux
+        .expect_send_keys_literal()
         .withf(|_, key: &str| key == "C-d")
         .times(1)
         .returning(|_, _| Ok(()));
     // new agent still sent
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "newagent")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -7044,15 +7789,19 @@ fn test_switch_agent_sends_ctrl_d_as_last_resort() {
 fn test_switch_agent_always_sends_new_agent_cmd() {
     // Even in worst case (shell never found), new agent cmd is sent
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "/exit")
         .returning(|_, _| Ok(()));
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("claude".to_string()));
-    mock_tmux.expect_send_keys_literal()
+    mock_tmux
+        .expect_send_keys_literal()
         .returning(|_, _| Ok(()));
     // This is the key assertion — new_agent_cmd must be sent exactly once
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "my-new-agent")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -7067,13 +7816,18 @@ fn test_switch_agent_always_sends_new_agent_cmd() {
 fn test_wait_for_agent_ready_returns_when_process_detected() {
     // pane_current_command returns agent process immediately → exits loop on first check
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("claude".to_string())); // not shell → agent detected
-    // capture_pane called for settle, returning no indicator content
-    mock_tmux.expect_capture_pane()
+                                                    // capture_pane called for settle, returning no indicator content
+    mock_tmux
+        .expect_capture_pane()
         .returning(|_| Ok(String::new()));
 
-    let result = wait_for_agent_ready(&(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
+        "proj:task",
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -7082,12 +7836,17 @@ fn test_wait_for_agent_ready_returns_when_process_detected() {
 fn test_wait_for_agent_ready_returns_when_ready_indicator_in_pane() {
     // pane_current_command returns shell (bash), but pane content has ready indicator
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("bash".to_string())); // at shell
-    mock_tmux.expect_capture_pane()
+    mock_tmux
+        .expect_capture_pane()
         .returning(|_| Ok("Type your message\n> ".to_string())); // Gemini ready indicator
 
-    let result = wait_for_agent_ready(&(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
+        "proj:task",
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -7096,22 +7855,29 @@ fn test_wait_for_agent_ready_returns_when_ready_indicator_in_pane() {
 fn test_wait_for_agent_ready_handles_claude_bypass_prompt() {
     // Pane contains "Yes, I accept" → sends "2" + Enter and returns immediately
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
-    mock_tmux.expect_capture_pane()
+    mock_tmux
+        .expect_capture_pane()
         .returning(|_| Ok("Yes, I accept\nSome prompt text".to_string()));
     // Must send "2" to accept
-    mock_tmux.expect_send_keys_literal()
+    mock_tmux
+        .expect_send_keys_literal()
         .withf(|_, key: &str| key == "2")
         .times(1)
         .returning(|_, _| Ok(()));
     // Must send Enter to confirm
-    mock_tmux.expect_send_keys_literal()
+    mock_tmux
+        .expect_send_keys_literal()
         .withf(|_, key: &str| key == "Enter")
         .times(1)
         .returning(|_, _| Ok(()));
 
-    let result = wait_for_agent_ready(&(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
+        "proj:task",
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -7123,23 +7889,26 @@ fn test_wait_for_agent_ready_returns_when_content_stabilizes() {
     let call_count2 = call_count.clone();
 
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("bash".to_string())); // always at shell
 
-    mock_tmux.expect_capture_pane()
-        .returning(move |_| {
-            let mut n = call_count2.lock().unwrap();
-            *n += 1;
-            // 3 changes (different content), then stable
-            match *n {
-                1 => Ok("loading 1".to_string()),
-                2 => Ok("loading 2".to_string()),
-                3 => Ok("loading 3".to_string()),
-                _ => Ok("stable content".to_string()), // unchanged → stable_ticks increment
-            }
-        });
+    mock_tmux.expect_capture_pane().returning(move |_| {
+        let mut n = call_count2.lock().unwrap();
+        *n += 1;
+        // 3 changes (different content), then stable
+        match *n {
+            1 => Ok("loading 1".to_string()),
+            2 => Ok("loading 2".to_string()),
+            3 => Ok("loading 3".to_string()),
+            _ => Ok("stable content".to_string()), // unchanged → stable_ticks increment
+        }
+    });
 
-    let result = wait_for_agent_ready(&(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
+        "proj:task",
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -7152,14 +7921,19 @@ fn test_wait_for_agent_ready_always_returns_some() {
     // We only run a minimal version: content changes 0 times → loop exits at 150
     // With mocks this is instant.
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
-    mock_tmux.expect_capture_pane()
+    mock_tmux
+        .expect_capture_pane()
         .returning(|_| Ok("same content forever".to_string()));
 
     // Loop runs all 150 iters with no content change → change_count=0, stable never triggered
     // Function always returns Some at end regardless.
-    let result = wait_for_agent_ready(&(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
+        "proj:task",
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -7175,7 +7949,11 @@ fn test_is_pane_at_shell_returns_true_for_shell_process() {
         let shell_str = shell.to_string();
         mock.expect_pane_current_command()
             .returning(move |_| Some(shell_str.clone()));
-        assert!(is_pane_at_shell(&mock, "t"), "should be at shell for {}", shell);
+        assert!(
+            is_pane_at_shell(&mock, "t"),
+            "should be at shell for {}",
+            shell
+        );
     }
 }
 
@@ -7187,7 +7965,11 @@ fn test_is_pane_at_shell_returns_false_for_agent_processes() {
         let agent_str = agent.to_string();
         mock.expect_pane_current_command()
             .returning(move |_| Some(agent_str.clone()));
-        assert!(!is_pane_at_shell(&mock, "t"), "should not be at shell for {}", agent);
+        assert!(
+            !is_pane_at_shell(&mock, "t"),
+            "should not be at shell for {}",
+            agent
+        );
     }
 }
 
@@ -7199,7 +7981,10 @@ fn test_is_agent_active_detects_claude_via_indicator() {
         .returning(|_| Some("bash".to_string())); // node/bash — Check 1 misses
     mock.expect_capture_pane()
         .returning(|_| Ok("Claude Code v2.1.72\n> ".to_string()));
-    assert!(is_agent_active(&mock, "t"), "Claude Code indicator should trigger is_agent_active");
+    assert!(
+        is_agent_active(&mock, "t"),
+        "Claude Code indicator should trigger is_agent_active"
+    );
 }
 
 #[test]
@@ -7210,7 +7995,10 @@ fn test_is_agent_active_detects_gemini_via_indicator() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nType your message".to_string()));
-    assert!(is_agent_active(&mock, "t"), "Gemini indicator should trigger is_agent_active");
+    assert!(
+        is_agent_active(&mock, "t"),
+        "Gemini indicator should trigger is_agent_active"
+    );
 }
 
 #[test]
@@ -7221,7 +8009,10 @@ fn test_is_agent_active_detects_opencode_via_indicator() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nAsk anything".to_string()));
-    assert!(is_agent_active(&mock, "t"), "OpenCode indicator should trigger is_agent_active");
+    assert!(
+        is_agent_active(&mock, "t"),
+        "OpenCode indicator should trigger is_agent_active"
+    );
 }
 
 #[test]
@@ -7232,7 +8023,10 @@ fn test_is_agent_active_detects_cursor_via_indicator() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nCursor Agent\n> ".to_string()));
-    assert!(is_agent_active(&mock, "t"), "Cursor indicator should trigger is_agent_active");
+    assert!(
+        is_agent_active(&mock, "t"),
+        "Cursor indicator should trigger is_agent_active"
+    );
 }
 
 #[test]
@@ -7243,7 +8037,10 @@ fn test_is_agent_active_detects_codex_via_indicator() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nOpenAI Codex".to_string()));
-    assert!(is_agent_active(&mock, "t"), "Codex indicator should trigger is_agent_active");
+    assert!(
+        is_agent_active(&mock, "t"),
+        "Codex indicator should trigger is_agent_active"
+    );
 }
 
 #[test]
@@ -7254,7 +8051,10 @@ fn test_is_agent_active_returns_false_when_no_indicator() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("just some shell output".to_string()));
-    assert!(!is_agent_active(&mock, "t"), "no indicator should return false");
+    assert!(
+        !is_agent_active(&mock, "t"),
+        "no indicator should return false"
+    );
 }
 
 // =============================================================================
@@ -7319,13 +8119,16 @@ fn test_wait_for_agent_ready_detects_codex_via_banner() {
 fn test_switch_agent_cursor_sends_ctrl_c_not_exit() {
     // Cursor is an Ink/Node TUI — uses Ctrl+C to exit, no /exit command
     let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_send_keys_literal()
+    mock_tmux
+        .expect_send_keys_literal()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
-    mock_tmux.expect_pane_current_command()
+    mock_tmux
+        .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
-    mock_tmux.expect_send_keys()
+    mock_tmux
+        .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "agent --yolo")
         .times(1)
         .returning(|_, _| Ok(()));

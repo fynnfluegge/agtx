@@ -33,9 +33,7 @@ pub fn repo_root(path: &Path) -> Result<std::path::PathBuf> {
         .output()
         .context("Failed to get git root")?;
 
-    let root = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_string();
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     Ok(std::path::PathBuf::from(root))
 }
@@ -82,10 +80,7 @@ pub fn merge_branch(path: &Path, branch: &str, message: &str) -> Result<()> {
         .context("Failed to merge branch")?;
 
     if !output.status.success() {
-        anyhow::bail!(
-            "Merge failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        anyhow::bail!("Merge failed: {}", String::from_utf8_lossy(&output.stderr));
     }
 
     Ok(())

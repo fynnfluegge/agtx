@@ -65,12 +65,42 @@ impl Agent {
 /// Get the list of known agents
 pub fn known_agents() -> Vec<Agent> {
     vec![
-        Agent::new("claude", "claude", "Anthropic's Claude Code CLI", "Claude <noreply@anthropic.com>"),
-        Agent::new("codex", "codex", "OpenAI's Codex CLI", "Codex <noreply@openai.com>"),
-        Agent::new("copilot", "copilot", "GitHub Copilot CLI", "GitHub Copilot <noreply@github.com>"),
-        Agent::new("gemini", "gemini", "Google Gemini CLI", "Gemini <noreply@google.com>"),
-        Agent::new("opencode", "opencode", "AI-powered coding assistant", "OpenCode <noreply@opencode.ai>"),
-        Agent::new("cursor", "agent", "Cursor Agent CLI", "Cursor Agent <noreply@cursor.com>"),
+        Agent::new(
+            "claude",
+            "claude",
+            "Anthropic's Claude Code CLI",
+            "Claude <noreply@anthropic.com>",
+        ),
+        Agent::new(
+            "codex",
+            "codex",
+            "OpenAI's Codex CLI",
+            "Codex <noreply@openai.com>",
+        ),
+        Agent::new(
+            "copilot",
+            "copilot",
+            "GitHub Copilot CLI",
+            "GitHub Copilot <noreply@github.com>",
+        ),
+        Agent::new(
+            "gemini",
+            "gemini",
+            "Google Gemini CLI",
+            "Gemini <noreply@google.com>",
+        ),
+        Agent::new(
+            "opencode",
+            "opencode",
+            "AI-powered coding assistant",
+            "OpenCode <noreply@opencode.ai>",
+        ),
+        Agent::new(
+            "cursor",
+            "agent",
+            "Cursor Agent CLI",
+            "Cursor Agent <noreply@cursor.com>",
+        ),
         // TODO: investigate CLI usage before enabling
         // Agent::new("aider", "aider", "AI pair programming in your terminal", "Aider <noreply@aider.chat>"),
         // Agent::new("cline", "cline", "AI coding assistant for VS Code", "Cline <noreply@cline.bot>"),
@@ -123,7 +153,6 @@ pub fn parse_agent_selection(input: &str, agent_count: usize) -> Option<usize> {
     }
     None
 }
-
 
 /// Build the command arguments for spawning an agent
 pub fn build_spawn_args(agent: &Agent, prompt: &str, task_id: &str) -> Vec<String> {

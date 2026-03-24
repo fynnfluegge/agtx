@@ -10,7 +10,12 @@ use mockall::automock;
 #[cfg_attr(feature = "test-mocks", automock)]
 pub trait GitOperations: Send + Sync {
     /// Create a worktree for a task
-    fn create_worktree(&self, project_path: &Path, task_slug: &str) -> Result<String>;
+    fn create_worktree(
+        &self,
+        project_path: &Path,
+        task_slug: &str,
+        base_branch: &str,
+    ) -> Result<String>;
 
     /// Remove a worktree
     fn remove_worktree(&self, project_path: &Path, worktree_path: &str) -> Result<()>;
@@ -72,8 +77,13 @@ pub trait GitOperations: Send + Sync {
 pub struct RealGitOps;
 
 impl GitOperations for RealGitOps {
-    fn create_worktree(&self, project_path: &Path, task_slug: &str) -> Result<String> {
-        let path = super::create_worktree(project_path, task_slug)?;
+    fn create_worktree(
+        &self,
+        project_path: &Path,
+        task_slug: &str,
+        base_branch: &str,
+    ) -> Result<String> {
+        let path = super::create_worktree_from_base(project_path, task_slug, base_branch)?;
         Ok(path.to_string_lossy().to_string())
     }
 
@@ -251,6 +261,12 @@ impl GitOperations for RealGitOps {
         init_script: Option<String>,
         copy_dirs: Vec<String>,
     ) -> Vec<String> {
-        super::initialize_worktree(project_path, worktree_path, copy_files.as_deref(), init_script.as_deref(), &copy_dirs)
+        super::initialize_worktree(
+            project_path,
+            worktree_path,
+            copy_files.as_deref(),
+            init_script.as_deref(),
+            &copy_dirs,
+        )
     }
 }

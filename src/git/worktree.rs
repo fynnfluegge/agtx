@@ -6,8 +6,18 @@ use std::process::Command;
 const AGTX_DIR: &str = ".agtx";
 const WORKTREES_DIR: &str = "worktrees";
 
-/// Create a new git worktree for a task from the main branch
+/// Create a new git worktree for a task from the detected default branch.
 pub fn create_worktree(project_path: &Path, task_slug: &str) -> Result<PathBuf> {
+    let base_branch = detect_main_branch(project_path)?;
+    create_worktree_from_base(project_path, task_slug, &base_branch)
+}
+
+/// Create a new git worktree for a task from the specified base branch.
+pub fn create_worktree_from_base(
+    project_path: &Path,
+    task_slug: &str,
+    base_branch: &str,
+) -> Result<PathBuf> {
     let worktree_path = project_path
         .join(AGTX_DIR)
         .join(WORKTREES_DIR)
@@ -28,10 +38,9 @@ pub fn create_worktree(project_path: &Path, task_slug: &str) -> Result<PathBuf> 
         std::fs::create_dir_all(parent)?;
     }
 
-    // Detect the main branch (main or master)
-    let main_branch = detect_main_branch(project_path)?;
+    let base_branch = resolve_base_branch(project_path, base_branch)?;
 
-    // Create worktree with a new branch based on main
+    // Create worktree with a new branch based on the requested base branch
     let branch_name = format!("task/{}", task_slug);
 
     // First, try to delete the branch if it exists (from a previous failed attempt)
@@ -44,7 +53,7 @@ pub fn create_worktree(project_path: &Path, task_slug: &str) -> Result<PathBuf> 
         .current_dir(project_path)
         .args(["worktree", "add"])
         .arg(&worktree_path)
-        .args(["-b", &branch_name, &main_branch])
+        .args(["-b", &branch_name, &base_branch])
         .output()
         .context("Failed to create git worktree")?;
 
@@ -54,6 +63,25 @@ pub fn create_worktree(project_path: &Path, task_slug: &str) -> Result<PathBuf> 
     }
 
     Ok(worktree_path)
+}
+
+fn resolve_base_branch(project_path: &Path, base_branch: &str) -> Result<String> {
+    let base_branch = base_branch.trim();
+    if base_branch.is_empty() {
+        return detect_main_branch(project_path);
+    }
+
+    let output = Command::new("git")
+        .current_dir(project_path)
+        .args(["rev-parse", "--verify", base_branch])
+        .output()
+        .context("Failed to verify configured base branch")?;
+
+    if output.status.success() {
+        Ok(base_branch.to_string())
+    } else {
+        anyhow::bail!("Configured base branch '{}' was not found", base_branch);
+    }
 }
 
 /// Agent config directories that are always copied from project root to worktrees.
@@ -121,7 +149,10 @@ pub fn initialize_worktree(
 
             if src.is_dir() {
                 if let Err(e) = copy_dir_recursive(&src, &dst) {
-                    warnings.push(format!("Failed to copy directory '{}' to worktree: {}", file_name, e));
+                    warnings.push(format!(
+                        "Failed to copy directory '{}' to worktree: {}",
+                        file_name, e
+                    ));
                 }
             } else {
                 if let Some(parent) = dst.parent() {
@@ -145,7 +176,12 @@ pub fn initialize_worktree(
     if let Some(script) = init_script {
         let script = script.trim();
         if !script.is_empty() {
-            match Command::new("sh").arg("-c").arg(script).current_dir(worktree_path).output() {
+            match Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .current_dir(worktree_path)
+                .output()
+            {
                 Ok(result) => {
                     if !result.status.success() {
                         let stderr = String::from_utf8_lossy(&result.stderr);

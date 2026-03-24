@@ -139,14 +139,11 @@ impl RealAgentRegistry {
 
 impl AgentRegistry for RealAgentRegistry {
     fn get(&self, agent_name: &str) -> Arc<dyn AgentOperations> {
-        self.agents
-            .get(agent_name)
-            .cloned()
-            .unwrap_or_else(|| {
-                self.agents
-                    .get(&self.default_name)
-                    .cloned()
-                    .expect("Default agent must exist in registry")
-            })
+        self.agents.get(agent_name).cloned().unwrap_or_else(|| {
+            self.agents
+                .get(&self.default_name)
+                .cloned()
+                .expect("Default agent must exist in registry")
+        })
     }
 }

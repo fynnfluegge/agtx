@@ -191,9 +191,7 @@ pub fn trim_trailing_empty_lines(lines: &[&str]) -> usize {
     }
 
     // Find the last non-empty line
-    let last_content_line = lines
-        .iter()
-        .rposition(|line| !line.trim().is_empty());
+    let last_content_line = lines.iter().rposition(|line| !line.trim().is_empty());
 
     match last_content_line {
         Some(idx) => {
@@ -263,10 +261,10 @@ pub fn render_shell_popup(
     let popup_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),                  // Title bar
-            Constraint::Length(escalation_height),  // Escalation banner (0 if none)
-            Constraint::Min(0),                     // Shell content
-            Constraint::Length(1),                  // Footer
+            Constraint::Length(1),                 // Title bar
+            Constraint::Length(escalation_height), // Escalation banner (0 if none)
+            Constraint::Min(0),                    // Shell content
+            Constraint::Length(1),                 // Footer
         ])
         .split(inner_area);
 
@@ -280,11 +278,22 @@ pub fn render_shell_popup(
     // Escalation banner (if present)
     if let Some(ref note) = popup.escalation_note {
         let banner_text = format!(" \u{26a0}  {} ", note);
-        let padded_banner = format!("{:<width$}", banner_text, width = popup_chunks[1].width as usize);
-        let hint = format!("{:<width$}", " Press any key to dismiss", width = popup_chunks[1].width as usize);
+        let padded_banner = format!(
+            "{:<width$}",
+            banner_text,
+            width = popup_chunks[1].width as usize
+        );
+        let hint = format!(
+            "{:<width$}",
+            " Press any key to dismiss",
+            width = popup_chunks[1].width as usize
+        );
         let banner_content = format!("{}\n{}", padded_banner, hint);
-        let banner = Paragraph::new(banner_content)
-            .style(Style::default().fg(colors.escalation_fg).bg(colors.escalation_bg));
+        let banner = Paragraph::new(banner_content).style(
+            Style::default()
+                .fg(colors.escalation_fg)
+                .bg(colors.escalation_bg),
+        );
         frame.render_widget(banner, popup_chunks[1]);
     }
 
@@ -300,7 +309,11 @@ pub fn render_shell_popup(
 
     // Footer with scroll indicator (pad to fill width)
     let footer_text = build_footer_text(popup.scroll_offset, start_line);
-    let padded_footer = format!("{:<width$}", footer_text, width = popup_chunks[3].width as usize);
+    let padded_footer = format!(
+        "{:<width$}",
+        footer_text,
+        width = popup_chunks[3].width as usize
+    );
     let footer = Paragraph::new(padded_footer)
         .style(Style::default().fg(colors.footer_fg).bg(colors.footer_bg));
     frame.render_widget(footer, popup_chunks[3]);

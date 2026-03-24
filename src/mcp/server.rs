@@ -2,12 +2,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use rmcp::{
-    ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    schemars,
-    tool, tool_handler, tool_router,
+    schemars, tool, tool_handler, tool_router,
     transport::io::stdio,
+    ServerHandler, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
 
@@ -199,7 +198,8 @@ impl AgtxMcpServer {
     }
 
     fn open_project_db(&self) -> Result<Database, String> {
-        Database::open_project(&self.project_path).map_err(|e| format!("Failed to open project database: {}", e))
+        Database::open_project(&self.project_path)
+            .map_err(|e| format!("Failed to open project database: {}", e))
     }
 
     fn open_global_db(&self) -> Result<Database, String> {
@@ -255,7 +255,8 @@ impl AgtxMcpServer {
                             path: p.path,
                         })
                         .collect();
-                    serde_json::to_string_pretty(&summaries).unwrap_or_else(|e| format!("Error serializing: {}", e))
+                    serde_json::to_string_pretty(&summaries)
+                        .unwrap_or_else(|e| format!("Error serializing: {}", e))
                 }
                 Err(e) => format!("Error listing projects: {}", e),
             },
@@ -263,7 +264,9 @@ impl AgtxMcpServer {
         }
     }
 
-    #[tool(description = "List tasks for the current project, optionally filtered by status (backlog, planning, running, review, done)")]
+    #[tool(
+        description = "List tasks for the current project, optionally filtered by status (backlog, planning, running, review, done)"
+    )]
     fn list_tasks(&self, Parameters(params): Parameters<ListTasksParams>) -> String {
         match self.open_project_db() {
             Ok(db) => {
@@ -290,7 +293,8 @@ impl AgtxMcpServer {
                                 plugin: t.plugin,
                             })
                             .collect();
-                        serde_json::to_string_pretty(&summaries).unwrap_or_else(|e| format!("Error serializing: {}", e))
+                        serde_json::to_string_pretty(&summaries)
+                            .unwrap_or_else(|e| format!("Error serializing: {}", e))
                     }
                     Err(e) => format!("Error listing tasks: {}", e),
                 }
@@ -299,7 +303,9 @@ impl AgtxMcpServer {
         }
     }
 
-    #[tool(description = "Get full details of a specific task by its ID. Includes allowed_actions based on the task's current status and plugin rules.")]
+    #[tool(
+        description = "Get full details of a specific task by its ID. Includes allowed_actions based on the task's current status and plugin rules."
+    )]
     fn get_task(&self, Parameters(params): Parameters<GetTaskParams>) -> String {
         match self.open_project_db() {
             Ok(db) => match db.get_task(&params.task_id) {
@@ -323,7 +329,8 @@ impl AgtxMcpServer {
                         updated_at: t.updated_at.to_rfc3339(),
                         allowed_actions: allowed,
                     };
-                    serde_json::to_string_pretty(&detail).unwrap_or_else(|e| format!("Error serializing: {}", e))
+                    serde_json::to_string_pretty(&detail)
+                        .unwrap_or_else(|e| format!("Error serializing: {}", e))
                 }
                 Ok(None) => format!("Task not found: {}", params.task_id),
                 Err(e) => format!("Error getting task: {}", e),
@@ -332,7 +339,9 @@ impl AgtxMcpServer {
         }
     }
 
-    #[tool(description = "Queue a task state transition. The agtx TUI will process it and execute all side effects (worktree creation, agent spawning, etc). Use get_transition_status to check completion. Actions: research (start research phase for backlog task), move_forward, move_to_planning, move_to_running, move_to_review, move_to_done, resume, escalate_to_user (flag task for user attention with an optional reason)")]
+    #[tool(
+        description = "Queue a task state transition. The agtx TUI will process it and execute all side effects (worktree creation, agent spawning, etc). Use get_transition_status to check completion. Actions: research (start research phase for backlog task), move_forward, move_to_planning, move_to_running, move_to_review, move_to_done, resume, escalate_to_user (flag task for user attention with an optional reason)"
+    )]
     fn move_task(&self, Parameters(params): Parameters<MoveTaskParams>) -> String {
         let valid_actions = [
             "research",
@@ -384,7 +393,9 @@ impl AgtxMcpServer {
         }
     }
 
-    #[tool(description = "Check the status of a queued transition request. Returns pending, completed, or error with details.")]
+    #[tool(
+        description = "Check the status of a queued transition request. Returns pending, completed, or error with details."
+    )]
     fn get_transition_status(
         &self,
         Parameters(params): Parameters<GetTransitionStatusParams>,
@@ -416,7 +427,9 @@ impl AgtxMcpServer {
         }
     }
 
-    #[tool(description = "Check if task branches have merge conflicts with the main branch. Pass a task_id to check one task, or omit it to check all Review tasks. Uses a read-only git check — no files are modified.")]
+    #[tool(
+        description = "Check if task branches have merge conflicts with the main branch. Pass a task_id to check one task, or omit it to check all Review tasks. Uses a read-only git check — no files are modified."
+    )]
     fn check_conflicts(&self, Parameters(params): Parameters<CheckConflictsParams>) -> String {
         let main_branch = match crate::git::detect_main_branch(&self.project_path) {
             Ok(b) => b,
@@ -483,10 +496,13 @@ impl AgtxMcpServer {
             main_branch,
             results,
         };
-        serde_json::to_string_pretty(&response).unwrap_or_else(|e| format!("Error serializing: {}", e))
+        serde_json::to_string_pretty(&response)
+            .unwrap_or_else(|e| format!("Error serializing: {}", e))
     }
 
-    #[tool(description = "Fetch and consume pending notifications. Returns new events (task created, phase completed, etc.) and removes them from the queue. Note: notifications are also pushed to your input automatically when you are idle, so you usually don't need to call this manually.")]
+    #[tool(
+        description = "Fetch and consume pending notifications. Returns new events (task created, phase completed, etc.) and removes them from the queue. Note: notifications are also pushed to your input automatically when you are idle, so you usually don't need to call this manually."
+    )]
     fn get_notifications(&self, _params: Parameters<GetNotificationsParams>) -> String {
         match self.open_project_db() {
             Ok(db) => match db.consume_notifications() {
@@ -510,7 +526,9 @@ impl AgtxMcpServer {
         }
     }
 
-    #[tool(description = "Read the last N lines of a task's agent tmux pane. Use this to understand what the agent is showing — e.g., when a task has been idle for a while. Returns pane content as text.")]
+    #[tool(
+        description = "Read the last N lines of a task's agent tmux pane. Use this to understand what the agent is showing — e.g., when a task has been idle for a while. Returns pane content as text."
+    )]
     fn read_pane_content(&self, Parameters(params): Parameters<ReadPaneParams>) -> String {
         let db = match self.open_project_db() {
             Ok(db) => db,
@@ -532,7 +550,16 @@ impl AgtxMcpServer {
         let lines_arg = format!("-{}", lines);
 
         let output = Command::new("tmux")
-            .args(["-L", "agtx", "capture-pane", "-t", &session_name, "-p", "-S", &lines_arg])
+            .args([
+                "-L",
+                "agtx",
+                "capture-pane",
+                "-t",
+                &session_name,
+                "-p",
+                "-S",
+                &lines_arg,
+            ])
             .output();
 
         match output {
@@ -551,7 +578,9 @@ impl AgtxMcpServer {
         }
     }
 
-    #[tool(description = "Send a message to a task's agent pane (followed by Enter). Only works for tasks in Planning or Running status. Use this to nudge a stuck agent, answer a CLI prompt (e.g. 'y' for yes), or provide guidance.")]
+    #[tool(
+        description = "Send a message to a task's agent pane (followed by Enter). Only works for tasks in Planning or Running status. Use this to nudge a stuck agent, answer a CLI prompt (e.g. 'y' for yes), or provide guidance."
+    )]
     fn send_to_task(&self, Parameters(params): Parameters<SendToTaskParams>) -> String {
         let db = match self.open_project_db() {
             Ok(db) => db,
@@ -579,7 +608,14 @@ impl AgtxMcpServer {
 
         // Send the message text
         let send_text = Command::new("tmux")
-            .args(["-L", "agtx", "send-keys", "-t", &session_name, &params.message])
+            .args([
+                "-L",
+                "agtx",
+                "send-keys",
+                "-t",
+                &session_name,
+                &params.message,
+            ])
             .output();
 
         if let Err(e) = send_text {

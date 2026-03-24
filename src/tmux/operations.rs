@@ -172,7 +172,11 @@ impl TmuxOperations for RealTmuxOps {
             .ok()?;
         if output.status.success() {
             let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !cmd.is_empty() { Some(cmd) } else { None }
+            if !cmd.is_empty() {
+                Some(cmd)
+            } else {
+                None
+            }
         } else {
             None
         }
