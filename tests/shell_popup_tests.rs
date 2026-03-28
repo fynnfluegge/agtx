@@ -20,6 +20,8 @@ fn test_shell_popup_new() {
 #[test]
 fn test_shell_popup_scroll_up() {
     let mut popup = ShellPopup::new("Test".to_string(), "window".to_string());
+    // Add content with 20 lines so scroll has room
+    popup.cached_content = b"line\n".repeat(20).to_vec();
     assert_eq!(popup.scroll_offset, 0);
 
     popup.scroll_up(5);
@@ -27,6 +29,16 @@ fn test_shell_popup_scroll_up() {
 
     popup.scroll_up(10);
     assert_eq!(popup.scroll_offset, -15);
+}
+
+#[test]
+fn test_shell_popup_scroll_up_clamped_to_content() {
+    let mut popup = ShellPopup::new("Test".to_string(), "window".to_string());
+    // Only 3 lines of content
+    popup.cached_content = b"a\nb\nc\n".to_vec();
+
+    popup.scroll_up(100);
+    assert_eq!(popup.scroll_offset, -3); // Clamped to -(total lines)
 }
 
 #[test]
@@ -63,6 +75,7 @@ fn test_shell_popup_scroll_to_bottom() {
 #[test]
 fn test_shell_popup_is_at_bottom() {
     let mut popup = ShellPopup::new("Test".to_string(), "window".to_string());
+    popup.cached_content = b"line\n".repeat(10).to_vec();
     assert!(popup.is_at_bottom());
 
     popup.scroll_up(5);
