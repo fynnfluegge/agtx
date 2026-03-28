@@ -141,11 +141,28 @@ When writing a task description, you can reference files, skills, and other task
 
 Config file location: `~/.config/agtx/config.toml`
 
+### Worktree Base Branch
+
+agtx creates a new git worktree for each task. By default it auto-detects the base branch in this
+order: `main`, then `master`, then the current branch. You can override this to force a specific
+base branch (for example `dev` or `develop`).
+
+Global worktree defaults can be set here:
+
+```toml
+# ~/.config/agtx/config.toml
+[worktree]
+base_branch = "dev"
+```
+
 ### Project Configuration
 
 Per-project settings can be placed in `.agtx/config.toml` at the project root:
 
 ```toml
+# Base branch used when creating new task worktrees (optional)
+base_branch = "dev"
+
 # Files to copy from project root into each new worktree (comma-separated)
 # Paths are relative and preserve directory structure
 copy_files = ".env, .env.local, web/.env.local"
@@ -154,7 +171,10 @@ copy_files = ".env, .env.local, web/.env.local"
 init_script = "scripts/init_worktree.sh"
 ```
 
-Both options run during the Backlog → Research/Planning/Running transition, after worktree creation
+`base_branch` controls which branch new task worktrees are created from. If omitted or empty, agtx
+auto-detects `main`, `master`, or falls back to the current branch.
+
+These options run during the Backlog → Research/Planning/Running transition, after worktree creation
 and before the agent session starts.
 
 ### Per-Phase Agent Configuration
