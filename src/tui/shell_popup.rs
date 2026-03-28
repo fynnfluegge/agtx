@@ -30,12 +30,14 @@ impl ShellPopup {
         }
     }
 
-    /// Scroll up into history
+    /// Scroll up into history, clamped to content bounds.
     pub fn scroll_up(&mut self, lines: i32) {
-        self.scroll_offset -= lines;
+        let total_lines = self.cached_content.iter().filter(|&&b| b == b'\n').count() as i32;
+        let min_offset = -(total_lines.max(0));
+        self.scroll_offset = (self.scroll_offset - lines).max(min_offset);
     }
 
-    /// Scroll down toward current content
+    /// Scroll down toward current content, clamped to 0.
     pub fn scroll_down(&mut self, lines: i32) {
         self.scroll_offset = (self.scroll_offset + lines).min(0);
     }
