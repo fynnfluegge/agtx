@@ -13,11 +13,22 @@
         agtx = pkgs.rustPlatform.buildRustPackage {
           pname = "agtx";
           version = "0.1.0";
-          src = ./.;
+          # Keep build inputs stable by excluding generated artifacts.
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter = path: type:
+              let
+                base = builtins.baseNameOf path;
+              in
+              base != "target" && base != ".git" && base != "result";
+          };
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [
             pkgs.pkg-config
             pkgs.makeWrapper
+          ];
+          nativeCheckInputs = [
+            pkgs.git
           ];
           buildInputs = [
             pkgs.openssl
