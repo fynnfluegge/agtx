@@ -12,7 +12,7 @@
         pkgs = import nixpkgs { inherit system; };
         agtx = pkgs.rustPlatform.buildRustPackage {
           pname = "agtx";
-          version = "0.1.0";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
           # Keep build inputs stable by excluding generated artifacts.
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
@@ -29,9 +29,6 @@
           ];
           nativeCheckInputs = [
             pkgs.git
-          ];
-          buildInputs = [
-            pkgs.openssl
           ];
           postFixup = ''
             wrapProgram $out/bin/agtx \
@@ -55,7 +52,6 @@
             pkgs.tmux
             pkgs.gh
             pkgs.pkg-config
-            pkgs.openssl
           ];
         };
       });
