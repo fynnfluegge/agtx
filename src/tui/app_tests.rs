@@ -1770,7 +1770,7 @@ fn test_agent_native_skill_dir() {
     );
     assert_eq!(
         skills::agent_native_skill_dir("opencode"),
-        Some((".opencode/commands", ""))
+        Some((".opencode/command", ""))
     );
     assert_eq!(
         skills::agent_native_skill_dir("codex"),
@@ -3541,7 +3541,7 @@ fn test_write_skills_to_worktree_opencode() {
 
     write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"]);
 
-    let md_path = dir.path().join(".opencode/commands/agtx-plan.md");
+    let md_path = dir.path().join(".opencode/command/agtx-plan.md");
     assert!(md_path.exists());
     let content = std::fs::read_to_string(&md_path).unwrap();
     assert!(
