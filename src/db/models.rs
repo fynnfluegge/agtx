@@ -73,6 +73,9 @@ pub struct Task {
     pub cycle: i32,
     pub referenced_tasks: Option<String>,
     pub escalation_note: Option<String>,
+    pub parent_task_id: Option<String>,  // None on regular tasks; Some(id) on subtasks
+    pub subtask_deps: Option<String>,    // comma-separated task IDs this task depends on
+    pub subtask_slug: Option<String>,    // agent-provided slug e.g. "subtask-1"
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -101,6 +104,9 @@ impl Task {
             cycle: 1,
             referenced_tasks: None,
             escalation_note: None,
+            parent_task_id: None,
+            subtask_deps: None,
+            subtask_slug: None,
             created_at: now,
             updated_at: now,
         }

@@ -1,4 +1,4 @@
-use agtx::db::{Database, Task, TransitionRequest};
+use agtx::db::{Database, Task, TaskStatus, TransitionRequest};
 
 // === TransitionRequest Model Tests ===
 
@@ -147,4 +147,109 @@ fn test_transition_request_with_task() {
     let fetched_req = db.get_transition_request(&req.id).unwrap();
     assert!(fetched_req.is_some());
     assert_eq!(fetched_req.unwrap().task_id, task.id);
+}
+
+// === Subtask dep-blocking tests ===
+// These test the DB queries that allowed_actions uses for dep-blocking and parent-blocking.
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dep_blocking_with_unresolved_dep() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let mut dep = Task::new("Dep task", "claude", "proj");
+    dep.status = TaskStatus::Running; // not Done
+    db.create_task(&dep).unwrap();
+
+    let mut child = Task::new("Child task", "claude", "proj");
+    child.subtask_deps = Some(dep.id.clone());
+    child.status = TaskStatus::Running;
+    db.create_task(&child).unwrap();
+
+    // Simulate allowed_actions dep-blocking check
+    let is_blocked = child.subtask_deps.as_ref().map_or(false, |deps_str| {
+        deps_str.split(',').filter(|s| !s.is_empty()).any(|dep_id| {
+            db.get_task(dep_id)
+                .ok()
+                .flatten()
+                .map(|t| !matches!(t.status, TaskStatus::Done))
+                .unwrap_or(true)
+        })
+    });
+    assert!(is_blocked, "move_forward should be blocked when dep is Running");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dep_blocking_clears_when_dep_done() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let mut dep = Task::new("Dep task", "claude", "proj");
+    dep.status = agtx::db::TaskStatus::Running;
+    db.create_task(&dep).unwrap();
+
+    let mut child = Task::new("Child task", "claude", "proj");
+    child.subtask_deps = Some(dep.id.clone());
+    child.status = TaskStatus::Running;
+    db.create_task(&child).unwrap();
+
+    // Move dep to Done
+    let mut dep_updated = dep.clone();
+    dep_updated.status = TaskStatus::Done;
+    db.update_task(&dep_updated).unwrap();
+
+    let is_blocked = child.subtask_deps.as_ref().map_or(false, |deps_str| {
+        deps_str.split(',').filter(|s| !s.is_empty()).any(|dep_id| {
+            db.get_task(dep_id)
+                .ok()
+                .flatten()
+                .map(|t| !matches!(t.status, TaskStatus::Done))
+                .unwrap_or(true)
+        })
+    });
+    assert!(!is_blocked, "move_forward unblocked when dep is Done");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_parent_blocking_with_active_children() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let mut parent = Task::new("Parent", "claude", "proj");
+    parent.status = TaskStatus::Running;
+    db.create_task(&parent).unwrap();
+
+    let mut child = Task::new("Child", "claude", "proj");
+    child.parent_task_id = Some(parent.id.clone());
+    child.status = TaskStatus::Running; // not Done
+    db.create_task(&child).unwrap();
+
+    // Simulate parent-blocking check
+    let children = db.get_child_tasks(&parent.id).unwrap();
+    let all_done = children
+        .iter()
+        .all(|c| matches!(c.status, TaskStatus::Done));
+    assert!(!all_done, "parent blocked while child is Running");
+    assert!(!children.is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_parent_blocking_clears_when_all_children_done() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let mut parent = Task::new("Parent", "claude", "proj");
+    parent.status = TaskStatus::Running;
+    db.create_task(&parent).unwrap();
+
+    let mut child = Task::new("Child", "claude", "proj");
+    child.parent_task_id = Some(parent.id.clone());
+    child.status = TaskStatus::Done;
+    db.create_task(&child).unwrap();
+
+    let children = db.get_child_tasks(&parent.id).unwrap();
+    let all_done = children
+        .iter()
+        .all(|c| matches!(c.status, TaskStatus::Done));
+    assert!(all_done, "parent unblocked when all children are Done");
 }

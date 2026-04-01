@@ -132,6 +132,15 @@ impl Database {
         let _ = self
             .conn
             .execute("ALTER TABLE tasks ADD COLUMN escalation_note TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN parent_task_id TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN subtask_deps TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN subtask_slug TEXT", []);
 
         // MCP transition request queue
         self.conn.execute_batch(
@@ -194,8 +203,8 @@ impl Database {
     pub fn create_task(&self, task: &Task) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, parent_task_id, subtask_deps, subtask_slug, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             "#,
             params![
                 task.id,
@@ -213,6 +222,9 @@ impl Database {
                 task.cycle,
                 task.referenced_tasks,
                 task.escalation_note,
+                task.parent_task_id,
+                task.subtask_deps,
+                task.subtask_slug,
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
             ],
@@ -237,7 +249,10 @@ impl Database {
                 cycle = ?12,
                 referenced_tasks = ?13,
                 escalation_note = ?14,
-                updated_at = ?15
+                parent_task_id = ?15,
+                subtask_deps = ?16,
+                subtask_slug = ?17,
+                updated_at = ?18
             WHERE id = ?1
             "#,
             params![
@@ -255,6 +270,9 @@ impl Database {
                 task.cycle,
                 task.referenced_tasks,
                 task.escalation_note,
+                task.parent_task_id,
+                task.subtask_deps,
+                task.subtask_slug,
                 task.updated_at.to_rfc3339(),
             ],
         )?;
@@ -285,6 +303,9 @@ impl Database {
             cycle: row.get("cycle").unwrap_or(1),
             referenced_tasks: row.get("referenced_tasks").ok().flatten(),
             escalation_note: row.get("escalation_note").ok().flatten(),
+            parent_task_id: row.get("parent_task_id").ok().flatten(),
+            subtask_deps: row.get("subtask_deps").ok().flatten(),
+            subtask_slug: row.get("subtask_slug").ok().flatten(),
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>("created_at")?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
@@ -322,6 +343,20 @@ impl Database {
 
         let tasks = stmt
             .query_map([], Self::task_from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(tasks)
+    }
+
+    /// Get all subtasks (child tasks) for a given parent task ID, ordered by creation time.
+    pub fn get_child_tasks(&self, parent_id: &str) -> Result<Vec<Task>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM tasks WHERE parent_task_id = ?1 ORDER BY created_at ASC")?;
+
+        let tasks = stmt
+            .query_map(params![parent_id], Self::task_from_row)?
             .filter_map(|r| r.ok())
             .collect();
 

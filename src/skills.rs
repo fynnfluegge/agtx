@@ -4,6 +4,7 @@
 
 pub const RESEARCH_SKILL: &str = include_str!("../plugins/agtx/skills/research.md");
 pub const PLAN_SKILL: &str = include_str!("../plugins/agtx/skills/plan.md");
+pub const PLAN_TEAMS_SKILL: &str = include_str!("../plugins/agtx/skills/plan-teams.md");
 pub const EXECUTE_SKILL: &str = include_str!("../plugins/agtx/skills/execute.md");
 pub const REVIEW_SKILL: &str = include_str!("../plugins/agtx/skills/review.md");
 pub const ORCHESTRATE_SKILL: &str = include_str!("../plugins/agtx/skills/orchestrate.md");

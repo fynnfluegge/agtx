@@ -3,7 +3,7 @@ description = "Built-in workflow with skills and prompts"
 
 [artifacts]
 research = ".agtx/research.md"
-planning = ".agtx/plan.md"
+planning = ".agtx/planning.done"
 running = ".agtx/execute.md"
 review = ".agtx/review.md"
 
@@ -12,3 +12,6 @@ research = "/agtx:research {task}"
 planning = "/agtx:plan {task}"
 running = "/agtx:execute {task}"
 review = "/agtx:review"
+
+[subtask_copy_files]
+".agtx/subtasks/{slug}/plan.md" = ".agtx/plan.md"
