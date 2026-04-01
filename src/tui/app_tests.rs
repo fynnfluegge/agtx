@@ -2903,13 +2903,14 @@ fn test_switch_agent_gemini_sends_quit() {
     let quit_sent = Arc::new(AtomicBool::new(false));
     let quit_sent_c = quit_sent.clone();
 
-    mock.expect_send_keys().returning(move |_, k| {
+    mock.expect_send_keys().returning(|_, _| Ok(()));
+    // Gemini /quit is sent via send_keys_literal (needs delay before Enter for Ink TUI)
+    mock.expect_send_keys_literal().returning(move |_, k| {
         if k == "/quit" {
             quit_sent_c.store(true, Ordering::SeqCst);
         }
         Ok(())
     });
-    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
     mock.expect_pane_current_command()
         .returning(|_| Some("zsh".to_string()));
     mock.expect_capture_pane().returning(|_| Ok(String::new()));
@@ -7682,6 +7683,10 @@ fn test_switch_agent_claude_sends_exit_then_new_cmd() {
     mock_tmux
         .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
+    // capture_pane returns empty content → no agent indicators → shell confirmed free
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok(String::new()));
     // new agent command sent after shell found
     mock_tmux
         .expect_send_keys()
@@ -7711,6 +7716,9 @@ fn test_switch_agent_codex_sends_ctrl_c_not_exit() {
     mock_tmux
         .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok(String::new()));
     mock_tmux
         .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "codex --full-auto")
@@ -7744,6 +7752,10 @@ fn test_switch_agent_retries_with_ctrl_c_when_shell_not_found() {
             Some("bash".to_string())
         }
     });
+    // capture_pane: no agent indicators in pane content
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok(String::new()));
     // C-c sent on retry
     mock_tmux
         .expect_send_keys_literal()
@@ -8138,6 +8150,9 @@ fn test_switch_agent_cursor_sends_ctrl_c_not_exit() {
     mock_tmux
         .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
+    mock_tmux
+        .expect_capture_pane()
+        .returning(|_| Ok(String::new()));
     mock_tmux
         .expect_send_keys()
         .withf(|_, cmd: &str| cmd == "agent --yolo")
