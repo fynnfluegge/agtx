@@ -4245,6 +4245,9 @@ impl App {
                 prompt_trigger,
                 task_content,
                 auto_dismiss,
+                task.worktree_path.clone(),
+                project_path.to_path_buf(),
+                plugin,
             );
             task.agent = planning_agent;
             return Ok(false);
@@ -4413,6 +4416,9 @@ impl App {
                 prompt_trigger,
                 task_content,
                 auto_dismiss,
+                task.worktree_path.clone(),
+                self.state.project_path.clone().unwrap_or_default(),
+                plugin,
             );
             task.agent = running_agent;
         }
@@ -4445,6 +4451,9 @@ impl App {
                 prompt_trigger,
                 task_content,
                 auto_dismiss,
+                task.worktree_path.clone(),
+                project_path.to_path_buf(),
+                plugin,
             );
         }
         task.agent = review_agent.clone();
@@ -5249,6 +5258,9 @@ impl App {
                 prompt_trigger,
                 task_content,
                 auto_dismiss,
+                task.worktree_path.clone(),
+                self.state.project_path.clone().unwrap_or_default(),
+                plugin,
             );
         }
         task.agent = review_agent;
@@ -7166,9 +7178,31 @@ fn spawn_send_to_agent(
     prompt_trigger: Option<String>,
     task_content: String,
     auto_dismiss: Vec<crate::config::AutoDismiss>,
+    worktree_path: Option<String>,
+    project_path: std::path::PathBuf,
+    plugin: Option<WorkflowPlugin>,
 ) {
     std::thread::spawn(move || {
         if needs_switch {
+            // Deploy skills for the incoming agent only if its native skill directory
+            // doesn't exist yet. This handles the case where a worktree was created
+            // with a different agent (e.g. Claude for planning) and a new agent
+            // (e.g. OpenCode for review) is switched in later.
+            if let Some(ref wt_path) = worktree_path {
+                let already_deployed = skills::agent_native_skill_dir(&target_agent)
+                    .map(|(base, namespace)| {
+                        let dir = if namespace.is_empty() {
+                            Path::new(wt_path).join(base)
+                        } else {
+                            Path::new(wt_path).join(base).join(namespace)
+                        };
+                        dir.exists()
+                    })
+                    .unwrap_or(true); // no native path for this agent — nothing to deploy
+                if !already_deployed {
+                    write_skills_to_worktree(wt_path, &project_path, &plugin, &[&target_agent]);
+                }
+            }
             let agent_ops = agent_registry.get(&target_agent);
             let new_cmd = agent_ops.build_interactive_command("");
             switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_agent, &new_cmd);
@@ -7201,12 +7235,13 @@ fn send_skill_and_prompt(
     agent_name: &str,
     auto_dismiss: &[crate::config::AutoDismiss],
 ) {
-    // Gemini & Codex: always combine skill+prompt into a single message.
+    // Gemini, Codex & OpenCode: always combine skill+prompt into a single message.
     // Gemini: sending separately causes it to execute the skill and queue the
     //   prompt, which gets lost or arrives too late.
     // Codex: skill mentions ($skill-name) are inline references that must be
     //   part of a message — sending just "$skill" standalone does nothing.
-    if matches!(agent_name, "gemini" | "codex" | "cursor") {
+    // OpenCode: same Ink TUI behavior as Gemini/Codex, needs combined send + double Enter.
+    if matches!(agent_name, "gemini" | "codex" | "cursor" | "opencode") {
         let text_to_send = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
                 Some(format!("{}\n\n{}", cmd, prompt))
@@ -7244,6 +7279,28 @@ fn send_skill_and_prompt(
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
             let _ = tmux_ops.send_keys_literal(target, "Enter");
+
+            // Codex and OpenCode show a command picker popup when a skill is typed.
+            // The first Enter confirms/closes the picker; a second Enter is needed
+            // to actually submit the message.
+            // - Codex: wait for "Press enter to insert" to disappear
+            // - OpenCode: wait a short delay (picker closes immediately on Enter)
+            if agent_name == "codex" {
+                for _ in 0..20 {
+                    // up to 4s
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    if let Ok(content) = tmux_ops.capture_pane(target) {
+                        if !content.contains("Press enter to insert") {
+                            break;
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let _ = tmux_ops.send_keys_literal(target, "Enter");
+            } else if agent_name == "opencode" {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let _ = tmux_ops.send_keys_literal(target, "Enter");
+            }
         }
         return;
     }
@@ -7634,18 +7691,38 @@ fn switch_agent_in_tmux(
     };
 
     if let Some(cmd) = exit_cmd {
-        let _ = tmux_ops.send_keys(target, cmd);
+        // For Gemini (Ink/Node TUI): send text first, wait for it to appear in pane,
+        // then send Enter — same pattern as send_skill_and_prompt. Without this delay,
+        // Enter fires before the Ink TUI has rendered the input, and /quit is lost.
+        if current_agent == "gemini" {
+            let _ = tmux_ops.send_keys_literal(target, cmd);
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = tmux_ops.capture_pane(target) {
+                    if content.contains(cmd) {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = tmux_ops.send_keys_literal(target, "Enter");
+        } else {
+            let _ = tmux_ops.send_keys(target, cmd);
+        }
     } else {
         let _ = tmux_ops.send_keys_literal(target, "C-c");
     }
 
-    // 2. Poll for shell (agent exited). If the agent was busy, the exit command
+    // 2. Poll for agent exit. If the agent was busy, the exit command
     //    may have been queued — so we wait up to 3s for it to take effect.
+    //    Uses is_agent_active (checks both pane_current_command AND pane content)
+    //    so that Node/Ink agents like Gemini (which always show "bash" as the
+    //    process name) are correctly detected as still running.
     let mut found_shell = false;
     for _ in 0..30 {
         // 3s
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if is_pane_at_shell(tmux_ops, target) {
+        if !is_agent_active(tmux_ops, target) {
             found_shell = true;
             break;
         }
@@ -7657,14 +7734,28 @@ fn switch_agent_in_tmux(
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
         if let Some(cmd) = exit_cmd {
-            let _ = tmux_ops.send_keys(target, cmd);
+            if current_agent == "gemini" {
+                let _ = tmux_ops.send_keys_literal(target, cmd);
+                for _ in 0..20 {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    if let Ok(content) = tmux_ops.capture_pane(target) {
+                        if content.contains(cmd) {
+                            break;
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let _ = tmux_ops.send_keys_literal(target, "Enter");
+            } else {
+                let _ = tmux_ops.send_keys(target, cmd);
+            }
         }
 
-        // Wait for shell after retry
+        // Wait for agent exit after retry
         for _ in 0..50 {
             // 5s
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if is_pane_at_shell(tmux_ops, target) {
+            if !is_agent_active(tmux_ops, target) {
                 found_shell = true;
                 break;
             }
@@ -7677,7 +7768,7 @@ fn switch_agent_in_tmux(
         for _ in 0..20 {
             // 2s
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if is_pane_at_shell(tmux_ops, target) {
+            if !is_agent_active(tmux_ops, target) {
                 break;
             }
         }
@@ -7908,7 +7999,7 @@ fn write_skills_to_worktree(
                         let _ = std::fs::write(skill_subdir.join("SKILL.md"), &content);
                     }
                     "opencode" => {
-                        // OpenCode uses flat .md command files: .opencode/commands/agtx-research.md
+                        // OpenCode uses flat .md command files: .opencode/command/agtx-research.md
                         // Commands have description frontmatter + prompt template
                         let oc_content = transform_skill_for_opencode(&content);
                         let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
