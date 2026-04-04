@@ -10,6 +10,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::config::{GlobalConfig, ProjectConfig};
 use crate::db::{Database, Task, TaskStatus, TransitionRequest};
 
 // === Parameter types ===
@@ -81,6 +82,56 @@ pub struct SendToTaskParams {
     /// Message to send to the task's agent pane (followed by Enter)
     #[schemars(description = "Message to send to the task's agent pane (followed by Enter)")]
     pub message: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateTaskParams {
+    /// Task title
+    #[schemars(description = "Task title")]
+    pub title: String,
+    /// Task description (what to implement, context, approach hints)
+    #[schemars(description = "Task description (what to implement, context, approach hints)")]
+    pub description: Option<String>,
+    /// Workflow plugin name (defaults to project's active plugin)
+    #[schemars(description = "Workflow plugin name (defaults to project's active plugin)")]
+    pub plugin: Option<String>,
+    /// Comma-separated task IDs that this task depends on
+    #[schemars(
+        description = "Comma-separated task IDs that this task depends on (must complete before this task starts)"
+    )]
+    pub referenced_tasks: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BatchTask {
+    /// Task title
+    #[schemars(description = "Task title")]
+    pub title: String,
+    /// Task description
+    #[schemars(description = "Task description (what to implement, context, approach hints)")]
+    pub description: Option<String>,
+    /// Workflow plugin name (defaults to project's active plugin)
+    #[schemars(description = "Workflow plugin name (defaults to project's active plugin)")]
+    pub plugin: Option<String>,
+    /// Indices (0-based) into the tasks array that this task depends on
+    #[schemars(
+        description = "Indices (0-based) into the tasks array that this task depends on. Referenced tasks must have a lower index (no forward references)."
+    )]
+    pub depends_on: Option<Vec<usize>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateTasksBatchParams {
+    /// Array of tasks to create, with index-based dependency wiring
+    #[schemars(description = "Array of tasks to create. Use depends_on with 0-based indices to wire dependencies between them.")]
+    pub tasks: Vec<BatchTask>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteTaskParams {
+    /// The task ID (UUID) to delete
+    #[schemars(description = "The task ID (UUID) to delete. Only backlog tasks can be deleted.")]
+    pub task_id: String,
 }
 
 // === Response types ===
@@ -181,6 +232,33 @@ struct SendToTaskResponse {
     message: String,
 }
 
+#[derive(Serialize)]
+struct CreateTaskResponse {
+    id: String,
+    title: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct BatchTaskResponse {
+    index: usize,
+    id: String,
+    title: String,
+}
+
+#[derive(Serialize)]
+struct CreateTasksBatchResponse {
+    created: Vec<BatchTaskResponse>,
+    count: usize,
+}
+
+#[derive(Serialize)]
+struct DeleteTaskResponse {
+    id: String,
+    title: String,
+    message: String,
+}
+
 // === MCP Server ===
 
 #[derive(Debug, Clone)]
@@ -204,6 +282,25 @@ impl AgtxMcpServer {
 
     fn open_global_db(&self) -> Result<Database, String> {
         Database::open_global().map_err(|e| format!("Failed to open global database: {}", e))
+    }
+
+    /// Get the project name from the project path.
+    fn project_name(&self) -> String {
+        self.project_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Get the default agent and plugin from merged config.
+    fn config_defaults(&self) -> (String, Option<String>) {
+        let global = GlobalConfig::load().unwrap_or_default();
+        let project = ProjectConfig::load(&self.project_path).unwrap_or_default();
+        let agent = project
+            .default_agent
+            .unwrap_or_else(|| global.default_agent.clone());
+        let plugin = project.workflow_plugin.clone();
+        (agent, plugin)
     }
 
     /// Compute which move_task actions are valid for a task given its status and plugin rules.
@@ -639,6 +736,151 @@ impl AgtxMcpServer {
                     .unwrap_or_else(|e| format!("Error serializing: {}", e))
             }
             Err(e) => format!("Error sending Enter: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Create a new task in the Backlog column. Returns the created task's ID. Use create_tasks_batch for multiple tasks with dependencies."
+    )]
+    fn create_task(&self, Parameters(params): Parameters<CreateTaskParams>) -> String {
+        let db = match self.open_project_db() {
+            Ok(db) => db,
+            Err(e) => return e,
+        };
+
+        let (default_agent, default_plugin) = self.config_defaults();
+        let project_name = self.project_name();
+
+        let mut task = Task::new(&params.title, &default_agent, &project_name);
+        task.description = params.description;
+        task.plugin = params.plugin.or(default_plugin);
+        task.referenced_tasks = params.referenced_tasks;
+
+        match db.create_task(&task) {
+            Ok(()) => {
+                let response = CreateTaskResponse {
+                    id: task.id,
+                    title: task.title,
+                    status: "backlog".to_string(),
+                };
+                serde_json::to_string_pretty(&response)
+                    .unwrap_or_else(|e| format!("Error serializing: {}", e))
+            }
+            Err(e) => format!("Error creating task: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Create multiple tasks at once with index-based dependency wiring. Each task's depends_on field uses 0-based indices into the tasks array (no forward references). Returns all created task IDs."
+    )]
+    fn create_tasks_batch(
+        &self,
+        Parameters(params): Parameters<CreateTasksBatchParams>,
+    ) -> String {
+        if params.tasks.is_empty() {
+            return "Error: tasks array is empty".to_string();
+        }
+        if params.tasks.len() > 50 {
+            return "Error: maximum 50 tasks per batch".to_string();
+        }
+
+        // Pass 1: Validate index-based dependencies
+        for (i, batch_task) in params.tasks.iter().enumerate() {
+            if let Some(ref deps) = batch_task.depends_on {
+                for &dep_idx in deps {
+                    if dep_idx >= i {
+                        return format!(
+                            "Error: task[{}] '{}' has depends_on index {} which is >= its own index {}. Only backward references allowed.",
+                            i, batch_task.title, dep_idx, i
+                        );
+                    }
+                }
+            }
+        }
+
+        let db = match self.open_project_db() {
+            Ok(db) => db,
+            Err(e) => return e,
+        };
+
+        let (default_agent, default_plugin) = self.config_defaults();
+        let project_name = self.project_name();
+
+        // Pass 2: Create all tasks, collect IDs
+        let mut created_tasks: Vec<Task> = Vec::with_capacity(params.tasks.len());
+        for batch_task in &params.tasks {
+            let mut task = Task::new(&batch_task.title, &default_agent, &project_name);
+            task.description = batch_task.description.clone();
+            task.plugin = batch_task.plugin.clone().or_else(|| default_plugin.clone());
+            created_tasks.push(task);
+        }
+
+        // Pass 3: Resolve index-based deps to real task IDs
+        for (i, batch_task) in params.tasks.iter().enumerate() {
+            if let Some(ref deps) = batch_task.depends_on {
+                let dep_ids: Vec<String> = deps
+                    .iter()
+                    .map(|&idx| created_tasks[idx].id.clone())
+                    .collect();
+                created_tasks[i].referenced_tasks = Some(dep_ids.join(","));
+            }
+        }
+
+        // Insert all tasks into DB
+        let mut results = Vec::with_capacity(created_tasks.len());
+        for (i, task) in created_tasks.iter().enumerate() {
+            if let Err(e) = db.create_task(task) {
+                return format!("Error creating task[{}] '{}': {}", i, task.title, e);
+            }
+            results.push(BatchTaskResponse {
+                index: i,
+                id: task.id.clone(),
+                title: task.title.clone(),
+            });
+        }
+
+        let response = CreateTasksBatchResponse {
+            count: results.len(),
+            created: results,
+        };
+        serde_json::to_string_pretty(&response)
+            .unwrap_or_else(|e| format!("Error serializing: {}", e))
+    }
+
+    #[tool(
+        description = "Delete a task. Only tasks in Backlog status can be deleted."
+    )]
+    fn delete_task(&self, Parameters(params): Parameters<DeleteTaskParams>) -> String {
+        let db = match self.open_project_db() {
+            Ok(db) => db,
+            Err(e) => return e,
+        };
+
+        let task = match db.get_task(&params.task_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => return format!("Task not found: {}", params.task_id),
+            Err(e) => return format!("Error getting task: {}", e),
+        };
+
+        if task.status != TaskStatus::Backlog {
+            return format!(
+                "Error: can only delete Backlog tasks. Task '{}' is in {} status.",
+                task.title,
+                task.status.as_str()
+            );
+        }
+
+        match db.delete_task(&params.task_id) {
+            Ok(()) => {
+                let response = DeleteTaskResponse {
+                    id: task.id,
+                    title: task.title,
+                    message: "Task deleted".to_string(),
+                };
+                serde_json::to_string_pretty(&response)
+                    .unwrap_or_else(|e| format!("Error serializing: {}", e))
+            }
+            Err(e) => format!("Error deleting task: {}", e),
         }
     }
 }
