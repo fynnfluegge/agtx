@@ -38,6 +38,16 @@ fn test_worktree_path_nested_project() {
 }
 
 #[test]
+fn test_worktree_path_with_custom_dir() {
+    let project = PathBuf::from("/home/user/project");
+    let path = git::worktree_path_with_dir(&project, "task-123", ".worktrees");
+    assert_eq!(
+        path,
+        PathBuf::from("/home/user/project/.worktrees/task-123")
+    );
+}
+
+#[test]
 fn test_worktree_exists_false_for_nonexistent() {
     let temp_dir = TempDir::new().unwrap();
     assert!(!git::worktree_exists(temp_dir.path(), "nonexistent-task"));

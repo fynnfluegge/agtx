@@ -4267,6 +4267,7 @@ impl App {
         let project_name = self.state.project_name.clone();
         let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = self.state.config.base_branch.clone();
+        let worktree_dir = self.state.config.worktree_dir.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -4318,6 +4319,7 @@ impl App {
                 &tmux_project_name,
                 &prompt,
                 &base_branch,
+                &worktree_dir,
                 copy_files,
                 init_script,
                 &plugin,
@@ -4607,6 +4609,7 @@ impl App {
         let project_name = self.state.project_name.clone();
         let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = self.state.config.base_branch.clone();
+        let worktree_dir = self.state.config.worktree_dir.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
 
@@ -4638,6 +4641,7 @@ impl App {
                 &tmux_project_name,
                 "",
                 &base_branch,
+                &worktree_dir,
                 copy_files,
                 init_script,
                 &plugin,
@@ -4805,6 +4809,7 @@ impl App {
         let project_name = self.state.project_name.clone();
         let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = self.state.config.base_branch.clone();
+        let worktree_dir = self.state.config.worktree_dir.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -4831,6 +4836,7 @@ impl App {
                 &tmux_project_name,
                 &prompt,
                 &base_branch,
+                &worktree_dir,
                 copy_files,
                 init_script,
                 &plugin,
@@ -6195,6 +6201,7 @@ fn setup_task_worktree(
     tmux_project_name: &str,
     prompt: &str,
     base_branch: &str,
+    worktree_dir: &str,
     copy_files: Option<String>,
     init_script: Option<String>,
     plugin: &Option<WorkflowPlugin>,
@@ -6210,18 +6217,18 @@ fn setup_task_worktree(
     let target = format!("{}:{}", tmux_project_name, window_name);
 
     // Create git worktree from the configured base branch
-    let worktree_path_str = match git_ops.create_worktree(project_path, &unique_slug, base_branch) {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("Failed to create worktree: {}", e);
-            project_path
-                .join(".agtx")
-                .join("worktrees")
-                .join(&unique_slug)
-                .to_string_lossy()
-                .to_string()
-        }
-    };
+    let worktree_path_str =
+        match git_ops.create_worktree(project_path, &unique_slug, base_branch, worktree_dir) {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("Failed to create worktree: {}", e);
+                project_path
+                    .join(worktree_dir)
+                    .join(&unique_slug)
+                    .to_string_lossy()
+                    .to_string()
+            }
+        };
 
     // Initialize worktree: copy files and run init script
     // Merge plugin-level copy_files with project-level copy_files
