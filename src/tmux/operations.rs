@@ -63,8 +63,9 @@ impl TmuxOperations for RealTmuxOps {
         command: Option<String>,
     ) -> Result<()> {
         let mut cmd = std::process::Command::new("tmux");
+        let target = format!("{}:", session);
         cmd.args(["-L", super::AGENT_SERVER])
-            .args(["new-window", "-d", "-t", session, "-n", window_name])
+            .args(["new-window", "-d", "-t", &target, "-n", window_name])
             .args(["-c", working_dir]);
 
         if let Some(ref shell_cmd) = command {
@@ -76,7 +77,23 @@ impl TmuxOperations for RealTmuxOps {
         let output = cmd.output()?;
 
         if !output.status.success() {
-            anyhow::bail!("Failed to create tmux window");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut details = String::new();
+            if !stderr.trim().is_empty() {
+                details.push_str(stderr.trim());
+            }
+            if !stdout.trim().is_empty() {
+                if !details.is_empty() {
+                    details.push_str(" | ");
+                }
+                details.push_str(stdout.trim());
+            }
+            if details.is_empty() {
+                anyhow::bail!("Failed to create tmux window");
+            } else {
+                anyhow::bail!("Failed to create tmux window: {}", details);
+            }
         }
         Ok(())
     }

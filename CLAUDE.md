@@ -124,7 +124,7 @@ Skills are markdown files with YAML frontmatter deployed to agent-native discove
 - Gemini: `.gemini/commands/agtx/plan.toml` (converted to TOML format)
 - Codex: `.codex/skills/agtx-plan/SKILL.md`
 - Cursor: `.cursor/skills/agtx-plan/SKILL.md`
-- OpenCode: `.config/opencode/command/agtx-plan.md` (frontmatter stripped)
+- OpenCode: `.opencode/command/agtx-plan.md` (frontmatter stripped)
 - Copilot: `.github/agents/agtx/plan.md`
 
 Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
@@ -330,7 +330,7 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 
 ### Agent Integration
 - Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
-- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--approval-mode full-auto`), Gemini (`--approval-mode yolo`), Copilot (`--allow-all-tools`)
+- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--full-auto`), Gemini (`--approval-mode yolo`), Copilot (`--allow-all-tools`)
 - Skills deployed to agent-native paths via `write_skills_to_worktree()` in app.rs
 - Commands resolved per-task via `resolve_skill_command()` (plugin command + agent transform)
 - Prompts resolved per-task via `resolve_prompt()` (pure template substitution, agent-agnostic)
@@ -373,6 +373,9 @@ Dependencies require:
 2. Add `build_interactive_command()` match arm in `src/agent/mod.rs`
 3. Add agent-native skill dir in `agent_native_skill_dir()` in `src/skills.rs`
 4. Add plugin command transform in `transform_plugin_command()` in `src/skills.rs`
+5. Add exit command handling in `switch_agent_in_tmux()` in `src/tui/app.rs` (graceful exit cmd or Ctrl+C)
+6. Add activity indicator string to `AGENT_ACTIVE_INDICATORS` in `src/tui/app.rs` if the agent is an Ink/Node TUI (runs inside bash)
+7. If Ink/Node TUI: add to combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
 
 ### Adding a keyboard shortcut
 1. Find the appropriate `handle_*_key` function in `src/tui/app.rs`
