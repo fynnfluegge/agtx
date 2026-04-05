@@ -4809,13 +4809,21 @@ impl App {
 
             // Deploy skills to the worktree
             let agent_refs: Vec<&str> = all_agents.iter().map(|s| s.as_str()).collect();
-            write_skills_to_worktree(
-                &worktree_path_str,
-                &project_path,
-                &plugin,
-                &agent_refs,
-                enable_agent_teams,
-            );
+            if enable_agent_teams {
+                write_skills_to_worktree_teams(
+                    &worktree_path_str,
+                    &project_path,
+                    &plugin,
+                    &agent_refs,
+                );
+            } else {
+                write_skills_to_worktree(
+                    &worktree_path_str,
+                    &project_path,
+                    &plugin,
+                    &agent_refs,
+                );
+            }
 
             // Create tmux window and spawn agent with /agtx:execute
             let task_content = child.content_text();
@@ -6901,7 +6909,11 @@ fn setup_task_worktree(
     // Write skills to worktree .agtx/skills/ and agent-native discovery paths
     // Deploy for all unique agents configured across phases
     let agent_refs: Vec<&str> = all_phase_agents.iter().map(|s| s.as_str()).collect();
-    write_skills_to_worktree(&worktree_path_str, project_path, plugin, &agent_refs, enable_agent_teams);
+    if enable_agent_teams {
+        write_skills_to_worktree_teams(&worktree_path_str, project_path, plugin, &agent_refs);
+    } else {
+        write_skills_to_worktree(&worktree_path_str, project_path, plugin, &agent_refs);
+    }
 
     // Copy referenced task artifacts into .agtx/references/
     if !referenced_tasks.is_empty() {
@@ -8448,6 +8460,24 @@ fn load_plugin_if_configured(
 /// `agent_names` determines which native paths to use (e.g. `.claude/commands/agtx/` for Claude).
 /// When multiple agents are configured for different phases, skills are deployed for all of them.
 fn write_skills_to_worktree(
+    worktree_path: &str,
+    project_path: &Path,
+    plugin: &Option<WorkflowPlugin>,
+    agent_names: &[&str],
+) {
+    write_skills_to_worktree_impl(worktree_path, project_path, plugin, agent_names, false);
+}
+
+fn write_skills_to_worktree_teams(
+    worktree_path: &str,
+    project_path: &Path,
+    plugin: &Option<WorkflowPlugin>,
+    agent_names: &[&str],
+) {
+    write_skills_to_worktree_impl(worktree_path, project_path, plugin, agent_names, true);
+}
+
+fn write_skills_to_worktree_impl(
     worktree_path: &str,
     project_path: &Path,
     plugin: &Option<WorkflowPlugin>,

@@ -3503,7 +3503,7 @@ fn test_write_skills_to_worktree_claude() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"]);
 
     // Canonical skills
     assert!(dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists());
@@ -3535,7 +3535,7 @@ fn test_write_skills_to_worktree_gemini_toml() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"]);
 
     let toml_path = dir.path().join(".gemini/commands/agtx/plan.toml");
     assert!(toml_path.exists());
@@ -3555,7 +3555,7 @@ fn test_write_skills_to_worktree_codex() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"]);
 
     // Codex uses subdirectories with SKILL.md
     assert!(dir.path().join(".codex/skills/agtx-plan/SKILL.md").exists());
@@ -3570,7 +3570,7 @@ fn test_write_skills_to_worktree_opencode() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"], false);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"]);
 
     let md_path = dir.path().join(".opencode/command/agtx-plan.md");
     assert!(md_path.exists());
@@ -3578,6 +3578,52 @@ fn test_write_skills_to_worktree_opencode() {
     assert!(
         content.starts_with("---\ndescription:"),
         "OpenCode should have description frontmatter"
+    );
+}
+
+#[test]
+fn test_write_skills_to_worktree_teams_deploys_plan_teams() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree_teams(&wt, dir.path(), &None, &["claude"]);
+
+    // Canonical plan skill should contain plan-teams content, not plan content
+    let plan_path = dir.path().join(".agtx/skills/agtx-plan/SKILL.md");
+    assert!(plan_path.exists());
+    let content = std::fs::read_to_string(&plan_path).unwrap();
+    assert!(
+        content.contains("create_subtask"),
+        "plan-teams skill should mention create_subtask MCP tool"
+    );
+
+    // Claude-native plan.md should also have teams content
+    let claude_plan = dir.path().join(".claude/commands/agtx/plan.md");
+    assert!(claude_plan.exists());
+    let claude_content = std::fs::read_to_string(&claude_plan).unwrap();
+    assert!(
+        claude_content.contains("create_subtask"),
+        "Claude-native plan skill should have teams content"
+    );
+
+    // Other skills (execute, review, research) are unaffected
+    assert!(dir.path().join(".agtx/skills/agtx-execute/SKILL.md").exists());
+    assert!(dir.path().join(".agtx/skills/agtx-review/SKILL.md").exists());
+    assert!(dir.path().join(".agtx/skills/agtx-research/SKILL.md").exists());
+}
+
+#[test]
+fn test_write_skills_to_worktree_regular_does_not_deploy_plan_teams() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"]);
+
+    let plan_path = dir.path().join(".agtx/skills/agtx-plan/SKILL.md");
+    let content = std::fs::read_to_string(&plan_path).unwrap();
+    assert!(
+        !content.contains("create_subtask"),
+        "regular plan skill should not contain teams content"
     );
 }
 
