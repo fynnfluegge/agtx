@@ -153,7 +153,11 @@ Global worktree defaults can be set here:
 # ~/.config/agtx/config.toml
 [worktree]
 base_branch = "dev"
+worktree_dir = ".worktrees"  # default: ".agtx/worktrees"
 ```
+
+`worktree_dir` is the directory (relative to project root) where task worktrees are created. Defaults
+to `.agtx/worktrees` if not set.
 
 ### Project Configuration
 
@@ -162,6 +166,9 @@ Per-project settings can be placed in `.agtx/config.toml` at the project root:
 ```toml
 # Base branch used when creating new task worktrees (optional)
 base_branch = "dev"
+
+# Directory where worktrees are created (optional, default: ".agtx/worktrees")
+worktree_dir = ".worktrees"
 
 # Files to copy from project root into each new worktree (comma-separated)
 # Paths are relative and preserve directory structure
