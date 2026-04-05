@@ -751,6 +751,17 @@ impl AgtxMcpServer {
         let (default_agent, default_plugin) = self.config_defaults();
         let project_name = self.project_name();
 
+        // Validate referenced task IDs exist
+        if let Some(ref refs) = params.referenced_tasks {
+            for ref_id in refs.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                match db.get_task(ref_id) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return format!("Error: referenced task not found: {}", ref_id),
+                    Err(e) => return format!("Error checking referenced task: {}", e),
+                }
+            }
+        }
+
         let mut task = Task::new(&params.title, &default_agent, &project_name);
         task.description = params.description;
         task.plugin = params.plugin.or(default_plugin);
@@ -787,11 +798,18 @@ impl AgtxMcpServer {
         // Pass 1: Validate index-based dependencies
         for (i, batch_task) in params.tasks.iter().enumerate() {
             if let Some(ref deps) = batch_task.depends_on {
+                let mut seen = std::collections::HashSet::new();
                 for &dep_idx in deps {
                     if dep_idx >= i {
                         return format!(
                             "Error: task[{}] '{}' has depends_on index {} which is >= its own index {}. Only backward references allowed.",
                             i, batch_task.title, dep_idx, i
+                        );
+                    }
+                    if !seen.insert(dep_idx) {
+                        return format!(
+                            "Error: task[{}] '{}' has duplicate depends_on index {}.",
+                            i, batch_task.title, dep_idx
                         );
                     }
                 }
