@@ -76,6 +76,21 @@ Backlog → Research → Planning → Running → Review
    finish processing and have no more pending work — this is how the board
    knows you are ready to receive the next notification.
 
+## Subtask Waves
+
+Tasks may have subtasks (identifiable by `parent_task_id` in `get_task` response).
+
+- **Only advance subtasks where `allowed_actions` includes `move_forward`.**
+  Dep-blocking is automatic — blocked tasks won't have `move_forward` available.
+- **Subtasks follow the same lifecycle as regular tasks:** Planning → Running → Review.
+  Each subtask has its own agent, worktree, and phase progression.
+- **When all children of a parent reach Done** (merged into parent branch), you'll
+  receive a notification: `"All subtasks of \"...\" (...) merged — parent ready for review"`.
+  Advance the parent with `move_forward` at that point.
+- **Never advance a parent independently** while it has children still in
+  Planning or Running. The parent's `allowed_actions` will omit `move_forward` until
+  all children are Done — trust the allowed_actions check.
+
 ## Rules
 
 - **You are a coordinator, not a reviewer.** Your job is to move tasks between phases.

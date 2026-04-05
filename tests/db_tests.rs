@@ -232,3 +232,90 @@ fn test_notifications_empty_queue() {
     let notifs = db.consume_notifications().unwrap();
     assert_eq!(notifs.len(), 0);
 }
+
+// === Subtask / parent_task_id Tests ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_create_task_with_parent_task_id() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let parent = Task::new("Parent task", "claude", "project-1");
+    db.create_task(&parent).unwrap();
+
+    let mut child = Task::new("Child task", "claude", "project-1");
+    child.parent_task_id = Some(parent.id.clone());
+    child.subtask_slug = Some("subtask-1".to_string());
+    db.create_task(&child).unwrap();
+
+    let fetched = db.get_task(&child.id).unwrap().unwrap();
+    assert_eq!(fetched.parent_task_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(fetched.subtask_slug.as_deref(), Some("subtask-1"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_get_child_tasks_returns_children() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let parent = Task::new("Parent", "claude", "project-1");
+    db.create_task(&parent).unwrap();
+
+    let mut child1 = Task::new("Child 1", "claude", "project-1");
+    child1.parent_task_id = Some(parent.id.clone());
+    child1.subtask_slug = Some("subtask-1".to_string());
+
+    let mut child2 = Task::new("Child 2", "claude", "project-1");
+    child2.parent_task_id = Some(parent.id.clone());
+    child2.subtask_slug = Some("subtask-2".to_string());
+
+    db.create_task(&child1).unwrap();
+    db.create_task(&child2).unwrap();
+
+    let children = db.get_child_tasks(&parent.id).unwrap();
+    assert_eq!(children.len(), 2);
+    assert!(children.iter().any(|t| t.id == child1.id));
+    assert!(children.iter().any(|t| t.id == child2.id));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_get_child_tasks_empty_for_non_parent() {
+    let db = Database::open_in_memory_project().unwrap();
+    let task = Task::new("Regular task", "claude", "project-1");
+    db.create_task(&task).unwrap();
+
+    let children = db.get_child_tasks(&task.id).unwrap();
+    assert!(children.is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_update_task_roundtrips_subtask_deps_and_slug() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let parent = Task::new("Parent", "claude", "project-1");
+    db.create_task(&parent).unwrap();
+
+    let mut child = Task::new("Child", "claude", "project-1");
+    child.parent_task_id = Some(parent.id.clone());
+    child.subtask_slug = Some("subtask-2".to_string());
+    child.subtask_deps = Some("dep-id-1,dep-id-2".to_string());
+    db.create_task(&child).unwrap();
+
+    let fetched = db.get_task(&child.id).unwrap().unwrap();
+    assert_eq!(fetched.subtask_slug.as_deref(), Some("subtask-2"));
+    assert_eq!(
+        fetched.subtask_deps.as_deref(),
+        Some("dep-id-1,dep-id-2")
+    );
+
+    // Update: clear deps
+    let mut updated = fetched;
+    updated.subtask_deps = None;
+    db.update_task(&updated).unwrap();
+
+    let refetched = db.get_task(&child.id).unwrap().unwrap();
+    assert!(refetched.subtask_deps.is_none());
+    assert_eq!(refetched.subtask_slug.as_deref(), Some("subtask-2"));
+}

@@ -249,6 +249,8 @@ struct AppState {
     review_to_running_task_id: Option<String>,
     // Git diff popup
     diff_popup: Option<DiffPopup>,
+    // Subtask dashboard popup (shown when pressing Enter on a parent with active subtasks)
+    subtask_dashboard: Option<SubtaskDashboard>,
     // Channel for receiving PR description generation results
     pr_generation_rx: Option<mpsc::Receiver<(String, String)>>,
     // PR creation status popup
@@ -294,6 +296,18 @@ struct AppState {
     orchestrator_last_check: Instant,
     // Background session refresh channel (non-blocking phase status polling)
     session_refresh_rx: Option<mpsc::Receiver<SessionRefreshResult>>,
+}
+
+/// Subtask dashboard popup shown when pressing Enter on a parent task with active subtasks.
+/// Lists each subtask with its status; keys 1-9 jump to that subtask's tmux pane.
+#[derive(Debug, Clone)]
+struct SubtaskDashboard {
+    /// Parent task ID
+    parent_id: String,
+    /// Parent task title
+    parent_title: String,
+    /// Ordered list of subtask IDs shown in the dashboard
+    subtask_ids: Vec<String>,
 }
 
 /// State for confirming move to Done
@@ -590,6 +604,7 @@ impl App {
                 pr_confirm_popup: None,
                 review_to_running_task_id: None,
                 diff_popup: None,
+                subtask_dashboard: None,
                 pr_generation_rx: None,
                 pr_status_popup: None,
                 pr_creation_rx: None,
@@ -765,6 +780,7 @@ impl App {
                 pr_confirm_popup: None,
                 review_to_running_task_id: None,
                 diff_popup: None,
+                subtask_dashboard: None,
                 pr_generation_rx: None,
                 pr_status_popup: None,
                 pr_creation_rx: None,
@@ -1017,16 +1033,43 @@ impl App {
             .split(chunks[1]);
 
         for (i, status) in TaskStatus::columns().iter().enumerate() {
-            let tasks: Vec<&Task> = state
+            // Column placement rule: subtasks always render in their parent's column.
+            // Collect tasks that "belong" to this column:
+            //   - Regular tasks (no parent_task_id) with this status
+            //   - Subtasks whose parent has this status
+            // Then interleave: for each parent in the column, insert its subtasks right below it.
+            let regular_tasks: Vec<&Task> = state
                 .board
                 .tasks
                 .iter()
-                .filter(|t| t.status == *status)
+                .filter(|t| t.status == *status && t.parent_task_id.is_none())
                 .collect();
+
+            // Build ordered task list: parent → its subtasks (sorted by created_at) → next parent
+            let mut tasks: Vec<(&Task, bool)> = Vec::new(); // (task, is_subtask_card)
+            for parent in &regular_tasks {
+                tasks.push((parent, false));
+                let mut children: Vec<&Task> = state
+                    .board
+                    .tasks
+                    .iter()
+                    .filter(|t| t.parent_task_id.as_deref() == Some(parent.id.as_str()))
+                    .collect();
+                children.sort_by_key(|t| &t.created_at);
+                for child in children {
+                    tasks.push((child, true));
+                }
+            }
+            // Also include orphan subtasks whose parent isn't in this column
+            // (e.g. subtask whose parent_task_id no longer exists — defensive)
+            // These are already shown in their own status column via the above logic.
+            // Subtasks with a valid parent in a different column: skip (parent's column owns them).
+            // But we must include subtasks whose parent is in this column (already done above).
 
             let is_selected_column = state.board.selected_column == i;
 
-            let title = format!(" {} ({}) ", status.display_name(), tasks.len());
+            // Column header count: only count regular (non-subtask) tasks in this status
+            let title = format!(" {} ({}) ", status.display_name(), regular_tasks.len());
             let (border_style, title_style) = if is_selected_column {
                 (
                     Style::default().fg(hex_to_color(&state.config.theme.color_selected)),
@@ -1057,7 +1100,7 @@ impl App {
 
             // Check if we need a scrollbar
             let needs_scrollbar = tasks.len() > max_visible_cards;
-            let content_width = if needs_scrollbar {
+            let _content_width = if needs_scrollbar {
                 columns[i].width.saturating_sub(3) // Leave room for scrollbar
             } else {
                 columns[i].width.saturating_sub(2)
@@ -1078,18 +1121,21 @@ impl App {
                 .skip(scroll_offset)
                 .take(max_visible_cards)
                 .collect();
-            for (j, task) in visible_tasks.iter().enumerate() {
+            for (j, (task, is_subtask_card)) in visible_tasks.iter().enumerate() {
                 let actual_index = scroll_offset + j;
                 let is_selected = is_selected_column && state.board.selected_row == actual_index;
 
+                // Subtask cards are indented 2 columns and reduced in width
+                let indent: u16 = if *is_subtask_card { 2 } else { 0 };
+                let base_width = if needs_scrollbar {
+                    inner_area.width.saturating_sub(1)
+                } else {
+                    inner_area.width
+                };
                 let card_area = Rect {
-                    x: inner_area.x,
+                    x: inner_area.x + indent,
                     y: inner_area.y + (j as u16 * card_height),
-                    width: if needs_scrollbar {
-                        inner_area.width.saturating_sub(1)
-                    } else {
-                        inner_area.width
-                    },
+                    width: base_width.saturating_sub(indent),
                     height: card_height
                         .min(inner_area.height.saturating_sub(j as u16 * card_height)),
                 };
@@ -1097,6 +1143,28 @@ impl App {
                 if card_area.height < 3 {
                     break;
                 }
+
+                // Count active (non-Done) subtasks for parent badge
+                let active_child_count = state
+                    .board
+                    .tasks
+                    .iter()
+                    .filter(|t| {
+                        t.parent_task_id.as_deref() == Some(task.id.as_str())
+                            && !matches!(t.status, TaskStatus::Done)
+                    })
+                    .count();
+
+                // Compute is_blocked: subtask with unresolved deps (deps not all Done)
+                let is_blocked = task.subtask_deps.as_ref().map_or(false, |deps_str| {
+                    deps_str.split(',').filter(|s| !s.is_empty()).any(|dep_id| {
+                        !state
+                            .board
+                            .tasks
+                            .iter()
+                            .any(|t| t.id == dep_id && matches!(t.status, TaskStatus::Done))
+                    })
+                });
 
                 Self::draw_task_card(
                     frame,
@@ -1106,6 +1174,8 @@ impl App {
                     &state.config.theme,
                     state.phase_status_cache.get(&task.id),
                     state.spinner_frame,
+                    active_child_count,
+                    is_blocked,
                 );
             }
 
@@ -1514,6 +1584,11 @@ impl App {
         // Shell popup overlay
         if let Some(popup) = &state.shell_popup {
             Self::draw_shell_popup(popup, frame, area, &state.config.theme);
+        }
+
+        // Subtask dashboard popup overlay
+        if let Some(ref dashboard) = state.subtask_dashboard {
+            Self::draw_subtask_dashboard(dashboard, state, frame, area);
         }
 
         // Task search popup
@@ -2033,6 +2108,109 @@ impl App {
         }
     }
 
+    /// Draw the subtask dashboard popup for a parent task.
+    fn draw_subtask_dashboard(
+        dashboard: &SubtaskDashboard,
+        state: &AppState,
+        frame: &mut Frame,
+        area: Rect,
+    ) {
+        let popup_area = centered_rect_fixed_width(60, 70, area);
+        frame.render_widget(Clear, popup_area);
+
+        let theme = &state.config.theme;
+        let block = Block::default()
+            .title(format!(" {} ", dashboard.parent_title))
+            .title_style(
+                Style::default()
+                    .fg(hex_to_color(&theme.color_popup_header))
+                    .bold(),
+            )
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(hex_to_color(&theme.color_popup_border)));
+
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        // Build subtask rows
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(""));
+
+        for (idx, subtask_id) in dashboard.subtask_ids.iter().enumerate() {
+            let num = idx + 1;
+            if let Some(task) = state.board.tasks.iter().find(|t| &t.id == subtask_id) {
+                // Status icon from phase_status_cache
+                let status_icon = match task.status {
+                    TaskStatus::Done => "✓",
+                    TaskStatus::Review => "⌛",
+                    _ => match state.phase_status_cache.get(&task.id).map(|(s, _)| s) {
+                        Some(PhaseStatus::Ready) => "✓",
+                        Some(PhaseStatus::Idle) => "⏸",
+                        Some(PhaseStatus::Exited) => "✗",
+                        _ => "⟳",
+                    },
+                };
+
+                let is_blocked = task.subtask_deps.as_ref().map_or(false, |deps_str| {
+                    deps_str.split(',').filter(|s| !s.is_empty()).any(|dep_id| {
+                        !state
+                            .board
+                            .tasks
+                            .iter()
+                            .any(|t| t.id == dep_id && matches!(t.status, TaskStatus::Done))
+                    })
+                });
+
+                let status_label = if is_blocked {
+                    "[Blocked]".to_string()
+                } else {
+                    format!("[{}]", task.status.display_name())
+                };
+
+                let num_span = Span::styled(
+                    format!("  {}. ", num),
+                    Style::default().fg(hex_to_color(&theme.color_dimmed)),
+                );
+                let icon_span = Span::styled(
+                    format!("{} ", status_icon),
+                    Style::default().fg(hex_to_color(&theme.color_accent)),
+                );
+                let title_span = Span::styled(
+                    task.title.clone(),
+                    Style::default().fg(hex_to_color(&theme.color_text)),
+                );
+                let status_span = Span::styled(
+                    format!("  {}", status_label),
+                    Style::default().fg(hex_to_color(&theme.color_dimmed)),
+                );
+
+                lines.push(Line::from(vec![
+                    num_span,
+                    icon_span,
+                    title_span,
+                    status_span,
+                ]));
+            }
+        }
+
+        lines.push(Line::from(""));
+
+        // Footer with key hints
+        let max_num = dashboard.subtask_ids.len().min(9);
+        let footer_text = if max_num > 0 {
+            format!("  [1-{}] Open subtask   [Esc] Close", max_num)
+        } else {
+            "  [Esc] Close".to_string()
+        };
+        lines.push(Line::from(Span::styled(
+            footer_text,
+            Style::default().fg(hex_to_color(&theme.color_dimmed)),
+        )));
+
+        let content = Paragraph::new(lines);
+        frame.render_widget(content, inner);
+    }
+
     fn draw_shell_popup(popup: &ShellPopup, frame: &mut Frame, area: Rect, theme: &ThemeConfig) {
         let popup_area =
             centered_rect_fixed_width(SHELL_POPUP_WIDTH, SHELL_POPUP_HEIGHT_PERCENT, area);
@@ -2062,6 +2240,8 @@ impl App {
         theme: &ThemeConfig,
         phase_status: Option<&(PhaseStatus, Instant)>,
         spinner_frame: usize,
+        active_child_count: usize,
+        is_blocked: bool,
     ) {
         let border_style = if is_selected {
             Style::default().fg(hex_to_color(&theme.color_selected))
@@ -2079,15 +2259,35 @@ impl App {
 
         // Truncate title to fit (char-safe for UTF-8)
         let max_title_len = area.width.saturating_sub(4) as usize;
-        let title: String = if task.title.chars().count() > max_title_len {
-            let truncated: String = task
-                .title
+
+        // Build title prefix for subtasks and badge for parents
+        let is_subtask = task.parent_task_id.is_some();
+        let subtask_prefix = if is_subtask { "\u{22a2} " } else { "" }; // ⊢
+        let child_badge = if active_child_count > 0 {
+            format!(" [\u{2193}{}]", active_child_count) // [↓ N]
+        } else {
+            String::new()
+        };
+        // [blocked] badge: only show when there are unresolved deps (not all Done).
+        // draw_task_card can't query the DB, so the caller passes in a pre-computed flag.
+        // For now we keep the conservative check (non-empty deps = potentially blocked);
+        // the accurate check is done in draw_board via the `is_blocked` parameter.
+        let blocked_badge = if is_subtask && is_blocked { " [blocked]" } else { "" };
+        let base_title = format!(
+            "{}{}{}{}",
+            subtask_prefix,
+            task.title,
+            child_badge,
+            blocked_badge
+        );
+        let title: String = if base_title.chars().count() > max_title_len {
+            let truncated: String = base_title
                 .chars()
                 .take(max_title_len.saturating_sub(3))
                 .collect();
             format!("{}...", truncated)
         } else {
-            task.title.clone()
+            base_title
         };
 
         let border_type = if is_selected {
@@ -2427,6 +2627,11 @@ impl App {
         // Handle shell popup if open
         if self.state.shell_popup.is_some() {
             return self.handle_shell_popup_key(key);
+        }
+
+        // Handle subtask dashboard popup if open
+        if self.state.subtask_dashboard.is_some() {
+            return self.handle_subtask_dashboard_key(key);
         }
 
         // Handle based on mode (Dashboard vs Project)
@@ -3041,6 +3246,70 @@ impl App {
                         self.state.tmux_ops.as_ref(),
                     );
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_subtask_dashboard_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let dashboard = match self.state.subtask_dashboard.take() {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                // dashboard already taken (closed)
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                let idx = (c as u8 - b'0') as usize;
+                if idx >= 1 && idx <= dashboard.subtask_ids.len() {
+                    let subtask_id = dashboard.subtask_ids[idx - 1].clone();
+                    // Open the subtask's tmux pane
+                    if let Some(task) = self
+                        .state
+                        .board
+                        .tasks
+                        .iter()
+                        .find(|t| t.id == subtask_id)
+                    {
+                        if let Some(window_name) = task.session_name.clone() {
+                            let task_id = task.id.clone();
+                            let task_title = task.title.clone();
+                            let escalation_note = task.escalation_note.clone();
+                            let mut popup = ShellPopup::new(task_title, window_name.clone());
+                            popup.task_id = Some(task_id);
+                            popup.escalation_note = escalation_note;
+                            if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
+                                let pane_width = SHELL_POPUP_CONTENT_WIDTH;
+                                let popup_height = (term_height as u32
+                                    * SHELL_POPUP_HEIGHT_PERCENT as u32
+                                    / 100) as u16;
+                                let pane_height = popup_height.saturating_sub(4);
+                                let _ = self.state.tmux_ops.resize_window(
+                                    &window_name,
+                                    pane_width,
+                                    pane_height,
+                                );
+                                popup.last_pane_size = Some((pane_width, pane_height));
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                            }
+                            popup.cached_content = capture_tmux_pane_with_history(
+                                &window_name,
+                                500,
+                                self.state.tmux_ops.as_ref(),
+                            );
+                            self.state.shell_popup = Some(popup);
+                        }
+                    }
+                } else {
+                    // Out of range — restore dashboard
+                    self.state.subtask_dashboard = Some(dashboard);
+                }
+            }
+            _ => {
+                // Restore dashboard for any other key
+                self.state.subtask_dashboard = Some(dashboard);
             }
         }
         Ok(())
@@ -4280,6 +4549,7 @@ impl App {
             .as_ref()
             .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
         let project_path = project_path.to_path_buf();
+        let enable_agent_teams = self.state.config.enable_agent_teams;
 
         // Pre-fetch referenced task info (DB isn't Send, so fetch before spawning thread)
         let referenced_tasks: Vec<ReferencedTaskInfo> = task
@@ -4327,6 +4597,7 @@ impl App {
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
                 &referenced_tasks,
+                enable_agent_teams,
             );
 
             match result {
@@ -4373,8 +4644,27 @@ impl App {
     }
 
     /// Planning → Running: send execution skill/prompt to agent.
+    /// If the parent task has subtasks in Backlog, launches all of them instead.
     /// Always returns Ok(false) to continue with db update.
     fn transition_to_running(&mut self, task: &mut Task) -> Result<bool> {
+        // Check if parent has Backlog subtasks — if so, launch them instead of the normal flow
+        if let Some(db) = &self.state.db {
+            let children = db.get_child_tasks(&task.id).unwrap_or_default();
+            let backlog_children: Vec<String> = children
+                .iter()
+                .filter(|c| matches!(c.status, TaskStatus::Backlog))
+                .map(|c| c.id.clone())
+                .collect();
+            if !backlog_children.is_empty() {
+                // Parent has subtasks — launch all of them, parent has no agent of its own
+                for child_id in backlog_children {
+                    self.launch_subtask(&child_id);
+                }
+                // Parent moves to Running but no agent is spawned for the parent itself
+                return Ok(false);
+            }
+        }
+
         if let Some(session_name) = &task.session_name {
             let plugin = self.load_task_plugin(task);
             let (running_agent, agent_switch) =
@@ -4420,6 +4710,179 @@ impl App {
         Ok(false)
     }
 
+    /// Launch a subtask: create its worktree (branched off parent branch), copy subtask_copy_files,
+    /// deploy skills, and spawn the agent with /agtx:execute.
+    fn launch_subtask(&mut self, child_id: &str) {
+        let db = match &self.state.db {
+            Some(db) => db,
+            None => return,
+        };
+
+        let child = match db.get_task(child_id).ok().flatten() {
+            Some(t) => t,
+            None => return,
+        };
+        let parent = match child
+            .parent_task_id
+            .as_ref()
+            .and_then(|pid| db.get_task(pid).ok().flatten())
+        {
+            Some(t) => t,
+            None => return,
+        };
+
+        let parent_branch = match &parent.branch_name {
+            Some(b) => b.clone(),
+            None => return,
+        };
+        let parent_worktree = match &parent.worktree_path {
+            Some(wt) => wt.clone(),
+            None => return,
+        };
+        let child_slug = match &child.subtask_slug {
+            Some(s) => s.clone(),
+            None => child.id.clone(),
+        };
+
+        let project_path = match &self.state.project_path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        // Determine agent and model for the subtask
+        let subtask_agent = self
+            .state
+            .config
+            .subtask_agent
+            .clone()
+            .unwrap_or_else(|| self.state.config.default_agent.clone());
+        let subtask_model = self.state.config.subtask_model.clone();
+
+        // Load plugin for subtask
+        let plugin = self.load_task_plugin(&child);
+
+        // Collect subtask copy files from plugin
+        let subtask_copy_files: std::collections::HashMap<String, String> = plugin
+            .as_ref()
+            .map(|p| p.subtask_copy_files.clone())
+            .unwrap_or_default();
+
+        let all_agents = collect_phase_agents(&self.state.config);
+        let tmux_project_name = self.state.tmux_project_name.clone();
+        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+        let git_ops = Arc::clone(&self.state.git_ops);
+        let agent_ops = self.state.agent_registry.get(&subtask_agent);
+        let child_id_owned = child_id.to_string();
+        let enable_agent_teams = self.state.config.enable_agent_teams;
+
+        std::thread::spawn(move || {
+            // Create worktree branched off parent branch (not main)
+            let unique_slug = generate_task_slug(&child.id, &child.title);
+            let window_name = format!("task-{}", unique_slug);
+            let target = format!("{}:{}", tmux_project_name, window_name);
+
+            let worktree_path_str = match git_ops.create_worktree(
+                &project_path,
+                &unique_slug,
+                &parent_branch,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Failed to create subtask worktree: {}", e);
+                    return;
+                }
+            };
+            let worktree_path = Path::new(&worktree_path_str);
+
+            // Copy subtask_copy_files from parent worktree with {slug} substitution
+            for (src_template, dst) in &subtask_copy_files {
+                let src_path_str = src_template.replace("{slug}", &child_slug);
+                let src = Path::new(&parent_worktree).join(&src_path_str);
+                let dst = worktree_path.join(dst);
+                if let Some(parent_dir) = dst.parent() {
+                    let _ = std::fs::create_dir_all(parent_dir);
+                }
+                if src.exists() {
+                    let _ = std::fs::copy(&src, &dst);
+                }
+            }
+
+            // Deploy skills to the worktree
+            let agent_refs: Vec<&str> = all_agents.iter().map(|s| s.as_str()).collect();
+            if enable_agent_teams {
+                write_skills_to_worktree_teams(
+                    &worktree_path_str,
+                    &project_path,
+                    &plugin,
+                    &agent_refs,
+                );
+            } else {
+                write_skills_to_worktree(
+                    &worktree_path_str,
+                    &project_path,
+                    &plugin,
+                    &agent_refs,
+                );
+            }
+
+            // Create tmux window and spawn agent with /agtx:execute
+            let task_content = child.content_text();
+            let skill_cmd = resolve_skill_command(&plugin, "running", &subtask_agent, &task_content, child.cycle);
+            let prompt = resolve_prompt(&plugin, "running", &task_content, &child.id, child.cycle);
+            let auto_dismiss = plugin
+                .as_ref()
+                .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+
+            let agent = crate::agent::get_agent(&subtask_agent).unwrap_or_else(|| {
+                crate::agent::known_agents()
+                    .into_iter()
+                    .next()
+                    .expect("at least one agent")
+            });
+            let cmd = if let Some(ref model) = subtask_model {
+                agent.build_interactive_command_with_model("", Some(model.as_str()))
+            } else {
+                agent.build_interactive_command("")
+            };
+
+            let session_name = format!(
+                "task-{}--{}--{}",
+                &child.id[..8],
+                tmux_project_name,
+                &unique_slug.chars().take(20).collect::<String>()
+            );
+
+            if tmux_ops.create_window(&tmux_project_name, &window_name, &worktree_path_str, Some(cmd)).is_ok() {
+                // Wait for agent, send skill+prompt
+                if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &target) {
+                    send_skill_and_prompt(
+                        &tmux_ops,
+                        &ready_target,
+                        &skill_cmd,
+                        &prompt,
+                        &None,
+                        &task_content,
+                        &subtask_agent,
+                        &auto_dismiss,
+                    );
+                }
+            }
+
+            // Update child task in DB
+            if let Ok(db) = crate::db::Database::open_project(&project_path) {
+                if let Ok(Some(mut updated_child)) = db.get_task(&child_id_owned) {
+                    updated_child.status = TaskStatus::Running;
+                    updated_child.session_name = Some(session_name);
+                    updated_child.worktree_path = Some(worktree_path_str);
+                    updated_child.branch_name = Some(format!("task/{}", unique_slug));
+                    updated_child.agent = subtask_agent;
+                    updated_child.updated_at = chrono::Utc::now();
+                    let _ = db.update_task(&updated_child);
+                }
+            }
+        });
+    }
+
     /// Running → Review: send review skill/prompt, then handle PR state.
     /// Returns Ok(true) always (PR push or review confirm popup shown).
     fn transition_to_review(&mut self, task: &mut Task, project_path: &Path) -> Result<bool> {
@@ -4452,6 +4915,11 @@ impl App {
             );
         }
         task.agent = review_agent.clone();
+
+        // Subtasks do NOT create PRs — just move to Review status
+        if task.parent_task_id.is_some() {
+            return Ok(false);
+        }
 
         // PR already exists (task was resumed from Review) — push new changes
         if task.pr_number.is_some() {
@@ -4502,6 +4970,93 @@ impl App {
     /// Review → Done: check PR state, uncommitted changes, or clean up.
     /// Returns Ok(true) if a confirmation popup was shown, Ok(false) to continue with db update.
     fn transition_to_done(&mut self, task: &mut Task, project_path: &Path) -> Result<bool> {
+        // Subtask Review → Done: merge subtask branch into parent branch locally (no PR)
+        if let Some(ref parent_id) = task.parent_task_id.clone() {
+            if let Some(db) = &self.state.db {
+                if let Ok(Some(parent)) = db.get_task(parent_id) {
+                    if let Some(ref parent_worktree) = parent.worktree_path {
+                        let child_branch = task.branch_name.clone().unwrap_or_default();
+                        let parent_wt = parent_worktree.clone();
+                        let git_ops = Arc::clone(&self.state.git_ops);
+                        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                        let task_id_clone = task.id.clone();
+                        let session_name = task.session_name.clone();
+                        let worktree_path = task.worktree_path.clone();
+                        let branch_name = task.branch_name.clone();
+                        let project_path_clone = project_path.to_path_buf();
+
+                        // Try the merge; if conflicts, send merge-conflicts skill to subtask
+                        let merge_result = std::process::Command::new("git")
+                            .args(["-C", &parent_wt, "merge", &child_branch])
+                            .output();
+
+                        match merge_result {
+                            Ok(out) if out.status.success() => {
+                                // Clean merge — proceed to Done cleanup
+                                task.session_name = None;
+                                task.worktree_path = None;
+                                std::thread::spawn(move || {
+                                    cleanup_task_resources(
+                                        &task_id_clone,
+                                        &branch_name,
+                                        &session_name,
+                                        &worktree_path,
+                                        &project_path_clone,
+                                        tmux_ops.as_ref(),
+                                        git_ops.as_ref(),
+                                    );
+                                });
+                                // Check if this was the last non-Done sibling — if so, notify orchestrator
+                                if self.state.orchestrator_session.is_some() {
+                                    let siblings = db.get_child_tasks(parent_id).unwrap_or_default();
+                                    let all_done = !siblings.is_empty()
+                                        && siblings.iter().all(|s| {
+                                            s.id == task.id || matches!(s.status, TaskStatus::Done)
+                                        });
+                                    if all_done {
+                                        let short_pid = if parent_id.len() >= 8 { &parent_id[..8] } else { parent_id.as_str() };
+                                        let notif = crate::db::Notification::new(format!(
+                                            "All subtasks of \"{}\" ({}) merged — parent ready for review",
+                                            parent.title, short_pid
+                                        ));
+                                        let _ = db.create_notification(&notif);
+                                    }
+                                }
+                                return Ok(false);
+                            }
+                            _ => {
+                                // Merge failed/conflicted — send merge-conflicts skill to subtask session
+                                if let Some(ref sess) = task.session_name {
+                                    let skill_cmd = skills::transform_plugin_command(
+                                        "/agtx:merge-conflicts",
+                                        &task.agent,
+                                    );
+                                    let prompt = format!(
+                                        "Base branch is {}. Merge conflicts detected — resolve them, then I'll retry the merge.",
+                                        parent_wt
+                                    );
+                                    send_skill_and_prompt(
+                                        &self.state.tmux_ops,
+                                        sess,
+                                        &skill_cmd,
+                                        &prompt,
+                                        &None,
+                                        "",
+                                        &task.agent,
+                                        &[],
+                                    );
+                                }
+                                // Don't advance to Done yet
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+            }
+            // Parent worktree not available — proceed to Done without merge
+            return Ok(false);
+        }
+
         if let Some(pr_number) = task.pr_number {
             let pr_state = self
                 .state
@@ -4647,6 +5202,7 @@ impl App {
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
                 &[],
+                false,
             );
 
             match result {
@@ -4840,6 +5396,7 @@ impl App {
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
                 &[],
+                false,
             );
 
             match result {
@@ -5397,10 +5954,45 @@ impl App {
 
     fn open_selected_task(&mut self) -> Result<()> {
         if let Some(task) = self.state.board.selected_task() {
-            if let Some(window_name) = &task.session_name.clone() {
-                let task_id = task.id.clone();
-                let escalation_note = task.escalation_note.clone();
-                let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
+            let task_id = task.id.clone();
+            let task_title = task.title.clone();
+            let session_name = task.session_name.clone();
+            let escalation_note = task.escalation_note.clone();
+
+            // Check if this task is a parent with active subtasks — show dashboard instead of tmux pane
+            let active_subtasks: Vec<String> = self
+                .state
+                .board
+                .tasks
+                .iter()
+                .filter(|t| {
+                    t.parent_task_id.as_deref() == Some(task_id.as_str())
+                        && !matches!(t.status, TaskStatus::Done)
+                })
+                .map(|t| t.id.clone())
+                .collect();
+
+            if !active_subtasks.is_empty() {
+                // Sort by created_at for stable ordering
+                let mut ordered: Vec<&crate::db::Task> = self
+                    .state
+                    .board
+                    .tasks
+                    .iter()
+                    .filter(|t| t.parent_task_id.as_deref() == Some(task_id.as_str()))
+                    .collect();
+                ordered.sort_by_key(|t| &t.created_at);
+                let subtask_ids: Vec<String> = ordered.iter().map(|t| t.id.clone()).collect();
+                self.state.subtask_dashboard = Some(SubtaskDashboard {
+                    parent_id: task_id,
+                    parent_title: task_title,
+                    subtask_ids,
+                });
+                return Ok(());
+            }
+
+            if let Some(window_name) = session_name {
+                let mut popup = ShellPopup::new(task_title.clone(), window_name.clone());
                 popup.task_id = Some(task_id);
                 popup.escalation_note = escalation_note;
 
@@ -5426,7 +6018,7 @@ impl App {
 
                 // Capture initial content
                 popup.cached_content =
-                    capture_tmux_pane_with_history(window_name, 500, self.state.tmux_ops.as_ref());
+                    capture_tmux_pane_with_history(&window_name, 500, self.state.tmux_ops.as_ref());
 
                 self.state.shell_popup = Some(popup);
             }
@@ -5746,6 +6338,24 @@ impl App {
         for task_status in result.statuses {
             let mut phase = task_status.phase_status;
 
+            // Parent tasks in Running with active subtasks have no tmux window of their own.
+            // Override Exited/Working phase to reflect children status instead.
+            if task_status.status == TaskStatus::Running && phase == PhaseStatus::Exited {
+                let has_active_children = self
+                    .state
+                    .board
+                    .tasks
+                    .iter()
+                    .any(|t| {
+                        t.parent_task_id.as_deref() == Some(task_status.task_id.as_str())
+                            && !matches!(t.status, TaskStatus::Done)
+                    });
+                if has_active_children {
+                    // Parent is waiting on subtasks — show Working (spinner)
+                    phase = PhaseStatus::Working;
+                }
+            }
+
             if phase == PhaseStatus::Working {
                 // Idle detection: check if content hash has been stable for 15s
                 if let Some(hash) = task_status.content_hash {
@@ -5796,6 +6406,43 @@ impl App {
                             task_title, short_id, phase_name
                         ));
                         let _ = db.create_notification(&notif);
+                    }
+                }
+            }
+
+            // Parent phase override: if this is a subtask that just became Done,
+            // check if ALL siblings are Done — if so, the parent transitions to Ready.
+            {
+                let parent_id_opt = self
+                    .state
+                    .board
+                    .tasks
+                    .iter()
+                    .find(|t| t.id == task_status.task_id)
+                    .and_then(|t| t.parent_task_id.clone());
+
+                if let Some(ref parent_id) = parent_id_opt {
+                    if let Some(db) = &self.state.db {
+                        let siblings = db.get_child_tasks(parent_id).unwrap_or_default();
+                        // Also check board tasks for freshest status
+                        let all_done = !siblings.is_empty()
+                            && siblings.iter().all(|s| {
+                                // Prefer board task status (most up to date in this tick)
+                                self.state
+                                    .board
+                                    .tasks
+                                    .iter()
+                                    .find(|bt| bt.id == s.id)
+                                    .map_or(matches!(s.status, TaskStatus::Done), |bt| {
+                                        matches!(bt.status, TaskStatus::Done)
+                                    })
+                            });
+                        if all_done {
+                            // Override parent phase to Ready in TUI
+                            self.state
+                                .phase_status_cache
+                                .insert(parent_id.clone(), (PhaseStatus::Ready, now));
+                        }
                     }
                 }
             }
@@ -5966,6 +6613,7 @@ impl App {
 
         // Clear per-task caches from previous project
         self.state.merge_conflict_checked.clear();
+
         self.state.stuck_task_notified.clear();
         self.state.stuck_task_idle_since.clear();
 
@@ -6204,6 +6852,7 @@ fn setup_task_worktree(
     git_ops: &dyn GitOperations,
     agent_ops: &dyn AgentOperations,
     referenced_tasks: &[ReferencedTaskInfo],
+    enable_agent_teams: bool,
 ) -> Result<String> {
     let unique_slug = generate_task_slug(&task.id, &task.title);
     let window_name = format!("task-{}", unique_slug);
@@ -6260,7 +6909,11 @@ fn setup_task_worktree(
     // Write skills to worktree .agtx/skills/ and agent-native discovery paths
     // Deploy for all unique agents configured across phases
     let agent_refs: Vec<&str> = all_phase_agents.iter().map(|s| s.as_str()).collect();
-    write_skills_to_worktree(&worktree_path_str, project_path, plugin, &agent_refs);
+    if enable_agent_teams {
+        write_skills_to_worktree_teams(&worktree_path_str, project_path, plugin, &agent_refs);
+    } else {
+        write_skills_to_worktree(&worktree_path_str, project_path, plugin, &agent_refs);
+    }
 
     // Copy referenced task artifacts into .agtx/references/
     if !referenced_tasks.is_empty() {
@@ -7812,15 +8465,51 @@ fn write_skills_to_worktree(
     plugin: &Option<WorkflowPlugin>,
     agent_names: &[&str],
 ) {
+    write_skills_to_worktree_impl(worktree_path, project_path, plugin, agent_names, false);
+}
+
+fn write_skills_to_worktree_teams(
+    worktree_path: &str,
+    project_path: &Path,
+    plugin: &Option<WorkflowPlugin>,
+    agent_names: &[&str],
+) {
+    write_skills_to_worktree_impl(worktree_path, project_path, plugin, agent_names, true);
+}
+
+fn write_skills_to_worktree_impl(
+    worktree_path: &str,
+    project_path: &Path,
+    plugin: &Option<WorkflowPlugin>,
+    agent_names: &[&str],
+    enable_agent_teams: bool,
+) {
     let agtx_dir = Path::new(worktree_path).join(".agtx");
     let _ = std::fs::create_dir_all(&agtx_dir);
+
+    // Build the effective skill list — replace agtx-plan with plan-teams when flag is on
+    let plan_content: &str = if enable_agent_teams {
+        skills::PLAN_TEAMS_SKILL
+    } else {
+        skills::PLAN_SKILL
+    };
+    let effective_skills: Vec<(&str, &str)> = skills::BUILTIN_SKILLS
+        .iter()
+        .map(|(name, default)| {
+            if *name == "agtx-plan" {
+                (*name, plan_content)
+            } else {
+                (*name, *default)
+            }
+        })
+        .collect();
 
     // Write canonical .agtx/skills/ directory
     let skills_dir = agtx_dir.join("skills");
     if let Some(ref p) = plugin {
         // Copy skills from plugin directory, falling back to built-in defaults
         if let Some(plugin_dir) = WorkflowPlugin::plugin_dir(&p.name, Some(project_path)) {
-            for (skill_name, default_content) in skills::BUILTIN_SKILLS {
+            for (skill_name, default_content) in &effective_skills {
                 let src = plugin_dir.join(skill_name).join("SKILL.md");
                 let dst_dir = skills_dir.join(skill_name);
                 let _ = std::fs::create_dir_all(&dst_dir);
@@ -7832,7 +8521,7 @@ fn write_skills_to_worktree(
             }
         } else {
             // Plugin dir not found, write defaults
-            for (skill_name, skill_content) in skills::BUILTIN_SKILLS {
+            for (skill_name, skill_content) in &effective_skills {
                 let skill_dir = skills_dir.join(skill_name);
                 let _ = std::fs::create_dir_all(&skill_dir);
                 let _ = std::fs::write(skill_dir.join("SKILL.md"), skill_content);
@@ -7840,7 +8529,7 @@ fn write_skills_to_worktree(
         }
     } else {
         // Write built-in default skills
-        for (skill_name, skill_content) in skills::BUILTIN_SKILLS {
+        for (skill_name, skill_content) in &effective_skills {
             let skill_dir = skills_dir.join(skill_name);
             let _ = std::fs::create_dir_all(&skill_dir);
             let _ = std::fs::write(skill_dir.join("SKILL.md"), skill_content);
@@ -7858,7 +8547,7 @@ fn write_skills_to_worktree(
             };
             let _ = std::fs::create_dir_all(&native_dir);
 
-            for (skill_dir_name, default_content) in skills::BUILTIN_SKILLS {
+            for (skill_dir_name, default_content) in &effective_skills {
                 let content =
                     resolve_skill_content(plugin, skill_dir_name, project_path, default_content);
 

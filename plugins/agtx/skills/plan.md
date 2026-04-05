@@ -35,8 +35,7 @@ What could go wrong — edge cases, breaking changes, areas needing extra care.
 
 ## CRITICAL: Stop After Writing
 
-After writing `.agtx/plan.md`:
-- Do NOT start implementing
-- Do NOT modify any source files
-- Say: "Plan written to `.agtx/plan.md`. Waiting for approval."
-- Wait for explicit instructions to proceed
+Once you have written `.agtx/plan.md`:
+1. Write `.agtx/planning.done` (signals phase complete to agtx)
+2. Say: "Planning complete."
+**Stop. Do not implement anything.**

@@ -44,6 +44,7 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 ## Features
 
 - **Orchestrator agent**: A dedicated AI agent that autonomously manages your kanban board via [MCP](https://modelcontextprotocol.io) — delegates to coding agents, advances phases, checks for merge conflicts ([experimental](#orchestrator-agent-experimental))
+- **Agent teams**: Decompose complex tasks into parallel subtasks during planning — each subtask gets its own worktree, agent session, and kanban lifecycle, then merges back automatically ([experimental](#agent-teams-experimental))
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — or define your own with a single TOML file
@@ -169,6 +170,19 @@ copy_files = ".env, .env.local, web/.env.local"
 
 # Shell command to run inside the worktree after creation and file copying
 init_script = "scripts/init_worktree.sh"
+
+# Enable agent teams: planning phase decomposes complex tasks into parallel subtasks.
+# Each subtask gets its own worktree, agent session, and kanban lifecycle.
+# Subtasks merge back into the parent branch automatically when done.
+# Defaults to false — opt-in per project.
+enable_agent_teams = true
+
+# Agent to use for subtasks (defaults to default_agent if not set)
+subtask_agent = "claude"
+
+# Model flag passed when spawning subtask agents (optional)
+# Only used if the agent supports --model
+subtask_model = "claude-sonnet-4-6"
 ```
 
 `base_branch` controls which branch new task worktrees are created from. If omitted or empty, agtx
@@ -447,6 +461,7 @@ agtx --experimental   # then press O
 **What it does:**
 - Monitors tasks in Planning and Running
 - Advances tasks automatically as phases complete (Planning → Running → Review)
+- Manages subtask waves: advances individual subtasks through their lifecycle, respects dep-blocking between siblings, and advances the parent when all subtasks are merged
 - Respects plugin phase rules — checks `allowed_actions` before each transition
 - Detects stuck tasks (idle for 1+ minute without a phase artifact) and reads the agent pane to diagnose the cause
 - Nudges stuck agents, answers CLI prompts automatically, or escalates to you with a reason when human input is needed
@@ -489,6 +504,32 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 5. If a task has been idle for 1+ minute without a phase artifact, the orchestrator is notified — it reads the pane with `read_pane_content`, then either nudges the agent with `send_to_task` or calls `move_task` with `escalate_to_user` to flag it for your attention
 6. Escalated tasks show a `⚠` badge on the kanban board; opening the task popup shows the reason and dismisses the flag
 7. MCP registration is cleaned up when the orchestrator is stopped
+
+## Agent Teams (Experimental)
+
+> One task. Multiple agents. All in parallel.
+
+When `enable_agent_teams = true`, the planning phase uses a decomposition-aware skill (`plan-teams.md`). The planning agent analyses the task, applies a heuristic (3+ directories, sequential layers, or 5+ independent steps), and either decomposes into subtasks or proceeds as a normal single task.
+
+**What happens on decomposition:**
+1. The planning agent writes a plan per subtask to `.agtx/subtasks/{slug}/plan.md`
+2. It calls the `create_subtask` MCP tool for each subtask — child task records appear on the board under the parent
+3. When the parent advances to Running, all subtasks launch in parallel — each gets its own worktree branched off the parent branch, its own tmux window, and its own agent session
+4. Subtasks follow the normal Planning → Running → Review lifecycle, managed by the orchestrator
+5. When a subtask moves to Done, its branch is merged locally into the parent worktree. On conflict, the agent is automatically sent the `/agtx:merge-conflicts` skill
+6. When all subtasks are merged, the orchestrator receives a notification and advances the parent task to Review
+
+**On the board**, subtask cards appear indented under their parent in the parent's column. Blocked subtasks (waiting on a sibling dependency) show a `[blocked]` badge. Opening a parent with active subtasks shows a dashboard listing each subtask's status — press `1`–`9` to jump to that subtask's agent pane.
+
+**Enable per project** in `.agtx/config.toml`:
+
+```toml
+enable_agent_teams = true
+
+# Optional: use a faster/cheaper model for subtasks
+subtask_agent = "claude"
+subtask_model = "claude-haiku-4-5-20251001"
+```
 
 ## Contributing
 

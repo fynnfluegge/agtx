@@ -83,6 +83,28 @@ pub struct SendToTaskParams {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateSubtaskParams {
+    /// The parent task ID (UUID) — must be in Planning status
+    #[schemars(description = "The parent task ID (UUID) — must be in Planning status")]
+    pub parent_task_id: String,
+    /// Short slug for this subtask (e.g. "subtask-1") — used in depends_on references and file paths
+    #[schemars(description = "Short slug for this subtask (e.g. \"subtask-1\")")]
+    pub slug: String,
+    /// Short imperative title (3-5 words) describing the deliverable
+    #[schemars(description = "Short imperative title (3-5 words) describing the deliverable")]
+    pub title: String,
+    /// 1-3 sentence description of what to implement and which files to own
+    #[schemars(description = "1-3 sentence description of what to implement and which files to own")]
+    pub description: String,
+    /// Comma-separated files/dirs this subtask exclusively modifies
+    #[schemars(description = "Comma-separated files/dirs this subtask exclusively modifies")]
+    pub scope: String,
+    /// Sibling slugs that must complete before this subtask can start ([] if none)
+    #[schemars(description = "Sibling slugs that must complete before this subtask can start")]
+    pub depends_on: Vec<String>,
+}
+
 // === Response types ===
 
 #[derive(Serialize)]
@@ -119,6 +141,7 @@ struct TaskDetail {
     pr_url: Option<String>,
     plugin: Option<String>,
     cycle: i32,
+    parent_task_id: Option<String>,
     created_at: String,
     updated_at: String,
     /// Actions the orchestrator can take on this task given its current status and plugin rules.
@@ -181,6 +204,12 @@ struct SendToTaskResponse {
     message: String,
 }
 
+#[derive(Serialize)]
+struct CreateSubtaskResult {
+    subtask_id: String,
+    message: String,
+}
+
 // === MCP Server ===
 
 #[derive(Debug, Clone)]
@@ -207,10 +236,10 @@ impl AgtxMcpServer {
     }
 
     /// Compute which move_task actions are valid for a task given its status and plugin rules.
-    fn allowed_actions(&self, task: &Task) -> Vec<String> {
+    fn allowed_actions(&self, task: &Task, db: &Database) -> Vec<String> {
         let mut actions = Vec::new();
 
-        let plugin = match &task.plugin {
+        let _plugin = match &task.plugin {
             Some(name) => crate::config::WorkflowPlugin::load(name, Some(&self.project_path))
                 .ok()
                 .or_else(|| crate::skills::load_bundled_plugin(name)),
@@ -234,6 +263,36 @@ impl AgtxMcpServer {
                 actions.push("resume".to_string());
             }
             TaskStatus::Done => {}
+        }
+
+        // Dep-blocking: remove move_forward if sibling deps are not yet Done
+        if let Some(ref deps_str) = task.subtask_deps {
+            let blocked = deps_str
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .any(|dep_id| {
+                    db.get_task(dep_id)
+                        .ok()
+                        .flatten()
+                        .map(|t| !matches!(t.status, TaskStatus::Done))
+                        .unwrap_or(true)
+                });
+            if blocked {
+                actions.retain(|a| a != "move_forward");
+            }
+        }
+
+        // Parent blocking: remove move_forward (Running→Review) if any child is not Done
+        if task.parent_task_id.is_none() && matches!(task.status, TaskStatus::Running) {
+            let children = db.get_child_tasks(&task.id).unwrap_or_default();
+            if !children.is_empty() {
+                let all_done = children
+                    .iter()
+                    .all(|c| matches!(c.status, TaskStatus::Done));
+                if !all_done {
+                    actions.retain(|a| a != "move_forward");
+                }
+            }
         }
 
         actions
@@ -310,7 +369,7 @@ impl AgtxMcpServer {
         match self.open_project_db() {
             Ok(db) => match db.get_task(&params.task_id) {
                 Ok(Some(t)) => {
-                    let allowed = self.allowed_actions(&t);
+                    let allowed = self.allowed_actions(&t, &db);
                     let detail = TaskDetail {
                         id: t.id,
                         title: t.title,
@@ -325,6 +384,7 @@ impl AgtxMcpServer {
                         pr_url: t.pr_url,
                         plugin: t.plugin,
                         cycle: t.cycle,
+                        parent_task_id: t.parent_task_id,
                         created_at: t.created_at.to_rfc3339(),
                         updated_at: t.updated_at.to_rfc3339(),
                         allowed_actions: allowed,
@@ -639,6 +699,95 @@ impl AgtxMcpServer {
                     .unwrap_or_else(|e| format!("Error serializing: {}", e))
             }
             Err(e) => format!("Error sending Enter: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Create a subtask (child task) under a parent task that is in Planning status. The subtask starts in Backlog and will be launched automatically when the parent advances to Running. Idempotent: if a subtask with the same parent_task_id + slug already exists, returns its existing ID."
+    )]
+    fn create_subtask(&self, Parameters(params): Parameters<CreateSubtaskParams>) -> String {
+        let db = match self.open_project_db() {
+            Ok(db) => db,
+            Err(e) => return e,
+        };
+
+        // Verify parent exists and is in Planning status
+        let parent = match db.get_task(&params.parent_task_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                return format!("Parent task not found: {}", params.parent_task_id)
+            }
+            Err(e) => return format!("Error getting parent task: {}", e),
+        };
+        if !matches!(parent.status, TaskStatus::Planning) {
+            return format!(
+                "Parent task is not in Planning status (current: {}). Subtasks can only be created during the Planning phase.",
+                parent.status.as_str()
+            );
+        }
+
+        // Idempotency: if a subtask with same parent + slug already exists, return its ID
+        let existing_children = db.get_child_tasks(&params.parent_task_id).unwrap_or_default();
+        if let Some(existing) = existing_children
+            .iter()
+            .find(|c| c.subtask_slug.as_deref() == Some(&params.slug))
+        {
+            let result = CreateSubtaskResult {
+                subtask_id: existing.id.clone(),
+                message: format!(
+                    "Subtask with slug '{}' already exists under parent {}.",
+                    params.slug, params.parent_task_id
+                ),
+            };
+            return serde_json::to_string_pretty(&result)
+                .unwrap_or_else(|e| format!("Error serializing: {}", e));
+        }
+
+        // Resolve depends_on slugs → task IDs
+        let resolved_deps: Vec<String> = params
+            .depends_on
+            .iter()
+            .filter_map(|dep_slug| {
+                existing_children
+                    .iter()
+                    .find(|c| c.subtask_slug.as_deref() == Some(dep_slug.as_str()))
+                    .map(|c| c.id.clone())
+            })
+            .collect();
+        let subtask_deps = if resolved_deps.is_empty() {
+            None
+        } else {
+            Some(resolved_deps.join(","))
+        };
+
+        // Build description including scope
+        let full_description = format!("{}\n\nScope: {}", params.description, params.scope);
+
+        let mut subtask = crate::db::Task::new(
+            &params.title,
+            &parent.agent,
+            &parent.project_id,
+        );
+        subtask.status = TaskStatus::Backlog;
+        subtask.parent_task_id = Some(params.parent_task_id.clone());
+        subtask.subtask_slug = Some(params.slug.clone());
+        subtask.subtask_deps = subtask_deps;
+        subtask.description = Some(full_description);
+        subtask.plugin = parent.plugin.clone();
+
+        match db.create_task(&subtask) {
+            Ok(()) => {
+                let result = CreateSubtaskResult {
+                    subtask_id: subtask.id,
+                    message: format!(
+                        "Subtask '{}' (slug: {}) created under parent {}.",
+                        params.title, params.slug, params.parent_task_id
+                    ),
+                };
+                serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|e| format!("Error serializing: {}", e))
+            }
+            Err(e) => format!("Error creating subtask: {}", e),
         }
     }
 }

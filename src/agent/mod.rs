@@ -36,10 +36,23 @@ impl Agent {
     /// Build the shell command to start the agent interactively.
     /// When prompt is empty, the agent starts with no initial message
     /// (task content and skill commands are sent later via tmux send_keys).
+    /// When model is set and the agent supports --model, the flag is appended.
     pub fn build_interactive_command(&self, prompt: &str) -> String {
+        self.build_interactive_command_with_model(prompt, None)
+    }
+
+    /// Build the shell command with an optional model override.
+    /// Currently only claude supports --model; other agents ignore the flag.
+    pub fn build_interactive_command_with_model(&self, prompt: &str, model: Option<&str>) -> String {
+        let model_suffix = match self.name.as_str() {
+            "claude" => model
+                .map(|m| format!(" --model {}", m))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
         if prompt.is_empty() {
             return match self.name.as_str() {
-                "claude" => "claude --dangerously-skip-permissions".to_string(),
+                "claude" => format!("claude --dangerously-skip-permissions{}", model_suffix),
                 "codex" => "codex --full-auto".to_string(),
                 "copilot" => "copilot --allow-all-tools".to_string(),
                 "gemini" => "gemini --approval-mode yolo".to_string(),
@@ -51,7 +64,7 @@ impl Agent {
 
         let escaped_prompt = prompt.replace('\'', "'\"'\"'");
         match self.name.as_str() {
-            "claude" => format!("claude --dangerously-skip-permissions '{}'", escaped_prompt),
+            "claude" => format!("claude --dangerously-skip-permissions{} '{}'", model_suffix, escaped_prompt),
             "codex" => format!("codex --full-auto '{}'", escaped_prompt),
             "copilot" => format!("copilot --allow-all-tools -p '{}'", escaped_prompt),
             "gemini" => format!("gemini --approval-mode yolo -i '{}'", escaped_prompt),

@@ -208,6 +208,9 @@ fn test_create_pr_with_content_success() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        parent_task_id: None,
+        subtask_deps: None,
+        subtask_slug: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -303,6 +306,9 @@ fn test_create_pr_with_content_no_changes() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        parent_task_id: None,
+        subtask_deps: None,
+        subtask_slug: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -357,6 +363,9 @@ fn test_create_pr_with_content_push_failure() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        parent_task_id: None,
+        subtask_deps: None,
+        subtask_slug: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -417,6 +426,9 @@ fn test_push_changes_to_existing_pr_success() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        parent_task_id: None,
+        subtask_deps: None,
+        subtask_slug: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -471,6 +483,9 @@ fn test_push_changes_to_existing_pr_no_changes() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        parent_task_id: None,
+        subtask_deps: None,
+        subtask_slug: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -508,6 +523,9 @@ fn test_push_changes_to_existing_pr_no_url() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        parent_task_id: None,
+        subtask_deps: None,
+        subtask_slug: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1416,6 +1434,7 @@ fn test_setup_task_worktree_success() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     );
 
     assert!(result.is_ok());
@@ -1468,6 +1487,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     )
     .unwrap();
 
@@ -1528,6 +1548,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     );
 
     // Should succeed despite worktree creation failure (uses fallback path)
@@ -1583,6 +1604,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     );
 
     // Should propagate the error
@@ -1634,6 +1656,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     );
 
     assert!(result.is_ok());
@@ -1688,6 +1711,7 @@ fn test_setup_task_worktree_passes_init_config() {
         &mock_git,
         &mock_agent,
         &[],
+        false,
     );
 
     assert!(result.is_ok());
@@ -1937,7 +1961,7 @@ fn test_agtx_plugin_artifacts() {
         plugin.artifacts.research.as_deref(),
         Some(".agtx/research.md")
     );
-    assert_eq!(plugin.artifacts.planning.as_deref(), Some(".agtx/plan.md"));
+    assert_eq!(plugin.artifacts.planning.as_deref(), Some(".agtx/planning.done"));
     assert_eq!(
         plugin.artifacts.running.as_deref(),
         Some(".agtx/execute.md")
@@ -2046,6 +2070,7 @@ fn test_resolve_skill_command_with_plugin() {
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
+        subtask_copy_files: std::collections::HashMap::new(),
     });
     // Claude/Gemini: canonical form unchanged
     assert_eq!(
@@ -2108,6 +2133,7 @@ fn test_plugin_supports_agent() {
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
+        subtask_copy_files: std::collections::HashMap::new(),
     };
     assert!(plugin.supports_agent("claude"));
     assert!(plugin.supports_agent("copilot"));
@@ -2133,6 +2159,7 @@ fn test_plugin_supports_agent() {
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
+        subtask_copy_files: std::collections::HashMap::new(),
     };
     assert!(plugin.supports_agent("claude"));
     assert!(plugin.supports_agent("codex"));
@@ -2204,6 +2231,7 @@ fn test_phase_artifact_exists_with_glob() {
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
+        subtask_copy_files: std::collections::HashMap::new(),
     });
 
     let worktree = tmp.to_string_lossy().to_string();
@@ -2524,6 +2552,7 @@ fn test_resolve_prompt_trigger_with_gsd() {
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
+        subtask_copy_files: std::collections::HashMap::new(),
     });
     assert_eq!(
         resolve_prompt_trigger(&plugin, "research"),
@@ -2562,6 +2591,7 @@ fn test_resolve_prompt_trigger_empty_string_filtered() {
         cyclic: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
+        subtask_copy_files: std::collections::HashMap::new(),
     });
     // Empty strings should be filtered out
     assert_eq!(resolve_prompt_trigger(&plugin, "research"), None);
@@ -3548,6 +3578,52 @@ fn test_write_skills_to_worktree_opencode() {
     assert!(
         content.starts_with("---\ndescription:"),
         "OpenCode should have description frontmatter"
+    );
+}
+
+#[test]
+fn test_write_skills_to_worktree_teams_deploys_plan_teams() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree_teams(&wt, dir.path(), &None, &["claude"]);
+
+    // Canonical plan skill should contain plan-teams content, not plan content
+    let plan_path = dir.path().join(".agtx/skills/agtx-plan/SKILL.md");
+    assert!(plan_path.exists());
+    let content = std::fs::read_to_string(&plan_path).unwrap();
+    assert!(
+        content.contains("create_subtask"),
+        "plan-teams skill should mention create_subtask MCP tool"
+    );
+
+    // Claude-native plan.md should also have teams content
+    let claude_plan = dir.path().join(".claude/commands/agtx/plan.md");
+    assert!(claude_plan.exists());
+    let claude_content = std::fs::read_to_string(&claude_plan).unwrap();
+    assert!(
+        claude_content.contains("create_subtask"),
+        "Claude-native plan skill should have teams content"
+    );
+
+    // Other skills (execute, review, research) are unaffected
+    assert!(dir.path().join(".agtx/skills/agtx-execute/SKILL.md").exists());
+    assert!(dir.path().join(".agtx/skills/agtx-review/SKILL.md").exists());
+    assert!(dir.path().join(".agtx/skills/agtx-research/SKILL.md").exists());
+}
+
+#[test]
+fn test_write_skills_to_worktree_regular_does_not_deploy_plan_teams() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"]);
+
+    let plan_path = dir.path().join(".agtx/skills/agtx-plan/SKILL.md");
+    let content = std::fs::read_to_string(&plan_path).unwrap();
+    assert!(
+        !content.contains("create_subtask"),
+        "regular plan skill should not contain teams content"
     );
 }
 
@@ -8924,4 +9000,117 @@ fn test_should_send_stuck_notification_other_plugins() {
     assert!(should_send_stuck_notification(Some("bmad")));
     // No plugin set (None) should also produce notifications
     assert!(should_send_stuck_notification(None));
+}
+
+// === Subtask board rendering tests ===
+
+#[test]
+fn test_draw_board_subtask_column_placement() {
+    // Subtasks should appear in their parent's column, regardless of their own status.
+    // Verify the task list built in draw_board: parent (Planning) + child (Running)
+    // should both appear in the Planning column grouping.
+    use crate::db::{Task, TaskStatus};
+
+    let mut parent = Task::new("Parent task", "claude", "proj");
+    parent.status = TaskStatus::Planning;
+
+    let mut child = Task::new("Child task", "claude", "proj");
+    child.status = TaskStatus::Running; // child is running
+    child.parent_task_id = Some(parent.id.clone());
+    child.subtask_slug = Some("subtask-1".to_string());
+
+    let tasks = vec![parent.clone(), child.clone()];
+
+    // Simulate the column grouping logic from draw_board for the Planning column
+    let planning_status = TaskStatus::Planning;
+    let regular_in_planning: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| t.status == planning_status && t.parent_task_id.is_none())
+        .collect();
+    assert_eq!(regular_in_planning.len(), 1, "one regular task in Planning");
+
+    // Build the grouped render list (parent + subtasks)
+    let mut grouped: Vec<(&Task, bool)> = Vec::new();
+    for p in &regular_in_planning {
+        grouped.push((p, false));
+        let mut children: Vec<&Task> = tasks
+            .iter()
+            .filter(|t| t.parent_task_id.as_deref() == Some(p.id.as_str()))
+            .collect();
+        children.sort_by_key(|t| &t.created_at);
+        for c in children {
+            grouped.push((c, true));
+        }
+    }
+
+    assert_eq!(grouped.len(), 2, "parent + child both in Planning column");
+    assert!(!grouped[0].1, "first entry is not a subtask card");
+    assert!(grouped[1].1, "second entry is a subtask card");
+    assert_eq!(grouped[0].0.id, parent.id);
+    assert_eq!(grouped[1].0.id, child.id);
+
+    // The Running column should NOT show this child (it follows parent)
+    let running_status = TaskStatus::Running;
+    let regular_in_running: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| t.status == running_status && t.parent_task_id.is_none())
+        .collect();
+    assert_eq!(regular_in_running.len(), 0, "no regular tasks in Running");
+}
+
+#[test]
+fn test_blocked_badge_logic() {
+    // is_blocked should be true only when deps are not all Done
+    use crate::db::{Task, TaskStatus};
+
+    let mut dep = Task::new("Dep task", "claude", "proj");
+    dep.status = TaskStatus::Running; // not Done
+
+    let mut child = Task::new("Child task", "claude", "proj");
+    child.subtask_deps = Some(dep.id.clone());
+
+    let tasks = vec![dep.clone(), child.clone()];
+
+    // Simulate is_blocked computation from draw_board
+    let is_blocked = child.subtask_deps.as_ref().map_or(false, |deps_str| {
+        deps_str.split(',').filter(|s| !s.is_empty()).any(|dep_id| {
+            !tasks
+                .iter()
+                .any(|t| t.id == dep_id && matches!(t.status, TaskStatus::Done))
+        })
+    });
+    assert!(is_blocked, "blocked when dep is Running");
+
+    // Now dep is Done
+    let mut dep_done = dep.clone();
+    dep_done.status = TaskStatus::Done;
+    let tasks2 = vec![dep_done, child.clone()];
+
+    let is_blocked2 = child.subtask_deps.as_ref().map_or(false, |deps_str| {
+        deps_str.split(',').filter(|s| !s.is_empty()).any(|dep_id| {
+            !tasks2
+                .iter()
+                .any(|t| t.id == dep_id && matches!(t.status, TaskStatus::Done))
+        })
+    });
+    assert!(!is_blocked2, "not blocked when dep is Done");
+}
+
+#[test]
+fn test_blocked_badge_empty_deps_not_blocked() {
+    use crate::db::Task;
+
+    let mut child = Task::new("Child", "claude", "proj");
+    child.subtask_deps = None;
+
+    let tasks: Vec<crate::db::Task> = vec![child.clone()];
+
+    let is_blocked = child.subtask_deps.as_ref().map_or(false, |deps_str| {
+        deps_str.split(',').filter(|s| !s.is_empty()).any(|dep_id| {
+            !tasks
+                .iter()
+                .any(|t| t.id == dep_id && matches!(t.status, crate::db::TaskStatus::Done))
+        })
+    });
+    assert!(!is_blocked, "no deps → not blocked");
 }

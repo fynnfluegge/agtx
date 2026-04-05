@@ -205,6 +205,19 @@ pub struct ProjectConfig {
 
     /// Workflow plugin name (e.g. "gsd", "spec-kit")
     pub workflow_plugin: Option<String>,
+
+    /// Enable agent teams: planning phase splits tasks into parallel subtasks.
+    /// Defaults to false — opt-in per project.
+    #[serde(default)]
+    pub enable_agent_teams: bool,
+
+    /// Agent binary to use for subtasks (e.g. "claude", "codex").
+    /// Falls back to default_agent if not set.
+    pub subtask_agent: Option<String>,
+
+    /// Model flag passed when spawning subtask agents (e.g. "claude-sonnet-4-6").
+    /// Only used if the agent supports --model. Falls back to no model flag if not set.
+    pub subtask_model: Option<String>,
 }
 
 impl GlobalConfig {
@@ -327,6 +340,9 @@ pub struct MergedConfig {
     pub copy_files: Option<String>,
     pub init_script: Option<String>,
     pub workflow_plugin: Option<String>,
+    pub enable_agent_teams: bool,
+    pub subtask_agent: Option<String>,
+    pub subtask_model: Option<String>,
 }
 
 impl MergedConfig {
@@ -355,6 +371,9 @@ impl MergedConfig {
             copy_files: project.copy_files.clone(),
             init_script: project.init_script.clone(),
             workflow_plugin: project.workflow_plugin.clone(),
+            enable_agent_teams: project.enable_agent_teams,
+            subtask_agent: project.subtask_agent.clone(),
+            subtask_model: project.subtask_model.clone(),
         }
     }
 
@@ -414,6 +433,12 @@ pub struct WorkflowPlugin {
     /// Each rule specifies patterns to detect and keystrokes to send in response.
     #[serde(default)]
     pub auto_dismiss: Vec<AutoDismiss>,
+    /// Files to copy from the parent worktree into subtask worktrees at launch time.
+    /// Keys are source paths (relative to parent worktree), values are destination paths
+    /// (relative to child worktree). Supports `{slug}` substitution for the subtask slug.
+    /// e.g. { ".agtx/subtasks/{slug}/plan.md" = ".agtx/plan.md" }
+    #[serde(default)]
+    pub subtask_copy_files: std::collections::HashMap<String, String>,
 }
 
 /// Rule for auto-dismissing interactive prompts in the tmux pane.

@@ -109,6 +109,9 @@ fn test_merged_config_project_overrides() {
         copy_files: Some(".env, .env.local".to_string()),
         init_script: Some("npm install".to_string()),
         workflow_plugin: None,
+        enable_agent_teams: false,
+        subtask_agent: None,
+        subtask_model: None,
     };
 
     let merged = MergedConfig::merge(&global, &project);
