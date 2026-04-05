@@ -891,8 +891,10 @@ impl ServerHandler for AgtxMcpServer {
         ServerInfo {
             instructions: Some(
                 "agtx MCP server — control the terminal kanban board for coding agents. \
-                 Use list_tasks to see current tasks, move_task to transition tasks between phases, \
-                 and get_transition_status to check if a transition completed."
+                 Use list_tasks to see current tasks, create_task or create_tasks_batch to add new tasks \
+                 (with optional dependency wiring via referenced_tasks), move_task to transition tasks \
+                 between phases, get_transition_status to check if a transition completed, and \
+                 delete_task to remove backlog tasks."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
