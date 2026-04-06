@@ -5447,43 +5447,57 @@ impl App {
         let session = &self.state.tmux_project_name;
         let window_target = format!("{}:{}", session, window_name);
 
-        // Leave alternate screen and disable raw mode
-        match self.terminal.backend_mut() {
-            AppBackend::Crossterm(backend) => {
-                let _ = disable_raw_mode();
-                let _ = execute!(backend, LeaveAlternateScreen);
+        // Check if we're already inside the agtx tmux server — if so, just
+        // switch windows instead of nesting with attach.
+        let inside_agtx = std::env::var("TMUX")
+            .map(|v| v.contains(tmux::AGENT_SERVER))
+            .unwrap_or(false);
+
+        if inside_agtx {
+            // Already inside agtx tmux — just switch to the task window
+            let _ = std::process::Command::new("tmux")
+                .args([
+                    "-L", tmux::AGENT_SERVER,
+                    "select-window", "-t", window_name,
+                    ";", "resize-window", "-A",
+                ])
+                .status();
+        } else {
+            // Leave alternate screen and disable raw mode
+            match self.terminal.backend_mut() {
+                AppBackend::Crossterm(backend) => {
+                    let _ = disable_raw_mode();
+                    let _ = execute!(backend, LeaveAlternateScreen);
+                }
+                #[cfg(feature = "test-mocks")]
+                AppBackend::Test(_) => {}
             }
-            #[cfg(feature = "test-mocks")]
-            AppBackend::Test(_) => {}
-        }
 
-        // Select the task window, attach, and resize in one tmux invocation.
-        // Uses just window_name (no session: prefix) for select-window since
-        // that's how the rest of the codebase targets windows.
-        // Unset $TMUX so tmux allows attaching to the agtx server even when
-        // the user is already inside their own tmux session.
-        let _ = std::process::Command::new("tmux")
-            .args([
-                "-L", tmux::AGENT_SERVER,
-                "attach", "-t", session,
-                ";", "select-window", "-t", window_name,
-                ";", "resize-window", "-A",
-            ])
-            .env_remove("TMUX")
-            .status();
+            // Attach to the agtx tmux server, select the task window, and resize.
+            // Unset $TMUX so tmux allows attaching when inside a different tmux.
+            let _ = std::process::Command::new("tmux")
+                .args([
+                    "-L", tmux::AGENT_SERVER,
+                    "attach", "-t", session,
+                    ";", "select-window", "-t", window_name,
+                    ";", "resize-window", "-A",
+                ])
+                .env_remove("TMUX")
+                .status();
 
-        // Restore terminal
-        match self.terminal.backend_mut() {
-            AppBackend::Crossterm(backend) => {
-                enable_raw_mode()?;
-                execute!(backend, EnterAlternateScreen)?;
+            // Restore terminal
+            match self.terminal.backend_mut() {
+                AppBackend::Crossterm(backend) => {
+                    enable_raw_mode()?;
+                    execute!(backend, EnterAlternateScreen)?;
+                }
+                #[cfg(feature = "test-mocks")]
+                AppBackend::Test(_) => {}
             }
-            #[cfg(feature = "test-mocks")]
-            AppBackend::Test(_) => {}
-        }
 
-        // Force full redraw
-        self.terminal.clear()?;
+            // Force full redraw
+            self.terminal.clear()?;
+        }
 
         Ok(())
     }
