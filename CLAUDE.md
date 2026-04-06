@@ -202,6 +202,12 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
 
 **MCP tools**: `list_tasks`, `get_task` (includes `allowed_actions`), `move_task`, `get_transition_status`, `check_conflicts`, `get_notifications`
 
+### General Configuration
+Configurable via `~/.config/agtx/config.toml`:
+```toml
+fullscreen_on_enter = false  # When true, Enter on a task attaches to tmux directly instead of opening the in-TUI popup
+```
+
 ### Theme Configuration
 Colors configurable via `~/.config/agtx/config.toml`:
 ```toml

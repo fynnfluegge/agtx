@@ -41,6 +41,7 @@ fn build_footer_text(
     sidebar_focused: bool,
     selected_column: usize,
     has_cyclic_plugin: bool,
+    fullscreen_on_enter: bool,
 ) -> String {
     match input_mode {
         InputMode::Normal => {
@@ -49,10 +50,26 @@ fn build_footer_text(
             } else {
                 match selected_column {
                     0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
-                    1 => " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string(),
-                    2 => " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
-                    3 if has_cyclic_plugin => " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string(),
-                    3 => " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
+                    1 => if fullscreen_on_enter {
+                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string()
+                    } else {
+                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string()
+                    },
+                    2 => if fullscreen_on_enter {
+                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                    } else {
+                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                    },
+                    3 if has_cyclic_plugin => if fullscreen_on_enter {
+                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string()
+                    } else {
+                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string()
+                    },
+                    3 => if fullscreen_on_enter {
+                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                    } else {
+                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                    },
                     _ => " [o] new  [/] search  [Enter] open  [x] del  [e] sidebar  [q] quit".to_string(),
                 }
             }
@@ -1161,6 +1178,7 @@ impl App {
                         state.sidebar_focused,
                         state.board.selected_column,
                         has_cyclic_plugin,
+                        state.config.fullscreen_on_enter,
                     ),
                     Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
                 )
@@ -1172,6 +1190,7 @@ impl App {
                     state.sidebar_focused,
                     state.board.selected_column,
                     has_cyclic_plugin,
+                    state.config.fullscreen_on_enter,
                 ),
                 Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
             )
@@ -3243,8 +3262,13 @@ impl App {
             KeyCode::Enter => {
                 if let Some(task) = self.state.board.selected_task() {
                     if task.status == TaskStatus::Backlog && task.session_name.is_some() {
-                        // Backlog task with active research session — open tmux popup
-                        self.open_selected_task()?;
+                        // Backlog task with active research session
+                        if self.state.config.fullscreen_on_enter {
+                            let window_name = task.session_name.clone().unwrap();
+                            self.attach_to_tmux_fullscreen(&window_name)?;
+                        } else {
+                            self.open_selected_task()?;
+                        }
                     } else if task.status == TaskStatus::Backlog {
                         // Edit task
                         self.state.editing_task_id = Some(task.id.clone());
@@ -3253,8 +3277,13 @@ impl App {
                         self.state.pending_task_title.clear();
                         self.state.input_mode = InputMode::InputTitle;
                     } else if task.session_name.is_some() {
-                        // Open shell popup
-                        self.open_selected_task()?;
+                        // Open shell popup or fullscreen
+                        if self.state.config.fullscreen_on_enter {
+                            let window_name = task.session_name.clone().unwrap();
+                            self.attach_to_tmux_fullscreen(&window_name)?;
+                        } else {
+                            self.open_selected_task()?;
+                        }
                     }
                 }
             }

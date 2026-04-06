@@ -20,6 +20,10 @@ pub struct GlobalConfig {
     /// UI theme/colors
     #[serde(default)]
     pub theme: ThemeConfig,
+
+    /// Whether to automatically fullscreen-attach to the tmux session when opening a task popup
+    #[serde(default)]
+    pub fullscreen_on_enter: bool,
 }
 
 impl Default for GlobalConfig {
@@ -29,6 +33,7 @@ impl Default for GlobalConfig {
             agents: PhaseAgentsConfig::default(),
             worktree: WorktreeConfig::default(),
             theme: ThemeConfig::default(),
+            fullscreen_on_enter: false,
         }
     }
 }
@@ -327,6 +332,7 @@ pub struct MergedConfig {
     pub copy_files: Option<String>,
     pub init_script: Option<String>,
     pub workflow_plugin: Option<String>,
+    pub fullscreen_on_enter: bool,
 }
 
 impl MergedConfig {
@@ -355,6 +361,7 @@ impl MergedConfig {
             copy_files: project.copy_files.clone(),
             init_script: project.init_script.clone(),
             workflow_plugin: project.workflow_plugin.clone(),
+            fullscreen_on_enter: global.fullscreen_on_enter,
         }
     }
 
