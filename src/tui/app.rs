@@ -628,6 +628,48 @@ impl App {
         // Load projects from global database
         app.refresh_projects()?;
 
+        // Recover tasks whose tmux windows were lost (server restart, manual kill, etc.)
+        {
+            let mut recovered = 0u32;
+            let tasks_to_recover: Vec<_> = app
+                .state
+                .board
+                .tasks
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.status,
+                        TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review
+                    ) && t.session_name.is_some()
+                        && t.worktree_path.is_some()
+                })
+                .filter(|t| {
+                    let sn = t.session_name.as_ref().unwrap();
+                    !app.state.tmux_ops.window_exists(sn).unwrap_or(true)
+                })
+                .cloned()
+                .collect();
+
+            for task in &tasks_to_recover {
+                let agent_ops = app.state.agent_registry.get(&task.agent);
+                if recover_task_session(
+                    task,
+                    &app.state.tmux_project_name,
+                    app.state
+                        .project_path
+                        .as_deref()
+                        .unwrap_or(Path::new(".")),
+                    app.state.tmux_ops.as_ref(),
+                    agent_ops.as_ref(),
+                )
+                .is_ok()
+                {
+                    recovered += 1;
+                }
+            }
+            let _ = recovered; // logged silently; UI will show recovered sessions on next refresh
+        }
+
         // Detect existing orchestrator session (survives agtx restarts)
         if app.state.flags.experimental {
             let orch_target = format!("{}:orchestrator", app.state.tmux_project_name);
@@ -4905,8 +4947,15 @@ impl App {
                         let agent_registry = Arc::clone(&self.state.agent_registry);
                         let running_agent_clone = running_agent.clone();
                         let current_agent_clone = task.agent.clone();
+                        let wt_path = task.worktree_path.clone();
                         std::thread::spawn(move || {
                             let agent_ops = agent_registry.get(&running_agent_clone);
+                            ensure_window_or_recover(
+                                tmux_ops.as_ref(),
+                                &session_clone,
+                                agent_ops.as_ref(),
+                                wt_path.as_deref(),
+                            );
                             let new_cmd = agent_ops.build_interactive_command("");
                             switch_agent_in_tmux(
                                 tmux_ops.as_ref(),
@@ -4970,9 +5019,17 @@ impl App {
                     let auto_dismiss = plugin
                         .as_ref()
                         .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+                    let wt_path = task.worktree_path.clone();
                     std::thread::spawn(move || {
+                        let agent_ops = agent_registry.get(&planning_agent_clone);
+                        // Recover window if it was lost
+                        ensure_window_or_recover(
+                            tmux_ops.as_ref(),
+                            &session_clone,
+                            agent_ops.as_ref(),
+                            wt_path.as_deref(),
+                        );
                         if agent_switch {
-                            let agent_ops = agent_registry.get(&planning_agent_clone);
                             let new_cmd = agent_ops.build_interactive_command("");
                             switch_agent_in_tmux(
                                 tmux_ops.as_ref(),
@@ -5022,8 +5079,15 @@ impl App {
                         let agent_registry = Arc::clone(&self.state.agent_registry);
                         let planning_agent_clone = planning_agent.clone();
                         let current_agent_clone = task.agent.clone();
+                        let wt_path = task.worktree_path.clone();
                         std::thread::spawn(move || {
                             let agent_ops = agent_registry.get(&planning_agent_clone);
+                            ensure_window_or_recover(
+                                tmux_ops.as_ref(),
+                                &session_clone,
+                                agent_ops.as_ref(),
+                                wt_path.as_deref(),
+                            );
                             let new_cmd = agent_ops.build_interactive_command("");
                             switch_agent_in_tmux(
                                 tmux_ops.as_ref(),
@@ -5398,6 +5462,31 @@ impl App {
     fn open_selected_task(&mut self) -> Result<()> {
         if let Some(task) = self.state.board.selected_task() {
             if let Some(window_name) = &task.session_name.clone() {
+                // If the tmux window is gone, try to recover it before opening
+                if !self
+                    .state
+                    .tmux_ops
+                    .window_exists(window_name)
+                    .unwrap_or(true)
+                {
+                    let agent_ops = self.state.agent_registry.get(&task.agent);
+                    let project_path = self
+                        .state
+                        .project_path
+                        .as_deref()
+                        .unwrap_or(Path::new("."));
+                    let _ = recover_task_session(
+                        task,
+                        &self.state.tmux_project_name,
+                        project_path,
+                        self.state.tmux_ops.as_ref(),
+                        agent_ops.as_ref(),
+                    );
+                    // Clear stale phase status so it gets re-evaluated
+                    self.state.phase_status_cache.remove(&task.id);
+                    self.state.pane_content_hashes.remove(&task.id);
+                }
+
                 let task_id = task.id.clone();
                 let escalation_note = task.escalation_note.clone();
                 let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
@@ -5709,8 +5798,19 @@ impl App {
                     }
                 }
 
-                // Capture tmux content hash for idle detection (only when Working)
-                let content_hash = if phase_status == PhaseStatus::Working {
+                // Check if tmux window still exists — if not, mark as Exited
+                // (unless phase artifact was found, in which case it completed before the crash)
+                let window_gone = session_name
+                    .as_ref()
+                    .map_or(false, |sn| !tmux_ops.window_exists(sn).unwrap_or(true));
+                let phase_status = if window_gone && phase_status == PhaseStatus::Working {
+                    PhaseStatus::Exited
+                } else {
+                    phase_status
+                };
+
+                // Capture tmux content hash for idle detection (only when Working and window alive)
+                let content_hash = if phase_status == PhaseStatus::Working && !window_gone {
                     session_name.as_ref().and_then(|sn| {
                         tmux_ops.capture_pane(sn).ok().map(|content| {
                             use std::hash::{Hash, Hasher};
@@ -5761,6 +5861,8 @@ impl App {
                     }
                 }
             } else if phase == PhaseStatus::Ready {
+                self.state.pane_content_hashes.remove(&task_status.task_id);
+            } else if phase == PhaseStatus::Exited {
                 self.state.pane_content_hashes.remove(&task_status.task_id);
             }
 
@@ -6052,6 +6154,38 @@ fn ensure_project_tmux_session(
     if !tmux_ops.has_session(project_name) {
         let _ = tmux_ops.create_session(project_name, &project_path.to_string_lossy());
     }
+}
+
+/// Recover a task's tmux session by creating a new window with the agent's resume command.
+/// Used when the tmux window has been lost (server restart, manual kill, etc.)
+/// but the task's worktree and agent session data still exist on disk.
+/// Returns the tmux target string on success.
+fn recover_task_session(
+    task: &Task,
+    project_name: &str,
+    project_path: &Path,
+    tmux_ops: &dyn TmuxOperations,
+    agent_ops: &dyn AgentOperations,
+) -> Result<String> {
+    let worktree_path = task
+        .worktree_path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Task has no worktree path"))?;
+
+    if !Path::new(worktree_path).exists() {
+        anyhow::bail!("Worktree no longer exists: {}", worktree_path);
+    }
+
+    ensure_project_tmux_session(project_name, project_path, tmux_ops);
+
+    let window_name = format!("task-{}", generate_task_slug(&task.id, &task.title));
+    let target = format!("{}:{}", project_name, window_name);
+
+    let resume_cmd = agent_ops.build_resume_command();
+
+    tmux_ops.create_window(project_name, &window_name, worktree_path, Some(resume_cmd))?;
+
+    Ok(target)
 }
 
 /// Copy files/dirs from worktree back to project root.
@@ -7062,6 +7196,17 @@ fn spawn_send_to_agent(
     plugin: Option<WorkflowPlugin>,
 ) {
     std::thread::spawn(move || {
+        // If the tmux window is gone, recover it with the agent's resume command
+        {
+            let agent_ops = agent_registry.get(&target_agent);
+            ensure_window_or_recover(
+                tmux_ops.as_ref(),
+                &target,
+                agent_ops.as_ref(),
+                worktree_path.as_deref(),
+            );
+        }
+
         if needs_switch {
             // Deploy skills for the incoming agent only if its native skill directory
             // doesn't exist yet. This handles the case where a worktree was created
@@ -7555,6 +7700,32 @@ fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
 /// Detection uses `tmux display -p #{pane_current_command}` which reports
 /// the actual process name (e.g. "claude", "node", "bash"), avoiding
 /// false positives from parsing pane text content.
+
+/// If the tmux window for `target` is gone, recreate it with the agent's resume command.
+/// Used before `switch_agent_in_tmux` and `send_skill_and_prompt` to handle dead windows.
+fn ensure_window_or_recover(
+    tmux_ops: &dyn TmuxOperations,
+    target: &str,
+    agent_ops: &dyn AgentOperations,
+    worktree_path: Option<&str>,
+) {
+    if tmux_ops.window_exists(target).unwrap_or(true) {
+        return;
+    }
+    let Some(wt_path) = worktree_path else { return };
+    if !Path::new(wt_path).exists() {
+        return;
+    }
+    let Some((session, window)) = target.split_once(':') else {
+        return;
+    };
+    if !tmux_ops.has_session(session) {
+        let _ = tmux_ops.create_session(session, wt_path);
+    }
+    let resume_cmd = agent_ops.build_resume_command();
+    let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd));
+}
+
 fn switch_agent_in_tmux(
     tmux_ops: &dyn TmuxOperations,
     target: &str,

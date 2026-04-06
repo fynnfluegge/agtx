@@ -28,6 +28,10 @@ pub trait AgentOperations: Send + Sync {
     /// When prompt is empty, the agent starts with no initial message.
     fn build_interactive_command(&self, prompt: &str) -> String;
 
+    /// Build the shell command to resume the agent's most recent session
+    /// in the current working directory. Used to recover from tmux/server restarts.
+    fn build_resume_command(&self) -> String;
+
     /// Build the full shell command to run this agent as an orchestrator.
     /// Includes MCP registration (if supported by the agent) and cleanup on exit.
     /// Default implementation: no MCP, just launches the agent interactively.
@@ -79,6 +83,10 @@ impl AgentOperations for CodingAgent {
 
     fn build_interactive_command(&self, prompt: &str) -> String {
         self.agent.build_interactive_command(prompt)
+    }
+
+    fn build_resume_command(&self) -> String {
+        self.agent.build_resume_command()
     }
 
     fn build_orchestrator_command(&self, mcp_json: &str, _agtx_bin: &str) -> String {
