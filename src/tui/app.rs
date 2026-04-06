@@ -3031,6 +3031,13 @@ impl App {
                 KeyCode::Char('g') if has_ctrl => {
                     popup.scroll_to_bottom();
                 }
+                // Ctrl+f = fullscreen attach to tmux session
+                KeyCode::Char('f') if has_ctrl => {
+                    // Close the popup first so the tmux window isn't stuck at popup dimensions
+                    self.state.shell_popup = None;
+                    self.attach_to_tmux_fullscreen(&window_name)?;
+                    return Ok(());
+                }
                 _ => {
                     // Forward all other keys to tmux window (including Esc)
                     send_key_to_tmux(&window_name, key.code, self.state.tmux_ops.as_ref());
@@ -5431,6 +5438,52 @@ impl App {
                 self.state.shell_popup = Some(popup);
             }
         }
+        Ok(())
+    }
+
+    /// Suspend the TUI and attach directly to a tmux window for full interaction.
+    /// Restores the TUI when the user detaches (Ctrl+b d).
+    fn attach_to_tmux_fullscreen(&mut self, window_name: &str) -> Result<()> {
+        let session = &self.state.tmux_project_name;
+        let window_target = format!("{}:{}", session, window_name);
+
+        // Leave alternate screen and disable raw mode
+        match self.terminal.backend_mut() {
+            AppBackend::Crossterm(backend) => {
+                let _ = disable_raw_mode();
+                let _ = execute!(backend, LeaveAlternateScreen);
+            }
+            #[cfg(feature = "test-mocks")]
+            AppBackend::Test(_) => {}
+        }
+
+        // Select the task window, attach, and resize in one tmux invocation.
+        // Uses just window_name (no session: prefix) for select-window since
+        // that's how the rest of the codebase targets windows.
+        // Unset $TMUX so tmux allows attaching to the agtx server even when
+        // the user is already inside their own tmux session.
+        let _ = std::process::Command::new("tmux")
+            .args([
+                "-L", tmux::AGENT_SERVER,
+                "attach", "-t", session,
+                ";", "select-window", "-t", window_name,
+                ";", "resize-window", "-A",
+            ])
+            .status();
+
+        // Restore terminal
+        match self.terminal.backend_mut() {
+            AppBackend::Crossterm(backend) => {
+                enable_raw_mode()?;
+                execute!(backend, EnterAlternateScreen)?;
+            }
+            #[cfg(feature = "test-mocks")]
+            AppBackend::Test(_) => {}
+        }
+
+        // Force full redraw
+        self.terminal.clear()?;
+
         Ok(())
     }
 

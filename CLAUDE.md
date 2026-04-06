@@ -242,6 +242,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `Ctrl+j/k` or `Ctrl+n/p` | Scroll up/down |
 | `Ctrl+d/u` | Page down/up |
 | `Ctrl+g` | Jump to bottom |
+| `Ctrl+f` | Fullscreen attach to tmux session |
 | `Ctrl+q` or `Esc` | Close popup |
 | Other keys | Forwarded to tmux/agent |
 
