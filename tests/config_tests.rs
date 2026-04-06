@@ -291,3 +291,74 @@ default_agent = "claude"
     assert_eq!(config.agents.running, None);
     assert_eq!(config.agents.review, None);
 }
+
+#[test]
+fn test_fullscreen_on_enter_defaults_to_false() {
+    let config: GlobalConfig = toml::from_str("").unwrap();
+    assert!(!config.fullscreen_on_enter);
+}
+
+#[test]
+fn test_fullscreen_on_enter_set_true() {
+    let toml_str = r#"
+fullscreen_on_enter = true
+"#;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.fullscreen_on_enter);
+}
+
+#[test]
+fn test_fullscreen_on_enter_merged() {
+    let mut global = GlobalConfig::default();
+    global.fullscreen_on_enter = true;
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    assert!(config.fullscreen_on_enter);
+}
+
+#[test]
+fn test_fullscreen_on_enter_from_real_config() {
+    let toml_str = r##"
+default_agent = "claude"
+fullscreen_on_enter = true
+
+[worktree]
+enabled = true
+
+[theme]
+color_selected = "#ead49a"
+"##;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.fullscreen_on_enter);
+    assert_eq!(config.default_agent, "claude");
+}
+
+#[test]
+fn test_fullscreen_on_enter_exact_user_config() {
+    let toml_str = r##"
+default_agent = "claude"
+fullscreen_on_enter = true
+
+[agents]
+
+[worktree]
+enabled = true
+auto_cleanup = true
+base_branch = ""
+worktree_dir = ".worktrees"
+
+[theme]
+color_selected = "#ead49a"
+color_normal = "#5cfff7"
+color_dimmed = "#9C9991"
+color_text = "#f2ece6"
+color_accent = "#5cfff7"
+color_description = "#C4B0AC"
+color_column_header = "#a0d2fa"
+color_popup_border = "#9ffcf8"
+color_popup_header = "#69fae7"
+"##;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.fullscreen_on_enter, "fullscreen_on_enter should be true");
+    let merged = MergedConfig::merge(&config, &ProjectConfig::default());
+    assert!(merged.fullscreen_on_enter, "merged fullscreen_on_enter should be true");
+}
