@@ -227,6 +227,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `o` | Create new task |
 | `Enter` | Open task popup (tmux view) / Edit task (backlog) |
 | `x` | Delete task (with confirmation) |
+| `f` | Fullscreen attach to task's tmux session |
 | `d` | Show git diff for task |
 | `m` | Move task forward (advance workflow) |
 | `r` | Resume task (Review → Running) |
