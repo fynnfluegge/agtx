@@ -5469,6 +5469,7 @@ impl App {
                 ";", "select-window", "-t", window_name,
                 ";", "resize-window", "-A",
             ])
+            .env_remove("TMUX")
             .status();
 
         // Restore terminal
