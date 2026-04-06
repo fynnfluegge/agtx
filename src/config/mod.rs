@@ -184,7 +184,7 @@ impl Default for WorktreeConfig {
 }
 
 fn default_worktree_dir() -> String {
-    ".agtx/worktrees".to_string()
+    crate::git::DEFAULT_WORKTREE_DIR.to_string()
 }
 
 fn default_true() -> bool {
