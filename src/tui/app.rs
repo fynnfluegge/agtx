@@ -5497,11 +5497,12 @@ impl App {
             .unwrap_or(false);
 
         if inside_agtx {
-            // Already inside agtx tmux — just switch to the task window
+            // Already inside agtx tmux — just switch to the task window.
+            // Use session:window target to work across multiple project sessions.
             let _ = std::process::Command::new("tmux")
                 .args([
                     "-L", tmux::AGENT_SERVER,
-                    "select-window", "-t", window_name,
+                    "select-window", "-t", &window_target,
                     ";", "resize-window", "-A",
                 ])
                 .status();

@@ -1324,6 +1324,20 @@ fn test_footer_text_running_column() {
 }
 
 #[test]
+fn test_footer_text_fullscreen_on_enter_hides_ctrl_f() {
+    // Columns 1-3 should hide [C-f] when fullscreen_on_enter is true
+    for col in 1..=3 {
+        let text = build_footer_text(InputMode::Normal, false, col, false, true);
+        assert!(!text.contains("[C-f]"), "Column {} should hide [C-f] when fullscreen_on_enter=true", col);
+    }
+    // And show it when false
+    for col in 1..=3 {
+        let text = build_footer_text(InputMode::Normal, false, col, false, false);
+        assert!(text.contains("[C-f]"), "Column {} should show [C-f] when fullscreen_on_enter=false", col);
+    }
+}
+
+#[test]
 fn test_footer_text_review_column() {
     let text = build_footer_text(InputMode::Normal, false, 3, false, false);
     assert!(text.contains("[r] move left"));
