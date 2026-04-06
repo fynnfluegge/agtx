@@ -49,10 +49,10 @@ fn build_footer_text(
             } else {
                 match selected_column {
                     0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
-                    1 => " [o] new  [/] search  [Enter] open  [f] fullscreen  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string(),
-                    2 => " [o] new  [/] search  [Enter] open  [f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
-                    3 if has_cyclic_plugin => " [o] new  [/] search  [Enter] open  [f] fullscreen  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string(),
-                    3 => " [o] new  [/] search  [Enter] open  [f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
+                    1 => " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string(),
+                    2 => " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
+                    3 if has_cyclic_plugin => " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string(),
+                    3 => " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
                     _ => " [o] new  [/] search  [Enter] open  [x] del  [e] sidebar  [q] quit".to_string(),
                 }
             }
@@ -2433,7 +2433,21 @@ impl App {
         match &self.state.mode {
             AppMode::Dashboard => self.handle_dashboard_key(key.code),
             AppMode::Project(_) => match self.state.input_mode {
-                InputMode::Normal => self.handle_normal_key(key.code),
+                InputMode::Normal => {
+                    // Ctrl+f = fullscreen attach (handled here since handle_normal_key only gets KeyCode)
+                    if key.code == KeyCode::Char('f')
+                        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                    {
+                        if let Some(task) = self.state.board.selected_task() {
+                            if let Some(window_name) = task.session_name.clone() {
+                                self.state.shell_popup = None;
+                                return self.attach_to_tmux_fullscreen(&window_name);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    self.handle_normal_key(key.code)
+                }
                 InputMode::InputTitle => self.handle_title_input(key),
                 InputMode::SelectPlugin => self.handle_plugin_select_wizard(key),
                 InputMode::InputDescription => self.handle_description_input(key),
@@ -3241,14 +3255,6 @@ impl App {
                     } else if task.session_name.is_some() {
                         // Open shell popup
                         self.open_selected_task()?;
-                    }
-                }
-            }
-            KeyCode::Char('f') => {
-                // Fullscreen attach to task's tmux session
-                if let Some(task) = self.state.board.selected_task() {
-                    if let Some(window_name) = task.session_name.clone() {
-                        self.attach_to_tmux_fullscreen(&window_name)?;
                     }
                 }
             }
