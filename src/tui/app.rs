@@ -630,7 +630,6 @@ impl App {
 
         // Recover tasks whose tmux windows were lost (server restart, manual kill, etc.)
         {
-            let mut recovered = 0u32;
             let tasks_to_recover: Vec<_> = app
                 .state
                 .board
@@ -652,7 +651,7 @@ impl App {
 
             for task in &tasks_to_recover {
                 let agent_ops = app.state.agent_registry.get(&task.agent);
-                if recover_task_session(
+                let _ = recover_task_session(
                     task,
                     &app.state.tmux_project_name,
                     app.state
@@ -661,13 +660,8 @@ impl App {
                         .unwrap_or(Path::new(".")),
                     app.state.tmux_ops.as_ref(),
                     agent_ops.as_ref(),
-                )
-                .is_ok()
-                {
-                    recovered += 1;
-                }
+                );
             }
-            let _ = recovered; // logged silently; UI will show recovered sessions on next refresh
         }
 
         // Detect existing orchestrator session (survives agtx restarts)
@@ -7688,19 +7682,6 @@ fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
     false
 }
 
-/// Gracefully switch the agent running in a tmux window.
-/// Terminates the current agent, waits for the shell prompt,
-/// then starts the new agent.
-///
-/// Exit commands per agent:
-///   - Claude, OpenCode: `/exit`
-///   - Gemini, Codex: `/quit`
-///   - Fallback: Ctrl+C + Ctrl+D as last resort
-///
-/// Detection uses `tmux display -p #{pane_current_command}` which reports
-/// the actual process name (e.g. "claude", "node", "bash"), avoiding
-/// false positives from parsing pane text content.
-
 /// If the tmux window for `target` is gone, recreate it with the agent's resume command.
 /// Used before `switch_agent_in_tmux` and `send_skill_and_prompt` to handle dead windows.
 fn ensure_window_or_recover(
@@ -7726,6 +7707,18 @@ fn ensure_window_or_recover(
     let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd));
 }
 
+/// Gracefully switch the agent running in a tmux window.
+/// Terminates the current agent, waits for the shell prompt,
+/// then starts the new agent.
+///
+/// Exit commands per agent:
+///   - Claude, OpenCode: `/exit`
+///   - Gemini, Codex: `/quit`
+///   - Fallback: Ctrl+C + Ctrl+D as last resort
+///
+/// Detection uses `tmux display -p #{pane_current_command}` which reports
+/// the actual process name (e.g. "claude", "node", "bash"), avoiding
+/// false positives from parsing pane text content.
 fn switch_agent_in_tmux(
     tmux_ops: &dyn TmuxOperations,
     target: &str,
