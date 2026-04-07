@@ -6170,16 +6170,21 @@ fn recover_task_session(
         anyhow::bail!("Worktree no longer exists: {}", worktree_path);
     }
 
-    ensure_project_tmux_session(project_name, project_path, tmux_ops);
+    let target = task
+        .session_name
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Task has no session name"))?;
+    let (session, window) = target
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Invalid session name format: {}", target))?;
 
-    let window_name = format!("task-{}", generate_task_slug(&task.id, &task.title));
-    let target = format!("{}:{}", project_name, window_name);
+    ensure_project_tmux_session(project_name, project_path, tmux_ops);
 
     let resume_cmd = agent_ops.build_resume_command();
 
-    tmux_ops.create_window(project_name, &window_name, worktree_path, Some(resume_cmd))?;
+    tmux_ops.create_window(session, window, worktree_path, Some(resume_cmd))?;
 
-    Ok(target)
+    Ok(target.clone())
 }
 
 /// Copy files/dirs from worktree back to project root.
