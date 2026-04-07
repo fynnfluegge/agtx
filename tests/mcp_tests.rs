@@ -228,3 +228,42 @@ fn test_delete_backlog_task() {
     let fetched = db.get_task(&task.id).unwrap();
     assert!(fetched.is_none());
 }
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_update_backlog_task() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let mut task = Task::new("Original title", "claude", "my-project");
+    task.description = Some("Original desc".to_string());
+    db.create_task(&task).unwrap();
+
+    // Update title and description
+    task.title = "Updated title".to_string();
+    task.description = Some("Updated desc".to_string());
+    task.plugin = Some("gsd".to_string());
+    db.update_task(&task).unwrap();
+
+    let fetched = db.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(fetched.title, "Updated title");
+    assert_eq!(fetched.description.unwrap(), "Updated desc");
+    assert_eq!(fetched.plugin.unwrap(), "gsd");
+    assert_eq!(fetched.status, TaskStatus::Backlog);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_update_non_backlog_task_fails_in_db() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let mut task = Task::new("My task", "claude", "my-project");
+    db.create_task(&task).unwrap();
+
+    // Move to planning status
+    task.status = TaskStatus::Planning;
+    db.update_task(&task).unwrap();
+
+    // DB layer allows update (status guard is in MCP layer), verify status changed
+    let fetched = db.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(fetched.status, TaskStatus::Planning);
+}

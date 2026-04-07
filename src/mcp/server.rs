@@ -128,6 +128,27 @@ pub struct CreateTasksBatchParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateTaskParams {
+    /// The task ID (UUID) to update
+    #[schemars(description = "The task ID (UUID) to update. Only backlog tasks can be updated.")]
+    pub task_id: String,
+    /// New title (if provided)
+    #[schemars(description = "New task title")]
+    pub title: Option<String>,
+    /// New description (if provided)
+    #[schemars(description = "New task description")]
+    pub description: Option<String>,
+    /// New plugin (if provided)
+    #[schemars(description = "New workflow plugin name")]
+    pub plugin: Option<String>,
+    /// New referenced tasks (if provided, replaces existing)
+    #[schemars(
+        description = "Comma-separated task IDs that this task depends on (replaces existing dependencies)"
+    )]
+    pub referenced_tasks: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DeleteTaskParams {
     /// The task ID (UUID) to delete
     #[schemars(description = "The task ID (UUID) to delete. Only backlog tasks can be deleted.")]
@@ -250,6 +271,13 @@ struct BatchTaskResponse {
 struct CreateTasksBatchResponse {
     created: Vec<BatchTaskResponse>,
     count: usize,
+}
+
+#[derive(Serialize)]
+struct UpdateTaskResponse {
+    id: String,
+    title: String,
+    updated_fields: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -866,6 +894,74 @@ impl AgtxMcpServer {
     }
 
     #[tool(
+        description = "Update a backlog task's fields. Only tasks in Backlog status can be updated. All fields are optional — only provided fields are changed."
+    )]
+    fn update_task(&self, Parameters(params): Parameters<UpdateTaskParams>) -> String {
+        let db = match self.open_project_db() {
+            Ok(db) => db,
+            Err(e) => return e,
+        };
+
+        let mut task = match db.get_task(&params.task_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => return format!("Task not found: {}", params.task_id),
+            Err(e) => return format!("Error getting task: {}", e),
+        };
+
+        if task.status != TaskStatus::Backlog {
+            return format!(
+                "Error: can only update Backlog tasks. Task '{}' is in {} status.",
+                task.title,
+                task.status.as_str()
+            );
+        }
+
+        let mut updated_fields = Vec::new();
+
+        if let Some(title) = params.title {
+            task.title = title;
+            updated_fields.push("title".to_string());
+        }
+        if let Some(description) = params.description {
+            task.description = Some(description);
+            updated_fields.push("description".to_string());
+        }
+        if let Some(plugin) = params.plugin {
+            task.plugin = Some(plugin);
+            updated_fields.push("plugin".to_string());
+        }
+        if let Some(ref refs) = params.referenced_tasks {
+            // Validate referenced task IDs exist
+            for ref_id in refs.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                match db.get_task(ref_id) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return format!("Error: referenced task not found: {}", ref_id),
+                    Err(e) => return format!("Error checking referenced task: {}", e),
+                }
+            }
+            task.referenced_tasks = Some(refs.clone());
+            updated_fields.push("referenced_tasks".to_string());
+        }
+
+        if updated_fields.is_empty() {
+            return "No fields to update".to_string();
+        }
+
+        match db.update_task(&task) {
+            Ok(()) => {
+                let response = UpdateTaskResponse {
+                    id: task.id,
+                    title: task.title,
+                    updated_fields,
+                };
+                serde_json::to_string_pretty(&response)
+                    .unwrap_or_else(|e| format!("Error serializing: {}", e))
+            }
+            Err(e) => format!("Error updating task: {}", e),
+        }
+    }
+
+    #[tool(
         description = "Delete a task. Only tasks in Backlog status can be deleted."
     )]
     fn delete_task(&self, Parameters(params): Parameters<DeleteTaskParams>) -> String {
@@ -910,9 +1006,9 @@ impl ServerHandler for AgtxMcpServer {
             instructions: Some(
                 "agtx MCP server — control the terminal kanban board for coding agents. \
                  Use list_tasks to see current tasks, create_task or create_tasks_batch to add new tasks \
-                 (with optional dependency wiring via referenced_tasks), move_task to transition tasks \
-                 between phases, get_transition_status to check if a transition completed, and \
-                 delete_task to remove backlog tasks."
+                 (with optional dependency wiring via referenced_tasks), update_task to modify backlog \
+                 task fields, move_task to transition tasks between phases, get_transition_status to \
+                 check if a transition completed, and delete_task to remove backlog tasks."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
