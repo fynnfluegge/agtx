@@ -232,3 +232,47 @@ fn test_notifications_empty_queue() {
     let notifs = db.consume_notifications().unwrap();
     assert_eq!(notifs.len(), 0);
 }
+
+// === delete_project Tests ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_delete_project_removes_from_list() {
+    let db = Database::open_in_memory_global().unwrap();
+    let project = Project::new("my-project", "/path/to/project");
+    db.upsert_project(&project).unwrap();
+
+    let before = db.get_all_projects().unwrap();
+    assert_eq!(before.len(), 1);
+
+    db.delete_project("/path/to/project").unwrap();
+
+    let after = db.get_all_projects().unwrap();
+    assert_eq!(after.len(), 0);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_delete_project_only_removes_matching_path() {
+    let db = Database::open_in_memory_global().unwrap();
+    db.upsert_project(&Project::new("proj-a", "/path/a")).unwrap();
+    db.upsert_project(&Project::new("proj-b", "/path/b")).unwrap();
+
+    db.delete_project("/path/a").unwrap();
+
+    let remaining = db.get_all_projects().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].name, "proj-b");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_delete_project_nonexistent_path_is_noop() {
+    let db = Database::open_in_memory_global().unwrap();
+    db.upsert_project(&Project::new("proj", "/real/path")).unwrap();
+
+    db.delete_project("/nonexistent/path").unwrap();
+
+    let remaining = db.get_all_projects().unwrap();
+    assert_eq!(remaining.len(), 1);
+}

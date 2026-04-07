@@ -45,7 +45,7 @@ fn build_footer_text(
     match input_mode {
         InputMode::Normal => {
             if sidebar_focused {
-                " [j/k] navigate  [Enter] open  [l] board  [e] hide sidebar  [q] quit ".to_string()
+                " [j/k] navigate  [Enter] open  [i] init script  [x] remove  [l] board  [e] hide  [q] quit ".to_string()
             } else {
                 match selected_column {
                     0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
@@ -58,6 +58,7 @@ fn build_footer_text(
             }
         }
         InputMode::InputTitle => " Enter task title... [Esc] cancel [Enter] next ".to_string(),
+        InputMode::InputInitScript => " [Ctrl+S] save  [Enter] newline  [Esc] cancel ".to_string(),
         InputMode::SelectPlugin => {
             " [j/k] select plugin  [Tab] cycle  [Enter] next  [Esc] cancel ".to_string()
         }
@@ -263,6 +264,10 @@ struct AppState {
     skip_move_confirm: bool,
     // Confirmation popup for deleting a task
     delete_confirm_popup: Option<DeleteConfirmPopup>,
+    // Confirmation popup for removing a project from tracking
+    project_delete_confirm_popup: Option<ProjectDeleteConfirmPopup>,
+    // Path of the project whose init script is being edited
+    editing_init_script_path: Option<PathBuf>,
     // Confirmation popup for asking if user wants to create PR when moving to Review
     review_confirm_popup: Option<ReviewConfirmPopup>,
     // Channel for receiving background worktree setup results
@@ -456,6 +461,13 @@ struct DeleteConfirmPopup {
     task_title: String,
 }
 
+/// State for project removal confirmation popup
+#[derive(Debug, Clone)]
+struct ProjectDeleteConfirmPopup {
+    project_name: String,
+    project_path: String,
+}
+
 /// State for asking if user wants to create PR when moving to Review
 #[derive(Debug, Clone)]
 struct ReviewConfirmPopup {
@@ -598,6 +610,8 @@ impl App {
                 move_confirm_popup: None,
                 skip_move_confirm: false,
                 delete_confirm_popup: None,
+                project_delete_confirm_popup: None,
+                editing_init_script_path: None,
                 review_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
@@ -773,6 +787,8 @@ impl App {
                 move_confirm_popup: None,
                 skip_move_confirm: false,
                 delete_confirm_popup: None,
+                project_delete_confirm_popup: None,
+                editing_init_script_path: None,
                 review_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
@@ -1856,6 +1872,55 @@ impl App {
             frame.render_widget(content, inner);
         }
 
+        // Init script editor overlay
+        if state.input_mode == InputMode::InputInitScript {
+            let overlay_area = centered_rect(65, 60, area);
+            frame.render_widget(Clear, overlay_area);
+
+            let selected_color = hex_to_color(&state.config.theme.color_selected);
+            let text_color = hex_to_color(&state.config.theme.color_text);
+            let dimmed_color = hex_to_color(&state.config.theme.color_dimmed);
+
+            let (before_cursor, after_cursor) = state
+                .input_buffer
+                .split_at(state.input_cursor.min(state.input_buffer.len()));
+            let full_text = format!("{}█{}", before_cursor, after_cursor);
+
+            let mut lines: Vec<Line> = full_text
+                .split('\n')
+                .map(|l| {
+                    Line::from(Span::styled(
+                        l.to_string(),
+                        Style::default().fg(text_color),
+                    ))
+                })
+                .collect();
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  [Ctrl+S] save  [Enter] newline  [Esc] cancel",
+                Style::default().fg(dimmed_color),
+            )));
+
+            let title = state
+                .editing_init_script_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(|n| format!(" Init Script — {} ", n))
+                .unwrap_or_else(|| " Init Script ".to_string());
+
+            let content = Paragraph::new(Text::from(lines))
+                .wrap(Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .title(title)
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(selected_color)),
+                );
+            frame.render_widget(content, overlay_area);
+        }
+
         // Delete confirmation popup
         if let Some(ref popup) = state.delete_confirm_popup {
             let popup_area = centered_rect(50, 25, area);
@@ -1874,6 +1939,32 @@ impl App {
             let text = format!(
                 "Are you sure you want to delete:\n\n\"{}\"\n\nThis will also remove the worktree and tmux session.\n\n[y] Yes, delete    [n/Esc] Cancel",
                 popup.task_title
+            );
+            let content = Paragraph::new(text)
+                .style(Style::default().fg(Color::White))
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(content, inner);
+        }
+
+        // Project removal confirmation popup
+        if let Some(ref popup) = state.project_delete_confirm_popup {
+            let popup_area = centered_rect(50, 30, area);
+            frame.render_widget(Clear, popup_area);
+
+            let main_block = Block::default()
+                .title(" Remove Project? ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red));
+            frame.render_widget(main_block, popup_area);
+
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 2,
+            });
+            let text = format!(
+                "Remove \"{}\" from the project list?\n\nThis removes it from agtx tracking only.\nWorktrees, git history, and files are untouched.\n\n[y] Yes, remove    [n/Esc] Cancel",
+                popup.project_name
             );
             let content = Paragraph::new(text)
                 .style(Style::default().fg(Color::White))
@@ -2399,6 +2490,11 @@ impl App {
             return self.handle_delete_confirm_key(key);
         }
 
+        // Handle project removal confirmation popup if open
+        if self.state.project_delete_confirm_popup.is_some() {
+            return self.handle_project_delete_confirm_key(key);
+        }
+
         // Handle Review confirmation popup if open
         if self.state.review_confirm_popup.is_some() {
             return self.handle_review_confirm_key(key);
@@ -2437,6 +2533,7 @@ impl App {
                 InputMode::InputTitle => self.handle_title_input(key),
                 InputMode::SelectPlugin => self.handle_plugin_select_wizard(key),
                 InputMode::InputDescription => self.handle_description_input(key),
+                InputMode::InputInitScript => self.handle_init_script_input(key),
             },
         }
     }
@@ -2495,6 +2592,57 @@ impl App {
         Ok(())
     }
 
+    fn handle_project_delete_confirm_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> Result<()> {
+        if let Some(popup) = self.state.project_delete_confirm_popup.clone() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.state.project_delete_confirm_popup = None;
+                    self.perform_delete_project(&popup.project_path)?;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.state.project_delete_confirm_popup = None;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn perform_delete_project(&mut self, project_path: &str) -> Result<()> {
+        self.state.global_db.delete_project(project_path)?;
+
+        let is_current = self
+            .state
+            .project_path
+            .as_ref()
+            .map(|p| p.to_string_lossy() == project_path)
+            .unwrap_or(false);
+
+        self.refresh_projects()?;
+
+        if self.state.selected_project >= self.state.projects.len()
+            && !self.state.projects.is_empty()
+        {
+            self.state.selected_project = self.state.projects.len() - 1;
+        }
+
+        if is_current {
+            if let Some(next) = self.state.projects.get(self.state.selected_project).cloned() {
+                self.switch_to_project_keep_sidebar(&next)?;
+            } else {
+                self.state.db = None;
+                self.state.project_path = None;
+                self.state.project_name = String::new();
+                self.state.board = BoardState::new();
+            }
+        }
+
+        Ok(())
+    }
+
     fn handle_review_confirm_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         if let Some(popup) = self.state.review_confirm_popup.clone() {
             match key.code {
@@ -2515,6 +2663,125 @@ impl App {
                 _ => {}
             }
         }
+        Ok(())
+    }
+
+    fn open_init_script_editor(&mut self, project: &ProjectInfo) {
+        let project_path = PathBuf::from(&project.path);
+        let script_path = project_path.join(".agtx").join("init.sh");
+        self.state.input_buffer = if script_path.exists() {
+            std::fs::read_to_string(&script_path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        self.state.input_cursor = self.state.input_buffer.len();
+        self.state.editing_init_script_path = Some(project_path);
+        self.state.input_mode = InputMode::InputInitScript;
+    }
+
+    fn handle_init_script_input(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        use crossterm::event::KeyModifiers;
+        match key.code {
+            KeyCode::Esc => {
+                self.state.input_mode = InputMode::Normal;
+                self.state.input_buffer.clear();
+                self.state.input_cursor = 0;
+                self.state.editing_init_script_path = None;
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.save_init_script()?;
+            }
+            KeyCode::Enter => {
+                self.state.input_buffer.insert(self.state.input_cursor, '\n');
+                self.state.input_cursor += 1;
+            }
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.state.input_cursor =
+                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.state.input_cursor =
+                    word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+            }
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.state.input_cursor =
+                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.state.input_cursor =
+                    word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+            }
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+                let new_pos =
+                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+                self.state
+                    .input_buffer
+                    .drain(new_pos..self.state.input_cursor);
+                self.state.input_cursor = new_pos;
+            }
+            KeyCode::Left => {
+                if self.state.input_cursor > 0 {
+                    self.state.input_cursor -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if self.state.input_cursor < self.state.input_buffer.len() {
+                    self.state.input_cursor += 1;
+                }
+            }
+            KeyCode::Home => self.state.input_cursor = 0,
+            KeyCode::End => self.state.input_cursor = self.state.input_buffer.len(),
+            KeyCode::Backspace => {
+                if self.state.input_cursor > 0 {
+                    self.state.input_cursor -= 1;
+                    self.state.input_buffer.remove(self.state.input_cursor);
+                }
+            }
+            KeyCode::Delete => {
+                if self.state.input_cursor < self.state.input_buffer.len() {
+                    self.state.input_buffer.remove(self.state.input_cursor);
+                }
+            }
+            KeyCode::Char(c) => {
+                self.state.input_buffer.insert(self.state.input_cursor, c);
+                self.state.input_cursor += 1;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn save_init_script(&mut self) -> Result<()> {
+        if let Some(project_path) = self.state.editing_init_script_path.clone() {
+            let agtx_dir = project_path.join(".agtx");
+            std::fs::create_dir_all(&agtx_dir)?;
+
+            let script_path = agtx_dir.join("init.sh");
+            std::fs::write(&script_path, &self.state.input_buffer)?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &script_path,
+                    std::fs::Permissions::from_mode(0o755),
+                );
+            }
+
+            let mut config = ProjectConfig::load(&project_path).unwrap_or_default();
+            config.init_script = Some("bash .agtx/init.sh".to_string());
+            let _ = config.save(&project_path);
+
+            let is_current = self.state.project_path.as_deref() == Some(project_path.as_path());
+            if is_current {
+                self.state.config.init_script = Some("bash .agtx/init.sh".to_string());
+            }
+        }
+
+        self.state.input_mode = InputMode::Normal;
+        self.state.input_buffer.clear();
+        self.state.input_cursor = 0;
+        self.state.editing_init_script_path = None;
         Ok(())
     }
 
@@ -3187,6 +3454,19 @@ impl App {
                 KeyCode::Enter => {
                     // Enter focuses the board (sidebar stays visible)
                     self.state.sidebar_focused = false;
+                }
+                KeyCode::Char('x') => {
+                    if let Some(p) = self.state.projects.get(self.state.selected_project).cloned() {
+                        self.state.project_delete_confirm_popup = Some(ProjectDeleteConfirmPopup {
+                            project_name: p.name,
+                            project_path: p.path,
+                        });
+                    }
+                }
+                KeyCode::Char('i') => {
+                    if let Some(p) = self.state.projects.get(self.state.selected_project).cloned() {
+                        self.open_init_script_editor(&p);
+                    }
                 }
                 _ => {}
             }
@@ -4004,6 +4284,7 @@ impl App {
         self.state.wizard_plugin_options.clear();
         self.state.wizard_referenced_task_ids.clear();
         self.state.task_ref_search = None;
+        self.state.editing_init_script_path = None;
     }
 
     /// Advance from title step to plugin selection or description.

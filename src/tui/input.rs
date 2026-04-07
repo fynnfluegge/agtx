@@ -9,6 +9,8 @@ pub enum InputMode {
     SelectPlugin,
     /// Entering task description/prompt
     InputDescription,
+    /// Editing a project's worktree init script
+    InputInitScript,
 }
 
 impl Default for InputMode {

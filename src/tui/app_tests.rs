@@ -1326,7 +1326,9 @@ fn test_word_boundary_roundtrip() {
 fn test_footer_text_sidebar_focused() {
     let text = build_footer_text(InputMode::Normal, true, 0, false);
     assert!(text.contains("[j/k] navigate"));
-    assert!(text.contains("[e] hide sidebar"));
+    assert!(text.contains("[e] hide"));
+    assert!(text.contains("[x] remove"));
+    assert!(text.contains("[i] init script"));
     assert!(!text.contains("[o] new"));
 }
 
@@ -8995,4 +8997,210 @@ fn test_should_send_stuck_notification_other_plugins() {
     assert!(should_send_stuck_notification(Some("bmad")));
     // No plugin set (None) should also produce notifications
     assert!(should_send_stuck_notification(None));
+}
+
+// =============================================================================
+// Tests for InputInitScript footer text
+// =============================================================================
+
+#[test]
+fn test_footer_text_input_init_script() {
+    let text = build_footer_text(InputMode::InputInitScript, false, 0, false);
+    assert!(text.contains("[Ctrl+S] save"));
+    assert!(text.contains("[Enter] newline"));
+    assert!(text.contains("[Esc] cancel"));
+}
+
+// =============================================================================
+// Tests for project delete confirm popup
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_project_delete_confirm_popup_opens_on_x() {
+    let mut app = make_test_app();
+    app.state.sidebar_visible = true;
+    app.state.sidebar_focused = true;
+    app.state.projects = vec![
+        ProjectInfo { name: "proj-a".to_string(), path: "/tmp/proj-a".to_string() },
+    ];
+    app.state.selected_project = 0;
+
+    press_key(&mut app, KeyCode::Char('x'));
+
+    assert!(app.state.project_delete_confirm_popup.is_some());
+    let popup = app.state.project_delete_confirm_popup.as_ref().unwrap();
+    assert_eq!(popup.project_name, "proj-a");
+    assert_eq!(popup.project_path, "/tmp/proj-a");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_project_delete_confirm_popup_n_cancels() {
+    let mut app = make_test_app();
+    app.state.project_delete_confirm_popup = Some(ProjectDeleteConfirmPopup {
+        project_name: "proj-a".to_string(),
+        project_path: "/tmp/proj-a".to_string(),
+    });
+
+    press_key(&mut app, KeyCode::Char('n'));
+
+    assert!(app.state.project_delete_confirm_popup.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_project_delete_confirm_popup_esc_cancels() {
+    let mut app = make_test_app();
+    app.state.project_delete_confirm_popup = Some(ProjectDeleteConfirmPopup {
+        project_name: "proj-a".to_string(),
+        project_path: "/tmp/proj-a".to_string(),
+    });
+
+    press_key(&mut app, KeyCode::Esc);
+
+    assert!(app.state.project_delete_confirm_popup.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_project_delete_confirm_popup_x_no_projects_does_nothing() {
+    let mut app = make_test_app();
+    app.state.sidebar_visible = true;
+    app.state.sidebar_focused = true;
+    app.state.projects = vec![];
+
+    press_key(&mut app, KeyCode::Char('x'));
+
+    assert!(app.state.project_delete_confirm_popup.is_none());
+}
+
+// =============================================================================
+// Tests for init script editor
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_init_script_editor_opens_on_i() {
+    let mut app = make_test_app();
+    app.state.sidebar_visible = true;
+    app.state.sidebar_focused = true;
+    app.state.projects = vec![
+        ProjectInfo { name: "proj-a".to_string(), path: "/tmp/proj-a".to_string() },
+    ];
+    app.state.selected_project = 0;
+
+    press_key(&mut app, KeyCode::Char('i'));
+
+    assert_eq!(app.state.input_mode, InputMode::InputInitScript);
+    assert_eq!(
+        app.state.editing_init_script_path,
+        Some(PathBuf::from("/tmp/proj-a"))
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_init_script_editor_esc_cancels() {
+    let mut app = make_test_app();
+    app.state.input_mode = InputMode::InputInitScript;
+    app.state.input_buffer = "echo hello".to_string();
+    app.state.input_cursor = 10;
+    app.state.editing_init_script_path = Some(PathBuf::from("/tmp/proj-a"));
+
+    press_key(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.state.input_mode, InputMode::Normal);
+    assert!(app.state.input_buffer.is_empty());
+    assert_eq!(app.state.input_cursor, 0);
+    assert!(app.state.editing_init_script_path.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_init_script_editor_enter_inserts_newline() {
+    let mut app = make_test_app();
+    app.state.input_mode = InputMode::InputInitScript;
+    app.state.input_buffer = "echo hello".to_string();
+    app.state.input_cursor = 10;
+    app.state.editing_init_script_path = Some(PathBuf::from("/tmp/proj-a"));
+
+    press_key(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.state.input_buffer, "echo hello\n");
+    assert_eq!(app.state.input_cursor, 11);
+    assert_eq!(app.state.input_mode, InputMode::InputInitScript);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_init_script_editor_typing() {
+    let mut app = make_test_app();
+    app.state.input_mode = InputMode::InputInitScript;
+    app.state.editing_init_script_path = Some(PathBuf::from("/tmp/proj-a"));
+
+    type_str(&mut app, "npm install");
+
+    assert_eq!(app.state.input_buffer, "npm install");
+    assert_eq!(app.state.input_cursor, 11);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_init_script_ctrl_s_saves_file() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let project_path = tmp.path().to_path_buf();
+
+    let mut app = make_test_app();
+    app.state.input_mode = InputMode::InputInitScript;
+    app.state.input_buffer = "npm install\nnpm run build".to_string();
+    app.state.input_cursor = app.state.input_buffer.len();
+    app.state.editing_init_script_path = Some(project_path.clone());
+
+    app.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('s'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ))
+    .unwrap();
+
+    assert_eq!(app.state.input_mode, InputMode::Normal);
+    assert!(app.state.editing_init_script_path.is_none());
+
+    let script_path = project_path.join(".agtx").join("init.sh");
+    assert!(script_path.exists());
+    let content = std::fs::read_to_string(&script_path).unwrap();
+    assert_eq!(content, "npm install\nnpm run build");
+
+    let config_path = project_path.join(".agtx").join("config.toml");
+    assert!(config_path.exists());
+    let config_content = std::fs::read_to_string(&config_path).unwrap();
+    assert!(config_content.contains("bash .agtx/init.sh"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_init_script_editor_loads_existing_file() {
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let project_path = tmp.path().to_path_buf();
+    let agtx_dir = project_path.join(".agtx");
+    std::fs::create_dir_all(&agtx_dir).unwrap();
+    std::fs::write(agtx_dir.join("init.sh"), "echo existing").unwrap();
+
+    let mut app = make_test_app();
+    app.state.sidebar_visible = true;
+    app.state.sidebar_focused = true;
+    app.state.projects = vec![ProjectInfo {
+        name: "proj".to_string(),
+        path: project_path.to_string_lossy().to_string(),
+    }];
+    app.state.selected_project = 0;
+
+    press_key(&mut app, KeyCode::Char('i'));
+
+    assert_eq!(app.state.input_mode, InputMode::InputInitScript);
+    assert_eq!(app.state.input_buffer, "echo existing");
 }

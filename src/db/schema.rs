@@ -379,6 +379,22 @@ impl Database {
         Ok(projects)
     }
 
+    pub fn delete_project(&self, project_path_str: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM projects WHERE path = ?1",
+            params![project_path_str],
+        )?;
+        if let Some(config_dir) = directories::ProjectDirs::from("", "", "agtx") {
+            let hash = Self::hash_path(project_path_str);
+            let db_file = config_dir
+                .config_dir()
+                .join("projects")
+                .join(format!("{}.db", hash));
+            let _ = std::fs::remove_file(db_file);
+        }
+        Ok(())
+    }
+
     // === Transition Request Operations (MCP command queue) ===
 
     pub fn create_transition_request(&self, req: &TransitionRequest) -> Result<()> {
