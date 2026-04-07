@@ -176,6 +176,9 @@ copy_files = ".env, .env.local, web/.env.local"
 
 # Shell command to run inside the worktree after creation and file copying
 init_script = "scripts/init_worktree.sh"
+
+# Shell command to run inside the worktree before removal
+cleanup_script = "scripts/cleanup_worktree.sh"
 ```
 
 `base_branch` controls which branch new task worktrees are created from. If omitted or empty, agtx
@@ -183,6 +186,16 @@ auto-detects `main`, `master`, or falls back to the current branch.
 
 These options run during the Backlog → Research/Planning/Running transition, after worktree creation
 and before the agent session starts.
+
+When a task worktree is removed, `cleanup_script` runs first (with cwd set to the worktree root).
+If it exits non-zero, worktree removal is aborted and the error is logged (forced cleanup flows
+continue after logging). The script receives:
+
+- `AGTX_PROJECT_PATH`
+- `AGTX_WORKTREE_PATH`
+- `AGTX_TASK_ID`
+- `AGTX_TASK_SLUG`
+- `AGTX_TASK_BRANCH` (when available)
 
 ### Per-Phase Agent Configuration
 

@@ -2630,15 +2630,18 @@ impl App {
                 let tmux_ops = Arc::clone(&self.state.tmux_ops);
                 let git_ops = Arc::clone(&self.state.git_ops);
                 let task_id = task.id.clone();
+                let cleanup_script = self.state.config.cleanup_script.clone();
                 std::thread::spawn(move || {
                     cleanup_task_resources(
                         &task_id,
                         &branch_name,
                         &session_name,
                         &worktree_path,
+                        cleanup_script.as_deref(),
                         &project_path,
                         tmux_ops.as_ref(),
                         git_ops.as_ref(),
+                        true,
                     );
                 });
             }
@@ -4034,10 +4037,12 @@ impl App {
             if let Some(task) = db.get_task(task_id)? {
                 delete_task_resources(
                     &task,
+                    self.state.config.cleanup_script.as_deref(),
                     project_path,
                     self.state.tmux_ops.as_ref(),
                     self.state.git_ops.as_ref(),
-                );
+                    false,
+                )?;
                 db.delete_task(&task.id)?;
                 self.refresh_tasks()?;
             }
@@ -4548,15 +4553,18 @@ impl App {
         let git_ops = Arc::clone(&self.state.git_ops);
         let task_id_clone = task.id.clone();
         let project_path_clone = project_path.to_path_buf();
+        let cleanup_script = self.state.config.cleanup_script.clone();
         std::thread::spawn(move || {
             cleanup_task_resources(
                 &task_id_clone,
                 &branch_name,
                 &session_name,
                 &worktree_path,
+                cleanup_script.as_deref(),
                 &project_path_clone,
                 tmux_ops.as_ref(),
                 git_ops.as_ref(),
+                false,
             );
         });
         Ok(false)
@@ -6102,13 +6110,92 @@ fn generate_task_slug(task_id: &str, title: &str) -> String {
     format!("{}-{}", id_prefix, title_slug)
 }
 
-/// Cleanup task resources (tmux window, git worktree) and mark as done
+fn build_cleanup_env(
+    project_path: &Path,
+    worktree_path: &Path,
+    task_id: &str,
+    branch_name: Option<&str>,
+) -> Vec<(String, String)> {
+    let slug = branch_name
+        .and_then(|b| b.strip_prefix("task/"))
+        .unwrap_or(task_id);
+
+    let mut envs = vec![
+        (
+            "AGTX_PROJECT_PATH".to_string(),
+            project_path.to_string_lossy().to_string(),
+        ),
+        (
+            "AGTX_WORKTREE_PATH".to_string(),
+            worktree_path.to_string_lossy().to_string(),
+        ),
+        ("AGTX_TASK_ID".to_string(), task_id.to_string()),
+        ("AGTX_TASK_SLUG".to_string(), slug.to_string()),
+    ];
+
+    if let Some(branch) = branch_name {
+        envs.push(("AGTX_TASK_BRANCH".to_string(), branch.to_string()));
+    }
+
+    envs
+}
+
+fn run_cleanup_script_for_worktree(
+    cleanup_script: Option<&str>,
+    project_path: &Path,
+    worktree_path: &Path,
+    task_id: &str,
+    branch_name: Option<&str>,
+    force_cleanup: bool,
+) -> Result<()> {
+    let Some(script) = cleanup_script else {
+        return Ok(());
+    };
+    let script = script.trim();
+    if script.is_empty() {
+        return Ok(());
+    }
+
+    let envs = build_cleanup_env(project_path, worktree_path, task_id, branch_name);
+    let output = match git::run_cleanup_script(script, worktree_path, &envs) {
+        Ok(result) => result,
+        Err(e) => {
+            if force_cleanup {
+                eprintln!("cleanup_script failed to run (forced): {}", e);
+                return Ok(());
+            }
+            return Err(e);
+        }
+    };
+
+    if !output.stdout.trim().is_empty() {
+        eprintln!("cleanup_script stdout:\n{}", output.stdout.trim_end());
+    }
+    if !output.stderr.trim().is_empty() {
+        eprintln!("cleanup_script stderr:\n{}", output.stderr.trim_end());
+    }
+
+    if !output.status.success() {
+        let message = format!("cleanup_script exited with {}: {}", output.status, script);
+        if force_cleanup {
+            eprintln!("{}", message);
+            return Ok(());
+        }
+        anyhow::bail!(message);
+    }
+
+    Ok(())
+}
+
+/// Cleanup task resources (tmux window, cleanup script, git worktree) and mark as done
 /// Modifies the task in place, ready for database update
 fn cleanup_task_for_done(
     task: &mut Task,
+    cleanup_script: Option<&str>,
     project_path: &Path,
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
+    force_cleanup: bool,
 ) {
     // Archive artifacts before removing worktree
     if let Some(worktree) = &task.worktree_path {
@@ -6137,7 +6224,18 @@ fn cleanup_task_for_done(
         let _ = tmux_ops.kill_window(session_name);
     }
     if let Some(worktree) = &task.worktree_path {
-        let _ = git_ops.remove_worktree(project_path, worktree);
+        if let Err(e) = run_cleanup_script_for_worktree(
+            cleanup_script,
+            project_path,
+            Path::new(worktree),
+            &task.id,
+            task.branch_name.as_deref(),
+            force_cleanup,
+        ) {
+            eprintln!("cleanup_script failed: {}", e);
+        } else {
+            let _ = git_ops.remove_worktree(project_path, worktree);
+        }
     }
     // Keep the branch so task can be reopened later
     task.session_name = None;
@@ -6146,16 +6244,18 @@ fn cleanup_task_for_done(
     task.updated_at = chrono::Utc::now();
 }
 
-/// Background-safe cleanup: archive artifacts, kill tmux window, remove worktree.
+/// Background-safe cleanup: archive artifacts, kill tmux window, run cleanup script, remove worktree.
 /// Takes owned/cloned values so it can run in a spawned thread.
 fn cleanup_task_resources(
     task_id: &str,
     branch_name: &Option<String>,
     session_name: &Option<String>,
     worktree_path: &Option<String>,
+    cleanup_script: Option<&str>,
     project_path: &Path,
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
+    force_cleanup: bool,
 ) {
     // Archive artifacts before removing worktree
     if let Some(worktree) = worktree_path {
@@ -6183,6 +6283,17 @@ fn cleanup_task_resources(
         let _ = tmux_ops.kill_window(session_name);
     }
     if let Some(worktree) = worktree_path {
+        if let Err(e) = run_cleanup_script_for_worktree(
+            cleanup_script,
+            project_path,
+            Path::new(worktree),
+            task_id,
+            branch_name.as_deref(),
+            force_cleanup,
+        ) {
+            eprintln!("cleanup_script failed: {}", e);
+            return;
+        }
         let _ = git_ops.remove_worktree(project_path, worktree);
     }
 }
@@ -6361,26 +6472,36 @@ fn setup_task_worktree(
     Ok(target)
 }
 
-/// Delete task resources: kill tmux window, remove worktree, delete branch
+/// Delete task resources: kill tmux window, run cleanup script, remove worktree, delete branch
 fn delete_task_resources(
     task: &Task,
+    cleanup_script: Option<&str>,
     project_path: &Path,
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
-) {
+    force_cleanup: bool,
+) -> Result<()> {
     // Kill tmux window if exists
     if let Some(ref session_name) = task.session_name {
         let _ = tmux_ops.kill_window(session_name);
     }
 
     // Remove worktree and delete branch if exists
-    if task.worktree_path.is_some() {
+    if let Some(ref worktree) = task.worktree_path {
         if let Some(ref branch_name) = task.branch_name {
-            let slug = branch_name.strip_prefix("task/").unwrap_or(branch_name);
-            let _ = git_ops.remove_worktree(project_path, slug);
+            run_cleanup_script_for_worktree(
+                cleanup_script,
+                project_path,
+                Path::new(worktree),
+                &task.id,
+                task.branch_name.as_deref(),
+                force_cleanup,
+            )?;
+            let _ = git_ops.remove_worktree(project_path, worktree);
             let _ = git_ops.delete_branch(project_path, branch_name);
         }
     }
+    Ok(())
 }
 
 /// Collect git diff content from a worktree

@@ -93,6 +93,44 @@ pub const AGENT_CONFIG_DIRS: &[&str] = &[
     ".config/opencode",
 ];
 
+/// Output from a shell script run inside a worktree.
+#[derive(Debug)]
+pub struct ScriptOutput {
+    pub status: std::process::ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run a shell script inside a worktree, capturing stdout/stderr.
+fn run_worktree_script(
+    script: &str,
+    worktree_path: &Path,
+    envs: &[(String, String)],
+) -> Result<ScriptOutput> {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(worktree_path)
+        .envs(envs.iter().map(|(k, v)| (k, v)))
+        .output()
+        .with_context(|| format!("Failed to run script: {}", script))?;
+
+    Ok(ScriptOutput {
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
+
+/// Run a cleanup script inside the worktree, returning the captured output.
+pub fn run_cleanup_script(
+    script: &str,
+    worktree_path: &Path,
+    envs: &[(String, String)],
+) -> Result<ScriptOutput> {
+    run_worktree_script(script, worktree_path, envs)
+}
+
 /// Initialize a worktree by copying agent config dirs, user-specified files, and running an init script.
 ///
 /// Returns a Vec of warning messages for any issues encountered.
@@ -175,25 +213,17 @@ pub fn initialize_worktree(
     if let Some(script) = init_script {
         let script = script.trim();
         if !script.is_empty() {
-            match Command::new("sh")
-                .arg("-c")
-                .arg(script)
-                .current_dir(worktree_path)
-                .output()
-            {
+            match run_worktree_script(script, worktree_path, &[]) {
                 Ok(result) => {
                     if !result.status.success() {
-                        let stderr = String::from_utf8_lossy(&result.stderr);
                         warnings.push(format!(
                             "init_script exited with {}: {}",
                             result.status,
-                            stderr.trim()
+                            result.stderr.trim()
                         ));
                     }
                 }
-                Err(e) => {
-                    warnings.push(format!("Failed to run init_script: {}", e));
-                }
+                Err(e) => warnings.push(format!("Failed to run init_script: {}", e)),
             }
         }
     }
