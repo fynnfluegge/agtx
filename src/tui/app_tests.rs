@@ -208,6 +208,7 @@ fn test_create_pr_with_content_success() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        base_branch: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -303,6 +304,7 @@ fn test_create_pr_with_content_no_changes() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        base_branch: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -357,6 +359,7 @@ fn test_create_pr_with_content_push_failure() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        base_branch: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -417,6 +420,7 @@ fn test_push_changes_to_existing_pr_success() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        base_branch: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -471,6 +475,7 @@ fn test_push_changes_to_existing_pr_no_changes() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        base_branch: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -508,6 +513,7 @@ fn test_push_changes_to_existing_pr_no_url() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        base_branch: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };

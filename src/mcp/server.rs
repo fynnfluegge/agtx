@@ -100,6 +100,11 @@ pub struct CreateTaskParams {
         description = "Comma-separated task IDs that this task depends on (must complete before this task starts)"
     )]
     pub referenced_tasks: Option<String>,
+    /// Base branch to create worktree from (defaults to project's main branch)
+    #[schemars(
+        description = "Base branch to create the worktree from (e.g. another task's branch for stacked PRs). Defaults to project's main branch."
+    )]
+    pub base_branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -118,6 +123,11 @@ pub struct BatchTask {
         description = "Indices (0-based) into the tasks array that this task depends on. Referenced tasks must have a lower index (no forward references)."
     )]
     pub depends_on: Option<Vec<usize>>,
+    /// Base branch to create worktree from (defaults to project's main branch)
+    #[schemars(
+        description = "Base branch to create the worktree from (e.g. another task's branch for stacked PRs). Defaults to project's main branch."
+    )]
+    pub base_branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -146,6 +156,11 @@ pub struct UpdateTaskParams {
         description = "Comma-separated task IDs that this task depends on (replaces existing dependencies)"
     )]
     pub referenced_tasks: Option<String>,
+    /// New base branch (if provided)
+    #[schemars(
+        description = "Base branch to create the worktree from (e.g. another task's branch for stacked PRs)"
+    )]
+    pub base_branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -794,6 +809,7 @@ impl AgtxMcpServer {
         task.description = params.description;
         task.plugin = params.plugin.or(default_plugin);
         task.referenced_tasks = params.referenced_tasks;
+        task.base_branch = params.base_branch;
 
         match db.create_task(&task) {
             Ok(()) => {
@@ -858,6 +874,7 @@ impl AgtxMcpServer {
             let mut task = Task::new(&batch_task.title, &default_agent, &project_name);
             task.description = batch_task.description.clone();
             task.plugin = batch_task.plugin.clone().or_else(|| default_plugin.clone());
+            task.base_branch = batch_task.base_branch.clone();
             created_tasks.push(task);
         }
 
@@ -941,6 +958,10 @@ impl AgtxMcpServer {
             }
             task.referenced_tasks = Some(refs.clone());
             updated_fields.push("referenced_tasks".to_string());
+        }
+        if let Some(base_branch) = params.base_branch {
+            task.base_branch = Some(base_branch);
+            updated_fields.push("base_branch".to_string());
         }
 
         if updated_fields.is_empty() {
