@@ -203,6 +203,9 @@ pub struct ProjectConfig {
     /// Shell command to run inside the worktree after creation and file copying
     pub init_script: Option<String>,
 
+    /// Shell command to run inside the worktree before removal
+    pub cleanup_script: Option<String>,
+
     /// Workflow plugin name (e.g. "gsd", "spec-kit")
     pub workflow_plugin: Option<String>,
 }
@@ -326,6 +329,7 @@ pub struct MergedConfig {
     pub theme: ThemeConfig,
     pub copy_files: Option<String>,
     pub init_script: Option<String>,
+    pub cleanup_script: Option<String>,
     pub workflow_plugin: Option<String>,
 }
 
@@ -354,6 +358,7 @@ impl MergedConfig {
             theme: global.theme.clone(),
             copy_files: project.copy_files.clone(),
             init_script: project.init_script.clone(),
+            cleanup_script: project.cleanup_script.clone(),
             workflow_plugin: project.workflow_plugin.clone(),
         }
     }

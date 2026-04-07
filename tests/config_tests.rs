@@ -79,6 +79,7 @@ fn test_project_config_default() {
     assert!(config.github_url.is_none());
     assert!(config.copy_files.is_none());
     assert!(config.init_script.is_none());
+    assert!(config.cleanup_script.is_none());
 }
 
 // === MergedConfig Tests ===
@@ -96,6 +97,7 @@ fn test_merged_config_uses_global_defaults() {
     assert!(merged.auto_cleanup);
     assert!(merged.copy_files.is_none());
     assert!(merged.init_script.is_none());
+    assert!(merged.cleanup_script.is_none());
 }
 
 #[test]
@@ -108,6 +110,7 @@ fn test_merged_config_project_overrides() {
         github_url: Some("https://github.com/user/repo".to_string()),
         copy_files: Some(".env, .env.local".to_string()),
         init_script: Some("npm install".to_string()),
+        cleanup_script: Some("scripts/cleanup.sh".to_string()),
         workflow_plugin: None,
     };
 
@@ -121,6 +124,10 @@ fn test_merged_config_project_overrides() {
     );
     assert_eq!(merged.copy_files, Some(".env, .env.local".to_string()));
     assert_eq!(merged.init_script, Some("npm install".to_string()));
+    assert_eq!(
+        merged.cleanup_script,
+        Some("scripts/cleanup.sh".to_string())
+    );
 }
 
 // === FirstRunAction Tests ===
