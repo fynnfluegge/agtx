@@ -311,6 +311,8 @@ struct AppState {
     orchestrator_last_check: Instant,
     // Background session refresh channel (non-blocking phase status polling)
     session_refresh_rx: Option<mpsc::Receiver<SessionRefreshResult>>,
+    // Cache of dependency satisfaction per task ID (refreshed with tasks)
+    deps_satisfied_cache: HashMap<String, bool>,
 }
 
 /// State for confirming move to Done
@@ -631,6 +633,7 @@ impl App {
                 orchestrator_stable_since: None,
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
+                deps_satisfied_cache: HashMap::new(),
             },
         };
 
@@ -842,6 +845,7 @@ impl App {
                 orchestrator_stable_since: None,
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
+                deps_satisfied_cache: HashMap::new(),
             },
         })
     }
@@ -1151,6 +1155,10 @@ impl App {
                     break;
                 }
 
+                let deps_blocked = state
+                    .deps_satisfied_cache
+                    .get(&task.id)
+                    .map_or(false, |satisfied| !satisfied);
                 Self::draw_task_card(
                     frame,
                     task,
@@ -1159,6 +1167,7 @@ impl App {
                     &state.config.theme,
                     state.phase_status_cache.get(&task.id),
                     state.spinner_frame,
+                    deps_blocked,
                 );
             }
 
@@ -2117,6 +2126,7 @@ impl App {
         theme: &ThemeConfig,
         phase_status: Option<&(PhaseStatus, Instant)>,
         spinner_frame: usize,
+        deps_blocked: bool,
     ) {
         let border_style = if is_selected {
             Style::default().fg(hex_to_color(&theme.color_selected))
@@ -2200,6 +2210,21 @@ impl App {
             };
             let title_spans =
                 Line::from(vec![indicator, warn_span, Span::styled(title, title_style)]);
+            let title_line = Paragraph::new(title_spans);
+            let title_area = Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            };
+            frame.render_widget(title_line, title_area);
+        } else if deps_blocked {
+            let lock_span = Span::styled(
+                "\u{2298} ",
+                Style::default()
+                    .fg(hex_to_color(&theme.color_dimmed)),
+            );
+            let title_spans = Line::from(vec![lock_span, Span::styled(title, title_style)]);
             let title_line = Paragraph::new(title_spans);
             let title_area = Rect {
                 x: inner.x,
@@ -4180,6 +4205,17 @@ impl App {
         };
 
         if let Some(new_status) = next_status {
+            // Block moving out of Backlog when dependencies are not satisfied
+            if current_status == TaskStatus::Backlog {
+                if let Some(db) = &self.state.db {
+                    if !db.deps_satisfied(&task) {
+                        self.state.warning_message =
+                            Some(("Dependencies not in Review/Done — cannot start task".to_string(), Instant::now()));
+                        return Ok(());
+                    }
+                }
+            }
+
             if self.check_phase_incomplete(&task, current_status, new_status) {
                 return Ok(());
             }
@@ -4863,6 +4899,15 @@ impl App {
             );
         }
 
+        // Block when dependencies are not satisfied
+        if let Some(db) = &self.state.db {
+            if !db.deps_satisfied(&task) {
+                self.state.warning_message =
+                    Some(("Dependencies not in Review/Done — cannot start task".to_string(), Instant::now()));
+                return Ok(());
+            }
+        }
+
         // Stamp plugin on task before checking research requirement
         if task.plugin.is_none() {
             task.plugin = self.state.config.workflow_plugin.clone();
@@ -5219,6 +5264,17 @@ impl App {
         let mut task = db
             .get_task(&req.task_id)?
             .ok_or_else(|| anyhow::anyhow!("Task not found: {}", req.task_id))?;
+
+        // Block forward transitions when dependencies are not satisfied
+        let is_forward = matches!(
+            req.action.as_str(),
+            "move_forward" | "move_to_planning" | "move_to_running"
+        );
+        if is_forward && task.status == TaskStatus::Backlog && !db.deps_satisfied(&task) {
+            anyhow::bail!(
+                "Cannot advance task: dependencies not in Review/Done"
+            );
+        }
 
         match req.action.as_str() {
             "research" => {
@@ -5662,6 +5718,15 @@ impl App {
     pub fn refresh_tasks(&mut self) -> Result<()> {
         if let Some(db) = &self.state.db {
             self.state.board.tasks = db.get_all_tasks()?;
+            // Refresh dependency satisfaction cache for backlog tasks with references
+            self.state.deps_satisfied_cache.clear();
+            for task in &self.state.board.tasks {
+                if task.referenced_tasks.is_some() {
+                    self.state
+                        .deps_satisfied_cache
+                        .insert(task.id.clone(), db.deps_satisfied(task));
+                }
+            }
         }
         Ok(())
     }
@@ -6863,12 +6928,13 @@ fn create_pr_with_content(
         git_ops.push(worktree_path, branch, true)?;
     }
 
-    // Create PR
+    // Create PR (use base_branch for stacked PRs)
     git_provider_ops.create_pr(
         project_path,
         pr_title,
         pr_body,
         task.branch_name.as_deref().unwrap_or(""),
+        task.base_branch.clone(),
     )
 }
 

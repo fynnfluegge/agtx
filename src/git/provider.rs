@@ -26,12 +26,14 @@ pub trait GitProviderOperations: Send + Sync {
 
     /// Create a pull/merge request
     /// Returns (pr_number, pr_url)
+    /// If `base_branch` is Some, uses `--base` to target that branch (for stacked PRs).
     fn create_pr(
         &self,
         project_path: &Path,
         title: &str,
         body: &str,
         head_branch: &str,
+        base_branch: Option<String>,
     ) -> Result<(i32, String)>;
 }
 
@@ -67,19 +69,25 @@ impl GitProviderOperations for RealGitHubOps {
         title: &str,
         body: &str,
         head_branch: &str,
+        base_branch: Option<String>,
     ) -> Result<(i32, String)> {
+        let mut args = vec![
+            "pr",
+            "create",
+            "--title",
+            title,
+            "--body",
+            body,
+            "--head",
+            head_branch,
+        ];
+        if let Some(ref base) = base_branch {
+            args.push("--base");
+            args.push(base);
+        }
         let output = std::process::Command::new("gh")
             .current_dir(project_path)
-            .args([
-                "pr",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--head",
-                head_branch,
-            ])
+            .args(&args)
             .output()?;
 
         if !output.status.success() {

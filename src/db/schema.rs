@@ -369,6 +369,21 @@ impl Database {
         Ok(tasks)
     }
 
+    /// Check whether all referenced_tasks (dependencies) are in Review or Done.
+    /// Returns true if the task has no dependencies or all deps are satisfied.
+    pub fn deps_satisfied(&self, task: &Task) -> bool {
+        let refs_str = match &task.referenced_tasks {
+            Some(s) if !s.is_empty() => s,
+            _ => return true,
+        };
+        refs_str.split(',').filter(|s| !s.is_empty()).all(|ref_id| {
+            self.get_task(ref_id)
+                .ok()
+                .flatten()
+                .map_or(true, |t| matches!(t.status, TaskStatus::Review | TaskStatus::Done))
+        })
+    }
+
     // === Project Operations (for global db) ===
 
     pub fn upsert_project(&self, project: &Project) -> Result<()> {

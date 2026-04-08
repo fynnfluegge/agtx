@@ -255,14 +255,15 @@ fn test_create_pr_with_content_success() {
     // Expect: create PR
     mock_git_provider
         .expect_create_pr()
-        .withf(|path: &Path, title: &str, body: &str, branch: &str| {
+        .withf(|path: &Path, title: &str, body: &str, branch: &str, base: &Option<String>| {
             path == Path::new("/project")
                 && title == "Test PR"
                 && body == "Test body"
                 && branch == "feature/test"
+                && base.is_none()
         })
         .times(1)
-        .returning(|_, _, _, _| Ok((42, "https://github.com/org/repo/pull/42".to_string())));
+        .returning(|_, _, _, _, _| Ok((42, "https://github.com/org/repo/pull/42".to_string())));
 
     let result = create_pr_with_content(
         &task,
@@ -320,7 +321,7 @@ fn test_create_pr_with_content_no_changes() {
 
     mock_git_provider
         .expect_create_pr()
-        .returning(|_, _, _, _| Ok((1, "https://github.com/pr/1".to_string())));
+        .returning(|_, _, _, _, _| Ok((1, "https://github.com/pr/1".to_string())));
 
     let result = create_pr_with_content(
         &task,
@@ -5682,7 +5683,7 @@ fn test_handle_pr_confirm_ctrl_s_submits_pr() {
     let mut mock_git_provider = MockGitProviderOperations::new();
     mock_git_provider
         .expect_create_pr()
-        .returning(|_, _, _, _| Ok((1, "https://github.com/pr/1".to_string())));
+        .returning(|_, _, _, _, _| Ok((1, "https://github.com/pr/1".to_string())));
 
     let mut mock_registry = MockAgentRegistry::new();
     let mut mock_agent_ops = MockAgentOperations::new();
