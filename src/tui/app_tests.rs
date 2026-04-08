@@ -924,7 +924,14 @@ fn test_cleanup_task_for_done_with_resources() {
     task.worktree_path = Some("/tmp/worktree".to_string());
     task.status = TaskStatus::Review;
 
-    cleanup_task_for_done(&mut task, Path::new("/project"), &mock_tmux, &mock_git);
+    cleanup_task_for_done(
+        &mut task,
+        None,
+        Path::new("/project"),
+        &mock_tmux,
+        &mock_git,
+        false,
+    );
 
     assert!(task.session_name.is_none());
     assert!(task.worktree_path.is_none());
@@ -944,7 +951,14 @@ fn test_cleanup_task_for_done_no_resources() {
     let mut task = Task::new("Test task", "claude", "project-1");
     // No session_name or worktree_path set
 
-    cleanup_task_for_done(&mut task, Path::new("/project"), &mock_tmux, &mock_git);
+    cleanup_task_for_done(
+        &mut task,
+        None,
+        Path::new("/project"),
+        &mock_tmux,
+        &mock_git,
+        false,
+    );
 
     assert_eq!(task.status, TaskStatus::Done);
 }
@@ -987,7 +1001,15 @@ fn test_delete_task_resources_full_cleanup() {
     task.worktree_path = Some("/tmp/worktree".to_string());
     task.branch_name = Some("task/abc-feature".to_string());
 
-    delete_task_resources(&task, Path::new("/project"), &mock_tmux, &mock_git);
+    delete_task_resources(
+        &task,
+        None,
+        Path::new("/project"),
+        &mock_tmux,
+        &mock_git,
+        false,
+    )
+    .unwrap();
 }
 
 /// Test delete_task_resources handles task without resources
@@ -1003,7 +1025,15 @@ fn test_delete_task_resources_no_resources() {
     let task = Task::new("Simple task", "claude", "project-1");
     // No session_name, worktree_path, or branch_name
 
-    delete_task_resources(&task, Path::new("/project"), &mock_tmux, &mock_git);
+    delete_task_resources(
+        &task,
+        None,
+        Path::new("/project"),
+        &mock_tmux,
+        &mock_git,
+        false,
+    )
+    .unwrap();
 }
 
 // =============================================================================
@@ -7393,7 +7423,14 @@ fn test_cleanup_task_for_done_clears_session_and_worktree() {
     task.session_name = Some("proj:task-1".to_string());
     task.worktree_path = Some("/tmp/nonexistent-wt".to_string());
 
-    cleanup_task_for_done(&mut task, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
+    cleanup_task_for_done(
+        &mut task,
+        None,
+        Path::new("/tmp/proj"),
+        &mock_tmux,
+        &mock_git,
+        false,
+    );
 
     assert_eq!(task.status, TaskStatus::Done);
     assert!(task.session_name.is_none());
@@ -7411,7 +7448,14 @@ fn test_cleanup_task_for_done_no_ops_when_no_session_or_worktree() {
     task.session_name = None;
     task.worktree_path = None;
 
-    cleanup_task_for_done(&mut task, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
+    cleanup_task_for_done(
+        &mut task,
+        None,
+        Path::new("/tmp/proj"),
+        &mock_tmux,
+        &mock_git,
+        false,
+    );
 
     assert_eq!(task.status, TaskStatus::Done);
 }
@@ -7439,7 +7483,14 @@ fn test_cleanup_task_for_done_archives_md_files() {
     task.worktree_path = Some(wt.path().to_string_lossy().to_string());
     task.branch_name = Some("task/my-slug".to_string());
 
-    cleanup_task_for_done(&mut task, project_dir.path(), &mock_tmux, &mock_git);
+    cleanup_task_for_done(
+        &mut task,
+        None,
+        project_dir.path(),
+        &mock_tmux,
+        &mock_git,
+        false,
+    );
 
     // Archived file should exist under .agtx/archive/my-slug/plan.md
     let archive = project_dir
@@ -7473,9 +7524,11 @@ fn test_cleanup_task_resources_kills_window_and_removes_worktree() {
         &Some("task/branch".to_string()),
         &Some("proj:task-win".to_string()),
         &Some("/tmp/wt".to_string()),
+        None,
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
+        false,
     );
 }
 
@@ -7490,9 +7543,11 @@ fn test_cleanup_task_resources_noop_when_no_session_or_worktree() {
         &None,
         &None,
         &None,
+        None,
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
+        false,
     );
     // No panic = correct (no mock calls made)
 }
@@ -7523,7 +7578,15 @@ fn test_delete_task_resources_kills_window_removes_worktree_and_deletes_branch()
     task.worktree_path = Some("/tmp/wt".to_string());
     task.branch_name = Some("task/my-task".to_string());
 
-    delete_task_resources(&task, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
+    delete_task_resources(
+        &task,
+        None,
+        Path::new("/tmp/proj"),
+        &mock_tmux,
+        &mock_git,
+        false,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -7534,7 +7597,15 @@ fn test_delete_task_resources_noop_when_no_session_or_worktree() {
 
     let task = make_test_task("t2", "Nothing to clean", TaskStatus::Backlog);
     // session_name and worktree_path both None → no mock calls
-    delete_task_resources(&task, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
+    delete_task_resources(
+        &task,
+        None,
+        Path::new("/tmp/proj"),
+        &mock_tmux,
+        &mock_git,
+        false,
+    )
+    .unwrap();
 }
 
 // --- save_task ---
