@@ -1,18 +1,15 @@
 name = "superpowers"
 description = "Superpowers by @obra - brainstorming, plans, TDD, subagent-driven development"
 supported_agents = ["claude"]
-init_script = "git clone --depth 1 https://github.com/obra/superpowers.git .superpowers 2>/dev/null; mkdir -p .claude/hooks && printf '{\"hooks\":{\"SessionStart\":[{\"matcher\":\"startup|resume|clear|compact\",\"hooks\":[{\"type\":\"command\",\"command\":\"bash .superpowers/hooks/session-start\",\"async\":false}]}]}}' > .claude/hooks/hooks.json; mkdir -p .claude/commands/superpowers && cp .superpowers/commands/*.md .claude/commands/superpowers/"
+init_script = "claude plugin install superpowers@claude-plugins-official --scope local 2>/dev/null || true"
 
 [artifacts]
-planning = "docs/plans/*.md"
-
-[commands]
-planning = "/superpowers:brainstorm"
-running = "/superpowers:execute-plan"
+planning = "docs/superpowers/plans/*.md"
 
 [prompts]
-planning = "You are already in an isolated git worktree managed by agtx. Do NOT create additional worktrees or branches. Work directly in this directory.\n\nTask: {task}"
-running = ""
+planning = "You are already in an isolated git worktree managed by agtx. Do NOT create additional worktrees or branches. Work directly in this directory.\n\nUse the brainstorming skill to explore and design this task. When the design is approved, use the writing-plans skill to produce an implementation plan.\n\nTask: {task}"
+running = "Use the executing-plans skill (or subagent-driven-development if subagents are available) to implement the plan in docs/superpowers/plans/."
+review = "Use the requesting-code-review skill to review the completed work."
 
 [copy_back]
-planning = ["docs/plans"]
+planning = ["docs/superpowers"]
