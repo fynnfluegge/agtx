@@ -1005,8 +1005,7 @@ fn test_delete_task_resources_full_cleanup() {
         Path::new("/project"),
         &mock_tmux,
         &mock_git,
-    )
-    .unwrap();
+    );
 }
 
 /// Test delete_task_resources handles task without resources
@@ -1028,8 +1027,7 @@ fn test_delete_task_resources_no_resources() {
         Path::new("/project"),
         &mock_tmux,
         &mock_git,
-    )
-    .unwrap();
+    );
 }
 
 // =============================================================================
@@ -7561,8 +7559,7 @@ fn test_delete_task_resources_kills_window_removes_worktree_and_deletes_branch()
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-    )
-    .unwrap();
+    );
 }
 
 #[test]
@@ -7579,8 +7576,7 @@ fn test_delete_task_resources_noop_when_no_session_or_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-    )
-    .unwrap();
+    );
 }
 
 // --- save_task ---
