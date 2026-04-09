@@ -29,6 +29,10 @@ pub trait TmuxOperations: Send + Sync {
     /// Send keys to a window without pressing Enter
     fn send_keys_literal(&self, target: &str, keys: &str) -> Result<()>;
 
+    /// Paste a block of text into a pane using tmux load-buffer + paste-buffer.
+    /// This sends proper bracketed paste sequences to the target pane.
+    fn paste_text(&self, target: &str, text: &str) -> Result<()>;
+
     /// Capture pane content
     fn capture_pane(&self, target: &str) -> Result<String>;
 
@@ -130,6 +134,24 @@ impl TmuxOperations for RealTmuxOps {
         std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
             .args(["send-keys", "-t", target, keys])
+            .output()?;
+        Ok(())
+    }
+
+    fn paste_text(&self, target: &str, text: &str) -> Result<()> {
+        use std::io::Write;
+        let mut child = std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["load-buffer", "-"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        child.wait()?;
+        std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["paste-buffer", "-p", "-t", target])
             .output()?;
         Ok(())
     }

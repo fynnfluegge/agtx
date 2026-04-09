@@ -9068,3 +9068,128 @@ fn test_task_has_live_session_returns_false_on_tmux_error() {
 
     assert!(!task_has_live_session(&task, &mock_tmux));
 }
+
+// =============================================================================
+// Tests for handle_paste
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_handle_paste_into_shell_popup_calls_paste_text() {
+    // When shell popup is open, handle_paste must call paste_text exactly once
+    // with the full pasted string (not send_keys_literal character by character).
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+    mock_tmux.expect_get_cursor_info().returning(|_| None);
+
+    let received = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let received_c = received.clone();
+    mock_tmux
+        .expect_paste_text()
+        .times(1)
+        .returning(move |_, text| {
+            *received_c.lock().unwrap() = text.to_string();
+            Ok(())
+        });
+    mock_tmux
+        .expect_capture_pane_with_history()
+        .returning(|_, _| vec![]);
+
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+
+    app.state.shell_popup = Some(ShellPopup::new(
+        "my task".to_string(),
+        "proj:my-task".to_string(),
+    ));
+
+    app.handle_paste("hello world".to_string()).unwrap();
+
+    assert_eq!(*received.lock().unwrap(), "hello world");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_handle_paste_into_shell_popup_does_not_call_send_keys_literal() {
+    // Verify the old per-character path is not taken for paste events.
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux
+        .expect_paste_text()
+        .times(1)
+        .returning(|_, _| Ok(()));
+    mock_tmux
+        .expect_capture_pane_with_history()
+        .returning(|_, _| vec![]);
+    // send_keys_literal must NOT be called — mockall panics if an unexpected call occurs
+    mock_tmux.expect_send_keys_literal().times(0);
+
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+
+    app.state.shell_popup = Some(ShellPopup::new(
+        "my task".to_string(),
+        "proj:my-task".to_string(),
+    ));
+
+    app.handle_paste("some pasted text".to_string()).unwrap();
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_handle_paste_into_description_editor_at_end() {
+    // Paste appends at the current cursor position (end of buffer).
+    let mut app = make_test_app();
+    app.state.input_mode = InputMode::InputDescription;
+    app.state.input_buffer = "start ".to_string();
+    app.state.input_cursor = 6;
+
+    app.handle_paste("pasted text".to_string()).unwrap();
+
+    assert_eq!(app.state.input_buffer, "start pasted text");
+    assert_eq!(app.state.input_cursor, 17); // 6 + len("pasted text")
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_handle_paste_into_description_editor_at_mid_cursor() {
+    // Paste inserts at the cursor position, pushing subsequent text right.
+    let mut app = make_test_app();
+    app.state.input_mode = InputMode::InputDescription;
+    app.state.input_buffer = "ab".to_string();
+    app.state.input_cursor = 1; // between 'a' and 'b'
+
+    app.handle_paste("XY".to_string()).unwrap();
+
+    assert_eq!(app.state.input_buffer, "aXYb");
+    assert_eq!(app.state.input_cursor, 3); // 1 + len("XY")
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_handle_paste_noop_in_normal_mode() {
+    // In Normal mode with no popup open, paste is silently ignored.
+    let mut app = make_test_app();
+    // input_mode starts as Normal, shell_popup is None
+    assert_eq!(app.state.input_mode, InputMode::Normal);
+    assert!(app.state.shell_popup.is_none());
+
+    app.handle_paste("should be ignored".to_string()).unwrap();
+
+    assert!(app.state.input_buffer.is_empty());
+}
