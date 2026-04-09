@@ -43,26 +43,6 @@ fn test_worktree_exists_false_for_nonexistent() {
     assert!(!git::worktree_exists(temp_dir.path(), "nonexistent-task"));
 }
 
-#[test]
-fn test_run_cleanup_script_captures_output_and_env() {
-    let temp_dir = TempDir::new().unwrap();
-    let envs = vec![("AGTX_TASK_ID".to_string(), "task-123".to_string())];
-
-    let output = git::run_cleanup_script("echo $AGTX_TASK_ID", temp_dir.path(), &envs).unwrap();
-
-    assert!(output.status.success());
-    assert_eq!(output.stdout.trim(), "task-123");
-}
-
-#[test]
-fn test_run_cleanup_script_nonzero_exit() {
-    let temp_dir = TempDir::new().unwrap();
-
-    let output = git::run_cleanup_script("exit 42", temp_dir.path(), &[]).unwrap();
-
-    assert!(!output.status.success());
-}
-
 // =============================================================================
 // Integration tests (require git)
 // =============================================================================

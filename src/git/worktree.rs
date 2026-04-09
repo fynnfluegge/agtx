@@ -96,14 +96,14 @@ pub const AGENT_CONFIG_DIRS: &[&str] = &[
 
 /// Output from a shell script run inside a worktree.
 #[derive(Debug)]
-pub struct ScriptOutput {
+pub(crate) struct ScriptOutput {
     pub status: std::process::ExitStatus,
     pub stdout: String,
     pub stderr: String,
 }
 
 /// Run a shell script inside a worktree, capturing stdout/stderr.
-fn run_worktree_script(
+pub(crate) fn run_worktree_script(
     script: &str,
     worktree_path: &Path,
     envs: &[(String, String)],
@@ -121,15 +121,6 @@ fn run_worktree_script(
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     })
-}
-
-/// Run a cleanup script inside the worktree, returning the captured output.
-pub fn run_cleanup_script(
-    script: &str,
-    worktree_path: &Path,
-    envs: &[(String, String)],
-) -> Result<ScriptOutput> {
-    run_worktree_script(script, worktree_path, envs)
 }
 
 /// Initialize a worktree by copying agent config dirs, user-specified files, and running an init script.
@@ -320,4 +311,31 @@ pub fn worktree_path(project_path: &Path, task_id: &str) -> PathBuf {
 /// Check if a worktree exists for a task
 pub fn worktree_exists(project_path: &Path, task_id: &str) -> bool {
     worktree_path(project_path, task_id).exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_run_worktree_script_captures_output_and_env() {
+        let temp_dir = TempDir::new().unwrap();
+        let envs = vec![("AGTX_TASK_ID".to_string(), "task-123".to_string())];
+
+        let output =
+            run_worktree_script("echo $AGTX_TASK_ID", temp_dir.path(), &envs).unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.trim(), "task-123");
+    }
+
+    #[test]
+    fn test_run_worktree_script_nonzero_exit() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let output = run_worktree_script("exit 42", temp_dir.path(), &[]).unwrap();
+
+        assert!(!output.status.success());
+    }
 }

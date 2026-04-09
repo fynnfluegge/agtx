@@ -181,14 +181,7 @@ These options run during the Backlog → Research/Planning/Running transition, a
 and before the agent session starts.
 
 When a task worktree is removed, `cleanup_script` runs first (with cwd set to the worktree root).
-If it exits non-zero, worktree removal is aborted and the error is logged (forced cleanup flows
-continue after logging). The script receives:
-
-- `AGTX_PROJECT_PATH`
-- `AGTX_WORKTREE_PATH`
-- `AGTX_TASK_ID`
-- `AGTX_TASK_SLUG`
-- `AGTX_TASK_BRANCH` (when available)
+If it exits non-zero, worktree removal is aborted and the error is logged.
 
 ### Per-Phase Agent Configuration
 
