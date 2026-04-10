@@ -282,16 +282,14 @@ pub fn detect_main_branch(project_path: &Path) -> Result<String> {
 }
 
 /// Remove a git worktree
-pub fn remove_worktree(project_path: &Path, task_id: &str) -> Result<()> {
-    let worktree_path = project_path
-        .join(DEFAULT_WORKTREE_DIR)
-        .join(task_id);
+pub fn remove_worktree(project_path: &Path, task_id: &str, worktree_dir: &str) -> Result<()> {
+    let wt_path = worktree_path(project_path, task_id, worktree_dir);
 
     // Remove the worktree
     let output = Command::new("git")
         .current_dir(project_path)
         .args(["worktree", "remove"])
-        .arg(&worktree_path)
+        .arg(&wt_path)
         .args(["--force"]) // Force in case of uncommitted changes
         .output()
         .context("Failed to remove git worktree")?;
@@ -308,20 +306,18 @@ pub fn remove_worktree(project_path: &Path, task_id: &str) -> Result<()> {
 }
 
 /// Get the worktree path for a task
-pub fn worktree_path(project_path: &Path, task_id: &str) -> PathBuf {
-    project_path
-        .join(DEFAULT_WORKTREE_DIR)
-        .join(task_id)
+pub fn worktree_path(project_path: &Path, task_id: &str, worktree_dir: &str) -> PathBuf {
+    project_path.join(worktree_dir).join(task_id)
 }
 
 /// Get the worktree path for a task using a custom worktree directory
 pub fn worktree_path_with_dir(project_path: &Path, task_id: &str, worktree_dir: &str) -> PathBuf {
-    project_path.join(worktree_dir).join(task_id)
+    worktree_path(project_path, task_id, worktree_dir)
 }
 
 /// Check if a worktree exists for a task
 pub fn worktree_exists(project_path: &Path, task_id: &str) -> bool {
-    worktree_path(project_path, task_id).exists()
+    worktree_path(project_path, task_id, DEFAULT_WORKTREE_DIR).exists()
 }
 
 /// Check if a worktree exists for a task using a custom worktree directory

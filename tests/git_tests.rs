@@ -10,7 +10,7 @@ use tempfile::TempDir;
 #[test]
 fn test_worktree_path() {
     let project = PathBuf::from("/home/user/project");
-    let path = git::worktree_path(&project, "task-123");
+    let path = git::worktree_path(&project, "task-123", git::DEFAULT_WORKTREE_DIR);
     assert_eq!(
         path,
         PathBuf::from("/home/user/project/.agtx/worktrees/task-123")
@@ -20,7 +20,7 @@ fn test_worktree_path() {
 #[test]
 fn test_worktree_path_with_special_chars() {
     let project = PathBuf::from("/home/user/my-project");
-    let path = git::worktree_path(&project, "fix-bug-456");
+    let path = git::worktree_path(&project, "fix-bug-456", git::DEFAULT_WORKTREE_DIR);
     assert_eq!(
         path,
         PathBuf::from("/home/user/my-project/.agtx/worktrees/fix-bug-456")
@@ -30,7 +30,7 @@ fn test_worktree_path_with_special_chars() {
 #[test]
 fn test_worktree_path_nested_project() {
     let project = PathBuf::from("/home/user/projects/rust/agtx");
-    let path = git::worktree_path(&project, "feature-abc");
+    let path = git::worktree_path(&project, "feature-abc", git::DEFAULT_WORKTREE_DIR);
     assert_eq!(
         path,
         PathBuf::from("/home/user/projects/rust/agtx/.agtx/worktrees/feature-abc")
@@ -167,7 +167,7 @@ fn test_create_and_remove_worktree() {
     assert!(git::worktree_exists(temp_dir.path(), "test-task"));
 
     // Remove worktree
-    git::remove_worktree(temp_dir.path(), "test-task").unwrap();
+    git::remove_worktree(temp_dir.path(), "test-task", git::DEFAULT_WORKTREE_DIR).unwrap();
 
     // Verify it's gone
     assert!(!worktree_path.exists());
@@ -262,7 +262,7 @@ fn test_remove_worktree_nonexistent() {
 
     // Removing a non-existent worktree should not panic
     // (it may return Ok or Err depending on git version, but shouldn't crash)
-    let result = git::remove_worktree(temp_dir.path(), "does-not-exist");
+    let result = git::remove_worktree(temp_dir.path(), "does-not-exist", git::DEFAULT_WORKTREE_DIR);
 
     // The function should complete without panicking
     // We don't assert success/failure since behavior may vary
@@ -307,9 +307,9 @@ fn test_create_multiple_worktrees() {
     assert_ne!(path1, path3);
 
     // Clean up
-    git::remove_worktree(temp_dir.path(), "task-1").unwrap();
-    git::remove_worktree(temp_dir.path(), "task-2").unwrap();
-    git::remove_worktree(temp_dir.path(), "task-3").unwrap();
+    git::remove_worktree(temp_dir.path(), "task-1", git::DEFAULT_WORKTREE_DIR).unwrap();
+    git::remove_worktree(temp_dir.path(), "task-2", git::DEFAULT_WORKTREE_DIR).unwrap();
+    git::remove_worktree(temp_dir.path(), "task-3", git::DEFAULT_WORKTREE_DIR).unwrap();
 
     assert!(!path1.exists());
     assert!(!path2.exists());
@@ -327,7 +327,7 @@ fn test_worktree_with_uncommitted_changes() {
     std::fs::write(worktree_path.join("dirty-file.txt"), "uncommitted content").unwrap();
 
     // Remove should still work (with --force)
-    let result = git::remove_worktree(temp_dir.path(), "dirty-task");
+    let result = git::remove_worktree(temp_dir.path(), "dirty-task", git::DEFAULT_WORKTREE_DIR);
     assert!(result.is_ok());
 }
 
