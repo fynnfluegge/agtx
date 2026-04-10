@@ -645,6 +645,42 @@ impl App {
         // Load projects from global database
         app.refresh_projects()?;
 
+        // Recover tasks whose tmux windows were lost (server restart, manual kill, etc.)
+        {
+            let tasks_to_recover: Vec<_> = app
+                .state
+                .board
+                .tasks
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.status,
+                        TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review
+                    ) && t.session_name.is_some()
+                        && t.worktree_path.is_some()
+                })
+                .filter(|t| {
+                    let sn = t.session_name.as_ref().unwrap();
+                    !app.state.tmux_ops.window_exists(sn).unwrap_or(true)
+                })
+                .cloned()
+                .collect();
+
+            for task in &tasks_to_recover {
+                let agent_ops = app.state.agent_registry.get(&task.agent);
+                let _ = recover_task_session(
+                    task,
+                    &app.state.tmux_project_name,
+                    app.state
+                        .project_path
+                        .as_deref()
+                        .unwrap_or(Path::new(".")),
+                    app.state.tmux_ops.as_ref(),
+                    agent_ops.as_ref(),
+                );
+            }
+        }
+
         // Detect existing orchestrator session (survives agtx restarts)
         if app.state.flags.experimental {
             let orch_target = format!("{}:orchestrator", app.state.tmux_project_name);
@@ -2674,7 +2710,6 @@ impl App {
                         &project_path,
                         tmux_ops.as_ref(),
                         git_ops.as_ref(),
-                        true,
                     );
                 });
             }
@@ -4091,8 +4126,7 @@ impl App {
                     project_path,
                     self.state.tmux_ops.as_ref(),
                     self.state.git_ops.as_ref(),
-                    false,
-                )?;
+                );
                 db.delete_task(&task.id)?;
                 self.refresh_tasks()?;
             }
@@ -4322,6 +4356,7 @@ impl App {
         let project_name = self.state.project_name.clone();
         let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = self.state.config.base_branch.clone();
+        let worktree_dir = self.state.config.worktree_dir.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -4373,6 +4408,7 @@ impl App {
                 &tmux_project_name,
                 &prompt,
                 &base_branch,
+                &worktree_dir,
                 copy_files,
                 init_script,
                 &plugin,
@@ -4612,7 +4648,6 @@ impl App {
                 &project_path_clone,
                 tmux_ops.as_ref(),
                 git_ops.as_ref(),
-                false,
             );
         });
         Ok(false)
@@ -4665,6 +4700,7 @@ impl App {
         let project_name = self.state.project_name.clone();
         let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = self.state.config.base_branch.clone();
+        let worktree_dir = self.state.config.worktree_dir.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
 
@@ -4696,6 +4732,7 @@ impl App {
                 &tmux_project_name,
                 "",
                 &base_branch,
+                &worktree_dir,
                 copy_files,
                 init_script,
                 &plugin,
@@ -4863,6 +4900,7 @@ impl App {
         let project_name = self.state.project_name.clone();
         let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = self.state.config.base_branch.clone();
+        let worktree_dir = self.state.config.worktree_dir.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -4889,6 +4927,7 @@ impl App {
                 &tmux_project_name,
                 &prompt,
                 &base_branch,
+                &worktree_dir,
                 copy_files,
                 init_script,
                 &plugin,
@@ -4963,8 +5002,15 @@ impl App {
                         let agent_registry = Arc::clone(&self.state.agent_registry);
                         let running_agent_clone = running_agent.clone();
                         let current_agent_clone = task.agent.clone();
+                        let wt_path = task.worktree_path.clone();
                         std::thread::spawn(move || {
                             let agent_ops = agent_registry.get(&running_agent_clone);
+                            ensure_window_or_recover(
+                                tmux_ops.as_ref(),
+                                &session_clone,
+                                agent_ops.as_ref(),
+                                wt_path.as_deref(),
+                            );
                             let new_cmd = agent_ops.build_interactive_command("");
                             switch_agent_in_tmux(
                                 tmux_ops.as_ref(),
@@ -5028,9 +5074,17 @@ impl App {
                     let auto_dismiss = plugin
                         .as_ref()
                         .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+                    let wt_path = task.worktree_path.clone();
                     std::thread::spawn(move || {
+                        let agent_ops = agent_registry.get(&planning_agent_clone);
+                        // Recover window if it was lost
+                        ensure_window_or_recover(
+                            tmux_ops.as_ref(),
+                            &session_clone,
+                            agent_ops.as_ref(),
+                            wt_path.as_deref(),
+                        );
                         if agent_switch {
-                            let agent_ops = agent_registry.get(&planning_agent_clone);
                             let new_cmd = agent_ops.build_interactive_command("");
                             switch_agent_in_tmux(
                                 tmux_ops.as_ref(),
@@ -5080,8 +5134,15 @@ impl App {
                         let agent_registry = Arc::clone(&self.state.agent_registry);
                         let planning_agent_clone = planning_agent.clone();
                         let current_agent_clone = task.agent.clone();
+                        let wt_path = task.worktree_path.clone();
                         std::thread::spawn(move || {
                             let agent_ops = agent_registry.get(&planning_agent_clone);
+                            ensure_window_or_recover(
+                                tmux_ops.as_ref(),
+                                &session_clone,
+                                agent_ops.as_ref(),
+                                wt_path.as_deref(),
+                            );
                             let new_cmd = agent_ops.build_interactive_command("");
                             switch_agent_in_tmux(
                                 tmux_ops.as_ref(),
@@ -5456,6 +5517,31 @@ impl App {
     fn open_selected_task(&mut self) -> Result<()> {
         if let Some(task) = self.state.board.selected_task() {
             if let Some(window_name) = &task.session_name.clone() {
+                // If the tmux window is gone, try to recover it before opening
+                if !self
+                    .state
+                    .tmux_ops
+                    .window_exists(window_name)
+                    .unwrap_or(true)
+                {
+                    let agent_ops = self.state.agent_registry.get(&task.agent);
+                    let project_path = self
+                        .state
+                        .project_path
+                        .as_deref()
+                        .unwrap_or(Path::new("."));
+                    let _ = recover_task_session(
+                        task,
+                        &self.state.tmux_project_name,
+                        project_path,
+                        self.state.tmux_ops.as_ref(),
+                        agent_ops.as_ref(),
+                    );
+                    // Clear stale phase status so it gets re-evaluated
+                    self.state.phase_status_cache.remove(&task.id);
+                    self.state.pane_content_hashes.remove(&task.id);
+                }
+
                 let task_id = task.id.clone();
                 let escalation_note = task.escalation_note.clone();
                 let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
@@ -5829,8 +5915,19 @@ impl App {
                     }
                 }
 
-                // Capture tmux content hash for idle detection (only when Working)
-                let content_hash = if phase_status == PhaseStatus::Working {
+                // Check if tmux window still exists — if not, mark as Exited
+                // (unless phase artifact was found, in which case it completed before the crash)
+                let window_gone = session_name
+                    .as_ref()
+                    .map_or(false, |sn| !tmux_ops.window_exists(sn).unwrap_or(true));
+                let phase_status = if window_gone && phase_status == PhaseStatus::Working {
+                    PhaseStatus::Exited
+                } else {
+                    phase_status
+                };
+
+                // Capture tmux content hash for idle detection (only when Working and window alive)
+                let content_hash = if phase_status == PhaseStatus::Working && !window_gone {
                     session_name.as_ref().and_then(|sn| {
                         tmux_ops.capture_pane(sn).ok().map(|content| {
                             use std::hash::{Hash, Hasher};
@@ -5881,6 +5978,8 @@ impl App {
                     }
                 }
             } else if phase == PhaseStatus::Ready {
+                self.state.pane_content_hashes.remove(&task_status.task_id);
+            } else if phase == PhaseStatus::Exited {
                 self.state.pane_content_hashes.remove(&task_status.task_id);
             }
 
@@ -6174,6 +6273,43 @@ fn ensure_project_tmux_session(
     }
 }
 
+/// Recover a task's tmux session by creating a new window with the agent's resume command.
+/// Used when the tmux window has been lost (server restart, manual kill, etc.)
+/// but the task's worktree and agent session data still exist on disk.
+/// Returns the tmux target string on success.
+fn recover_task_session(
+    task: &Task,
+    project_name: &str,
+    project_path: &Path,
+    tmux_ops: &dyn TmuxOperations,
+    agent_ops: &dyn AgentOperations,
+) -> Result<String> {
+    let worktree_path = task
+        .worktree_path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Task has no worktree path"))?;
+
+    if !Path::new(worktree_path).exists() {
+        anyhow::bail!("Worktree no longer exists: {}", worktree_path);
+    }
+
+    let target = task
+        .session_name
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Task has no session name"))?;
+    let (session, window) = target
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Invalid session name format: {}", target))?;
+
+    ensure_project_tmux_session(project_name, project_path, tmux_ops);
+
+    let resume_cmd = agent_ops.build_resume_command();
+
+    tmux_ops.create_window(session, window, worktree_path, Some(resume_cmd))?;
+
+    Ok(target.clone())
+}
+
 /// Copy files/dirs from worktree back to project root.
 /// Used by plugins with `[copy_back]` to sync artifacts after phase completion.
 fn copy_back_to_project(worktree: &Path, project_root: &Path, entries: &[String]) {
@@ -6216,81 +6352,27 @@ fn generate_task_slug(task_id: &str, title: &str) -> String {
     format!("{}-{}", id_prefix, title_slug)
 }
 
-fn build_cleanup_env(
-    project_path: &Path,
-    worktree_path: &Path,
-    task_id: &str,
-    branch_name: Option<&str>,
-) -> Vec<(String, String)> {
-    let slug = branch_name
-        .and_then(|b| b.strip_prefix("task/"))
-        .unwrap_or(task_id);
-
-    let mut envs = vec![
-        (
-            "AGTX_PROJECT_PATH".to_string(),
-            project_path.to_string_lossy().to_string(),
-        ),
-        (
-            "AGTX_WORKTREE_PATH".to_string(),
-            worktree_path.to_string_lossy().to_string(),
-        ),
-        ("AGTX_TASK_ID".to_string(), task_id.to_string()),
-        ("AGTX_TASK_SLUG".to_string(), slug.to_string()),
-    ];
-
-    if let Some(branch) = branch_name {
-        envs.push(("AGTX_TASK_BRANCH".to_string(), branch.to_string()));
-    }
-
-    envs
-}
-
-fn run_cleanup_script_for_worktree(
-    cleanup_script: Option<&str>,
-    project_path: &Path,
-    worktree_path: &Path,
-    task_id: &str,
-    branch_name: Option<&str>,
-    force_cleanup: bool,
-) -> Result<()> {
+fn run_cleanup_script_for_worktree(cleanup_script: Option<&str>, worktree_path: &Path) {
     let Some(script) = cleanup_script else {
-        return Ok(());
+        return;
     };
     let script = script.trim();
     if script.is_empty() {
-        return Ok(());
+        return;
     }
 
-    let envs = build_cleanup_env(project_path, worktree_path, task_id, branch_name);
-    let output = match git::run_cleanup_script(script, worktree_path, &envs) {
-        Ok(result) => result,
-        Err(e) => {
-            if force_cleanup {
-                eprintln!("cleanup_script failed to run (forced): {}", e);
-                return Ok(());
+    match git::run_worktree_script(script, worktree_path, &[]) {
+        Err(e) => eprintln!("cleanup_script failed to run: {}", e),
+        Ok(output) => {
+            if !output.status.success() {
+                eprintln!(
+                    "cleanup_script exited with {}: {}",
+                    output.status,
+                    output.stderr.trim()
+                );
             }
-            return Err(e);
         }
-    };
-
-    if !output.stdout.trim().is_empty() {
-        eprintln!("cleanup_script stdout:\n{}", output.stdout.trim_end());
     }
-    if !output.stderr.trim().is_empty() {
-        eprintln!("cleanup_script stderr:\n{}", output.stderr.trim_end());
-    }
-
-    if !output.status.success() {
-        let message = format!("cleanup_script exited with {}: {}", output.status, script);
-        if force_cleanup {
-            eprintln!("{}", message);
-            return Ok(());
-        }
-        anyhow::bail!(message);
-    }
-
-    Ok(())
 }
 
 /// Cleanup task resources (tmux window, cleanup script, git worktree) and mark as done
@@ -6301,7 +6383,6 @@ fn cleanup_task_for_done(
     project_path: &Path,
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
-    force_cleanup: bool,
 ) {
     // Archive artifacts before removing worktree
     if let Some(worktree) = &task.worktree_path {
@@ -6330,18 +6411,8 @@ fn cleanup_task_for_done(
         let _ = tmux_ops.kill_window(session_name);
     }
     if let Some(worktree) = &task.worktree_path {
-        if let Err(e) = run_cleanup_script_for_worktree(
-            cleanup_script,
-            project_path,
-            Path::new(worktree),
-            &task.id,
-            task.branch_name.as_deref(),
-            force_cleanup,
-        ) {
-            eprintln!("cleanup_script failed: {}", e);
-        } else {
-            let _ = git_ops.remove_worktree(project_path, worktree);
-        }
+        run_cleanup_script_for_worktree(cleanup_script, Path::new(worktree));
+        let _ = git_ops.remove_worktree(project_path, worktree);
     }
     // Keep the branch so task can be reopened later
     task.session_name = None;
@@ -6361,7 +6432,6 @@ fn cleanup_task_resources(
     project_path: &Path,
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
-    force_cleanup: bool,
 ) {
     // Archive artifacts before removing worktree
     if let Some(worktree) = worktree_path {
@@ -6389,17 +6459,7 @@ fn cleanup_task_resources(
         let _ = tmux_ops.kill_window(session_name);
     }
     if let Some(worktree) = worktree_path {
-        if let Err(e) = run_cleanup_script_for_worktree(
-            cleanup_script,
-            project_path,
-            Path::new(worktree),
-            task_id,
-            branch_name.as_deref(),
-            force_cleanup,
-        ) {
-            eprintln!("cleanup_script failed: {}", e);
-            return;
-        }
+        run_cleanup_script_for_worktree(cleanup_script, Path::new(worktree));
         let _ = git_ops.remove_worktree(project_path, worktree);
     }
 }
@@ -6418,6 +6478,7 @@ fn setup_task_worktree(
     tmux_project_name: &str,
     prompt: &str,
     base_branch: &str,
+    worktree_dir: &str,
     copy_files: Option<String>,
     init_script: Option<String>,
     plugin: &Option<WorkflowPlugin>,
@@ -6433,18 +6494,18 @@ fn setup_task_worktree(
     let target = format!("{}:{}", tmux_project_name, window_name);
 
     // Create git worktree from the configured base branch
-    let worktree_path_str = match git_ops.create_worktree(project_path, &unique_slug, base_branch) {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("Failed to create worktree: {}", e);
-            project_path
-                .join(".agtx")
-                .join("worktrees")
-                .join(&unique_slug)
-                .to_string_lossy()
-                .to_string()
-        }
-    };
+    let worktree_path_str =
+        match git_ops.create_worktree(project_path, &unique_slug, base_branch, worktree_dir) {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("Failed to create worktree: {}", e);
+                project_path
+                    .join(worktree_dir)
+                    .join(&unique_slug)
+                    .to_string_lossy()
+                    .to_string()
+            }
+        };
 
     // Initialize worktree: copy files and run init script
     // Merge plugin-level copy_files with project-level copy_files
@@ -6584,8 +6645,7 @@ fn delete_task_resources(
     project_path: &Path,
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
-    force_cleanup: bool,
-) -> Result<()> {
+) {
     // Kill tmux window if exists
     if let Some(ref session_name) = task.session_name {
         let _ = tmux_ops.kill_window(session_name);
@@ -6594,19 +6654,11 @@ fn delete_task_resources(
     // Remove worktree and delete branch if exists
     if let Some(ref worktree) = task.worktree_path {
         if let Some(ref branch_name) = task.branch_name {
-            run_cleanup_script_for_worktree(
-                cleanup_script,
-                project_path,
-                Path::new(worktree),
-                &task.id,
-                task.branch_name.as_deref(),
-                force_cleanup,
-            )?;
+            run_cleanup_script_for_worktree(cleanup_script, Path::new(worktree));
             let _ = git_ops.remove_worktree(project_path, worktree);
             let _ = git_ops.delete_branch(project_path, branch_name);
         }
     }
-    Ok(())
 }
 
 /// Collect git diff content from a worktree
@@ -7295,6 +7347,17 @@ fn spawn_send_to_agent(
     plugin: Option<WorkflowPlugin>,
 ) {
     std::thread::spawn(move || {
+        // If the tmux window is gone, recover it with the agent's resume command
+        {
+            let agent_ops = agent_registry.get(&target_agent);
+            ensure_window_or_recover(
+                tmux_ops.as_ref(),
+                &target,
+                agent_ops.as_ref(),
+                worktree_path.as_deref(),
+            );
+        }
+
         if needs_switch {
             // Deploy skills for the incoming agent only if its native skill directory
             // doesn't exist yet. This handles the case where a worktree was created
@@ -7774,6 +7837,31 @@ fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
         }
     }
     false
+}
+
+/// If the tmux window for `target` is gone, recreate it with the agent's resume command.
+/// Used before `switch_agent_in_tmux` and `send_skill_and_prompt` to handle dead windows.
+fn ensure_window_or_recover(
+    tmux_ops: &dyn TmuxOperations,
+    target: &str,
+    agent_ops: &dyn AgentOperations,
+    worktree_path: Option<&str>,
+) {
+    if tmux_ops.window_exists(target).unwrap_or(true) {
+        return;
+    }
+    let Some(wt_path) = worktree_path else { return };
+    if !Path::new(wt_path).exists() {
+        return;
+    }
+    let Some((session, window)) = target.split_once(':') else {
+        return;
+    };
+    if !tmux_ops.has_session(session) {
+        let _ = tmux_ops.create_session(session, wt_path);
+    }
+    let resume_cmd = agent_ops.build_resume_command();
+    let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd));
 }
 
 /// Gracefully switch the agent running in a tmux window.

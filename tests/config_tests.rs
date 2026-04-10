@@ -107,6 +107,7 @@ fn test_merged_config_project_overrides() {
         default_agent: Some("codex".to_string()),
         agents: None,
         base_branch: Some("develop".to_string()),
+        worktree_dir: None,
         github_url: Some("https://github.com/user/repo".to_string()),
         copy_files: Some(".env, .env.local".to_string()),
         init_script: Some("npm install".to_string()),
@@ -124,10 +125,34 @@ fn test_merged_config_project_overrides() {
     );
     assert_eq!(merged.copy_files, Some(".env, .env.local".to_string()));
     assert_eq!(merged.init_script, Some("npm install".to_string()));
+    // worktree_dir not overridden, uses global default
+    assert_eq!(merged.worktree_dir, ".agtx/worktrees");
     assert_eq!(
         merged.cleanup_script,
         Some("scripts/cleanup.sh".to_string())
     );
+}
+
+#[test]
+fn test_merged_config_worktree_dir_override() {
+    let global = GlobalConfig::default();
+    let project = ProjectConfig {
+        worktree_dir: Some(".worktrees".to_string()),
+        ..Default::default()
+    };
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.worktree_dir, ".worktrees");
+}
+
+#[test]
+fn test_merged_config_worktree_dir_global() {
+    let mut global = GlobalConfig::default();
+    global.worktree.worktree_dir = ".wt".to_string();
+    let project = ProjectConfig::default();
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.worktree_dir, ".wt");
 }
 
 // === FirstRunAction Tests ===

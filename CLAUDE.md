@@ -93,7 +93,7 @@ Backlog → Planning → Running → Review → Done
 ```
 
 - **Backlog**: Task ideas, not started
-- **Planning**: Creates git worktree at `.agtx/worktrees/{slug}`, copies configured files, runs init script, deploys skills, starts agent in planning mode
+- **Planning**: Creates git worktree at `{worktree_dir}/{slug}` (default `.agtx/worktrees/{slug}`, configurable via `worktree_dir`), copies configured files, runs init script, deploys skills, starts agent in planning mode
 - **Running**: Agent is implementing (sends execute command/prompt)
 - **Review**: Optionally create PR. Tmux window stays open. Can resume to address feedback
 - **Done**: Cleanup worktree + tmux window (branch kept locally)

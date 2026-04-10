@@ -69,11 +69,13 @@ review = "codex"
 
 [worktree]
 base_branch = "dev"
+worktree_dir = ".worktrees"  # default: ".agtx/worktrees"
 ```
 
 ```toml
 # Project config (.agtx/config.toml)
 base_branch = "dev"
+worktree_dir = ".worktrees"  # overrides global
 copy_files = ".env, .env.local"
 init_script = "scripts/init_worktree.sh"
 

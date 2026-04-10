@@ -153,7 +153,11 @@ Global worktree defaults can be set here:
 # ~/.config/agtx/config.toml
 [worktree]
 base_branch = "dev"
+worktree_dir = ".worktrees"  # default: ".agtx/worktrees"
 ```
+
+`worktree_dir` is the directory (relative to project root) where task worktrees are created. Defaults
+to `.agtx/worktrees` if not set.
 
 ### Project Configuration
 
@@ -162,6 +166,9 @@ Per-project settings can be placed in `.agtx/config.toml` at the project root:
 ```toml
 # Base branch used when creating new task worktrees (optional)
 base_branch = "dev"
+
+# Directory where worktrees are created (optional, default: ".agtx/worktrees")
+worktree_dir = ".worktrees"
 
 # Files to copy from project root into each new worktree (comma-separated)
 # Paths are relative and preserve directory structure
@@ -176,19 +183,6 @@ cleanup_script = "scripts/cleanup_worktree.sh"
 
 `base_branch` controls which branch new task worktrees are created from. If omitted or empty, agtx
 auto-detects `main`, `master`, or falls back to the current branch.
-
-These options run during the Backlog → Research/Planning/Running transition, after worktree creation
-and before the agent session starts.
-
-When a task worktree is removed, `cleanup_script` runs first (with cwd set to the worktree root).
-If it exits non-zero, worktree removal is aborted and the error is logged (forced cleanup flows
-continue after logging). The script receives:
-
-- `AGTX_PROJECT_PATH`
-- `AGTX_WORKTREE_PATH`
-- `AGTX_TASK_ID`
-- `AGTX_TASK_SLUG`
-- `AGTX_TASK_BRANCH` (when available)
 
 ### Per-Phase Agent Configuration
 

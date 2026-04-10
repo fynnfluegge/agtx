@@ -33,6 +33,20 @@ impl Agent {
         which::which(&self.command).is_ok()
     }
 
+    /// Build the shell command to resume the agent's most recent session
+    /// in the current working directory. Used to recover from tmux/server restarts.
+    pub fn build_resume_command(&self) -> String {
+        match self.name.as_str() {
+            "claude" => "claude --dangerously-skip-permissions --continue".to_string(),
+            "codex" => "codex resume --last".to_string(),
+            "copilot" => "copilot --allow-all-tools --continue".to_string(),
+            "gemini" => "gemini --approval-mode yolo --resume".to_string(),
+            "opencode" => "opencode --continue".to_string(),
+            "cursor" => "agent --yolo --continue".to_string(),
+            _ => self.build_interactive_command(""),
+        }
+    }
+
     /// Build the shell command to start the agent interactively.
     /// When prompt is empty, the agent starts with no initial message
     /// (task content and skill commands are sent later via tmux send_keys).
@@ -154,24 +168,3 @@ pub fn parse_agent_selection(input: &str, agent_count: usize) -> Option<usize> {
     None
 }
 
-/// Build the command arguments for spawning an agent
-pub fn build_spawn_args(agent: &Agent, prompt: &str, task_id: &str) -> Vec<String> {
-    let mut args = agent.args.clone();
-
-    match agent.name.as_str() {
-        "claude" => {
-            // Claude Code supports session persistence
-            args.extend(["--session".to_string(), task_id.to_string()]);
-            args.push(prompt.to_string());
-        }
-        "copilot" => {
-            args.extend(["-p".to_string(), prompt.to_string()]);
-        }
-        _ => {
-            // Default: just pass the prompt
-            args.push(prompt.to_string());
-        }
-    }
-
-    args
-}

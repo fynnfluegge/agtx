@@ -15,13 +15,14 @@ pub trait GitOperations: Send + Sync {
         project_path: &Path,
         task_slug: &str,
         base_branch: &str,
+        worktree_dir: &str,
     ) -> Result<String>;
 
     /// Remove a worktree
     fn remove_worktree(&self, project_path: &Path, worktree_path: &str) -> Result<()>;
 
     /// Check if worktree exists
-    fn worktree_exists(&self, project_path: &Path, task_slug: &str) -> bool;
+    fn worktree_exists(&self, project_path: &Path, task_slug: &str, worktree_dir: &str) -> bool;
 
     /// Delete a branch
     fn delete_branch(&self, project_path: &Path, branch_name: &str) -> Result<()>;
@@ -82,8 +83,10 @@ impl GitOperations for RealGitOps {
         project_path: &Path,
         task_slug: &str,
         base_branch: &str,
+        worktree_dir: &str,
     ) -> Result<String> {
-        let path = super::create_worktree_from_base(project_path, task_slug, base_branch)?;
+        let path =
+            super::create_worktree_from_base(project_path, task_slug, base_branch, worktree_dir)?;
         Ok(path.to_string_lossy().to_string())
     }
 
@@ -95,8 +98,8 @@ impl GitOperations for RealGitOps {
         Ok(())
     }
 
-    fn worktree_exists(&self, project_path: &Path, task_slug: &str) -> bool {
-        super::worktree_exists(project_path, task_slug)
+    fn worktree_exists(&self, project_path: &Path, task_slug: &str, worktree_dir: &str) -> bool {
+        super::worktree_exists_with_dir(project_path, task_slug, worktree_dir)
     }
 
     fn delete_branch(&self, project_path: &Path, branch_name: &str) -> Result<()> {
