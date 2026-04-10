@@ -930,7 +930,6 @@ fn test_cleanup_task_for_done_with_resources() {
         Path::new("/project"),
         &mock_tmux,
         &mock_git,
-        false,
     );
 
     assert!(task.session_name.is_none());
@@ -957,7 +956,6 @@ fn test_cleanup_task_for_done_no_resources() {
         Path::new("/project"),
         &mock_tmux,
         &mock_git,
-        false,
     );
 
     assert_eq!(task.status, TaskStatus::Done);
@@ -1007,9 +1005,7 @@ fn test_delete_task_resources_full_cleanup() {
         Path::new("/project"),
         &mock_tmux,
         &mock_git,
-        false,
-    )
-    .unwrap();
+    );
 }
 
 /// Test delete_task_resources handles task without resources
@@ -1031,9 +1027,7 @@ fn test_delete_task_resources_no_resources() {
         Path::new("/project"),
         &mock_tmux,
         &mock_git,
-        false,
-    )
-    .unwrap();
+    );
 }
 
 // =============================================================================
@@ -7421,7 +7415,6 @@ fn test_cleanup_task_for_done_clears_session_and_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
     );
 
     assert_eq!(task.status, TaskStatus::Done);
@@ -7446,7 +7439,6 @@ fn test_cleanup_task_for_done_no_ops_when_no_session_or_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
     );
 
     assert_eq!(task.status, TaskStatus::Done);
@@ -7481,7 +7473,6 @@ fn test_cleanup_task_for_done_archives_md_files() {
         project_dir.path(),
         &mock_tmux,
         &mock_git,
-        false,
     );
 
     // Archived file should exist under .agtx/archive/my-slug/plan.md
@@ -7520,7 +7511,6 @@ fn test_cleanup_task_resources_kills_window_and_removes_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
     );
 }
 
@@ -7539,7 +7529,6 @@ fn test_cleanup_task_resources_noop_when_no_session_or_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
     );
     // No panic = correct (no mock calls made)
 }
@@ -7576,9 +7565,7 @@ fn test_delete_task_resources_kills_window_removes_worktree_and_deletes_branch()
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
-    )
-    .unwrap();
+    );
 }
 
 #[test]
@@ -7595,9 +7582,7 @@ fn test_delete_task_resources_noop_when_no_session_or_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
-    )
-    .unwrap();
+    );
 }
 
 // --- save_task ---
