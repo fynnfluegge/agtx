@@ -114,6 +114,49 @@ fn test_build_interactive_command_existing_agents_unchanged() {
 }
 
 // =============================================================================
+// Tests for build_resume_command
+// =============================================================================
+
+#[test]
+fn test_build_resume_command_all_agents() {
+    let agents = known_agents();
+    let by_name = |n: &str| agents.iter().find(|a| a.name == n).unwrap().clone();
+
+    assert_eq!(
+        by_name("claude").build_resume_command(),
+        "claude --dangerously-skip-permissions --continue"
+    );
+    assert_eq!(
+        by_name("codex").build_resume_command(),
+        "codex resume --last"
+    );
+    assert_eq!(
+        by_name("copilot").build_resume_command(),
+        "copilot --allow-all-tools --continue"
+    );
+    assert_eq!(
+        by_name("gemini").build_resume_command(),
+        "gemini --approval-mode yolo --resume"
+    );
+    assert_eq!(
+        by_name("opencode").build_resume_command(),
+        "opencode --continue"
+    );
+    assert_eq!(
+        by_name("cursor").build_resume_command(),
+        "agent --yolo --continue"
+    );
+}
+
+#[test]
+fn test_build_resume_command_unknown_agent_falls_back_to_interactive() {
+    use agtx::agent::Agent;
+    let agent = Agent::new("custom-agent", "my-agent", "A custom agent", "Custom <noreply@example.com>");
+    // Unknown agent should fall back to build_interactive_command("")
+    assert_eq!(agent.build_resume_command(), agent.build_interactive_command(""));
+}
+
+// =============================================================================
 // Tests for cursor skill integration
 // =============================================================================
 

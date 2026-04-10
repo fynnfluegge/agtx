@@ -166,6 +166,10 @@ pub struct WorktreeConfig {
     /// Base branch to create worktrees from (empty = auto-detect main/master)
     #[serde(default)]
     pub base_branch: String,
+
+    /// Directory (relative to project root) where worktrees are created
+    #[serde(default = "default_worktree_dir")]
+    pub worktree_dir: String,
 }
 
 impl Default for WorktreeConfig {
@@ -174,8 +178,13 @@ impl Default for WorktreeConfig {
             enabled: true,
             auto_cleanup: true,
             base_branch: String::new(),
+            worktree_dir: default_worktree_dir(),
         }
     }
+}
+
+fn default_worktree_dir() -> String {
+    crate::git::DEFAULT_WORKTREE_DIR.to_string()
 }
 
 fn default_true() -> bool {
@@ -196,6 +205,9 @@ pub struct ProjectConfig {
 
     /// GitHub URL for this project
     pub github_url: Option<String>,
+
+    /// Directory (relative to project root) where worktrees are created
+    pub worktree_dir: Option<String>,
 
     /// Comma-separated list of files to copy from project root into worktrees
     pub copy_files: Option<String>,
@@ -325,6 +337,7 @@ pub struct MergedConfig {
     pub worktree_enabled: bool,
     pub auto_cleanup: bool,
     pub base_branch: String,
+    pub worktree_dir: String,
     pub github_url: Option<String>,
     pub theme: ThemeConfig,
     pub copy_files: Option<String>,
@@ -354,6 +367,10 @@ impl MergedConfig {
                 .base_branch
                 .clone()
                 .unwrap_or_else(|| global.worktree.base_branch.clone()),
+            worktree_dir: project
+                .worktree_dir
+                .clone()
+                .unwrap_or_else(|| global.worktree.worktree_dir.clone()),
             github_url: project.github_url.clone(),
             theme: global.theme.clone(),
             copy_files: project.copy_files.clone(),

@@ -936,7 +936,6 @@ fn test_cleanup_task_for_done_with_resources() {
         Path::new("/project"),
         &mock_tmux,
         &mock_git,
-        false,
     );
 
     assert!(task.session_name.is_none());
@@ -963,7 +962,6 @@ fn test_cleanup_task_for_done_no_resources() {
         Path::new("/project"),
         &mock_tmux,
         &mock_git,
-        false,
     );
 
     assert_eq!(task.status, TaskStatus::Done);
@@ -1013,9 +1011,7 @@ fn test_delete_task_resources_full_cleanup() {
         Path::new("/project"),
         &mock_tmux,
         &mock_git,
-        false,
-    )
-    .unwrap();
+    );
 }
 
 /// Test delete_task_resources handles task without resources
@@ -1037,9 +1033,7 @@ fn test_delete_task_resources_no_resources() {
         Path::new("/project"),
         &mock_tmux,
         &mock_git,
-        false,
-    )
-    .unwrap();
+    );
 }
 
 // =============================================================================
@@ -1415,7 +1409,7 @@ fn test_setup_task_worktree_success() {
     // Expect worktree creation
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
 
     // Expect worktree initialization
     mock_git
@@ -1443,6 +1437,7 @@ fn test_setup_task_worktree_success() {
         "my-project",
         "implement this",
         "main",
+        ".agtx/worktrees",
         None,
         None,
         &None,
@@ -1475,7 +1470,7 @@ fn test_setup_task_worktree_sets_task_fields() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -1495,6 +1490,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         "my-project",
         "fix the bug",
         "main",
+        ".agtx/worktrees",
         Some("CLAUDE.md".to_string()),
         Some("./init.sh".to_string()),
         &None,
@@ -1533,7 +1529,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     // Worktree creation fails
     mock_git
         .expect_create_worktree()
-        .returning(|_, _, _| Err(anyhow::anyhow!("worktree already exists")));
+        .returning(|_, _, _, _| Err(anyhow::anyhow!("worktree already exists")));
 
     // Should still initialize and create window with fallback path
     mock_git
@@ -1555,6 +1551,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         "my-project",
         "do something",
         "main",
+        ".agtx/worktrees",
         None,
         None,
         &None,
@@ -1588,7 +1585,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -1610,6 +1607,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         "my-project",
         "do something",
         "main",
+        ".agtx/worktrees",
         None,
         None,
         &None,
@@ -1638,7 +1636,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -1661,6 +1659,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         "my-project",
         "do work",
         "main",
+        ".agtx/worktrees",
         None,
         None,
         &None,
@@ -1687,8 +1686,8 @@ fn test_setup_task_worktree_passes_init_config() {
 
     mock_git
         .expect_create_worktree()
-        .withf(|_, _, base_branch| base_branch == "development")
-        .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .withf(|_, _, base_branch, _| base_branch == "development")
+        .returning(|_, slug, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
 
     // Verify copy_files and init_script are passed through
     mock_git
@@ -1715,6 +1714,7 @@ fn test_setup_task_worktree_passes_init_config() {
         "my-project",
         "implement feature",
         "development",
+        ".agtx/worktrees",
         Some("CLAUDE.md,.env".to_string()),
         Some("./setup.sh".to_string()),
         &None,
@@ -7421,7 +7421,6 @@ fn test_cleanup_task_for_done_clears_session_and_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
     );
 
     assert_eq!(task.status, TaskStatus::Done);
@@ -7446,7 +7445,6 @@ fn test_cleanup_task_for_done_no_ops_when_no_session_or_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
     );
 
     assert_eq!(task.status, TaskStatus::Done);
@@ -7481,7 +7479,6 @@ fn test_cleanup_task_for_done_archives_md_files() {
         project_dir.path(),
         &mock_tmux,
         &mock_git,
-        false,
     );
 
     // Archived file should exist under .agtx/archive/my-slug/plan.md
@@ -7520,7 +7517,6 @@ fn test_cleanup_task_resources_kills_window_and_removes_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
     );
 }
 
@@ -7539,7 +7535,6 @@ fn test_cleanup_task_resources_noop_when_no_session_or_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
     );
     // No panic = correct (no mock calls made)
 }
@@ -7576,9 +7571,7 @@ fn test_delete_task_resources_kills_window_removes_worktree_and_deletes_branch()
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
-    )
-    .unwrap();
+    );
 }
 
 #[test]
@@ -7595,9 +7588,7 @@ fn test_delete_task_resources_noop_when_no_session_or_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
-        false,
-    )
-    .unwrap();
+    );
 }
 
 // --- save_task ---
