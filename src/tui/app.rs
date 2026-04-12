@@ -5268,7 +5268,7 @@ impl App {
         // Block forward transitions when dependencies are not satisfied
         let is_forward = matches!(
             req.action.as_str(),
-            "move_forward" | "move_to_planning" | "move_to_running"
+            "move_forward" | "move_to_planning" | "move_to_running" | "research"
         );
         if is_forward && task.status == TaskStatus::Backlog && !db.deps_satisfied(&task) {
             anyhow::bail!(
