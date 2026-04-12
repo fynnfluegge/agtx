@@ -41,6 +41,7 @@ fn build_footer_text(
     sidebar_focused: bool,
     selected_column: usize,
     has_cyclic_plugin: bool,
+    fullscreen_on_enter: bool,
 ) -> String {
     match input_mode {
         InputMode::Normal => {
@@ -49,10 +50,26 @@ fn build_footer_text(
             } else {
                 match selected_column {
                     0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
-                    1 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string(),
-                    2 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
-                    3 if has_cyclic_plugin => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string(),
-                    3 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
+                    1 => if fullscreen_on_enter {
+                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string()
+                    } else {
+                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string()
+                    },
+                    2 => if fullscreen_on_enter {
+                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                    } else {
+                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                    },
+                    3 if has_cyclic_plugin => if fullscreen_on_enter {
+                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string()
+                    } else {
+                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string()
+                    },
+                    3 => if fullscreen_on_enter {
+                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                    } else {
+                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                    },
                     _ => " [o] new  [/] search  [Enter] open  [x] del  [e] sidebar  [q] quit".to_string(),
                 }
             }
@@ -1197,6 +1214,7 @@ impl App {
                         state.sidebar_focused,
                         state.board.selected_column,
                         has_cyclic_plugin,
+                        state.config.fullscreen_on_enter,
                     ),
                     Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
                 )
@@ -1208,6 +1226,7 @@ impl App {
                     state.sidebar_focused,
                     state.board.selected_column,
                     has_cyclic_plugin,
+                    state.config.fullscreen_on_enter,
                 ),
                 Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
             )
@@ -2469,7 +2488,21 @@ impl App {
         match &self.state.mode {
             AppMode::Dashboard => self.handle_dashboard_key(key.code),
             AppMode::Project(_) => match self.state.input_mode {
-                InputMode::Normal => self.handle_normal_key(key.code),
+                InputMode::Normal => {
+                    // Ctrl+f = fullscreen attach (handled here since handle_normal_key only gets KeyCode)
+                    if key.code == KeyCode::Char('f')
+                        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                    {
+                        if let Some(task) = self.state.board.selected_task() {
+                            if let Some(window_name) = task.session_name.clone() {
+                                self.state.shell_popup = None;
+                                return self.attach_to_tmux_fullscreen(&window_name);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    self.handle_normal_key(key.code)
+                }
                 InputMode::InputTitle => self.handle_title_input(key),
                 InputMode::SelectPlugin => self.handle_plugin_select_wizard(key),
                 InputMode::InputDescription => self.handle_description_input(key),
@@ -3069,6 +3102,13 @@ impl App {
                 KeyCode::Char('g') if has_ctrl => {
                     popup.scroll_to_bottom();
                 }
+                // Ctrl+f = fullscreen attach to tmux session
+                KeyCode::Char('f') if has_ctrl => {
+                    // Close the popup first so the tmux window isn't stuck at popup dimensions
+                    self.state.shell_popup = None;
+                    self.attach_to_tmux_fullscreen(&window_name)?;
+                    return Ok(());
+                }
                 _ => {
                     // Forward all other keys to tmux window (including Esc)
                     send_key_to_tmux(&window_name, key.code, self.state.tmux_ops.as_ref());
@@ -3260,8 +3300,13 @@ impl App {
             KeyCode::Enter => {
                 if let Some(task) = self.state.board.selected_task() {
                     if task.status == TaskStatus::Backlog && task.session_name.is_some() {
-                        // Backlog task with active research session — open tmux popup
-                        self.open_selected_task()?;
+                        // Backlog task with active research session
+                        if self.state.config.fullscreen_on_enter {
+                            let window_name = task.session_name.clone().unwrap();
+                            self.attach_to_tmux_fullscreen(&window_name)?;
+                        } else {
+                            self.open_selected_task()?;
+                        }
                     } else if task.status == TaskStatus::Backlog {
                         // Edit task
                         self.state.editing_task_id = Some(task.id.clone());
@@ -3270,8 +3315,13 @@ impl App {
                         self.state.pending_task_title.clear();
                         self.state.input_mode = InputMode::InputTitle;
                     } else if task.session_name.is_some() {
-                        // Open shell popup
-                        self.open_selected_task()?;
+                        // Open shell popup or fullscreen
+                        if self.state.config.fullscreen_on_enter {
+                            let window_name = task.session_name.clone().unwrap();
+                            self.attach_to_tmux_fullscreen(&window_name)?;
+                        } else {
+                            self.open_selected_task()?;
+                        }
                     }
                 }
             }
@@ -5534,6 +5584,68 @@ impl App {
                 self.state.shell_popup = Some(popup);
             }
         }
+        Ok(())
+    }
+
+    /// Suspend the TUI and attach directly to a tmux window for full interaction.
+    /// Restores the TUI when the user detaches (Ctrl+b d).
+    fn attach_to_tmux_fullscreen(&mut self, window_name: &str) -> Result<()> {
+        let session = &self.state.tmux_project_name;
+        let window_target = format!("{}:{}", session, window_name);
+
+        // Check if we're already inside the agtx tmux server — if so, just
+        // switch windows instead of nesting with attach.
+        let inside_agtx = std::env::var("TMUX")
+            .map(|v| v.contains(tmux::AGENT_SERVER))
+            .unwrap_or(false);
+
+        if inside_agtx {
+            // Already inside agtx tmux — just switch to the task window.
+            // Use session:window target to work across multiple project sessions.
+            let _ = std::process::Command::new("tmux")
+                .args([
+                    "-L", tmux::AGENT_SERVER,
+                    "select-window", "-t", &window_target,
+                    ";", "resize-window", "-A",
+                ])
+                .status();
+        } else {
+            // Leave alternate screen and disable raw mode
+            match self.terminal.backend_mut() {
+                AppBackend::Crossterm(backend) => {
+                    let _ = disable_raw_mode();
+                    let _ = execute!(backend, LeaveAlternateScreen);
+                }
+                #[cfg(feature = "test-mocks")]
+                AppBackend::Test(_) => {}
+            }
+
+            // Attach to the agtx tmux server, select the task window, and resize.
+            // Unset $TMUX so tmux allows attaching when inside a different tmux.
+            let _ = std::process::Command::new("tmux")
+                .args([
+                    "-L", tmux::AGENT_SERVER,
+                    "attach", "-t", session,
+                    ";", "select-window", "-t", window_name,
+                    ";", "resize-window", "-A",
+                ])
+                .env_remove("TMUX")
+                .status();
+
+            // Restore terminal
+            match self.terminal.backend_mut() {
+                AppBackend::Crossterm(backend) => {
+                    enable_raw_mode()?;
+                    execute!(backend, EnterAlternateScreen)?;
+                }
+                #[cfg(feature = "test-mocks")]
+                AppBackend::Test(_) => {}
+            }
+
+            // Force full redraw
+            self.terminal.clear()?;
+        }
+
         Ok(())
     }
 

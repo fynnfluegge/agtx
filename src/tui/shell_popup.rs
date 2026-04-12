@@ -119,11 +119,11 @@ pub fn compute_visible_lines<'a>(
 pub fn build_footer_text(scroll_offset: i32, start_line: usize) -> String {
     if scroll_offset < 0 {
         format!(
-            " [Ctrl+j/k] scroll [Ctrl+d/u] page [Ctrl+g] bottom [Ctrl+q] close | Line {} ",
+            " [C-j/k] scroll [C-d/u] page [C-g] bottom [C-f] fullscreen [C-q] close | Line {} ",
             start_line + 1
         )
     } else {
-        " [Ctrl+j/k] scroll [Ctrl+d/u] page [Ctrl+q] close | At bottom ".to_string()
+        " [C-j/k] scroll [C-d/u] page [C-f] fullscreen [C-q] close | At bottom ".to_string()
     }
 }
 

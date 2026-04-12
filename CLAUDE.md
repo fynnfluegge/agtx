@@ -202,6 +202,12 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
 
 **MCP tools**: `list_tasks`, `get_task` (includes `allowed_actions`), `move_task`, `get_transition_status`, `check_conflicts`, `get_notifications`
 
+### General Configuration
+Configurable via `~/.config/agtx/config.toml`:
+```toml
+fullscreen_on_enter = false  # When true, Enter on a task attaches to tmux directly instead of opening the in-TUI popup
+```
+
 ### Theme Configuration
 Colors configurable via `~/.config/agtx/config.toml`:
 ```toml
@@ -227,6 +233,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `o` | Create new task |
 | `Enter` | Open task popup (tmux view) / Edit task (backlog) |
 | `x` | Delete task (with confirmation) |
+| `Ctrl+f` | Fullscreen attach to task's tmux session |
 | `d` | Show git diff for task |
 | `m` | Move task forward (advance workflow) |
 | `r` | Resume task (Review → Running) |
@@ -242,6 +249,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `Ctrl+j/k` or `Ctrl+n/p` | Scroll up/down |
 | `Ctrl+d/u` | Page down/up |
 | `Ctrl+g` | Jump to bottom |
+| `Ctrl+f` | Fullscreen attach to tmux session |
 | `Ctrl+q` or `Esc` | Close popup |
 | Other keys | Forwarded to tmux/agent |
 

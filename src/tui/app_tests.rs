@@ -1324,7 +1324,7 @@ fn test_word_boundary_roundtrip() {
 
 #[test]
 fn test_footer_text_sidebar_focused() {
-    let text = build_footer_text(InputMode::Normal, true, 0, false);
+    let text = build_footer_text(InputMode::Normal, true, 0, false, false);
     assert!(text.contains("[j/k] navigate"));
     assert!(text.contains("[e] hide sidebar"));
     assert!(!text.contains("[o] new"));
@@ -1332,7 +1332,7 @@ fn test_footer_text_sidebar_focused() {
 
 #[test]
 fn test_footer_text_backlog_column() {
-    let text = build_footer_text(InputMode::Normal, false, 0, false);
+    let text = build_footer_text(InputMode::Normal, false, 0, false, false);
     assert!(text.contains("[M] run"));
     assert!(text.contains("[m] plan"));
     assert!(!text.contains("[r] move left"));
@@ -1340,7 +1340,7 @@ fn test_footer_text_backlog_column() {
 
 #[test]
 fn test_footer_text_planning_column() {
-    let text = build_footer_text(InputMode::Normal, false, 1, false);
+    let text = build_footer_text(InputMode::Normal, false, 1, false, false);
     assert!(text.contains("[m] run"));
     assert!(!text.contains("[M] run"));
     assert!(!text.contains("[r] move left"));
@@ -1348,21 +1348,35 @@ fn test_footer_text_planning_column() {
 
 #[test]
 fn test_footer_text_running_column() {
-    let text = build_footer_text(InputMode::Normal, false, 2, false);
+    let text = build_footer_text(InputMode::Normal, false, 2, false, false);
     assert!(text.contains("[r] move left"));
     assert!(text.contains("[m] move"));
 }
 
 #[test]
+fn test_footer_text_fullscreen_on_enter_hides_ctrl_f() {
+    // Columns 1-3 should hide [C-f] when fullscreen_on_enter is true
+    for col in 1..=3 {
+        let text = build_footer_text(InputMode::Normal, false, col, false, true);
+        assert!(!text.contains("[C-f]"), "Column {} should hide [C-f] when fullscreen_on_enter=true", col);
+    }
+    // And show it when false
+    for col in 1..=3 {
+        let text = build_footer_text(InputMode::Normal, false, col, false, false);
+        assert!(text.contains("[C-f]"), "Column {} should show [C-f] when fullscreen_on_enter=false", col);
+    }
+}
+
+#[test]
 fn test_footer_text_review_column() {
-    let text = build_footer_text(InputMode::Normal, false, 3, false);
+    let text = build_footer_text(InputMode::Normal, false, 3, false, false);
     assert!(text.contains("[r] move left"));
     assert!(text.contains("[m] move"));
 }
 
 #[test]
 fn test_footer_text_review_column_cyclic() {
-    let text = build_footer_text(InputMode::Normal, false, 3, true);
+    let text = build_footer_text(InputMode::Normal, false, 3, true, false);
     assert!(text.contains("[p] next phase"));
     assert!(text.contains("[r] resume"));
     assert!(text.contains("[m] done"));
@@ -1370,7 +1384,7 @@ fn test_footer_text_review_column_cyclic() {
 
 #[test]
 fn test_footer_text_done_column() {
-    let text = build_footer_text(InputMode::Normal, false, 4, false);
+    let text = build_footer_text(InputMode::Normal, false, 4, false, false);
     assert!(!text.contains("[m] move"));
     assert!(!text.contains("[r]"));
     assert!(!text.contains("[d] diff"));
@@ -1378,14 +1392,14 @@ fn test_footer_text_done_column() {
 
 #[test]
 fn test_footer_text_input_title() {
-    let text = build_footer_text(InputMode::InputTitle, false, 0, false);
+    let text = build_footer_text(InputMode::InputTitle, false, 0, false, false);
     assert!(text.contains("Enter task title"));
     assert!(text.contains("[Esc] cancel"));
 }
 
 #[test]
 fn test_footer_text_input_description() {
-    let text = build_footer_text(InputMode::InputDescription, false, 0, false);
+    let text = build_footer_text(InputMode::InputDescription, false, 0, false, false);
     assert!(text.contains("[#] files"));
     assert!(text.contains("[/] skills"));
     assert!(text.contains("[!] tasks"));
@@ -2428,7 +2442,7 @@ fn test_install_plugin_none_clears_config() {
 
 #[test]
 fn test_footer_text_backlog_includes_research() {
-    let text = build_footer_text(InputMode::Normal, false, 0, false);
+    let text = build_footer_text(InputMode::Normal, false, 0, false, false);
     assert!(text.contains("[R] research"));
 }
 
@@ -3154,7 +3168,7 @@ fn test_determine_phase_variant_review_passthrough() {
 
 #[test]
 fn test_footer_text_review_non_cyclic_no_next_phase() {
-    let text = build_footer_text(InputMode::Normal, false, 3, false);
+    let text = build_footer_text(InputMode::Normal, false, 3, false, false);
     assert!(!text.contains("[p] next phase"));
     assert!(text.contains("[m] move"));
 }
@@ -4338,7 +4352,7 @@ fn test_task_ref_after_space() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_footer_text_select_plugin() {
-    let text = build_footer_text(InputMode::SelectPlugin, false, 0, false);
+    let text = build_footer_text(InputMode::SelectPlugin, false, 0, false, false);
     assert!(text.contains("select plugin"));
     assert!(text.contains("Tab"));
     assert!(text.contains("Enter"));
@@ -4348,7 +4362,7 @@ fn test_footer_text_select_plugin() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_footer_text_description_shows_all_triggers() {
-    let text = build_footer_text(InputMode::InputDescription, false, 0, false);
+    let text = build_footer_text(InputMode::InputDescription, false, 0, false, false);
     assert!(
         text.contains("[#] files"),
         "Missing files trigger: {}",
