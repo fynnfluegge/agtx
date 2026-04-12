@@ -4706,6 +4706,14 @@ impl App {
             let Some(task) = db.get_task(task_id)? else {
                 return Ok(());
             };
+            // Block research when dependencies are not satisfied
+            if task.status == TaskStatus::Backlog && !db.deps_satisfied(&task) {
+                self.state.warning_message = Some((
+                    "Dependencies not in Review/Done — cannot start task".to_string(),
+                    Instant::now(),
+                ));
+                return Ok(());
+            }
             task
         };
         let Some(project_path) = self.state.project_path.clone() else {
