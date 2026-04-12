@@ -1,4 +1,4 @@
-use agtx::db::{Database, Task, TaskStatus, TransitionRequest};
+use agtx::db::{Database, Notification, Project, Task, TaskStatus, TransitionRequest};
 
 // === TransitionRequest Model Tests ===
 
@@ -192,27 +192,42 @@ fn test_create_task_with_referenced_tasks() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_batch_create_tasks_with_index_deps() {
-    let db = Database::open_in_memory_project().unwrap();
+    let mut db = Database::open_in_memory_project().unwrap();
 
-    // Simulate batch creation: 3 tasks where task[2] depends on task[0] and task[1]
+    // 3 tasks where task[2] depends on task[0] and task[1]
     let task0 = Task::new("DB schema", "claude", "my-project");
     let task1 = Task::new("Config setup", "claude", "my-project");
     let mut task2 = Task::new("Endpoints", "claude", "my-project");
     task2.referenced_tasks = Some(format!("{},{}", task0.id, task1.id));
 
-    db.create_task(&task0).unwrap();
-    db.create_task(&task1).unwrap();
-    db.create_task(&task2).unwrap();
+    db.create_tasks_batch(&[task0.clone(), task1.clone(), task2.clone()])
+        .unwrap();
 
-    // Verify all three exist
     let all = db.get_all_tasks().unwrap();
     assert_eq!(all.len(), 3);
 
-    // Verify deps on task2
     let fetched = db.get_task(&task2.id).unwrap().unwrap();
     let refs = fetched.referenced_tasks.unwrap();
     assert!(refs.contains(&task0.id));
     assert!(refs.contains(&task1.id));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_batch_create_tasks_rolls_back_on_failure() {
+    let mut db = Database::open_in_memory_project().unwrap();
+
+    let task0 = Task::new("First task", "claude", "my-project");
+    // task1 deliberately reuses task0's ID to trigger a UNIQUE constraint violation
+    let mut task1 = Task::new("Duplicate ID task", "claude", "my-project");
+    task1.id = task0.id.clone();
+
+    let result = db.create_tasks_batch(&[task0, task1]);
+    assert!(result.is_err(), "batch insert should fail on duplicate ID");
+
+    // Nothing should have been committed
+    let all = db.get_all_tasks().unwrap();
+    assert!(all.is_empty(), "rollback should leave DB empty");
 }
 
 #[test]
@@ -266,4 +281,191 @@ fn test_update_task_db_allows_non_backlog_status_change() {
     // DB layer allows update regardless of status (status guard is in MCP layer), verify status changed
     let fetched = db.get_task(&task.id).unwrap().unwrap();
     assert_eq!(fetched.status, TaskStatus::Planning);
+}
+
+// === get_tasks_by_status ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_get_tasks_by_status_filters_correctly() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let backlog = Task::new("Backlog task", "claude", "proj");
+    let mut planning = Task::new("Planning task", "claude", "proj");
+    planning.status = TaskStatus::Planning;
+    let mut running = Task::new("Running task", "claude", "proj");
+    running.status = TaskStatus::Running;
+
+    db.create_task(&backlog).unwrap();
+    db.create_task(&planning).unwrap();
+    db.create_task(&running).unwrap();
+
+    let backlog_tasks = db.get_tasks_by_status(TaskStatus::Backlog).unwrap();
+    assert_eq!(backlog_tasks.len(), 1);
+    assert_eq!(backlog_tasks[0].id, backlog.id);
+
+    let planning_tasks = db.get_tasks_by_status(TaskStatus::Planning).unwrap();
+    assert_eq!(planning_tasks.len(), 1);
+    assert_eq!(planning_tasks[0].id, planning.id);
+
+    let done_tasks = db.get_tasks_by_status(TaskStatus::Done).unwrap();
+    assert!(done_tasks.is_empty());
+}
+
+// === update_task / delete_task edge cases ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_update_nonexistent_task_is_silent_noop() {
+    let db = Database::open_in_memory_project().unwrap();
+    let task = Task::new("Ghost", "claude", "proj");
+    // Never inserted — update should succeed without error and affect nothing
+    db.update_task(&task).unwrap();
+    let fetched = db.get_task(&task.id).unwrap();
+    assert!(fetched.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_delete_nonexistent_task_is_silent_noop() {
+    let db = Database::open_in_memory_project().unwrap();
+    // Should not error
+    db.delete_task("no-such-id").unwrap();
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_create_and_get_task_with_all_none_optionals() {
+    let db = Database::open_in_memory_project().unwrap();
+    let task = Task::new("Bare task", "claude", "proj");
+    db.create_task(&task).unwrap();
+
+    let fetched = db.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(fetched.title, "Bare task");
+    assert!(fetched.description.is_none());
+    assert!(fetched.plugin.is_none());
+    assert!(fetched.referenced_tasks.is_none());
+    assert!(fetched.escalation_note.is_none());
+    assert!(fetched.base_branch.is_none());
+    assert!(fetched.session_name.is_none());
+    assert!(fetched.worktree_path.is_none());
+    assert!(fetched.branch_name.is_none());
+    assert!(fetched.pr_number.is_none());
+    assert!(fetched.pr_url.is_none());
+}
+
+// === Project (global db) ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_upsert_and_get_project() {
+    let db = Database::open_in_memory_global().unwrap();
+
+    let project = Project::new("my-app", "/home/user/my-app");
+    db.upsert_project(&project).unwrap();
+
+    let all = db.get_all_projects().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].name, "my-app");
+    assert_eq!(all[0].path, "/home/user/my-app");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_upsert_project_on_conflict_updates_name() {
+    let db = Database::open_in_memory_global().unwrap();
+
+    let mut project = Project::new("old-name", "/home/user/my-app");
+    db.upsert_project(&project).unwrap();
+
+    project.name = "new-name".to_string();
+    db.upsert_project(&project).unwrap();
+
+    let all = db.get_all_projects().unwrap();
+    assert_eq!(all.len(), 1, "upsert should not create a duplicate row");
+    assert_eq!(all[0].name, "new-name");
+}
+
+// === Notifications ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_peek_notifications_does_not_consume() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    db.create_notification(&Notification::new("phase completed")).unwrap();
+    db.create_notification(&Notification::new("task ready")).unwrap();
+
+    let first_peek = db.peek_notifications().unwrap();
+    assert_eq!(first_peek.len(), 2);
+
+    // Peek again — should still be there
+    let second_peek = db.peek_notifications().unwrap();
+    assert_eq!(second_peek.len(), 2);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_consume_notifications_clears_table() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    db.create_notification(&Notification::new("event A")).unwrap();
+    db.create_notification(&Notification::new("event B")).unwrap();
+
+    let consumed = db.consume_notifications().unwrap();
+    assert_eq!(consumed.len(), 2);
+
+    // Table should now be empty
+    let after = db.peek_notifications().unwrap();
+    assert!(after.is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_consume_notifications_returns_in_order() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    db.create_notification(&Notification::new("first")).unwrap();
+    db.create_notification(&Notification::new("second")).unwrap();
+    db.create_notification(&Notification::new("third")).unwrap();
+
+    let consumed = db.consume_notifications().unwrap();
+    assert_eq!(consumed[0].message, "first");
+    assert_eq!(consumed[1].message, "second");
+    assert_eq!(consumed[2].message, "third");
+}
+
+// === cleanup_old_transition_requests actually deletes ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cleanup_deletes_old_processed_requests() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let req = TransitionRequest::new("task-1", "move_forward");
+    db.create_transition_request(&req).unwrap();
+
+    // Backdate processed_at to 2 hours ago directly via SQL
+    let two_hours_ago = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+    db.backdate_transition_processed_at(&req.id, &two_hours_ago).unwrap();
+
+    db.cleanup_old_transition_requests().unwrap();
+
+    let fetched = db.get_transition_request(&req.id).unwrap();
+    assert!(fetched.is_none(), "request older than 1h should be deleted");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cleanup_keeps_recently_processed_requests() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let req = TransitionRequest::new("task-1", "move_forward");
+    db.create_transition_request(&req).unwrap();
+    db.mark_transition_processed(&req.id, None).unwrap();
+
+    db.cleanup_old_transition_requests().unwrap();
+
+    let fetched = db.get_transition_request(&req.id).unwrap();
+    assert!(fetched.is_some(), "recently processed request should be kept");
 }

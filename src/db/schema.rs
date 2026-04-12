@@ -483,6 +483,16 @@ impl Database {
         Ok(())
     }
 
+    /// Directly set processed_at to an arbitrary timestamp (for testing cleanup logic only).
+    #[cfg(feature = "test-mocks")]
+    pub fn backdate_transition_processed_at(&self, id: &str, processed_at: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE transition_requests SET processed_at = ?1 WHERE id = ?2",
+            params![processed_at, id],
+        )?;
+        Ok(())
+    }
+
     fn transition_request_from_row(row: &rusqlite::Row) -> rusqlite::Result<TransitionRequest> {
         Ok(TransitionRequest {
             id: row.get("id")?,
