@@ -224,6 +224,40 @@ impl Database {
         Ok(())
     }
 
+    pub fn create_tasks_batch(&mut self, tasks: &[Task]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for task in tasks {
+            tx.execute(
+                r#"
+                INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                "#,
+                params![
+                    task.id,
+                    task.title,
+                    task.description,
+                    task.status.as_str(),
+                    task.agent,
+                    task.project_id,
+                    task.session_name,
+                    task.worktree_path,
+                    task.branch_name,
+                    task.pr_number,
+                    task.pr_url,
+                    task.plugin,
+                    task.cycle,
+                    task.referenced_tasks,
+                    task.escalation_note,
+                    task.base_branch,
+                    task.created_at.to_rfc3339(),
+                    task.updated_at.to_rfc3339(),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn update_task(&self, task: &Task) -> Result<()> {
         self.conn.execute(
             r#"

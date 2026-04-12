@@ -253,7 +253,7 @@ fn test_update_backlog_task() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_update_non_backlog_task_fails_in_db() {
+fn test_update_task_db_allows_non_backlog_status_change() {
     let db = Database::open_in_memory_project().unwrap();
 
     let mut task = Task::new("My task", "claude", "my-project");
@@ -263,7 +263,7 @@ fn test_update_non_backlog_task_fails_in_db() {
     task.status = TaskStatus::Planning;
     db.update_task(&task).unwrap();
 
-    // DB layer allows update (status guard is in MCP layer), verify status changed
+    // DB layer allows update regardless of status (status guard is in MCP layer), verify status changed
     let fetched = db.get_task(&task.id).unwrap().unwrap();
     assert_eq!(fetched.status, TaskStatus::Planning);
 }

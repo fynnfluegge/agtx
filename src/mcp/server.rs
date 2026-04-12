@@ -860,7 +860,7 @@ impl AgtxMcpServer {
             }
         }
 
-        let db = match self.open_project_db() {
+        let mut db = match self.open_project_db() {
             Ok(db) => db,
             Err(e) => return e,
         };
@@ -889,18 +889,20 @@ impl AgtxMcpServer {
             }
         }
 
-        // Insert all tasks into DB
-        let mut results = Vec::with_capacity(created_tasks.len());
-        for (i, task) in created_tasks.iter().enumerate() {
-            if let Err(e) = db.create_task(task) {
-                return format!("Error creating task[{}] '{}': {}", i, task.title, e);
-            }
-            results.push(BatchTaskResponse {
+        // Insert all tasks atomically — on any failure none are committed
+        if let Err(e) = db.create_tasks_batch(&created_tasks) {
+            return format!("Error creating tasks: {}", e);
+        }
+
+        let results: Vec<BatchTaskResponse> = created_tasks
+            .iter()
+            .enumerate()
+            .map(|(i, task)| BatchTaskResponse {
                 index: i,
                 id: task.id.clone(),
                 title: task.title.clone(),
-            });
-        }
+            })
+            .collect();
 
         let response = CreateTasksBatchResponse {
             count: results.len(),
