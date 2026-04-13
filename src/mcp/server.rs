@@ -189,6 +189,9 @@ struct TaskSummary {
     branch_name: Option<String>,
     pr_url: Option<String>,
     plugin: Option<String>,
+    referenced_tasks: Option<String>,
+    base_branch: Option<String>,
+    deps_satisfied: bool,
 }
 
 #[derive(Serialize)]
@@ -206,10 +209,24 @@ struct TaskDetail {
     pr_url: Option<String>,
     plugin: Option<String>,
     cycle: i32,
+    referenced_tasks: Option<String>,
+    base_branch: Option<String>,
+    escalation_note: Option<String>,
     created_at: String,
     updated_at: String,
+    /// Whether all referenced_tasks (dependencies) are in Review or Done.
+    deps_satisfied: bool,
+    /// Dependencies that are not yet in Review or Done status.
+    blocking_tasks: Vec<BlockingTask>,
     /// Actions the orchestrator can take on this task given its current status and plugin rules.
     allowed_actions: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct BlockingTask {
+    id: String,
+    title: String,
+    status: String,
 }
 
 #[derive(Serialize)]
@@ -347,10 +364,10 @@ impl AgtxMcpServer {
     }
 
     /// Compute which move_task actions are valid for a task given its status and plugin rules.
-    fn allowed_actions(&self, task: &Task) -> Vec<String> {
+    fn allowed_actions(&self, task: &Task, deps_satisfied: bool) -> Vec<String> {
         let mut actions = Vec::new();
 
-        let plugin = match &task.plugin {
+        let _plugin = match &task.plugin {
             Some(name) => crate::config::WorkflowPlugin::load(name, Some(&self.project_path))
                 .ok()
                 .or_else(|| crate::skills::load_bundled_plugin(name)),
@@ -374,6 +391,16 @@ impl AgtxMcpServer {
                 actions.push("resume".to_string());
             }
             TaskStatus::Done => {}
+        }
+
+        // Block forward transitions out of Backlog when dependencies are not satisfied
+        if !deps_satisfied && task.status == TaskStatus::Backlog {
+            actions.retain(|a| {
+                !matches!(
+                    a.as_str(),
+                    "move_forward" | "move_to_planning" | "move_to_running"
+                )
+            });
         }
 
         actions
@@ -422,15 +449,21 @@ impl AgtxMcpServer {
                     Ok(tasks) => {
                         let summaries: Vec<TaskSummary> = tasks
                             .into_iter()
-                            .map(|t| TaskSummary {
-                                id: t.id,
-                                title: t.title,
-                                description: t.description,
-                                status: t.status.as_str().to_string(),
-                                agent: t.agent,
-                                branch_name: t.branch_name,
-                                pr_url: t.pr_url,
-                                plugin: t.plugin,
+                            .map(|t| {
+                                let deps_satisfied = db.deps_satisfied(&t);
+                                TaskSummary {
+                                    id: t.id,
+                                    title: t.title,
+                                    description: t.description,
+                                    status: t.status.as_str().to_string(),
+                                    agent: t.agent,
+                                    branch_name: t.branch_name,
+                                    pr_url: t.pr_url,
+                                    plugin: t.plugin,
+                                    referenced_tasks: t.referenced_tasks,
+                                    base_branch: t.base_branch,
+                                    deps_satisfied,
+                                }
                             })
                             .collect();
                         serde_json::to_string_pretty(&summaries)
@@ -450,7 +483,31 @@ impl AgtxMcpServer {
         match self.open_project_db() {
             Ok(db) => match db.get_task(&params.task_id) {
                 Ok(Some(t)) => {
-                    let allowed = self.allowed_actions(&t);
+                    let deps_ok = db.deps_satisfied(&t);
+                    let allowed = self.allowed_actions(&t, deps_ok);
+                    let blocking = match &t.referenced_tasks {
+                        Some(refs) if !refs.is_empty() => refs
+                            .split(',')
+                            .filter(|s| !s.is_empty())
+                            .filter_map(|ref_id| {
+                                db.get_task(ref_id)
+                                    .ok()
+                                    .flatten()
+                                    .filter(|dep| {
+                                        !matches!(
+                                            dep.status,
+                                            TaskStatus::Review | TaskStatus::Done
+                                        )
+                                    })
+                                    .map(|dep| BlockingTask {
+                                        id: dep.id,
+                                        title: dep.title,
+                                        status: dep.status.as_str().to_string(),
+                                    })
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
                     let detail = TaskDetail {
                         id: t.id,
                         title: t.title,
@@ -465,8 +522,13 @@ impl AgtxMcpServer {
                         pr_url: t.pr_url,
                         plugin: t.plugin,
                         cycle: t.cycle,
+                        referenced_tasks: t.referenced_tasks,
+                        base_branch: t.base_branch,
+                        escalation_note: t.escalation_note,
                         created_at: t.created_at.to_rfc3339(),
                         updated_at: t.updated_at.to_rfc3339(),
+                        deps_satisfied: deps_ok,
+                        blocking_tasks: blocking,
                         allowed_actions: allowed,
                     };
                     serde_json::to_string_pretty(&detail)
@@ -504,10 +566,24 @@ impl AgtxMcpServer {
         match self.open_project_db() {
             Ok(db) => {
                 // Verify task exists
-                match db.get_task(&params.task_id) {
-                    Ok(Some(_)) => {}
+                let task = match db.get_task(&params.task_id) {
+                    Ok(Some(t)) => t,
                     Ok(None) => return format!("Task not found: {}", params.task_id),
                     Err(e) => return format!("Error checking task: {}", e),
+                };
+
+                // Eagerly check dependency gates for forward transitions from Backlog
+                let forward_actions = [
+                    "move_forward",
+                    "move_to_planning",
+                    "move_to_running",
+                    "research",
+                ];
+                if forward_actions.contains(&params.action.as_str())
+                    && task.status == TaskStatus::Backlog
+                    && !db.deps_satisfied(&task)
+                {
+                    return "Cannot advance task: dependencies not in Review/Done. Use get_task to see blocking_tasks.".to_string();
                 }
 
                 let mut req = TransitionRequest::new(&params.task_id, &params.action);
