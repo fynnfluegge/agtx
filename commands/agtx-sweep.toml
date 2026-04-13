@@ -1,0 +1,2 @@
+description = "Sweep this conversation into agtx tasks and push them to the kanban board"
+prompt = "Sweep the conversation so far into agtx kanban tasks. Call list_tasks first to check for duplicates. Extract every actionable work item, determine dependencies, present the proposed task list for confirmation, then use create_tasks_batch to push them to the board. Sweeping only — do not implement anything."
