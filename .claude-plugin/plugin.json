@@ -3,9 +3,9 @@
   "description": "Manage and decompose work into feature-level tasks on the agtx kanban board",
   "version": "0.1.0",
   "author": {
-    "name": "fynnfluegge"
+    "name": "fynnfluegge",
+    "url": "https://github.com/fynnfluegge/agtx"
   },
-  "repository": "https://github.com/fynnfluegge/agtx",
   "license": "MIT",
   "keywords": [
     "kanban",
@@ -13,5 +13,12 @@
     "worktrees",
     "tasks",
     "orchestration"
-  ]
+  ],
+  "mcpServers": {
+    "agtx": {
+      "type": "stdio",
+      "command": "agtx",
+      "args": ["mcp-serve", "."]
+    }
+  }
 }
