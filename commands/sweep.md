@@ -6,7 +6,7 @@ allowed-tools: ["mcp__plugin_agtx_agtx__list_tasks", "mcp__plugin_agtx_agtx__cre
 
 Sweep the conversation into agtx kanban tasks. $ARGUMENTS
 
-Use the sweep skill for guidance. Follow the sweep workflow:
+Use the agtx skill for guidance. Follow the Sweep workflow:
 1. Call list_tasks to check for duplicates
 2. Extract actionable work items from the conversation
 3. Present proposed task list for user confirmation

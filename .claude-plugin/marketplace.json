@@ -1,0 +1,14 @@
+{
+  "name": "agtx-marketplace",
+  "description": "Marketplace for agtx plugins",
+  "owner": {
+    "name": "fynnfluegge"
+  },
+  "plugins": [
+    {
+      "name": "agtx",
+      "description": "Manage and decompose work into feature-level tasks on the agtx kanban board",
+      "source": "./"
+    }
+  ]
+}
