@@ -9008,3 +9008,63 @@ fn test_should_send_stuck_notification_other_plugins() {
     // No plugin set (None) should also produce notifications
     assert!(should_send_stuck_notification(None));
 }
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_task_has_live_session_returns_true_when_window_exists() {
+    let mut mock_tmux = crate::tmux::MockTmuxOperations::new();
+    mock_tmux
+        .expect_window_exists()
+        .with(mockall::predicate::eq("my-project:task-abc123"))
+        .times(1)
+        .returning(|_| Ok(true));
+
+    let mut task = crate::db::Task::new("my task", "claude", "my-project");
+    task.session_name = Some("my-project:task-abc123".to_string());
+
+    assert!(task_has_live_session(&task, &mock_tmux));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_task_has_live_session_returns_false_when_window_gone() {
+    let mut mock_tmux = crate::tmux::MockTmuxOperations::new();
+    mock_tmux
+        .expect_window_exists()
+        .with(mockall::predicate::eq("my-project:task-abc123"))
+        .times(1)
+        .returning(|_| Ok(false));
+
+    let mut task = crate::db::Task::new("my task", "claude", "my-project");
+    task.session_name = Some("my-project:task-abc123".to_string());
+
+    assert!(!task_has_live_session(&task, &mock_tmux));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_task_has_live_session_returns_false_when_no_session_name() {
+    // Task has never been assigned a tmux window — window_exists must not be called
+    let mock_tmux = crate::tmux::MockTmuxOperations::new();
+
+    let task = crate::db::Task::new("my task", "claude", "my-project");
+    // session_name is None by default
+
+    assert!(!task_has_live_session(&task, &mock_tmux));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_task_has_live_session_returns_false_on_tmux_error() {
+    // If window_exists returns an error, we conservatively treat it as no live session
+    let mut mock_tmux = crate::tmux::MockTmuxOperations::new();
+    mock_tmux
+        .expect_window_exists()
+        .times(1)
+        .returning(|_| Err(anyhow::anyhow!("tmux server not running")));
+
+    let mut task = crate::db::Task::new("my task", "claude", "my-project");
+    task.session_name = Some("my-project:task-abc123".to_string());
+
+    assert!(!task_has_live_session(&task, &mock_tmux));
+}

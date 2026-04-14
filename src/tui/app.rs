@@ -4325,10 +4325,7 @@ impl App {
         let (planning_agent, agent_switch) =
             needs_agent_switch(&self.state.config, task, "planning");
 
-        let has_live_session = task.session_name.as_ref().map_or(false, |s| {
-            self.state.tmux_ops.window_exists(s).unwrap_or(false)
-        });
-
+        let has_live_session = task_has_live_session(&task, self.state.tmux_ops.as_ref());
         if has_live_session {
             // Reuse existing session from research
             let target = task.session_name.clone().unwrap();
@@ -4956,6 +4953,43 @@ impl App {
             task.cycle,
         );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
+        let auto_dismiss = plugin
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+
+        // If a live session already exists (e.g. from a prior research/planning phase),
+        // reuse it instead of creating a duplicate tmux window.
+        let has_live_session = task_has_live_session(&task, self.state.tmux_ops.as_ref());
+        if has_live_session {
+            let target = task.session_name.clone().unwrap();
+            let (agent_switch_agent, agent_switch) =
+                needs_agent_switch(&self.state.config, &task, "running");
+            spawn_send_to_agent(
+                Arc::clone(&self.state.tmux_ops),
+                Arc::clone(&self.state.agent_registry),
+                target,
+                task.agent.clone(),
+                agent_switch_agent.clone(),
+                agent_switch,
+                skill_cmd,
+                prompt,
+                prompt_trigger,
+                task_content,
+                auto_dismiss,
+                task.worktree_path.clone(),
+                project_path.clone(),
+                plugin,
+            );
+            task.agent = agent_switch_agent;
+            task.status = TaskStatus::Running;
+            task.updated_at = chrono::Utc::now();
+            if let Some(db) = &self.state.db {
+                db.update_task(&task)?;
+            }
+            self.refresh_tasks()?;
+            return Ok(());
+        }
+
         let project_name = self.state.project_name.clone();
         let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = task
@@ -4971,9 +5005,6 @@ impl App {
         let task_id = task.id.clone();
         let task_title = task.title.clone();
         let running_agent_clone = running_agent.clone();
-        let auto_dismiss = plugin
-            .as_ref()
-            .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
@@ -6343,6 +6374,14 @@ fn check_orchestrator_idle(
             _ => OrchestratorIdleResult::Waiting,
         }
     }
+}
+
+/// Returns true if the task already has a tmux window that is currently alive.
+/// Used to decide whether to reuse an existing session instead of creating a new one.
+fn task_has_live_session(task: &Task, tmux_ops: &dyn TmuxOperations) -> bool {
+    task.session_name
+        .as_ref()
+        .map_or(false, |s| tmux_ops.window_exists(s).unwrap_or(false))
 }
 
 fn ensure_project_tmux_session(
