@@ -504,11 +504,20 @@ pub struct App {
 
 impl App {
     pub fn new(mode: AppMode, flags: crate::FeatureFlags) -> Result<Self> {
+        let git_ops: Arc<dyn GitOperations> = match &mode {
+            AppMode::Project(path) => match crate::git::detect_vcs(path) {
+                crate::git::VcsBackend::Jj | crate::git::VcsBackend::ColocatedJj => {
+                    Arc::new(crate::git::RealJjOps)
+                }
+                _ => Arc::new(RealGitOps),
+            },
+            AppMode::Dashboard => Arc::new(RealGitOps),
+        };
         Self::with_ops(
             mode,
             flags,
             Arc::new(RealTmuxOps),
-            Arc::new(RealGitOps),
+            git_ops,
             Arc::new(RealGitHubOps),
             Arc::new(agent::RealAgentRegistry::new("claude")),
         )
@@ -3220,7 +3229,7 @@ impl App {
                 }
                 KeyCode::Char('n') => {
                     let current_dir = std::env::current_dir()?;
-                    if crate::git::is_git_repo(&current_dir) {
+                    if crate::git::is_git_repo(&current_dir) || crate::git::is_jj_repo(&current_dir) {
                         let canonical = current_dir.canonicalize().unwrap_or(current_dir);
                         let name = canonical
                             .file_name()

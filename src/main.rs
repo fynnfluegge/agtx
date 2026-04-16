@@ -34,8 +34,8 @@ async fn main() -> Result<()> {
                 .map(PathBuf::from)
                 .unwrap_or(std::env::current_dir()?);
             let project_path = project_path.canonicalize()?;
-            if !git::is_git_repo(&project_path) {
-                anyhow::bail!("mcp-serve requires a git project directory");
+            if !git::is_git_repo(&project_path) && !git::is_jj_repo(&project_path) {
+                anyhow::bail!("mcp-serve requires a git or jj project directory");
             }
             return agtx::mcp::serve(project_path).await;
         }
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
         None => {
             // Default: if in git repo, use project mode; otherwise dashboard
             let current_dir = std::env::current_dir()?;
-            if git::is_git_repo(&current_dir) {
+            if git::is_git_repo(&current_dir) || git::is_jj_repo(&current_dir) {
                 AppMode::Project(current_dir)
             } else {
                 AppMode::Dashboard

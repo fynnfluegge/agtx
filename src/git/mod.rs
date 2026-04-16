@@ -1,7 +1,9 @@
+mod jj_operations;
 mod operations;
 mod provider;
 mod worktree;
 
+pub use jj_operations::RealJjOps;
 pub use operations::*;
 pub use provider::{GitProviderOperations, PullRequestState, RealGitHubOps};
 pub use worktree::*;
@@ -15,11 +17,41 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
+/// Which VCS backend a repository uses
+#[derive(Debug, Clone, PartialEq)]
+pub enum VcsBackend {
+    Git,
+    Jj,
+    /// jj repo that also has a .git — prefer jj
+    ColocatedJj,
+}
+
+/// Detect which VCS backend is in use at the given path
+pub fn detect_vcs(path: &Path) -> VcsBackend {
+    let jj = is_jj_repo(path);
+    let git = is_git_repo(path);
+    match (jj, git) {
+        (true, true) => VcsBackend::ColocatedJj,
+        (true, false) => VcsBackend::Jj,
+        _ => VcsBackend::Git,
+    }
+}
+
 /// Check if a path is inside a git repository
 pub fn is_git_repo(path: &Path) -> bool {
     Command::new("git")
         .current_dir(path)
         .args(["rev-parse", "--git-dir"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Check if a path is inside a jj repository
+pub fn is_jj_repo(path: &Path) -> bool {
+    Command::new("jj")
+        .current_dir(path)
+        .args(["root"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
