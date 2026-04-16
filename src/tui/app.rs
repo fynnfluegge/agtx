@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -525,7 +525,7 @@ impl App {
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = ratatui::Terminal::new(AppBackend::Crossterm(backend))?;
 
@@ -921,10 +921,14 @@ impl App {
             self.process_transition_requests()?;
 
             if event::poll(std::time::Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
                         self.handle_key(key)?;
                     }
+                    Event::Paste(text) => {
+                        self.handle_paste(text)?;
+                    }
+                    _ => {}
                 }
             }
 
@@ -3146,6 +3150,29 @@ impl App {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn handle_paste(&mut self, text: String) -> Result<()> {
+        // Shell popup open: forward paste to the tmux pane with proper bracketed paste sequences
+        if let Some(ref mut popup) = self.state.shell_popup {
+            let window_name = popup.window_name.clone();
+            let _ = self.state.tmux_ops.paste_text(&window_name, &text);
+            popup.cached_content = capture_tmux_pane_with_history(
+                &window_name,
+                500,
+                self.state.tmux_ops.as_ref(),
+            );
+            return Ok(());
+        }
+
+        // Description editor open: insert pasted text at cursor
+        if self.state.input_mode == InputMode::InputDescription {
+            let cursor = self.state.input_cursor;
+            self.state.input_buffer.insert_str(cursor, &text);
+            self.state.input_cursor += text.len();
+        }
+
         Ok(())
     }
 
@@ -6313,7 +6340,7 @@ impl Drop for App {
         match self.terminal.backend_mut() {
             AppBackend::Crossterm(backend) => {
                 let _ = disable_raw_mode();
-                let _ = execute!(backend, LeaveAlternateScreen);
+                let _ = execute!(backend, LeaveAlternateScreen, DisableBracketedPaste);
             }
             #[cfg(feature = "test-mocks")]
             AppBackend::Test(_) => {}
