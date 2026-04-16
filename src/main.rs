@@ -31,12 +31,17 @@ async fn main() -> Result<()> {
         Some("mcp-serve") => {
             let project_path = positional_args
                 .get(1)
-                .map(PathBuf::from)
-                .unwrap_or(std::env::current_dir()?);
-            let project_path = project_path.canonicalize()?;
-            if !git::is_git_repo(&project_path) {
-                anyhow::bail!("mcp-serve requires a git project directory");
-            }
+                .map(PathBuf::from);
+            let project_path = match project_path {
+                Some(p) => {
+                    let p = p.canonicalize()?;
+                    if !git::is_git_repo(&p) {
+                        anyhow::bail!("mcp-serve requires a git project directory");
+                    }
+                    Some(p)
+                }
+                None => None, // global mode
+            };
             return agtx::mcp::serve(project_path).await;
         }
         Some("-g") => AppMode::Dashboard,

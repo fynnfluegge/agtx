@@ -409,6 +409,31 @@ impl Database {
         Ok(())
     }
 
+    pub fn get_project_by_id(&self, id: &str) -> Result<Option<Project>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM projects WHERE id = ?1")?;
+
+        let project = stmt
+            .query_row(params![id], |row| {
+                Ok(Project {
+                    id: row.get("id")?,
+                    name: row.get("name")?,
+                    path: row.get("path")?,
+                    github_url: row.get("github_url")?,
+                    default_agent: row.get("default_agent")?,
+                    last_opened: chrono::DateTime::parse_from_rfc3339(
+                        &row.get::<_, String>("last_opened")?,
+                    )
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            })
+            .ok();
+
+        Ok(project)
+    }
+
     pub fn get_all_projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self
             .conn
