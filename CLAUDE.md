@@ -49,7 +49,7 @@ src/
 │   └── operations.rs # AgentOperations/CodingAgent traits (mockable)
 ├── mcp/
 │   ├── mod.rs        # Re-exports
-│   └── server.rs     # MCP server (JSON-RPC over stdio) for orchestrator
+│   └── server.rs     # MCP server (JSON-RPC over stdio) — global and project-scoped modes
 └── config/
     └── mod.rs        # GlobalConfig, ProjectConfig, ThemeConfig, WorkflowPlugin
 
@@ -57,7 +57,8 @@ skills/                # Built-in skill files (embedded at compile time)
 ├── plan.md            # Planning phase instructions
 ├── execute.md         # Execution phase instructions
 ├── review.md          # Review phase instructions
-└── research.md        # Research phase instructions
+├── research.md        # Research phase instructions
+└── agtx/sweep/SKILL.md # Sweep skill — push any conversation to the agtx board (/agtx:sweep)
 
 plugins/               # Bundled plugin configs (embedded at compile time)
 ├── agtx/
@@ -201,6 +202,19 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
 - On startup, if an orchestrator tmux session already exists, it is detected and reconnected; catch-up notifications are created for tasks that completed phases while the TUI was down (deduplicated via `peek_notifications`)
 
 **MCP tools**: `list_tasks`, `get_task` (includes `allowed_actions`), `move_task`, `get_transition_status`, `check_conflicts`, `get_notifications`
+
+### MCP Server Modes
+
+Two modes, selected by whether a path argument is passed to `agtx mcp-serve`:
+
+| Mode | Command | Used by |
+|------|---------|---------|
+| **Project-scoped** | `agtx mcp-serve <path>` | Orchestrator (bound to one project) |
+| **Global** | `agtx mcp-serve` | Sweep skill, any ad-hoc session |
+
+In global mode all CRUD tools (`list_tasks`, `create_task`, etc.) require a `project_id` parameter. The agent calls `list_projects` first to resolve it. In project-scoped mode `project_id` is ignored — the path is fixed at startup.
+
+`ServerMode` enum in `src/mcp/server.rs`. Path resolution via `resolve_project_path(project_id)` helper.
 
 ### General Configuration
 Configurable via `~/.config/agtx/config.toml`:
@@ -421,3 +435,4 @@ Detected automatically via `known_agents()` in order of preference:
 - Reopen Done tasks (recreate worktree from preserved branch)
 - Orchestrator: support non-Claude agents as orchestrator
 - Orchestrator: task deletion notifications
+- Orchestrator: multi-project support (see `docs/planning/multi-project-orchestrator.md`)

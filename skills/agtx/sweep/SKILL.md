@@ -1,6 +1,6 @@
 ---
-name: agtx
-description: "Use when planning features, decomposing work into tasks, creating or managing tasks on a kanban board, coordinating parallel coding agent sessions across git worktrees, or when the user wants to sweep/push conversation results to the agtx board. Also use when asked about agtx setup, MCP configuration, or task workflow."
+name: sweep
+description: "Sweep this conversation into agtx tasks and push them to the kanban board. Use when the user wants to capture, decompose, or hand off conversation results to the agtx board."
 ---
 
 # agtx — Terminal Kanban for Coding Agents
@@ -102,9 +102,11 @@ Tasks 1 and 2 run in parallel (both depend on 0). Task 3 waits for both.
 
 When the user asks to sweep, push, or hand off the conversation to the board:
 
-1. Call `list_tasks` — check for duplicates
-2. Extract every actionable work item from the conversation
-3. Present proposed task list for confirmation:
+1. Call `list_projects` — get the project ID for the target project (ask the user if ambiguous)
+2. Call `list_tasks` with `project_id` — check for duplicates
+3. Extract every actionable work item from the conversation
+4. **Stop and present the proposed task list to the user. Do NOT call any MCP write tools yet.**
+   Show title, description, and dependencies for each task:
    ```
    [0] Add streaming CSV export endpoint
        Implement GET /export/csv with streaming response
@@ -113,8 +115,9 @@ When the user asks to sweep, push, or hand off the conversation to the board:
        Query params ?from=&to= applied before streaming
        depends on: [0]
    ```
-4. After confirmation: use `create_tasks_batch` for multiple tasks, `create_task` for one
-5. Report created IDs:
+   Then ask: "Send these N tasks to agtx? (yes / edit / cancel)"
+5. **Only after explicit user confirmation:** use `create_tasks_batch` (with `project_id`) for multiple tasks, `create_task` for one
+6. Report created IDs:
    ```
    ✓ a1b2c3  Add streaming CSV export endpoint
    ✓ d4e5f6  Add date range filter to export
@@ -124,10 +127,10 @@ When the user asks to sweep, push, or hand off the conversation to the board:
 
 Before creating tasks, verify the MCP connection:
 
-1. Call `list_tasks` — if it works, you're connected
+1. Call `list_projects` — if it works, you're connected
 2. If it fails, the user needs to install agtx and register the MCP server:
    ```bash
-   claude mcp add agtx -- agtx mcp-serve .
+   claude mcp add agtx -- agtx mcp-serve
    ```
    See the [agtx README](https://github.com/fynnfluegge/agtx) for full installation instructions.
 

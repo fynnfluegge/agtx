@@ -13,6 +13,16 @@ use serde::{Deserialize, Serialize};
 use crate::config::{GlobalConfig, ProjectConfig};
 use crate::db::{Database, Task, TaskStatus, TransitionRequest};
 
+/// Whether the MCP server is bound to a specific project or serves all projects globally.
+#[derive(Debug, Clone)]
+pub enum ServerMode {
+    /// Serve a single project (legacy / orchestrator mode — path is fixed at startup).
+    Project(PathBuf),
+    /// Serve all projects indexed in the global DB.
+    /// CRUD tools require a `project_id` parameter.
+    Global,
+}
+
 // === Parameter types ===
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -23,6 +33,11 @@ pub struct ListTasksParams {
     /// Filter by status: "backlog", "planning", "running", "review", "done". Omit for all tasks.
     #[schemars(description = "Filter by status: backlog, planning, running, review, done")]
     pub status: Option<String>,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -30,6 +45,11 @@ pub struct GetTaskParams {
     /// The task ID (UUID)
     #[schemars(description = "The task ID (UUID)")]
     pub task_id: String,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -105,6 +125,11 @@ pub struct CreateTaskParams {
         description = "Base branch to create the worktree from (e.g. another task's branch for stacked PRs). Defaults to project's main branch."
     )]
     pub base_branch: Option<String>,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -135,6 +160,11 @@ pub struct CreateTasksBatchParams {
     /// Array of tasks to create, with index-based dependency wiring
     #[schemars(description = "Array of tasks to create. Use depends_on with 0-based indices to wire dependencies between them.")]
     pub tasks: Vec<BatchTask>,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -161,6 +191,11 @@ pub struct UpdateTaskParams {
         description = "Base branch to create the worktree from (e.g. another task's branch for stacked PRs)"
     )]
     pub base_branch: Option<String>,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -168,6 +203,11 @@ pub struct DeleteTaskParams {
     /// The task ID (UUID) to delete
     #[schemars(description = "The task ID (UUID) to delete. Only backlog tasks can be deleted.")]
     pub task_id: String,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 // === Response types ===
@@ -323,21 +363,49 @@ struct DeleteTaskResponse {
 
 #[derive(Debug, Clone)]
 pub struct AgtxMcpServer {
-    project_path: PathBuf,
+    mode: ServerMode,
     tool_router: ToolRouter<Self>,
 }
 
 impl AgtxMcpServer {
-    fn new(project_path: PathBuf) -> Self {
+    fn new(mode: ServerMode) -> Self {
         Self {
-            project_path,
+            mode,
             tool_router: Self::tool_router(),
         }
     }
 
-    fn open_project_db(&self) -> Result<Database, String> {
-        Database::open_project(&self.project_path)
+    /// Resolve a project path from an optional `project_id`.
+    ///
+    /// - In `Project` mode the fixed path is always returned; `project_id` is ignored.
+    /// - In `Global` mode `project_id` is required and looked up in the global DB.
+    fn resolve_project_path(&self, project_id: Option<&str>) -> Result<PathBuf, String> {
+        match &self.mode {
+            ServerMode::Project(path) => Ok(path.clone()),
+            ServerMode::Global => {
+                let pid = project_id.ok_or_else(|| {
+                    "project_id is required in global mode. Call list_projects first to get project IDs.".to_string()
+                })?;
+                let global_db = Database::open_global()
+                    .map_err(|e| format!("Failed to open global database: {}", e))?;
+                match global_db.get_project_by_id(pid) {
+                    Ok(Some(p)) => Ok(PathBuf::from(p.path)),
+                    Ok(None) => Err(format!("Project not found: {}", pid)),
+                    Err(e) => Err(format!("Failed to look up project: {}", e)),
+                }
+            }
+        }
+    }
+
+    /// Open a project DB, resolving the path via `resolve_project_path`.
+    fn open_project_db_for(&self, project_id: Option<&str>) -> Result<Database, String> {
+        let path = self.resolve_project_path(project_id)?;
+        Database::open_project(&path)
             .map_err(|e| format!("Failed to open project database: {}", e))
+    }
+
+    fn open_project_db(&self) -> Result<Database, String> {
+        self.open_project_db_for(None)
     }
 
     fn open_global_db(&self) -> Result<Database, String> {
@@ -345,32 +413,44 @@ impl AgtxMcpServer {
     }
 
     /// Get the project name from the project path.
-    fn project_name(&self) -> String {
-        self.project_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
+    fn project_name_for(&self, project_id: Option<&str>) -> String {
+        match self.resolve_project_path(project_id) {
+            Ok(path) => path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            Err(_) => "unknown".to_string(),
+        }
     }
 
     /// Get the default agent and plugin from merged config.
-    fn config_defaults(&self) -> (String, Option<String>) {
+    fn config_defaults_for(&self, project_id: Option<&str>) -> (String, Option<String>) {
         let global = GlobalConfig::load().unwrap_or_default();
-        let project = ProjectConfig::load(&self.project_path).unwrap_or_default();
-        let agent = project
-            .default_agent
-            .unwrap_or_else(|| global.default_agent.clone());
-        let plugin = project.workflow_plugin.clone();
-        (agent, plugin)
+        match self.resolve_project_path(project_id) {
+            Ok(path) => {
+                let project = ProjectConfig::load(&path).unwrap_or_default();
+                let agent = project
+                    .default_agent
+                    .unwrap_or_else(|| global.default_agent.clone());
+                let plugin = project.workflow_plugin.clone();
+                (agent, plugin)
+            }
+            Err(_) => (global.default_agent.clone(), None),
+        }
     }
 
     /// Compute which move_task actions are valid for a task given its status and plugin rules.
     fn allowed_actions(&self, task: &Task, deps_satisfied: bool) -> Vec<String> {
+        let project_path = self.resolve_project_path(None).ok();
         let mut actions = Vec::new();
 
         let _plugin = match &task.plugin {
-            Some(name) => crate::config::WorkflowPlugin::load(name, Some(&self.project_path))
-                .ok()
-                .or_else(|| crate::skills::load_bundled_plugin(name)),
+            Some(name) => crate::config::WorkflowPlugin::load(
+                name,
+                project_path.as_deref(),
+            )
+            .ok()
+            .or_else(|| crate::skills::load_bundled_plugin(name)),
             None => crate::skills::load_bundled_plugin("agtx"),
         };
 
@@ -432,10 +512,10 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "List tasks for the current project, optionally filtered by status (backlog, planning, running, review, done)"
+        description = "List tasks for a project, optionally filtered by status (backlog, planning, running, review, done). In global mode, project_id is required — call list_projects first."
     )]
     fn list_tasks(&self, Parameters(params): Parameters<ListTasksParams>) -> String {
-        match self.open_project_db() {
+        match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => {
                 let tasks_result = if let Some(status_str) = &params.status {
                     match TaskStatus::from_str(status_str) {
@@ -477,10 +557,10 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "Get full details of a specific task by its ID. Includes allowed_actions based on the task's current status and plugin rules."
+        description = "Get full details of a specific task by its ID. Includes allowed_actions based on the task's current status and plugin rules. In global mode, project_id is required — call list_projects first."
     )]
     fn get_task(&self, Parameters(params): Parameters<GetTaskParams>) -> String {
-        match self.open_project_db() {
+        match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => match db.get_task(&params.task_id) {
                 Ok(Some(t)) => {
                     let deps_ok = db.deps_satisfied(&t);
@@ -647,7 +727,11 @@ impl AgtxMcpServer {
         description = "Check if task branches have merge conflicts with the main branch. Pass a task_id to check one task, or omit it to check all Review tasks. Uses a read-only git check — no files are modified."
     )]
     fn check_conflicts(&self, Parameters(params): Parameters<CheckConflictsParams>) -> String {
-        let main_branch = match crate::git::detect_main_branch(&self.project_path) {
+        let project_path = match self.resolve_project_path(None) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let main_branch = match crate::git::detect_main_branch(&project_path) {
             Ok(b) => b,
             Err(e) => return format!("Failed to detect main branch: {}", e),
         };
@@ -687,7 +771,7 @@ impl AgtxMcpServer {
                     }
                 };
 
-                match crate::git::check_merge_conflicts(&self.project_path, &main_branch, &branch) {
+                match crate::git::check_merge_conflicts(&project_path, &main_branch, &branch) {
                     Ok((has_conflicts, files)) => ConflictCheckResult {
                         task_id: t.id,
                         title: t.title,
@@ -859,16 +943,17 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "Create a new task in the Backlog column. Returns the created task's ID. Use create_tasks_batch for multiple tasks with dependencies."
+        description = "Create a new task in the Backlog column. Returns the created task's ID. Use create_tasks_batch for multiple tasks with dependencies. In global mode, project_id is required — call list_projects first."
     )]
     fn create_task(&self, Parameters(params): Parameters<CreateTaskParams>) -> String {
-        let db = match self.open_project_db() {
+        let db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,
         };
 
-        let (default_agent, default_plugin) = self.config_defaults();
-        let project_name = self.project_name();
+        let (default_agent, default_plugin) =
+            self.config_defaults_for(params.project_id.as_deref());
+        let project_name = self.project_name_for(params.project_id.as_deref());
 
         // Validate referenced task IDs exist
         if let Some(ref refs) = params.referenced_tasks {
@@ -902,7 +987,7 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "Create multiple tasks at once with index-based dependency wiring. Each task's depends_on field uses 0-based indices into the tasks array (no forward references). Returns all created task IDs."
+        description = "Create multiple tasks at once with index-based dependency wiring. Each task's depends_on field uses 0-based indices into the tasks array (no forward references). Returns all created task IDs. In global mode, project_id is required — call list_projects first."
     )]
     fn create_tasks_batch(
         &self,
@@ -936,13 +1021,14 @@ impl AgtxMcpServer {
             }
         }
 
-        let mut db = match self.open_project_db() {
+        let mut db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,
         };
 
-        let (default_agent, default_plugin) = self.config_defaults();
-        let project_name = self.project_name();
+        let (default_agent, default_plugin) =
+            self.config_defaults_for(params.project_id.as_deref());
+        let project_name = self.project_name_for(params.project_id.as_deref());
 
         // Pass 2: Create all tasks, collect IDs
         let mut created_tasks: Vec<Task> = Vec::with_capacity(params.tasks.len());
@@ -989,10 +1075,10 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "Update a backlog task's fields. Only tasks in Backlog status can be updated. All fields are optional — only provided fields are changed."
+        description = "Update a backlog task's fields. Only tasks in Backlog status can be updated. All fields are optional — only provided fields are changed. In global mode, project_id is required — call list_projects first."
     )]
     fn update_task(&self, Parameters(params): Parameters<UpdateTaskParams>) -> String {
-        let db = match self.open_project_db() {
+        let db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,
         };
@@ -1061,10 +1147,10 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "Delete a task. Only tasks in Backlog status can be deleted."
+        description = "Delete a task. Only tasks in Backlog status can be deleted. In global mode, project_id is required — call list_projects first."
     )]
     fn delete_task(&self, Parameters(params): Parameters<DeleteTaskParams>) -> String {
-        let db = match self.open_project_db() {
+        let db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,
         };
@@ -1101,26 +1187,45 @@ impl AgtxMcpServer {
 #[tool_handler]
 impl ServerHandler for AgtxMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
+        let instructions = match &self.mode {
+            ServerMode::Global =>
+                "agtx MCP server (global mode) — control the terminal kanban board for coding agents. \
+                 IMPORTANT: always call list_projects first to get the project_id for your target project, \
+                 then pass it to every other tool call. \
+                 Use list_tasks to see tasks, create_task or create_tasks_batch to add new tasks \
+                 (with optional dependency wiring via referenced_tasks), update_task to modify backlog \
+                 task fields, move_task to transition tasks between phases, get_transition_status to \
+                 check if a transition completed, and delete_task to remove backlog tasks.",
+            ServerMode::Project(_) =>
                 "agtx MCP server — control the terminal kanban board for coding agents. \
                  Use list_tasks to see current tasks, create_task or create_tasks_batch to add new tasks \
                  (with optional dependency wiring via referenced_tasks), update_task to modify backlog \
                  task fields, move_task to transition tasks between phases, get_transition_status to \
-                 check if a transition completed, and delete_task to remove backlog tasks."
-                    .into(),
-            ),
+                 check if a transition completed, and delete_task to remove backlog tasks.",
+        };
+        ServerInfo {
+            instructions: Some(instructions.into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
     }
 }
 
-pub async fn serve(project_path: PathBuf) -> anyhow::Result<()> {
-    // Validate project DB can be opened
-    Database::open_project(&project_path)?;
+pub async fn serve(project_path: Option<PathBuf>) -> anyhow::Result<()> {
+    let mode = match project_path {
+        Some(path) => {
+            // Validate project DB can be opened
+            Database::open_project(&path)?;
+            ServerMode::Project(path)
+        }
+        None => {
+            // Global mode — validate global DB can be opened
+            Database::open_global()?;
+            ServerMode::Global
+        }
+    };
 
-    let server = AgtxMcpServer::new(project_path);
+    let server = AgtxMcpServer::new(mode);
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())

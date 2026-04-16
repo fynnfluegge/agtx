@@ -497,6 +497,118 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 6. Escalated tasks show a `⚠` badge on the kanban board; opening the task popup shows the reason and dismisses the flag
 7. MCP registration is cleaned up when the orchestrator is stopped
 
+## Sweep — Push Any Conversation to the Board
+
+Running a brainstorm or research session in any coding agent? Sweep the conversation into agtx tasks with a single command — `/agtx:sweep`.
+
+The agent extracts every actionable work item from the conversation, presents a proposed task list for your confirmation, and pushes confirmed tasks directly to the agtx board.
+
+### Install
+
+<details>
+<summary><b>Claude Code (recommended)</b></summary>
+
+**Marketplace install:**
+```
+/plugin install fynnfluegge/agtx
+```
+
+**Manual install:**
+```bash
+claude mcp add agtx -- agtx mcp-serve
+```
+
+Then in any Claude Code session:
+```
+/agtx:sweep
+```
+
+</details>
+
+<details>
+<summary><b>Gemini CLI</b></summary>
+
+Add the skill to your `GEMINI.md` for persistent context:
+```bash
+echo "@~/skills/agtx/sweep/SKILL.md" >> ~/GEMINI.md
+```
+
+Register the global MCP server in your Gemini config:
+```bash
+gemini mcp add agtx -- agtx mcp-serve
+```
+
+Then in any Gemini session:
+```
+/agtx-sweep
+```
+
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
+
+Copy the skill into your Cursor rules:
+```bash
+cp skills/agtx/sweep/SKILL.md ~/.cursor/rules/agtx-sweep.md
+```
+
+Register the MCP server in Cursor's MCP settings (`~/.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "agtx": {
+      "command": "agtx",
+      "args": ["mcp-serve"]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Codex</b></summary>
+
+Copy the skill to Codex's skill discovery path:
+```bash
+mkdir -p .codex/skills/agtx-sweep
+cp skills/agtx/sweep/SKILL.md .codex/skills/agtx-sweep/SKILL.md
+```
+
+Register the MCP server in `.codex/config.json`:
+```json
+{
+  "mcp": {
+    "agtx": {
+      "command": "agtx",
+      "args": ["mcp-serve"]
+    }
+  }
+}
+```
+
+Then in any Codex session:
+```
+$agtx-sweep
+```
+
+</details>
+
+<details>
+<summary><b>Other agents</b></summary>
+
+Skills are plain Markdown — they work with any agent that accepts instruction files. Copy `skills/agtx/sweep/SKILL.md` into your agent's context and register the MCP server:
+
+```bash
+agtx mcp-serve   # global mode — works from any directory
+```
+
+</details>
+
+> [!NOTE]
+> The project must have been opened in agtx at least once to appear in `list_projects`. Run `agtx` in your project directory first.
+
 ## Contributing
 
 Contributions are welcome! Whether it's a bug fix, new plugin, agent integration, or documentation improvement.
