@@ -1331,12 +1331,19 @@ impl App {
                 lines.push(Line::from(""));
             }
 
-            // Active area content
+            // Active area content. Track the insertion point so the native
+            // terminal cursor can be anchored there — this lets the OS render
+            // IME composition (Korean, Japanese, Chinese) inline at the cursor
+            // instead of drifting to wherever the last text was written.
+            let mut cursor_display: Option<(u16, u16)> = None;
+            let cursor_line_start = lines.len();
             match state.input_mode {
                 InputMode::InputTitle => {
-                    let (before_cursor, after_cursor) = state
-                        .input_buffer
-                        .split_at(state.input_cursor.min(state.input_buffer.len()));
+                    let (buf_col, buf_row) =
+                        cursor_display_pos(&state.input_buffer, state.input_cursor);
+                    let prefix_cols = Span::raw("  Title: ").width();
+                    let col = prefix_cols + buf_col;
+                    cursor_display = Some((col as u16, (cursor_line_start + buf_row) as u16));
                     lines.push(Line::from(vec![
                         Span::styled(
                             "  Title: ",
@@ -1344,9 +1351,10 @@ impl App {
                                 .fg(selected_color)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(before_cursor, Style::default().fg(text_color)),
-                        Span::styled("█", Style::default().fg(selected_color)),
-                        Span::styled(after_cursor, Style::default().fg(text_color)),
+                        Span::styled(
+                            state.input_buffer.clone(),
+                            Style::default().fg(text_color),
+                        ),
                     ]));
                 }
                 InputMode::SelectPlugin => {
@@ -1373,10 +1381,16 @@ impl App {
                     }
                 }
                 InputMode::InputDescription => {
-                    let (before_cursor, after_cursor) = state
-                        .input_buffer
-                        .split_at(state.input_cursor.min(state.input_buffer.len()));
-                    let full_text = format!("  Prompt: {}█{}", before_cursor, after_cursor);
+                    let (buf_col, buf_row) =
+                        cursor_display_pos(&state.input_buffer, state.input_cursor);
+                    let prefix_cols = Span::raw("  Prompt: ").width();
+                    let col = if buf_row == 0 {
+                        prefix_cols + buf_col
+                    } else {
+                        buf_col
+                    };
+                    cursor_display = Some((col as u16, (cursor_line_start + buf_row) as u16));
+                    let full_text = format!("  Prompt: {}", state.input_buffer);
                     // Split on newlines to handle multi-line descriptions
                     for part in full_text.split('\n') {
                         if !state.highlighted_references.is_empty() {
@@ -1415,6 +1429,17 @@ impl App {
                         .border_style(Style::default().fg(selected_color)),
                 );
             frame.render_widget(content, input_area);
+
+            // +1 offsets account for the surrounding Block border.
+            if let Some((col, row)) = cursor_display {
+                let abs_x = input_area.x.saturating_add(1).saturating_add(col);
+                let abs_y = input_area.y.saturating_add(1).saturating_add(row);
+                if abs_x < input_area.x + input_area.width
+                    && abs_y < input_area.y + input_area.height
+                {
+                    frame.set_cursor_position((abs_x, abs_y));
+                }
+            }
 
             // Search dropdowns (only in InputDescription mode)
             if state.input_mode == InputMode::InputDescription {
@@ -3474,14 +3499,12 @@ impl App {
                 self.state.input_cursor = new_pos;
             }
             KeyCode::Left => {
-                if self.state.input_cursor > 0 {
-                    self.state.input_cursor -= 1;
-                }
+                self.state.input_cursor =
+                    prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Right => {
-                if self.state.input_cursor < self.state.input_buffer.len() {
-                    self.state.input_cursor += 1;
-                }
+                self.state.input_cursor =
+                    next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Home => {
                 self.state.input_cursor = 0;
@@ -3491,18 +3514,24 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.state.input_cursor > 0 {
-                    self.state.input_cursor -= 1;
-                    self.state.input_buffer.remove(self.state.input_cursor);
+                    let new_pos =
+                        prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                    self.state
+                        .input_buffer
+                        .drain(new_pos..self.state.input_cursor);
+                    self.state.input_cursor = new_pos;
                 }
             }
             KeyCode::Delete => {
                 if self.state.input_cursor < self.state.input_buffer.len() {
-                    self.state.input_buffer.remove(self.state.input_cursor);
+                    let end =
+                        next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                    self.state.input_buffer.drain(self.state.input_cursor..end);
                 }
             }
             KeyCode::Char(c) => {
                 self.state.input_buffer.insert(self.state.input_cursor, c);
-                self.state.input_cursor += 1;
+                self.state.input_cursor += c.len_utf8();
             }
             _ => {}
         }
@@ -3591,8 +3620,14 @@ impl App {
                     } else {
                         search.pattern.pop();
                         if self.state.input_cursor > 0 {
-                            self.state.input_cursor -= 1;
-                            self.state.input_buffer.remove(self.state.input_cursor);
+                            let new_pos = prev_char_boundary(
+                                &self.state.input_buffer,
+                                self.state.input_cursor,
+                            );
+                            self.state
+                                .input_buffer
+                                .drain(new_pos..self.state.input_cursor);
+                            self.state.input_cursor = new_pos;
                         }
                         let query = search.pattern.clone();
                         let matches = self.get_all_task_matches(&query);
@@ -3607,7 +3642,7 @@ impl App {
                         search.pattern.push(c);
                     }
                     self.state.input_buffer.insert(self.state.input_cursor, c);
-                    self.state.input_cursor += 1;
+                    self.state.input_cursor += c.len_utf8();
                     let query = self
                         .state
                         .task_ref_search
@@ -3681,20 +3716,24 @@ impl App {
                 KeyCode::Backspace => {
                     if search.pattern.is_empty() {
                         // Cancel search if pattern is empty
-                        self.state.input_buffer.remove(search.start_pos); // Remove the `!`
+                        self.state.input_buffer.remove(search.start_pos); // Remove the `/`
                         self.state.input_cursor = search.start_pos;
                         self.state.skill_search = None;
                     } else {
                         search.pattern.pop();
-                        self.state.input_cursor = self.state.input_cursor.saturating_sub(1);
-                        self.state.input_buffer.remove(self.state.input_cursor);
+                        let new_pos =
+                            prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                        self.state
+                            .input_buffer
+                            .drain(new_pos..self.state.input_cursor);
+                        self.state.input_cursor = new_pos;
                         self.update_skill_search_matches();
                     }
                 }
                 KeyCode::Char(c) => {
                     search.pattern.push(c);
                     self.state.input_buffer.insert(self.state.input_cursor, c);
-                    self.state.input_cursor += 1;
+                    self.state.input_cursor += c.len_utf8();
                     self.update_skill_search_matches();
                 }
                 _ => {}
@@ -3754,20 +3793,20 @@ impl App {
                 KeyCode::Backspace => {
                     if search.pattern.is_empty() {
                         // Cancel search if pattern is empty
-                        self.state.input_buffer.pop(); // Remove the trigger char
+                        self.state.input_buffer.pop(); // Remove the trigger char (ASCII)
                         self.state.input_cursor = self.state.input_cursor.saturating_sub(1);
                         self.state.file_search = None;
                     } else {
                         search.pattern.pop();
                         self.state.input_buffer.pop();
-                        self.state.input_cursor = self.state.input_cursor.saturating_sub(1);
+                        self.state.input_cursor = self.state.input_buffer.len();
                         self.update_file_search_matches();
                     }
                 }
                 KeyCode::Char(c) => {
                     search.pattern.push(c);
                     self.state.input_buffer.push(c);
-                    self.state.input_cursor += 1;
+                    self.state.input_cursor += c.len_utf8();
                     self.update_file_search_matches();
                 }
                 _ => {}
@@ -3818,14 +3857,12 @@ impl App {
                 self.state.input_cursor = new_pos;
             }
             KeyCode::Left => {
-                if self.state.input_cursor > 0 {
-                    self.state.input_cursor -= 1;
-                }
+                self.state.input_cursor =
+                    prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Right => {
-                if self.state.input_cursor < self.state.input_buffer.len() {
-                    self.state.input_cursor += 1;
-                }
+                self.state.input_cursor =
+                    next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
             }
             KeyCode::Home => {
                 self.state.input_cursor = 0;
@@ -3835,13 +3872,19 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.state.input_cursor > 0 {
-                    self.state.input_cursor -= 1;
-                    self.state.input_buffer.remove(self.state.input_cursor);
+                    let new_pos =
+                        prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                    self.state
+                        .input_buffer
+                        .drain(new_pos..self.state.input_cursor);
+                    self.state.input_cursor = new_pos;
                 }
             }
             KeyCode::Delete => {
                 if self.state.input_cursor < self.state.input_buffer.len() {
-                    self.state.input_buffer.remove(self.state.input_cursor);
+                    let end =
+                        next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                    self.state.input_buffer.drain(self.state.input_cursor..end);
                 }
             }
             KeyCode::Char('#') | KeyCode::Char('@') => {
@@ -3946,7 +3989,7 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.state.input_buffer.insert(self.state.input_cursor, c);
-                self.state.input_cursor += 1;
+                self.state.input_cursor += c.len_utf8();
             }
             _ => {}
         }
@@ -7207,6 +7250,46 @@ fn parse_sgr(seq: &str, mut style: Style) -> Style {
     }
 
     style
+}
+
+/// Map a byte offset in `text` to the (column, row) of the terminal cell it
+/// renders on. Column uses Unicode display width so wide chars (CJK, emoji)
+/// take two cells — a plain byte/char count would misplace the cursor.
+fn cursor_display_pos(text: &str, cursor_byte: usize) -> (usize, usize) {
+    let end = cursor_byte.min(text.len());
+    let before = &text[..end];
+    let row = before.bytes().filter(|b| *b == b'\n').count();
+    let last_line = before.rsplit('\n').next().unwrap_or("");
+    let col = ratatui::text::Span::raw(last_line).width();
+    (col, row)
+}
+
+/// Snap `pos` back to the nearest UTF-8 char boundary at or before it.
+/// Cursor arithmetic tracks bytes, but String indexing panics mid-codepoint —
+/// callers use this to stay valid after moving across multi-byte chars.
+fn prev_char_boundary(s: &str, pos: usize) -> usize {
+    if pos == 0 {
+        return 0;
+    }
+    let mut new_pos = pos - 1;
+    while new_pos > 0 && !s.is_char_boundary(new_pos) {
+        new_pos -= 1;
+    }
+    new_pos
+}
+
+/// Snap `pos` forward to the next UTF-8 char boundary (or `s.len()` if none).
+/// See `prev_char_boundary` for why byte-indexed cursors need this.
+fn next_char_boundary(s: &str, pos: usize) -> usize {
+    let len = s.len();
+    if pos >= len {
+        return len;
+    }
+    let mut new_pos = pos + 1;
+    while new_pos < len && !s.is_char_boundary(new_pos) {
+        new_pos += 1;
+    }
+    new_pos
 }
 
 /// Find the previous word boundary (for Option+Left)

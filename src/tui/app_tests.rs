@@ -3803,6 +3803,7 @@ fn type_str(app: &mut App, s: &str) {
     }
 }
 
+
 // --- Smoke tests ---
 
 #[test]
@@ -4346,6 +4347,203 @@ fn test_task_ref_after_space() {
     type_str(&mut app, "depends on ");
     press_key(&mut app, KeyCode::Char('!'));
     assert!(app.state.task_ref_search.is_some());
+}
+
+// --- Multi-byte character input (e.g. Korean, Japanese, Chinese) ---
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_korean_char_advances_cursor_by_utf8_length_in_title() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    // Type Korean char '한' (3 bytes in UTF-8)
+    press_key(&mut app, KeyCode::Char('한'));
+    assert_eq!(app.state.input_buffer, "한");
+    // Cursor must land on a char boundary (byte 3), not mid-character (byte 1)
+    assert_eq!(app.state.input_cursor, 3);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_korean_word_in_description_preserves_buffer_and_cursor() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    // Typing two Korean chars should not panic and should yield correct buffer
+    type_str(&mut app, "한글");
+    assert_eq!(app.state.input_buffer, "한글");
+    assert_eq!(app.state.input_cursor, 6); // 3+3 bytes
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_korean_then_ascii_does_not_panic() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    // Korean char followed by ASCII must not panic on insert
+    type_str(&mut app, "한a");
+    assert_eq!(app.state.input_buffer, "한a");
+    assert_eq!(app.state.input_cursor, 4);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_korean_backspace_removes_whole_char_in_description() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    type_str(&mut app, "안녕");
+    press_key(&mut app, KeyCode::Backspace);
+    assert_eq!(app.state.input_buffer, "안");
+    assert_eq!(app.state.input_cursor, 3);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_korean_left_arrow_moves_whole_char_in_description() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    type_str(&mut app, "안녕");
+    press_key(&mut app, KeyCode::Left);
+    // Cursor must land on char boundary between 안 (bytes 0..3) and 녕 (bytes 3..6)
+    assert_eq!(app.state.input_cursor, 3);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_korean_right_arrow_moves_whole_char_in_title() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "안녕");
+    // Move cursor to start
+    press_key(&mut app, KeyCode::Home);
+    assert_eq!(app.state.input_cursor, 0);
+    // Right arrow should advance one char (3 bytes), not one byte
+    press_key(&mut app, KeyCode::Right);
+    assert_eq!(app.state.input_cursor, 3);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_japanese_typing_preserves_cursor() {
+    // Japanese hiragana are 3-byte UTF-8; guards against Korean-only handling.
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "こんにちは");
+    assert_eq!(app.state.input_buffer, "こんにちは");
+    assert_eq!(app.state.input_cursor, 15); // 5 chars * 3 bytes
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_chinese_typing_preserves_cursor() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "你好");
+    assert_eq!(app.state.input_buffer, "你好");
+    assert_eq!(app.state.input_cursor, 6); // 2 chars * 3 bytes
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_emoji_typing_handles_4_byte_utf8() {
+    // Emoji are 4-byte UTF-8 — a distinct edge case from 3-byte CJK.
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    press_key(&mut app, KeyCode::Char('👋'));
+    assert_eq!(app.state.input_buffer, "👋");
+    assert_eq!(app.state.input_cursor, 4);
+    press_key(&mut app, KeyCode::Backspace);
+    assert_eq!(app.state.input_buffer, "");
+    assert_eq!(app.state.input_cursor, 0);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_delete_removes_whole_multibyte_char_in_description() {
+    // Delete takes a different code path from Backspace — verify it too.
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+
+    type_str(&mut app, "안녕");
+    press_key(&mut app, KeyCode::Home);
+    press_key(&mut app, KeyCode::Delete);
+    assert_eq!(app.state.input_buffer, "녕");
+    assert_eq!(app.state.input_cursor, 0);
+}
+
+// --- Cursor display position (for IME composition anchoring) ---
+
+#[test]
+fn test_cursor_display_pos_ascii_only() {
+    // "hello", cursor at byte 3 → col 3, row 0
+    let (col, row) = super::cursor_display_pos("hello", 3);
+    assert_eq!((col, row), (3, 0));
+}
+
+#[test]
+fn test_cursor_display_pos_korean_is_wide() {
+    // "가나", cursor at byte 6 (end) → col 4 (2 wide chars * 2 cols), row 0
+    let (col, row) = super::cursor_display_pos("가나", 6);
+    assert_eq!((col, row), (4, 0));
+}
+
+#[test]
+fn test_cursor_display_pos_korean_mid() {
+    // "가나", cursor at byte 3 (between 가 and 나) → col 2, row 0
+    let (col, row) = super::cursor_display_pos("가나", 3);
+    assert_eq!((col, row), (2, 0));
+}
+
+#[test]
+fn test_cursor_display_pos_mixed_ascii_korean() {
+    // "a가b" bytes: a(1) + 가(3) + b(1) = 5 bytes
+    // cursor after 가 (byte 4) → col 3 (1 + 2), row 0
+    let (col, row) = super::cursor_display_pos("a가b", 4);
+    assert_eq!((col, row), (3, 0));
+}
+
+#[test]
+fn test_cursor_display_pos_with_newline() {
+    // "가나\n다", cursor at end (byte 10) → col 2 (just 다), row 1
+    let (col, row) = super::cursor_display_pos("가나\n다", 10);
+    assert_eq!((col, row), (2, 1));
+}
+
+#[test]
+fn test_cursor_display_pos_at_start() {
+    let (col, row) = super::cursor_display_pos("hello", 0);
+    assert_eq!((col, row), (0, 0));
+}
+
+#[test]
+fn test_cursor_display_pos_empty_string() {
+    let (col, row) = super::cursor_display_pos("", 0);
+    assert_eq!((col, row), (0, 0));
+}
+
+#[test]
+fn test_cursor_display_pos_emoji_is_wide() {
+    // "👋" is 4 bytes UTF-8, display width 2. Cursor at end → col 2.
+    let (col, row) = super::cursor_display_pos("👋", 4);
+    assert_eq!((col, row), (2, 0));
 }
 
 // --- Footer text ---
