@@ -171,11 +171,6 @@ The brainstorm skill keeps the agent in discussion mode — asking questions, su
 
 ### Install
 
-### Install
-
-> [!NOTE]
-> The `agtx` binary must be in your PATH. If running from source: `cargo build --release && cp target/release/agtx ~/.local/bin/`
-
 <details>
 <summary><strong>Claude Code</strong></summary>
 
