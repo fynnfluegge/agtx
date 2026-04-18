@@ -150,7 +150,7 @@ When writing a task description, you can reference files, skills, and other task
 
 </details>
 
-### Agent Sessions
+### Manage agent sessions in agtx board
 
 Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to attach fullscreen.
 
@@ -162,7 +162,7 @@ Each task runs in its own tmux window with a dedicated coding agent. The session
 
 ## Brainstorm & Sweep Skill
 
-Two companion skills for capturing ideas and turning them into tasks.
+Two companion skills for capturing ideas in any coding agent session and turning them into tasks in the agtx board.
 
 | Skill | Command | When to use |
 |-------|---------|-------------|
@@ -175,7 +175,7 @@ Two companion skills for capturing ideas and turning them into tasks.
       ↓
 /agtx:sweep        ← extract tasks, confirm, push to board
       ↓
-agtx board         ← tasks appear in Backlog, ready to plan
+agtx board         ← tasks appear in Backlog, ready to advance
 ```
 
 The brainstorm skill keeps the agent in discussion mode — asking questions, surfacing trade-offs, no code or plans. When the conversation feels complete, run `/agtx:sweep` to decompose outcomes into feature-level tasks and push them to the board with a single confirmation step.
