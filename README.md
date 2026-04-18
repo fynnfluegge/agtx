@@ -21,12 +21,11 @@
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
   <a href="#usage">Usage</a> •
-  <a href="#brainstorm--sweep-skill">Brainstorm & Sweep Skill</a> •
+  <a href="#brainstorm--sweep-skills">Brainstorm & Sweep Skills</a> •
   <a href="#mcp-server">MCP Server</a> •
   <a href="#plugins">Plugins</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
   <a href="#configuration">Configuration</a> •
-  <a href="#contributing">Contributing</a>
 </p>
 
 ---
@@ -160,7 +159,7 @@ Each task runs in its own tmux window with a dedicated coding agent. The session
 - **Fullscreen**: Press `Ctrl+f` to attach directly to the agent's tmux window
 - **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch using a non-destructive virtual merge (`git merge-tree`). If conflicts are detected, the agent is automatically sent the `/agtx:merge-conflicts` skill to resolve them and re-commit
 
-## Brainstorm & Sweep Skill
+## Brainstorm & Sweep Skills
 
 Two companion skills for capturing ideas in any coding agent session and turning them into tasks in the agtx board.
 
