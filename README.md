@@ -27,7 +27,7 @@
   <a href="#mcp-server">MCP Server</a> •
   <a href="#plugins">Plugins</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
-  <a href="#configuration">Configuration</a> •
+  <a href="#configuration">Configuration</a>
 </p>
 
 ---
@@ -96,7 +96,6 @@ agtx --experimental
 cargo build --release
 cp target/release/agtx ~/.local/bin/
 ```
-</details>
 
 ### Requirements
 
@@ -154,7 +153,7 @@ When writing a task description, you can reference files, skills, and other task
 
 </details>
 
-### Manage agent sessions in agtx board
+### Agent Sessions
 
 Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to attach fullscreen.
 
@@ -558,7 +557,7 @@ tmux -L agtx attach
 
 ### Data Storage
 
-- **Database**: `~/Library/Application Support/agtx/` (macOS) or `~/.local/share/agtx/` (Linux)
+- **Database**: `~/Library/Application Support/agtx/` (macOS) or `~/.config/agtx/` (Linux)
 - Config: `~/.config/agtx/config.toml`
 - **Worktrees**: `.agtx/worktrees/` in each project
 - **Tmux**: Dedicated server `agtx` with per-project sessions
