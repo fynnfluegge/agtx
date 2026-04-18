@@ -19,10 +19,10 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
-  <a href="#mcp-server">MCP Server</a> •
   <a href="#features">Features</a> •
   <a href="#usage">Usage</a> •
   <a href="#plugins">Plugins</a> •
+  <a href="#mcp-server">MCP Server</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
   <a href="#brainstorm--sweep">Brainstorm & Sweep</a> •
   <a href="#configuration">Configuration</a> •
@@ -94,31 +94,6 @@ cp target/release/agtx ~/.local/bin/
 ```
 </details>
 
-### MCP Server
-
-The agtx MCP server enables the [orchestrator agent](#orchestrator-agent-experimental) and the [brainstorm & sweep](#brainstorm--sweep) skills to communicate with the board from any coding agent session.
-
-Register it once, user-scoped — works across all projects:
-
-```bash
-claude mcp add --scope user agtx -- agtx mcp-serve
-```
-
-For Gemini:
-```bash
-gemini mcp add agtx -- agtx mcp-serve
-```
-
-For Codex:
-```bash
-codex mcp add agtx -- agtx mcp-serve
-```
-
-If `agtx` is not in your PATH (e.g. running from source), use the absolute path:
-```bash
-claude mcp add --scope user agtx -- /path/to/agtx mcp-serve
-```
-
 ### Requirements
 
 - **tmux** — agent sessions run in a dedicated tmux server
@@ -168,85 +143,23 @@ The brainstorm skill keeps the agent in discussion mode — asking questions, su
 
 ### Install
 
-<details>
-<summary><b>Claude Code (recommended)</b></summary>
+Pick your agent. One command to install the plugin + register the MCP server.
 
-**Install via plugin marketplace:**
-```bash
-claude "/plugin marketplace add fynnfluegge/agtx" && claude "/plugin install agtx@agtx-marketplace"
-```
+| Agent | Install |
+|-------|---------|
+| **Claude Code** | `claude "/plugin marketplace add fynnfluegge/agtx" && claude "/plugin install agtx@agtx-marketplace" && claude mcp add --scope user agtx -- agtx mcp-serve` |
+| **Codex** | `codex mcp add agtx -- agtx mcp-serve` then add plugin via `.agents/plugins/marketplace.json` (see below) |
+| **Gemini CLI** | `gemini mcp add agtx -- agtx mcp-serve` then `echo "@skills/sweep/SKILL.md" >> ~/GEMINI.md` |
+| **Cursor** | `cursor mcp add agtx -- agtx mcp-serve` then copy `skills/sweep/SKILL.md` to `~/.cursor/rules/agtx-sweep.md` |
+| **Other** | Register `agtx mcp-serve` as an MCP server, then copy `skills/sweep/SKILL.md` into your agent's context |
 
-**Manual install / running from source:**
-
-1. Make sure the `agtx` binary is in your PATH. If running from source:
-   ```bash
-   cargo build --release
-   # Then either add to PATH:
-   export PATH="$PATH:$(pwd)/target/release"
-   # Or use the absolute path in the next step instead of "agtx"
-   ```
-
-2. Register the MCP server (once, user-scoped — works across all projects):
-   ```bash
-   claude mcp add --scope user agtx -- agtx mcp-serve
-   # Or with absolute path if not in PATH:
-   claude mcp add --scope user agtx -- /path/to/agtx mcp-serve
-   ```
-
-3. Load the skills into your session:
-   ```
-   /plugin marketplace add fynnfluegge/agtx
-   /plugin install agtx@agtx-marketplace
-   ```
-
-</details>
+> [!NOTE]
+> The `agtx` binary must be in your PATH. If running from source: `cargo build --release && cp target/release/agtx ~/.local/bin/`
 
 <details>
-<summary><b>Gemini CLI</b></summary>
+<summary><b>Codex — plugin setup</b></summary>
 
-Add the skill to your `GEMINI.md` for persistent context:
-```bash
-echo "@~/skills/sweep/SKILL.md" >> ~/GEMINI.md
-```
-
-Register the global MCP server in your Gemini config:
-```bash
-gemini mcp add agtx -- agtx mcp-serve
-```
-
-Then in any Gemini session:
-```
-/agtx-sweep
-```
-
-</details>
-
-<details>
-<summary><b>Cursor</b></summary>
-
-Copy the skill into your Cursor rules:
-```bash
-cp skills/sweep/SKILL.md ~/.cursor/rules/agtx-sweep.md
-```
-
-Register the MCP server in Cursor's MCP settings (`~/.cursor/mcp.json`):
-```json
-{
-  "mcpServers": {
-    "agtx": {
-      "command": "agtx",
-      "args": ["mcp-serve"]
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><b>Codex</b></summary>
-
-**Install via repo marketplace** — add to your project's `.agents/plugins/marketplace.json`:
+Add to your project's `.agents/plugins/marketplace.json`:
 ```json
 {
   "name": "local-repo",
@@ -271,17 +184,6 @@ Then in any Codex session:
 ```
 @agtx:sweep
 @agtx:brainstorm
-```
-
-</details>
-
-<details>
-<summary><b>Other agents</b></summary>
-
-Skills are plain Markdown — they work with any agent that accepts instruction files. Copy `skills/sweep/SKILL.md` into your agent's context and register the MCP server:
-
-```bash
-agtx mcp-serve   # global mode — works from any directory
 ```
 
 </details>
@@ -620,6 +522,41 @@ tmux -L agtx attach
 - **Worktrees**: `.agtx/worktrees/` in each project
 - **Tmux**: Dedicated server `agtx` with per-project sessions
 
+## MCP Server
+
+The agtx MCP server (`agtx mcp-serve`) exposes the board to any coding agent session via the [Model Context Protocol](https://modelcontextprotocol.io). Used by the orchestrator agent and the brainstorm & sweep skills.
+
+### Modes
+
+| Mode | Command | Used by |
+|------|---------|---------|
+| **Global** | `agtx mcp-serve` | Sweep/brainstorm skills — works across all projects |
+| **Project-scoped** | `agtx mcp-serve <path>` | Orchestrator — bound to one project at startup |
+
+In global mode all tools require a `project_id` parameter. Call `list_projects` first to resolve it.
+
+### Tools
+
+| Tool | Description |
+|------|-------------|
+| `list_projects` | List all projects indexed in agtx |
+| `list_tasks` | List tasks, optionally filtered by status |
+| `get_task` | Get task details + `allowed_actions` for valid transitions |
+| `create_task` | Create a single backlog task |
+| `create_tasks_batch` | Batch-create tasks with index-based dependencies |
+| `update_task` | Modify a backlog task (title, description, deps) |
+| `delete_task` | Delete a backlog task |
+| `move_task` | Queue a phase transition |
+| `get_transition_status` | Check if a queued transition completed or errored |
+| `check_conflicts` | Non-destructive merge conflict check against default branch |
+| `get_notifications` | Fetch pending orchestrator notifications |
+| `read_pane_content` | Read the last N lines of a task's tmux pane |
+| `send_to_task` | Send a message to a task's agent pane |
+
+### Register
+
+See the [Brainstorm & Sweep install table](#install) for per-agent registration commands.
+
 ## Orchestrator Agent (Experimental)
 
 > Press `O` and walk away. Come back to changes ready to merge.
@@ -654,7 +591,7 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 └──────────────┘
 ```
 
-**MCP tools available to the orchestrator:**
+**MCP tools used by the orchestrator:**
 
 | Tool | Description |
 |------|-------------|
