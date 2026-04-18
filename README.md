@@ -590,10 +590,6 @@ In global mode all tools require a `project_id` parameter. Call `list_projects` 
 | `read_pane_content` | Read the last N lines of a task's tmux pane |
 | `send_to_task` | Send a message to a task's agent pane |
 
-### Register
-
-See the [Brainstorm & Sweep install table](#install) for per-agent registration commands.
-
 ## Orchestrator Agent (Experimental)
 
 > Press `O` and walk away. Come back to changes ready to merge.
