@@ -102,7 +102,7 @@ cp target/release/agtx ~/.local/bin/
 ## Usage
 
 <details>
-<summary>Keyboard Shortcuts</summary>
+<summary><strong>Keyboard Shortcuts</strong></summary>
 
 | Key | Action |
 |-----|--------|
@@ -125,7 +125,7 @@ cp target/release/agtx ~/.local/bin/
 </details>
 
 <details>
-<summary>Task Creation Wizard</summary>
+<summary><strong>Task Creation Wizard</strong></summary>
 
 Press `o` to create a new task. The wizard guides you through:
 1. **Title** — enter a short task name
@@ -137,7 +137,7 @@ The agent is configured at the project level via `config.toml` (not per-task).
 </details>
 
 <details>
-<summary>Task Description Editor</summary>
+<summary><strong>Task Description Editor</strong></summary>
 
 When writing a task description, you can reference files, skills, and other tasks inline:
 
@@ -171,21 +171,28 @@ The brainstorm skill keeps the agent in discussion mode — asking questions, su
 
 ### Install
 
-Pick your agent. One command to install the plugin + register the MCP server.
-
-| Agent | Install |
-|-------|---------|
-| **Claude Code** | `claude plugin marketplace add fynnfluegge/agtx && claude plugin install agtx@agtx-marketplace && claude mcp add --scope user agtx -- agtx mcp-serve` |
-| **Codex** | `codex mcp add agtx -- agtx mcp-serve` then add plugin via `.agents/plugins/marketplace.json` (see below) |
-| **Gemini CLI** | `gemini mcp add agtx -- agtx mcp-serve` then `echo "@skills/sweep/SKILL.md" >> ~/GEMINI.md` |
-| **Cursor** | `cursor mcp add agtx -- agtx mcp-serve` then copy `skills/sweep/SKILL.md` to `~/.cursor/rules/agtx-sweep.md` |
-| **Other** | Register `agtx mcp-serve` as an MCP server, then copy `skills/sweep/SKILL.md` into your agent's context |
+### Install
 
 > [!NOTE]
 > The `agtx` binary must be in your PATH. If running from source: `cargo build --release && cp target/release/agtx ~/.local/bin/`
 
 <details>
-<summary><b>Codex — plugin setup</b></summary>
+<summary><strong>Claude Code</strong></summary>
+
+```bash
+claude plugin marketplace add fynnfluegge/agtx
+claude plugin install agtx@agtx-marketplace
+claude mcp add --scope user agtx -- agtx mcp-serve
+```
+
+</details>
+
+<details>
+<summary><strong>Codex</strong></summary>
+
+```bash
+codex mcp add agtx -- agtx mcp-serve
+```
 
 Add to your project's `.agents/plugins/marketplace.json`:
 ```json
@@ -208,11 +215,34 @@ Add to your project's `.agents/plugins/marketplace.json`:
 }
 ```
 
-Then in any Codex session:
+Then in any Codex session: `@agtx:sweep` / `@agtx:brainstorm`
+
+</details>
+
+<details>
+<summary><strong>Gemini CLI</strong></summary>
+
+```bash
+gemini mcp add agtx -- agtx mcp-serve
+echo "@skills/sweep/SKILL.md" >> ~/GEMINI.md
 ```
-@agtx:sweep
-@agtx:brainstorm
+
+</details>
+
+<details>
+<summary><strong>Cursor</strong></summary>
+
+```bash
+cursor mcp add agtx -- agtx mcp-serve
+cp skills/sweep/SKILL.md ~/.cursor/rules/agtx-sweep.md
 ```
+
+</details>
+
+<details>
+<summary><strong>Other</strong></summary>
+
+Register `agtx mcp-serve` as an MCP server, then copy `skills/sweep/SKILL.md` into your agent's context.
 
 </details>
 
