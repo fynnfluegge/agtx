@@ -19,6 +19,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
+  <a href="#mcp-server">MCP Server</a> •
   <a href="#features">Features</a> •
   <a href="#usage">Usage</a> •
   <a href="#plugins">Plugins</a> •
@@ -92,6 +93,26 @@ cargo build --release
 cp target/release/agtx ~/.local/bin/
 ```
 </details>
+
+### MCP Server
+
+The agtx MCP server enables the [orchestrator agent](#orchestrator-agent-experimental) and the [brainstorm & sweep](#brainstorm--sweep) skills to communicate with the board from any coding agent session.
+
+Register it once, user-scoped — works across all projects:
+
+```bash
+claude mcp add --scope user agtx -- agtx mcp-serve
+```
+
+For Gemini:
+```bash
+gemini mcp add agtx -- agtx mcp-serve
+```
+
+If `agtx` is not in your PATH (e.g. running from source), use the absolute path:
+```bash
+claude mcp add --scope user agtx -- /path/to/agtx mcp-serve
+```
 
 ### Requirements
 
