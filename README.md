@@ -147,7 +147,7 @@ Pick your agent. One command to install the plugin + register the MCP server.
 
 | Agent | Install |
 |-------|---------|
-| **Claude Code** | `claude "/plugin marketplace add fynnfluegge/agtx" && claude "/plugin install agtx@agtx-marketplace" && claude mcp add --scope user agtx -- agtx mcp-serve` |
+| **Claude Code** | `claude plugin marketplace add fynnfluegge/agtx && claude plugin install agtx@agtx-marketplace && claude mcp add --scope user agtx -- agtx mcp-serve` |
 | **Codex** | `codex mcp add agtx -- agtx mcp-serve` then add plugin via `.agents/plugins/marketplace.json` (see below) |
 | **Gemini CLI** | `gemini mcp add agtx -- agtx mcp-serve` then `echo "@skills/sweep/SKILL.md" >> ~/GEMINI.md` |
 | **Cursor** | `cursor mcp add agtx -- agtx mcp-serve` then copy `skills/sweep/SKILL.md` to `~/.cursor/rules/agtx-sweep.md` |
