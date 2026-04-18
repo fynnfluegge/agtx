@@ -109,6 +109,11 @@ For Gemini:
 gemini mcp add agtx -- agtx mcp-serve
 ```
 
+For Codex:
+```bash
+codex mcp add agtx -- agtx mcp-serve
+```
+
 If `agtx` is not in your PATH (e.g. running from source), use the absolute path:
 ```bash
 claude mcp add --scope user agtx -- /path/to/agtx mcp-serve
