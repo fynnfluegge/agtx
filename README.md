@@ -21,10 +21,10 @@
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
   <a href="#usage">Usage</a> •
-  <a href="#plugins">Plugins</a> •
+  <a href="#brainstorm--sweep-skill">Brainstorm & Sweep Skill</a> •
   <a href="#mcp-server">MCP Server</a> •
+  <a href="#plugins">Plugins</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
-  <a href="#brainstorm--sweep">Brainstorm & Sweep</a> •
   <a href="#configuration">Configuration</a> •
   <a href="#contributing">Contributing</a>
 </p>
@@ -149,7 +149,7 @@ When writing a task description, you can reference files, skills, and other task
 
 </details>
 
-## Brainstorm & Sweep
+## Brainstorm & Sweep Skill
 
 Two companion skills for capturing ideas and turning them into tasks.
 
