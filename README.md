@@ -101,7 +101,8 @@ cp target/release/agtx ~/.local/bin/
 
 ## Usage
 
-### Keyboard Shortcuts
+<details>
+<summary>Keyboard Shortcuts</summary>
 
 | Key | Action |
 |-----|--------|
@@ -120,6 +121,8 @@ cp target/release/agtx ~/.local/bin/
 | `O` | Toggle orchestrator agent (`--experimental`) |
 | `e` | Toggle project sidebar |
 | `q` | Quit |
+
+</details>
 
 ## Brainstorm & Sweep
 
