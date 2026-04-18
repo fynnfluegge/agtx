@@ -7,8 +7,10 @@
 <div align="left">
     
 > **An AI agent that manages other coding agents in a terminal kanban board** - Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates to multiple coding agents running in parallel. Come back to changes ready to merge.
-> 
+>
 > **Let different AI coding agents collaborate** autonomously on the same task with automatic session switching and context awareness - e.g. **Gemini** → research | **Claude** → implement | **Codex** → review
+>
+> **Capture ideas without leaving your agent session** — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to push the conversation to the board as tasks in one step.
 
 </div>
 
@@ -48,12 +50,15 @@ AI coding tools give you one agent, one task, one terminal. agtx gives you a **k
 
 With the orchestrator, you don't even manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, review and resolving conflicts — while you focus on what matters: research, defining tasks, and merging changes.
 
+And when ideas come up mid-session, `/agtx:brainstorm` keeps your agent in exploration mode — then `/agtx:sweep` turns the conversation into board tasks with a single confirmation step. **No context switching, no copy-pasting — ideas flow directly into work.**
+
 > [!TIP]
 > Check out the [Contributing](#contributing) section or have a look at [`good first issues`](https://github.com/fynnfluegge/agtx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) to get involved and become a contributor ⭐️ 
 
 ## Features
 
 - **Orchestrator agent**: A dedicated AI agent that autonomously manages your kanban board via [MCP](https://modelcontextprotocol.io) — delegates to coding agents, advances phases, checks for merge conflicts ([experimental](#orchestrator-agent-experimental))
+- **Brainstorm & Sweep skills**: Capture ideas and push them to the board from any coding agent session — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to decompose and create tasks with one confirmation step ([details](#brainstorm--sweep-skills))
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — or define your own with a single TOML file
