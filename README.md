@@ -120,6 +120,149 @@ cp target/release/agtx ~/.local/bin/
 | `e` | Toggle project sidebar |
 | `q` | Quit |
 
+## Brainstorm & Sweep
+
+Two companion skills for capturing ideas and turning them into tasks.
+
+| Skill | Command | When to use |
+|-------|---------|-------------|
+| **Brainstorm** | `/agtx:brainstorm` | Explore a feature idea — discussion only, no planning or implementation |
+| **Sweep** | `/agtx:sweep` | Push conversation outcomes to the agtx board as tasks |
+
+**Typical flow:**
+```
+/agtx:brainstorm   ← explore the idea freely
+      ↓
+/agtx:sweep        ← extract tasks, confirm, push to board
+      ↓
+agtx board         ← tasks appear in Backlog, ready to plan
+```
+
+The brainstorm skill keeps the agent in discussion mode — asking questions, surfacing trade-offs, no code or plans. When the conversation feels complete, run `/agtx:sweep` to decompose outcomes into feature-level tasks and push them to the board with a single confirmation step.
+
+### Install
+
+<details>
+<summary><b>Claude Code (recommended)</b></summary>
+
+**Install via plugin marketplace:**
+```bash
+claude "/plugin marketplace add fynnfluegge/agtx" && claude "/plugin install agtx@agtx-marketplace"
+```
+
+**Manual install / running from source:**
+
+1. Make sure the `agtx` binary is in your PATH. If running from source:
+   ```bash
+   cargo build --release
+   # Then either add to PATH:
+   export PATH="$PATH:$(pwd)/target/release"
+   # Or use the absolute path in the next step instead of "agtx"
+   ```
+
+2. Register the MCP server (once, user-scoped — works across all projects):
+   ```bash
+   claude mcp add --scope user agtx -- agtx mcp-serve
+   # Or with absolute path if not in PATH:
+   claude mcp add --scope user agtx -- /path/to/agtx mcp-serve
+   ```
+
+3. Load the skills into your session:
+   ```
+   /plugin marketplace add fynnfluegge/agtx
+   /plugin install agtx@agtx-marketplace
+   ```
+
+</details>
+
+<details>
+<summary><b>Gemini CLI</b></summary>
+
+Add the skill to your `GEMINI.md` for persistent context:
+```bash
+echo "@~/skills/sweep/SKILL.md" >> ~/GEMINI.md
+```
+
+Register the global MCP server in your Gemini config:
+```bash
+gemini mcp add agtx -- agtx mcp-serve
+```
+
+Then in any Gemini session:
+```
+/agtx-sweep
+```
+
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
+
+Copy the skill into your Cursor rules:
+```bash
+cp skills/sweep/SKILL.md ~/.cursor/rules/agtx-sweep.md
+```
+
+Register the MCP server in Cursor's MCP settings (`~/.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "agtx": {
+      "command": "agtx",
+      "args": ["mcp-serve"]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Codex</b></summary>
+
+**Install via repo marketplace** — add to your project's `.agents/plugins/marketplace.json`:
+```json
+{
+  "name": "local-repo",
+  "plugins": [
+    {
+      "name": "agtx",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agtx"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
+```
+
+Then in any Codex session:
+```
+@agtx:sweep
+@agtx:brainstorm
+```
+
+</details>
+
+<details>
+<summary><b>Other agents</b></summary>
+
+Skills are plain Markdown — they work with any agent that accepts instruction files. Copy `skills/sweep/SKILL.md` into your agent's context and register the MCP server:
+
+```bash
+agtx mcp-serve   # global mode — works from any directory
+```
+
+</details>
+
+> [!NOTE]
+> The project must have been opened in agtx at least once to appear in `list_projects`. Run `agtx` in your project directory first.
+
 ### Task Creation Wizard
 
 Press `o` to create a new task. The wizard guides you through:
@@ -506,149 +649,6 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 5. If a task has been idle for 1+ minute without a phase artifact, the orchestrator is notified — it reads the pane with `read_pane_content`, then either nudges the agent with `send_to_task` or calls `move_task` with `escalate_to_user` to flag it for your attention
 6. Escalated tasks show a `⚠` badge on the kanban board; opening the task popup shows the reason and dismisses the flag
 7. MCP registration is cleaned up when the orchestrator is stopped
-
-## Brainstorm & Sweep
-
-Two companion skills for capturing ideas and turning them into tasks.
-
-| Skill | Command | When to use |
-|-------|---------|-------------|
-| **Brainstorm** | `/agtx:brainstorm` | Explore a feature idea — discussion only, no planning or implementation |
-| **Sweep** | `/agtx:sweep` | Push conversation outcomes to the agtx board as tasks |
-
-**Typical flow:**
-```
-/agtx:brainstorm   ← explore the idea freely
-      ↓
-/agtx:sweep        ← extract tasks, confirm, push to board
-      ↓
-agtx board         ← tasks appear in Backlog, ready to plan
-```
-
-The brainstorm skill keeps the agent in discussion mode — asking questions, surfacing trade-offs, no code or plans. When the conversation feels complete, run `/agtx:sweep` to decompose outcomes into feature-level tasks and push them to the board with a single confirmation step.
-
-### Install
-
-<details>
-<summary><b>Claude Code (recommended)</b></summary>
-
-**Install via plugin marketplace:**
-```bash
-claude "/plugin marketplace add fynnfluegge/agtx" && claude "/plugin install agtx@agtx-marketplace"
-```
-
-**Manual install / running from source:**
-
-1. Make sure the `agtx` binary is in your PATH. If running from source:
-   ```bash
-   cargo build --release
-   # Then either add to PATH:
-   export PATH="$PATH:$(pwd)/target/release"
-   # Or use the absolute path in the next step instead of "agtx"
-   ```
-
-2. Register the MCP server (once, user-scoped — works across all projects):
-   ```bash
-   claude mcp add --scope user agtx -- agtx mcp-serve
-   # Or with absolute path if not in PATH:
-   claude mcp add --scope user agtx -- /path/to/agtx mcp-serve
-   ```
-
-3. Load the skills into your session:
-   ```
-   /plugin marketplace add fynnfluegge/agtx
-   /plugin install agtx@agtx-marketplace
-   ```
-
-</details>
-
-<details>
-<summary><b>Gemini CLI</b></summary>
-
-Add the skill to your `GEMINI.md` for persistent context:
-```bash
-echo "@~/skills/sweep/SKILL.md" >> ~/GEMINI.md
-```
-
-Register the global MCP server in your Gemini config:
-```bash
-gemini mcp add agtx -- agtx mcp-serve
-```
-
-Then in any Gemini session:
-```
-/agtx-sweep
-```
-
-</details>
-
-<details>
-<summary><b>Cursor</b></summary>
-
-Copy the skill into your Cursor rules:
-```bash
-cp skills/sweep/SKILL.md ~/.cursor/rules/agtx-sweep.md
-```
-
-Register the MCP server in Cursor's MCP settings (`~/.cursor/mcp.json`):
-```json
-{
-  "mcpServers": {
-    "agtx": {
-      "command": "agtx",
-      "args": ["mcp-serve"]
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><b>Codex</b></summary>
-
-**Install via repo marketplace** — add to your project's `.agents/plugins/marketplace.json`:
-```json
-{
-  "name": "local-repo",
-  "plugins": [
-    {
-      "name": "agtx",
-      "source": {
-        "source": "local",
-        "path": "./plugins/agtx"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Productivity"
-    }
-  ]
-}
-```
-
-Then in any Codex session:
-```
-@agtx:sweep
-@agtx:brainstorm
-```
-
-</details>
-
-<details>
-<summary><b>Other agents</b></summary>
-
-Skills are plain Markdown — they work with any agent that accepts instruction files. Copy `skills/sweep/SKILL.md` into your agent's context and register the MCP server:
-
-```bash
-agtx mcp-serve   # global mode — works from any directory
-```
-
-</details>
-
-> [!NOTE]
-> The project must have been opened in agtx at least once to appear in `list_projects`. Run `agtx` in your project directory first.
 
 ## Contributing
 
