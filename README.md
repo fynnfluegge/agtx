@@ -111,6 +111,7 @@ cp target/release/agtx ~/.local/bin/
 | `o` | Create new task |
 | `R` | Enter research mode |
 | `↩` | Open task (view agent session) |
+| `Ctrl+f` | Fullscreen attach to task's tmux session |
 | `m` | Move task forward in workflow |
 | `r` | Resume task (Review → Running) / Move back (Running → Planning) |
 | `p` | Next phase (Review → Planning, cyclic plugins only) |
@@ -148,6 +149,16 @@ When writing a task description, you can reference files, skills, and other task
 | `!` | Fuzzy search and insert a task reference (at line start or after space) |
 
 </details>
+
+### Agent Sessions
+
+Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to attach fullscreen.
+
+- **Persistent context**: The agent's full conversation history is preserved across Planning → Running → Review
+- **Resume from Review**: Moving a task back to Running simply reconnects to the existing session — no re-initialization needed
+- **Inline view**: Press `↩` on any active task to open a scrollable tmux view inside the TUI
+- **Fullscreen**: Press `Ctrl+f` to attach directly to the agent's tmux window
+- **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch using a non-destructive virtual merge (`git merge-tree`). If conflicts are detected, the agent is automatically sent the `/agtx:merge-conflicts` skill to resolve them and re-commit
 
 ## Brainstorm & Sweep Skill
 
@@ -540,16 +551,6 @@ tmux -L agtx list-windows -a
 # Attach to the agtx server
 tmux -L agtx attach
 ```
-
-### Agent Sessions
-
-Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to attach fullscreen.
-
-- **Persistent context**: The agent's full conversation history is preserved across Planning → Running → Review
-- **Resume from Review**: Moving a task back to Running simply reconnects to the existing session — no re-initialization needed
-- **Inline view**: Press `↩` on any active task to open a scrollable tmux view inside the TUI
-- **Fullscreen**: Press `Ctrl+f` to attach directly to the agent's tmux window
-- **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch using a non-destructive virtual merge (`git merge-tree`). If conflicts are detected, the agent is automatically sent the `/agtx:merge-conflicts` skill to resolve them and re-commit
 
 ### Data Storage
 
