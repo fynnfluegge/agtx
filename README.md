@@ -8,8 +8,7 @@
     
 > **An AI agent that manages other coding agents in a terminal kanban board** - Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates to multiple coding agents running in parallel. Come back to changes ready to merge.
 > 
-> **Let different AI coding agents collaborate** autonomously on the same task with automatic session switching and context awareness -  
-> e.g. **Gemini** → research | **Claude** → implement | **Codex** → review
+> **Let different AI coding agents collaborate** autonomously on the same task with automatic session switching and context awareness - e.g. **Gemini** → research | **Claude** → implement | **Codex** → review
 
 </div>
 
