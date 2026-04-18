@@ -522,27 +522,33 @@ The brainstorm skill keeps the agent in discussion mode — asking questions, su
 <details>
 <summary><b>Claude Code (recommended)</b></summary>
 
-**Install via plugin marketplace** (two steps — adds the marketplace, then installs):
-```
-/plugin marketplace add fynnfluegge/agtx
-/plugin install agtx@agtx-marketplace
-```
-
-This registers the MCP server automatically. Then in any Claude Code session:
-```
-/agtx:sweep
-```
-
-**Manual install** (if you prefer):
+**Install via plugin marketplace:**
 ```bash
-claude mcp add agtx -- agtx mcp-serve
+claude "/plugin marketplace add fynnfluegge/agtx" && claude "/plugin install agtx@agtx-marketplace"
 ```
 
-Then copy the skill to Claude's command discovery path:
-```bash
-mkdir -p ~/.claude/commands/agtx
-cp skills/sweep/SKILL.md ~/.claude/commands/agtx/sweep.md
-```
+**Manual install / running from source:**
+
+1. Make sure the `agtx` binary is in your PATH. If running from source:
+   ```bash
+   cargo build --release
+   # Then either add to PATH:
+   export PATH="$PATH:$(pwd)/target/release"
+   # Or use the absolute path in the next step instead of "agtx"
+   ```
+
+2. Register the MCP server (once, user-scoped — works across all projects):
+   ```bash
+   claude mcp add --scope user agtx -- agtx mcp-serve
+   # Or with absolute path if not in PATH:
+   claude mcp add --scope user agtx -- /path/to/agtx mcp-serve
+   ```
+
+3. Load the skills into your session:
+   ```
+   /plugin marketplace add fynnfluegge/agtx
+   /plugin install agtx@agtx-marketplace
+   ```
 
 </details>
 

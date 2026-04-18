@@ -107,18 +107,23 @@ When the user asks to sweep, push, or hand off the conversation to the board:
 2. Call `list_tasks` with `project_id` — check for duplicates
 3. Extract every actionable work item from the conversation
 4. **Stop and present the proposed task list to the user. Do NOT call any MCP write tools yet.**
-   Show title, description, and dependencies for each task:
+   Show each task with a checkmark, title, description, and dependencies:
    ```
-   [0] Add streaming CSV export endpoint
-       Implement GET /export/csv with streaming response
-       depends on: none
-   [1] Add date range filter to export
-       Query params ?from=&to= applied before streaming
-       depends on: [0]
+   ✓ [0] Add streaming CSV export endpoint
+         Implement GET /export/csv with streaming response
+         depends on: none
+
+   ✓ [1] Add date range filter to export
+         Query params ?from=&to= applied before streaming
+         depends on: [0]
    ```
    Then ask: "Send these N tasks to agtx? (yes / edit / cancel)"
-5. **Only after explicit user confirmation:** use `create_tasks_batch` (with `project_id`) for multiple tasks, `create_task` for one
-6. Report created IDs:
+5. **Handle the response:**
+   - `yes` → proceed with all tasks
+   - `edit` → ask which task to modify and what to change, update it in the list, re-show the full list, ask to confirm again
+   - `cancel` → stop, do nothing
+6. **Only after final confirmation:** use `create_tasks_batch` (with `project_id`) for multiple tasks, `create_task` for one
+7. Report created IDs:
    ```
    ✓ a1b2c3  Add streaming CSV export endpoint
    ✓ d4e5f6  Add date range filter to export
