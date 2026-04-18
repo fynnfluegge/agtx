@@ -624,19 +624,6 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 └──────────────┘
 ```
 
-**MCP tools used by the orchestrator:**
-
-| Tool | Description |
-|------|-------------|
-| `list_tasks` | List all tasks, optionally filtered by status |
-| `get_task` | Get task details including `allowed_actions` for valid transitions |
-| `move_task` | Queue a state transition (the TUI executes it with full side effects) |
-| `get_transition_status` | Check if a queued transition completed or errored |
-| `check_conflicts` | Non-destructive merge conflict detection against the default branch |
-| `get_notifications` | Manually fetch pending notifications (backup — usually pushed automatically) |
-| `read_pane_content` | Read the last N lines of a task's agent tmux pane |
-| `send_to_task` | Send a message to a task's agent pane (Planning/Running only) |
-
 **How it works:**
 1. When you press `O`, the TUI registers the MCP server with the orchestrator agent via `claude mcp add-json --scope local`
 2. The orchestrator receives phase completion notifications pushed to its tmux pane when idle
