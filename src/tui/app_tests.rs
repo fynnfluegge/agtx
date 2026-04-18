@@ -697,7 +697,11 @@ fn test_send_key_to_tmux_char() {
         .times(1)
         .returning(|_, _| Ok(()));
 
-    send_key_to_tmux("test-window", KeyCode::Char('a'), &mock_tmux);
+    send_key_to_tmux(
+        "test-window",
+        crossterm::event::KeyEvent::new(KeyCode::Char('a'), crossterm::event::KeyModifiers::NONE),
+        &mock_tmux,
+    );
 }
 
 /// Test sending Enter key to tmux
@@ -715,7 +719,11 @@ fn test_send_key_to_tmux_enter() {
         .times(1)
         .returning(|_, _| Ok(()));
 
-    send_key_to_tmux("test-window", KeyCode::Enter, &mock_tmux);
+    send_key_to_tmux(
+        "test-window",
+        crossterm::event::KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+        &mock_tmux,
+    );
 }
 
 /// Test sending special keys to tmux
@@ -733,7 +741,11 @@ fn test_send_key_to_tmux_special_keys() {
         )
         .returning(|_, _| Ok(()));
 
-    send_key_to_tmux("win", KeyCode::Esc, &mock_tmux);
+    send_key_to_tmux(
+        "win",
+        crossterm::event::KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::NONE),
+        &mock_tmux,
+    );
 
     // Test Backspace
     let mut mock_tmux2 = MockTmuxOperations::new();
@@ -745,7 +757,11 @@ fn test_send_key_to_tmux_special_keys() {
         )
         .returning(|_, _| Ok(()));
 
-    send_key_to_tmux("win", KeyCode::Backspace, &mock_tmux2);
+    send_key_to_tmux(
+        "win",
+        crossterm::event::KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::NONE),
+        &mock_tmux2,
+    );
 }
 
 /// Test sending function key to tmux
@@ -759,7 +775,73 @@ fn test_send_key_to_tmux_function_key() {
         .with(mockall::predicate::eq("win"), mockall::predicate::eq("F5"))
         .returning(|_, _| Ok(()));
 
-    send_key_to_tmux("win", KeyCode::F(5), &mock_tmux);
+    send_key_to_tmux(
+        "win",
+        crossterm::event::KeyEvent::new(KeyCode::F(5), crossterm::event::KeyModifiers::NONE),
+        &mock_tmux,
+    );
+}
+
+/// Test Alt+Left and Alt+Right send M-Left / M-Right (word-boundary navigation)
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_send_key_to_tmux_alt_arrow_keys() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux
+        .expect_send_keys_literal()
+        .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-Left"))
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    send_key_to_tmux(
+        "win",
+        crossterm::event::KeyEvent::new(KeyCode::Left, crossterm::event::KeyModifiers::ALT),
+        &mock_tmux,
+    );
+
+    let mut mock_tmux2 = MockTmuxOperations::new();
+    mock_tmux2
+        .expect_send_keys_literal()
+        .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-Right"))
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    send_key_to_tmux(
+        "win",
+        crossterm::event::KeyEvent::new(KeyCode::Right, crossterm::event::KeyModifiers::ALT),
+        &mock_tmux2,
+    );
+}
+
+/// Test Alt+b / Alt+f (macOS Option+Left/Right Emacs-style) send M-b / M-f
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_send_key_to_tmux_alt_b_f() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux
+        .expect_send_keys_literal()
+        .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-b"))
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    send_key_to_tmux(
+        "win",
+        crossterm::event::KeyEvent::new(KeyCode::Char('b'), crossterm::event::KeyModifiers::ALT),
+        &mock_tmux,
+    );
+
+    let mut mock_tmux2 = MockTmuxOperations::new();
+    mock_tmux2
+        .expect_send_keys_literal()
+        .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-f"))
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    send_key_to_tmux(
+        "win",
+        crossterm::event::KeyEvent::new(KeyCode::Char('f'), crossterm::event::KeyModifiers::ALT),
+        &mock_tmux2,
+    );
 }
 
 // =============================================================================
@@ -9290,9 +9372,6 @@ fn test_handle_paste_into_shell_popup_calls_paste_text() {
             *received_c.lock().unwrap() = text.to_string();
             Ok(())
         });
-    mock_tmux
-        .expect_capture_pane_with_history()
-        .returning(|_, _| vec![]);
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -9325,9 +9404,6 @@ fn test_handle_paste_into_shell_popup_does_not_call_send_keys_literal() {
         .expect_paste_text()
         .times(1)
         .returning(|_, _| Ok(()));
-    mock_tmux
-        .expect_capture_pane_with_history()
-        .returning(|_, _| vec![]);
     // send_keys_literal must NOT be called — mockall panics if an unexpected call occurs
     mock_tmux.expect_send_keys_literal().times(0);
 

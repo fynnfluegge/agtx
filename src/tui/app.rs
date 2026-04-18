@@ -3165,7 +3165,7 @@ impl App {
                 }
                 _ => {
                     // Forward all other keys to tmux window (including Esc)
-                    send_key_to_tmux(&window_name, key.code, self.state.tmux_ops.as_ref());
+                    send_key_to_tmux(&window_name, key, self.state.tmux_ops.as_ref());
                     // After sending a key, refresh content to show the result
                     popup.cached_content = capture_tmux_pane_with_history(
                         &window_name,
@@ -3180,14 +3180,9 @@ impl App {
 
     fn handle_paste(&mut self, text: String) -> Result<()> {
         // Shell popup open: forward paste to the tmux pane with proper bracketed paste sequences
-        if let Some(ref mut popup) = self.state.shell_popup {
+        if let Some(ref popup) = self.state.shell_popup {
             let window_name = popup.window_name.clone();
             let _ = self.state.tmux_ops.paste_text(&window_name, &text);
-            popup.cached_content = capture_tmux_pane_with_history(
-                &window_name,
-                500,
-                self.state.tmux_ops.as_ref(),
-            );
             return Ok(());
         }
 
@@ -5779,7 +5774,7 @@ impl App {
             match self.terminal.backend_mut() {
                 AppBackend::Crossterm(backend) => {
                     let _ = disable_raw_mode();
-                    let _ = execute!(backend, LeaveAlternateScreen);
+                    let _ = execute!(backend, LeaveAlternateScreen, DisableBracketedPaste);
                 }
                 #[cfg(feature = "test-mocks")]
                 AppBackend::Test(_) => {}
@@ -5801,7 +5796,7 @@ impl App {
             match self.terminal.backend_mut() {
                 AppBackend::Crossterm(backend) => {
                     enable_raw_mode()?;
-                    execute!(backend, EnterAlternateScreen)?;
+                    execute!(backend, EnterAlternateScreen, EnableBracketedPaste)?;
                 }
                 #[cfg(feature = "test-mocks")]
                 AppBackend::Test(_) => {}
@@ -7092,8 +7087,15 @@ fn push_changes_to_existing_pr(
 }
 
 /// Send a key to a tmux pane
-fn send_key_to_tmux(window_name: &str, key: KeyCode, tmux_ops: &dyn TmuxOperations) {
-    let key_str = match key {
+fn send_key_to_tmux(
+    window_name: &str,
+    key: crossterm::event::KeyEvent,
+    tmux_ops: &dyn TmuxOperations,
+) {
+    use crossterm::event::KeyModifiers;
+    let has_alt = key.modifiers.contains(KeyModifiers::ALT);
+
+    let base = match key.code {
         KeyCode::Char(c) => c.to_string(),
         KeyCode::Enter => "Enter".to_string(),
         KeyCode::Esc => "Escape".to_string(),
@@ -7111,6 +7113,12 @@ fn send_key_to_tmux(window_name: &str, key: KeyCode, tmux_ops: &dyn TmuxOperatio
         KeyCode::Insert => "IC".to_string(),
         KeyCode::F(n) => format!("F{}", n),
         _ => return,
+    };
+
+    let key_str = if has_alt {
+        format!("M-{}", base)
+    } else {
+        base
     };
 
     let _ = tmux_ops.send_keys_literal(window_name, &key_str);
