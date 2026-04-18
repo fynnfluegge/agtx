@@ -244,13 +244,6 @@ Register `agtx mcp-serve` as an MCP server, then copy `skills/sweep/SKILL.md` in
 > [!NOTE]
 > The project must have been opened in agtx at least once to appear in `list_projects`. Run `agtx` in your project directory first.
 
-### Agent Session Features
-
-- Sessions automatically resume when moving Review → Running
-- Full conversation context is preserved across the task lifecycle
-- View live agent output in the task popup
-- **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch. If conflicts are detected, the agent is automatically instructed to resolve them.
-
 ## Configuration
 
 Config file location: `~/.config/agtx/config.toml`
@@ -547,6 +540,16 @@ tmux -L agtx list-windows -a
 # Attach to the agtx server
 tmux -L agtx attach
 ```
+
+### Agent Sessions
+
+Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to attach fullscreen.
+
+- **Persistent context**: The agent's full conversation history is preserved across Planning → Running → Review
+- **Resume from Review**: Moving a task back to Running simply reconnects to the existing session — no re-initialization needed
+- **Inline view**: Press `↩` on any active task to open a scrollable tmux view inside the TUI
+- **Fullscreen**: Press `Ctrl+f` to attach directly to the agent's tmux window
+- **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch using a non-destructive virtual merge (`git merge-tree`). If conflicts are detected, the agent is automatically sent the `/agtx:merge-conflicts` skill to resolve them and re-commit
 
 ### Data Storage
 
