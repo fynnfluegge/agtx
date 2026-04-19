@@ -164,9 +164,9 @@ pub const BUNDLED_PLUGINS: &[(&str, &str, &str)] = &[
         include_str!("../plugins/superpowers/plugin.toml"),
     ),
     (
-        "omc",
+        "oh-my-claudecode",
         "oh-my-claudecode - Multi-agent orchestration",
-        include_str!("../plugins/omc/plugin.toml"),
+        include_str!("../plugins/oh-my-claudecode/plugin.toml"),
     ),
 ];
 
