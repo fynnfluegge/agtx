@@ -65,6 +65,11 @@ pub struct MoveTaskParams {
     /// Optional reason (used with escalate_to_user action)
     #[schemars(description = "Optional reason, used with escalate_to_user action")]
     pub reason: Option<String>,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -72,6 +77,11 @@ pub struct GetTransitionStatusParams {
     /// The transition request ID returned by move_task
     #[schemars(description = "The transition request ID returned by move_task")]
     pub request_id: String,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -79,10 +89,21 @@ pub struct CheckConflictsParams {
     /// Optional task ID. If omitted, checks all tasks in Review status.
     #[schemars(description = "Optional task ID. If omitted, checks all tasks in Review status.")]
     pub task_id: Option<String>,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct GetNotificationsParams {}
+pub struct GetNotificationsParams {
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadPaneParams {
@@ -92,6 +113,11 @@ pub struct ReadPaneParams {
     /// Number of lines to read from the end of the pane (default 50)
     #[schemars(description = "Number of lines to read from the end of the pane (default 50)")]
     pub lines: Option<i32>,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -102,6 +128,11 @@ pub struct SendToTaskParams {
     /// Message to send to the task's agent pane (followed by Enter)
     #[schemars(description = "Message to send to the task's agent pane (followed by Enter)")]
     pub message: String,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -643,7 +674,7 @@ impl AgtxMcpServer {
             );
         }
 
-        match self.open_project_db() {
+        match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => {
                 // Verify task exists
                 let task = match db.get_task(&params.task_id) {
@@ -696,7 +727,7 @@ impl AgtxMcpServer {
         &self,
         Parameters(params): Parameters<GetTransitionStatusParams>,
     ) -> String {
-        match self.open_project_db() {
+        match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => match db.get_transition_request(&params.request_id) {
                 Ok(Some(req)) => {
                     let status = if req.processed_at.is_some() {
@@ -727,7 +758,7 @@ impl AgtxMcpServer {
         description = "Check if task branches have merge conflicts with the main branch. Pass a task_id to check one task, or omit it to check all Review tasks. Uses a read-only git check — no files are modified."
     )]
     fn check_conflicts(&self, Parameters(params): Parameters<CheckConflictsParams>) -> String {
-        let project_path = match self.resolve_project_path(None) {
+        let project_path = match self.resolve_project_path(params.project_id.as_deref()) {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -736,7 +767,7 @@ impl AgtxMcpServer {
             Err(e) => return format!("Failed to detect main branch: {}", e),
         };
 
-        let tasks = match self.open_project_db() {
+        let tasks = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => {
                 if let Some(task_id) = &params.task_id {
                     match db.get_task(task_id) {
@@ -803,8 +834,8 @@ impl AgtxMcpServer {
     #[tool(
         description = "Fetch and consume pending notifications. Returns new events (task created, phase completed, etc.) and removes them from the queue. Note: notifications are also pushed to your input automatically when you are idle, so you usually don't need to call this manually."
     )]
-    fn get_notifications(&self, _params: Parameters<GetNotificationsParams>) -> String {
-        match self.open_project_db() {
+    fn get_notifications(&self, Parameters(params): Parameters<GetNotificationsParams>) -> String {
+        match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => match db.consume_notifications() {
                 Ok(notifs) => {
                     let items: Vec<NotificationItem> = notifs
@@ -830,7 +861,7 @@ impl AgtxMcpServer {
         description = "Read the last N lines of a task's agent tmux pane. Use this to understand what the agent is showing — e.g., when a task has been idle for a while. Returns pane content as text."
     )]
     fn read_pane_content(&self, Parameters(params): Parameters<ReadPaneParams>) -> String {
-        let db = match self.open_project_db() {
+        let db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,
         };
@@ -882,7 +913,7 @@ impl AgtxMcpServer {
         description = "Send a message to a task's agent pane (followed by Enter). Only works for tasks in Planning or Running status. Use this to nudge a stuck agent, answer a CLI prompt (e.g. 'y' for yes), or provide guidance."
     )]
     fn send_to_task(&self, Parameters(params): Parameters<SendToTaskParams>) -> String {
-        let db = match self.open_project_db() {
+        let db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,
         };
