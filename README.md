@@ -341,6 +341,7 @@ Press `P` to switch plugins. Ships with 7 built-in:
 | **openspec** | [OpenSpec](https://github.com/Fission-AI/OpenSpec) - lightweight AI-guided specification framework |
 | **bmad** | [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) - AI-driven agile development with structured phases |
 | **superpowers** | [Superpowers](https://github.com/obra/superpowers) - brainstorming, plans, TDD, subagent-driven development |
+| **oh-my-claudecode** | [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode) - multi-agent orchestration with 37 skills and 22 specialized agents |
 
 ### Agent Compatibility
 
@@ -358,6 +359,7 @@ Commands are written once in canonical format and automatically translated per a
 | **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
