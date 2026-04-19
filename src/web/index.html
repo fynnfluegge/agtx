@@ -152,6 +152,28 @@ body {
 .badge-pr:hover { text-decoration: underline; }
 .col-empty { color: var(--border2); font-size: 11px; text-align: center; padding: 14px 0; }
 
+/* ── Collapsed board (task panel open) ───────────────────────── */
+#board.collapsed {
+  width: 210px;
+  min-width: 210px;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.flat-list { display: flex; flex-direction: column; gap: 4px; padding: 7px; }
+.flat-sec {
+  font-size: 10px; color: var(--dimmed);
+  letter-spacing: .09em; text-transform: uppercase;
+  padding: 8px 2px 3px;
+}
+.flat-sec:first-child { padding-top: 2px; }
+/* Status accent on left border in collapsed mode */
+#board.collapsed .card { border-left: 3px solid var(--border); }
+#board.collapsed .card[data-status="planning"] { border-left-color: var(--gold); }
+#board.collapsed .card[data-status="running"]  { border-left-color: var(--cyan); }
+#board.collapsed .card[data-status="review"]   { border-left-color: var(--blue); }
+#board.collapsed .card[data-status="done"]     { border-left-color: var(--green); }
+
 /* ── Task panel ───────────────────────────────────────────────── */
 #panel {
   width: 400px; flex-shrink: 0;
@@ -397,24 +419,41 @@ function renderBoard(kanban) {
   const board = document.getElementById('board');
   board.innerHTML = '';
 
-  for (const col of kanban.columns) {
-    const colEl = document.createElement('div');
-    colEl.className = 'col';
-    const hdr = document.createElement('div');
-    hdr.className = 'col-hdr';
-    hdr.innerHTML =
-      `${esc(col.display_name.toUpperCase())} <span class="col-cnt">${col.tasks.length}</span>`;
-    colEl.appendChild(hdr);
-
-    const tasks = document.createElement('div');
-    tasks.className = 'col-tasks';
-    if (col.tasks.length === 0) {
-      tasks.innerHTML = '<div class="col-empty">—</div>';
-    } else {
-      for (const t of col.tasks) tasks.appendChild(mkCard(t, kanban.project_id));
+  if (S.taskId) {
+    // Collapsed: single scrollable list grouped by status
+    board.classList.add('collapsed');
+    const list = document.createElement('div');
+    list.className = 'flat-list';
+    for (const col of kanban.columns) {
+      if (col.tasks.length === 0) continue;
+      const sec = document.createElement('div');
+      sec.className = 'flat-sec';
+      sec.textContent = col.display_name.toUpperCase();
+      list.appendChild(sec);
+      for (const t of col.tasks) list.appendChild(mkCard(t, kanban.project_id));
     }
-    colEl.appendChild(tasks);
-    board.appendChild(colEl);
+    board.appendChild(list);
+  } else {
+    // Full kanban
+    board.classList.remove('collapsed');
+    for (const col of kanban.columns) {
+      const colEl = document.createElement('div');
+      colEl.className = 'col';
+      const hdr = document.createElement('div');
+      hdr.className = 'col-hdr';
+      hdr.innerHTML =
+        `${esc(col.display_name.toUpperCase())} <span class="col-cnt">${col.tasks.length}</span>`;
+      colEl.appendChild(hdr);
+      const tasks = document.createElement('div');
+      tasks.className = 'col-tasks';
+      if (col.tasks.length === 0) {
+        tasks.innerHTML = '<div class="col-empty">—</div>';
+      } else {
+        for (const t of col.tasks) tasks.appendChild(mkCard(t, kanban.project_id));
+      }
+      colEl.appendChild(tasks);
+      board.appendChild(colEl);
+    }
   }
 }
 
@@ -422,6 +461,7 @@ function mkCard(task, projectId) {
   const card = document.createElement('div');
   card.className = 'card' + (task.id === S.taskId ? ' sel' : '');
   card.dataset.id = task.id;
+  card.dataset.status = task.status;
 
   const desc = task.description
     ? task.description.replace(/\n/g, ' ').slice(0, 90)
@@ -452,7 +492,8 @@ async function selectTask(projectId, taskId) {
   S.taskId = taskId;
   S.artifact = null;
 
-  // Highlight cards
+  // Switch board to collapsed mode and highlight selected card
+  if (S.kanban) renderBoard(S.kanban);
   document.querySelectorAll('.card').forEach(c =>
     c.classList.toggle('sel', c.dataset.id === taskId));
 
@@ -525,7 +566,7 @@ async function selectArtifact(projectId, taskId, name) {
 document.getElementById('btn-close').onclick = () => {
   S.taskId = null; S.task = null; S.artifact = null;
   document.getElementById('panel').classList.add('hidden');
-  document.querySelectorAll('.card').forEach(c => c.classList.remove('sel'));
+  if (S.kanban) renderBoard(S.kanban);
 };
 
 // ── Util ──────────────────────────────────────────────────────────
