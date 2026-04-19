@@ -330,7 +330,7 @@ running = "codex"
 
 Plug any spec-driven framework into the task lifecycle. Define commands, prompts, and artifacts — agtx handles phase gating, artifact polling, worktree sync, agent switching, and autonomous execution.
 
-Press `P` to switch plugins. Ships with 7 built-in:
+Press `P` to switch plugins. Ships with 9 built-in:
 
 | Plugin | Description |
 |--------|-------------|
@@ -342,6 +342,7 @@ Press `P` to switch plugins. Ships with 7 built-in:
 | **bmad** | [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) - AI-driven agile development with structured phases |
 | **superpowers** | [Superpowers](https://github.com/obra/superpowers) - brainstorming, plans, TDD, subagent-driven development |
 | **oh-my-claudecode** | [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode) - multi-agent orchestration with 37 skills and 22 specialized agents |
+| **agent-skills** | [Agent Skills](https://github.com/addyosmani/agent-skills) - production-grade engineering skills covering the full spec-to-ship lifecycle |
 
 ### Agent Compatibility
 
@@ -360,12 +361,16 @@ Commands are written once in canonical format and automatically translated per a
 | **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
 | **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
 
 <details>
 <summary><b>Creating a Plugin</b></summary>
+
+> [!TIP]
+> If you have the agtx repo open in Claude Code, run `/add-plugin <github-url>` to automatically generate a bundled `plugin.toml` from any spec-driven framework repo — including wiring up `src/skills.rs` and the README tables.
 
 Place your plugin at `.agtx/plugins/<name>/plugin.toml` in your project root (or `~/.config/agtx/plugins/<name>/plugin.toml` for global use). It will appear in the plugin selector automatically.
 

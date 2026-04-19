@@ -181,6 +181,11 @@ pub const BUNDLED_PLUGINS: &[(&str, &str, &str)] = &[
         "oh-my-claudecode - Multi-agent orchestration",
         include_str!("../plugins/oh-my-claudecode/plugin.toml"),
     ),
+    (
+        "agent-skills",
+        "Agent Skills - production-grade engineering skills for the full spec-to-ship lifecycle",
+        include_str!("../plugins/agent-skills/plugin.toml"),
+    ),
 ];
 
 /// Extract the description from YAML frontmatter.
