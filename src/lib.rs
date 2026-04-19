@@ -6,6 +6,7 @@ pub mod mcp;
 pub mod skills;
 pub mod tmux;
 pub mod tui;
+pub mod web;
 
 use std::path::PathBuf;
 

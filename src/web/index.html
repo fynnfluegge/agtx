@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>agtx</title>
+<style>
+:root {
+  --gold:    #ead49a;
+  --cyan:    #5cfff7;
+  --blue:    #a0d2fa;
+  --green:   #7ec87e;
+  --text:    #f2ece6;
+  --desc:    #c4b0ac;
+  --dimmed:  #9c9991;
+  --bg:      #141414;
+  --bg2:     #1a1a1a;
+  --bg3:     #202020;
+  --bg4:     #262626;
+  --border:  #2d2d2d;
+  --border2: #383838;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Header ───────────────────────────────────────────────────── */
+#hdr {
+  height: 38px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  gap: 10px;
+  flex-shrink: 0;
+}
+#hdr .logo { color: var(--gold); font-weight: bold; font-size: 13px; letter-spacing: .04em; }
+#hdr .sep  { color: var(--border2); }
+#hdr-proj  { color: var(--cyan); }
+#hdr-ts    { margin-left: auto; color: var(--dimmed); font-size: 11px; }
+
+/* ── Layout ───────────────────────────────────────────────────── */
+#layout { display: flex; flex: 1; overflow: hidden; }
+
+/* ── Sidebar ──────────────────────────────────────────────────── */
+#sidebar {
+  width: 190px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+.sidebar-label {
+  padding: 10px 12px 6px;
+  font-size: 10px;
+  color: var(--dimmed);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.proj-item {
+  padding: 6px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border-left: 2px solid transparent;
+  color: var(--desc);
+}
+.proj-item:hover { background: var(--bg2); color: var(--text); }
+.proj-item.active {
+  border-left-color: var(--gold);
+  color: var(--gold);
+  background: rgba(234,212,154,.05);
+}
+.proj-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--dimmed); flex-shrink: 0;
+}
+.proj-item.active .proj-dot { background: var(--gold); }
+.proj-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj-badge { font-size: 10px; color: var(--dimmed); }
+.proj-item.active .proj-badge { color: var(--gold); opacity: .7; }
+
+/* ── Main content ─────────────────────────────────────────────── */
+#content { flex: 1; display: flex; overflow: hidden; }
+
+/* ── Board ────────────────────────────────────────────────────── */
+#board {
+  flex: 1; display: flex; overflow-x: auto; overflow-y: hidden;
+}
+#no-proj {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--dimmed); font-size: 13px;
+}
+
+/* ── Kanban columns ───────────────────────────────────────────── */
+.col {
+  min-width: 185px; flex: 1;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+.col:last-child { border-right: none; }
+.col-hdr {
+  padding: 9px 10px 7px;
+  font-size: 10px; font-weight: bold;
+  letter-spacing: .09em; text-transform: uppercase;
+  color: var(--blue);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 6px;
+  flex-shrink: 0;
+}
+.col-cnt { color: var(--dimmed); font-weight: normal; }
+.col-tasks {
+  flex: 1; overflow-y: auto; padding: 7px;
+  display: flex; flex-direction: column; gap: 5px;
+}
+
+/* ── Task cards ───────────────────────────────────────────────── */
+.card {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 9px;
+  cursor: pointer;
+  transition: border-color .1s;
+}
+.card:hover { border-color: var(--border2); background: var(--bg4); }
+.card.sel   { border-color: var(--gold); }
+.card-title { color: var(--text); font-size: 12px; line-height: 1.4; margin-bottom: 4px; }
+.card-desc  {
+  color: var(--desc); font-size: 11px; line-height: 1.4;
+  overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  margin-bottom: 5px;
+}
+.card-meta  { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.badge {
+  font-size: 10px; padding: 1px 5px; border-radius: 3px; border: 1px solid;
+}
+.badge-agent  { color: var(--cyan);   border-color: rgba(92,255,247,.25); }
+.badge-plugin { color: var(--dimmed); border-color: #333; }
+.badge-pr     { color: var(--blue);   border-color: rgba(160,210,250,.25); text-decoration: none; }
+.badge-pr:hover { text-decoration: underline; }
+.col-empty { color: var(--border2); font-size: 11px; text-align: center; padding: 14px 0; }
+
+/* ── Task panel ───────────────────────────────────────────────── */
+#panel {
+  width: 400px; flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+#panel.hidden { display: none; }
+
+#panel-hdr {
+  padding: 11px 12px 9px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: flex-start; gap: 8px;
+}
+#panel-title {
+  flex: 1; font-size: 12px; font-weight: bold;
+  color: var(--text); line-height: 1.4;
+}
+#btn-close {
+  background: none; border: none; color: var(--dimmed);
+  cursor: pointer; font-size: 18px; line-height: 1;
+  padding: 0; flex-shrink: 0;
+}
+#btn-close:hover { color: var(--text); }
+
+#panel-meta {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px; color: var(--dimmed);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.meta-row { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.meta-row a { color: var(--blue); text-decoration: none; }
+.meta-row a:hover { text-decoration: underline; }
+.s-backlog  { color: var(--dimmed); }
+.s-planning { color: var(--gold); }
+.s-running  { color: var(--cyan); }
+.s-review   { color: var(--blue); }
+.s-done     { color: var(--green); }
+
+#art-tabs {
+  padding: 6px 12px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex; gap: 2px;
+}
+.art-tab {
+  padding: 4px 9px; font-size: 11px; cursor: pointer;
+  color: var(--dimmed); background: none;
+  border: none; border-bottom: 2px solid transparent;
+  font-family: inherit;
+}
+.art-tab:hover:not(.unavail) { color: var(--text); }
+.art-tab.active  { color: var(--cyan); border-bottom-color: var(--cyan); }
+.art-tab.unavail { color: #3a3a3a; cursor: default; }
+
+#artifact {
+  flex: 1; overflow-y: auto; padding: 14px;
+  font-size: 12px; line-height: 1.6;
+}
+.hint { color: var(--dimmed); font-style: italic; }
+
+/* ── Markdown styles ──────────────────────────────────────────── */
+#artifact h1 { font-size: 15px; color: var(--gold); margin: 14px 0 7px; font-weight: bold; }
+#artifact h2 {
+  font-size: 13px; color: var(--cyan); margin: 12px 0 6px; font-weight: bold;
+  border-bottom: 1px solid var(--border); padding-bottom: 3px;
+}
+#artifact h3 { font-size: 12px; color: var(--blue); margin: 10px 0 5px; font-weight: bold; }
+#artifact h4 { font-size: 12px; color: var(--text); margin: 8px 0 4px; font-weight: bold; }
+#artifact p  { margin: 6px 0; color: var(--desc); }
+#artifact ul, #artifact ol { margin: 6px 0 6px 16px; }
+#artifact li { margin: 2px 0; color: var(--desc); }
+#artifact code {
+  background: #1a1a2e; color: var(--cyan);
+  padding: 1px 4px; border-radius: 3px; font-size: 11px;
+}
+#artifact pre {
+  background: #151520; border: 1px solid var(--border);
+  border-radius: 4px; padding: 10px; overflow-x: auto; margin: 8px 0;
+}
+#artifact pre code { background: none; padding: 0; color: var(--text); }
+#artifact table {
+  border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 11px;
+}
+#artifact th, #artifact td {
+  border: 1px solid var(--border); padding: 4px 9px; text-align: left;
+}
+#artifact th { color: var(--blue); background: var(--bg2); }
+#artifact blockquote {
+  border-left: 3px solid var(--gold); padding-left: 10px;
+  margin: 7px 0; color: var(--dimmed);
+}
+#artifact a { color: var(--blue); }
+#artifact hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+
+/* ── Scrollbars ───────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #444; }
+</style>
+</head>
+<body>
+
+<div id="hdr">
+  <span class="logo">agtx</span>
+  <span class="sep">/</span>
+  <span id="hdr-proj">—</span>
+  <span id="hdr-ts"></span>
+</div>
+
+<div id="layout">
+  <div id="sidebar">
+    <div class="sidebar-label">Projects</div>
+    <div id="proj-list"></div>
+  </div>
+
+  <div id="content">
+    <div id="board">
+      <div id="no-proj">No projects found</div>
+    </div>
+
+    <div id="panel" class="hidden">
+      <div id="panel-hdr">
+        <div id="panel-title"></div>
+        <button id="btn-close">×</button>
+      </div>
+      <div id="panel-meta"></div>
+      <div id="art-tabs"></div>
+      <div id="artifact"><span class="hint">Select an artifact tab above.</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+const S = {
+  projects: [],
+  projectId: null,
+  kanban: null,
+  taskId: null,
+  task: null,
+  artifact: null,
+};
+
+let refreshTimer = null;
+let lastRefresh = null;
+
+// ── API ──────────────────────────────────────────────────────────
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status} ${url}`);
+  return r.json();
+}
+
+async function getText(url) {
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  return r.text();
+}
+
+// ── Init ─────────────────────────────────────────────────────────
+
+async function init() {
+  try {
+    S.projects = await getJSON('/api/projects');
+    renderProjects();
+    if (S.projects.length > 0) await selectProject(S.projects[0].id);
+  } catch (e) { console.error('init:', e); }
+  refreshTimer = setInterval(autoRefresh, 5000);
+  setInterval(tickTimestamp, 1000);
+}
+
+// ── Auto-refresh ──────────────────────────────────────────────────
+
+async function autoRefresh() {
+  if (!S.projectId) return;
+  try {
+    const [kanban, projects] = await Promise.all([
+      getJSON(`/api/projects/${S.projectId}/tasks`),
+      getJSON('/api/projects'),
+    ]);
+    S.kanban = kanban;
+    S.projects = projects;
+    renderProjects();
+    renderBoard(kanban);
+    lastRefresh = Date.now();
+    tickTimestamp();
+  } catch (e) { /* silent refresh failure */ }
+}
+
+function tickTimestamp() {
+  if (!lastRefresh) return;
+  const s = Math.round((Date.now() - lastRefresh) / 1000);
+  document.getElementById('hdr-ts').textContent =
+    s < 2 ? 'refreshed just now' : `refreshed ${s}s ago`;
+}
+
+// ── Projects ──────────────────────────────────────────────────────
+
+async function selectProject(id) {
+  S.projectId = id;
+  S.taskId = null;
+  S.task = null;
+  S.artifact = null;
+  document.getElementById('panel').classList.add('hidden');
+
+  const p = S.projects.find(x => x.id === id);
+  document.getElementById('hdr-proj').textContent = p ? p.name : id;
+  renderProjects();
+
+  try {
+    S.kanban = await getJSON(`/api/projects/${id}/tasks`);
+    renderBoard(S.kanban);
+    lastRefresh = Date.now();
+    tickTimestamp();
+  } catch (e) { console.error('selectProject:', e); }
+}
+
+function renderProjects() {
+  const el = document.getElementById('proj-list');
+  el.innerHTML = '';
+  for (const p of S.projects) {
+    const active = (p.task_counts.planning || 0)
+      + (p.task_counts.running || 0)
+      + (p.task_counts.review || 0);
+    const div = document.createElement('div');
+    div.className = 'proj-item' + (p.id === S.projectId ? ' active' : '');
+    div.innerHTML =
+      `<div class="proj-dot"></div>` +
+      `<div class="proj-name" title="${esc(p.path)}">${esc(p.name)}</div>` +
+      (active ? `<div class="proj-badge">${active}</div>` : '');
+    div.onclick = () => selectProject(p.id);
+    el.appendChild(div);
+  }
+}
+
+// ── Board ─────────────────────────────────────────────────────────
+
+function renderBoard(kanban) {
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+  document.getElementById('no-proj').style.display = 'none';
+
+  for (const col of kanban.columns) {
+    const colEl = document.createElement('div');
+    colEl.className = 'col';
+    const hdr = document.createElement('div');
+    hdr.className = 'col-hdr';
+    hdr.innerHTML =
+      `${esc(col.display_name.toUpperCase())} <span class="col-cnt">${col.tasks.length}</span>`;
+    colEl.appendChild(hdr);
+
+    const tasks = document.createElement('div');
+    tasks.className = 'col-tasks';
+    if (col.tasks.length === 0) {
+      tasks.innerHTML = '<div class="col-empty">—</div>';
+    } else {
+      for (const t of col.tasks) tasks.appendChild(mkCard(t, kanban.project_id));
+    }
+    colEl.appendChild(tasks);
+    board.appendChild(colEl);
+  }
+}
+
+function mkCard(task, projectId) {
+  const card = document.createElement('div');
+  card.className = 'card' + (task.id === S.taskId ? ' sel' : '');
+  card.dataset.id = task.id;
+
+  const desc = task.description
+    ? task.description.replace(/\n/g, ' ').slice(0, 90)
+    : '';
+  const pr = task.pr_url
+    ? `<a class="badge badge-pr" href="${esc(task.pr_url)}" target="_blank">#${task.pr_number}</a>`
+    : '';
+
+  card.innerHTML =
+    `<div class="card-title">${esc(task.title)}</div>` +
+    (desc ? `<div class="card-desc">${esc(desc)}${(task.description||'').length > 90 ? '…' : ''}</div>` : '') +
+    `<div class="card-meta">` +
+      `<span class="badge badge-agent">${esc(task.agent)}</span>` +
+      (task.plugin ? `<span class="badge badge-plugin">${esc(task.plugin)}</span>` : '') +
+      pr +
+    `</div>`;
+
+  card.onclick = e => {
+    if (e.target.closest('a')) return;
+    selectTask(projectId, task.id);
+  };
+  return card;
+}
+
+// ── Task panel ────────────────────────────────────────────────────
+
+async function selectTask(projectId, taskId) {
+  S.taskId = taskId;
+  S.artifact = null;
+
+  // Highlight cards
+  document.querySelectorAll('.card').forEach(c =>
+    c.classList.toggle('sel', c.dataset.id === taskId));
+
+  const panel = document.getElementById('panel');
+  panel.classList.remove('hidden');
+  document.getElementById('panel-title').textContent = '…';
+  document.getElementById('panel-meta').innerHTML = '';
+  document.getElementById('art-tabs').innerHTML = '';
+  document.getElementById('artifact').innerHTML = '<span class="hint">Loading…</span>';
+
+  try {
+    S.task = await getJSON(`/api/projects/${projectId}/tasks/${taskId}`);
+    renderPanel(S.task, projectId);
+    const first = S.task.artifacts.find(a => a.available);
+    if (first) await selectArtifact(projectId, taskId, first.name);
+    else document.getElementById('artifact').innerHTML =
+      '<span class="hint">No artifacts yet.</span>';
+  } catch (e) {
+    console.error('selectTask:', e);
+    document.getElementById('panel-title').textContent = 'Error loading task';
+  }
+}
+
+function renderPanel(task, projectId) {
+  document.getElementById('panel-title').textContent = task.title;
+
+  const meta = document.getElementById('panel-meta');
+  const branch = task.branch_name
+    ? `<span>${esc(task.branch_name)}</span>` : '';
+  const pr = task.pr_url
+    ? `<a href="${esc(task.pr_url)}" target="_blank">PR #${task.pr_number}</a>` : '';
+  const brPr = [branch, pr].filter(Boolean).join(' · ');
+  const note = task.escalation_note
+    ? `<div class="meta-row" style="color:var(--gold)">${esc(task.escalation_note)}</div>` : '';
+
+  meta.innerHTML =
+    `<div class="meta-row">` +
+      `<span class="s-${task.status}">${task.status}</span>` +
+      ` · <span>${esc(task.agent)}</span>` +
+      (task.plugin ? ` · <span>${esc(task.plugin)}</span>` : '') +
+      (task.cycle > 1 ? ` · <span>cycle ${task.cycle}</span>` : '') +
+    `</div>` +
+    (brPr ? `<div class="meta-row">${brPr}</div>` : '') +
+    note;
+
+  const tabs = document.getElementById('art-tabs');
+  tabs.innerHTML = '';
+  for (const a of task.artifacts) {
+    const btn = document.createElement('button');
+    btn.className = 'art-tab' + (!a.available ? ' unavail' : '');
+    btn.textContent = a.label;
+    btn.dataset.name = a.name;
+    if (a.available) btn.onclick = () => selectArtifact(projectId, task.id, a.name);
+    tabs.appendChild(btn);
+  }
+}
+
+async function selectArtifact(projectId, taskId, name) {
+  S.artifact = name;
+  document.querySelectorAll('.art-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.name === name));
+
+  const el = document.getElementById('artifact');
+  el.innerHTML = '<span class="hint">Loading…</span>';
+
+  const html = await getText(`/api/projects/${projectId}/tasks/${taskId}/artifacts/${name}`);
+  el.innerHTML = html || '<span class="hint">Artifact not available.</span>';
+}
+
+document.getElementById('btn-close').onclick = () => {
+  S.taskId = null; S.task = null; S.artifact = null;
+  document.getElementById('panel').classList.add('hidden');
+  document.querySelectorAll('.card').forEach(c => c.classList.remove('sel'));
+};
+
+// ── Util ──────────────────────────────────────────────────────────
+
+function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+init();
+</script>
+</body>
+</html>

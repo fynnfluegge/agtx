@@ -36,6 +36,10 @@ uuid = { version = "1.16", features = ["v4"] }
 # MCP server
 rmcp = { version = "0.16", features = ["server", "macros", "transport-io"] }
 
+# Web server
+axum = "0.7"
+pulldown-cmark = "0.12"
+
 [features]
 default = []
 test-mocks = ["dep:mockall"]

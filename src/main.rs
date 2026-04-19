@@ -28,6 +28,15 @@ async fn main() -> Result<()> {
         .collect();
 
     let mode = match positional_args.first().copied() {
+        Some("web-serve") => {
+            let port: u16 = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .and_then(|w| w[1].parse().ok())
+                .or_else(|| std::env::var("PORT").ok().and_then(|v| v.parse().ok()))
+                .unwrap_or(3000);
+            return agtx::web::serve(port).await;
+        }
         Some("mcp-serve") => {
             let project_path = positional_args
                 .get(1)
