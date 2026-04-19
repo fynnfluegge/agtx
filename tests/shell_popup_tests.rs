@@ -1,7 +1,6 @@
 use agtx::tui::shell_popup::{
-    compute_visible_lines, build_footer_text, render_shell_popup,
-    trim_content_to_cursor, trim_trailing_empty_lines,
-    ShellPopup, ShellPopupColors, MAX_TRAILING_EMPTY_LINES,
+    build_footer_text, compute_visible_lines, render_shell_popup, trim_content_to_cursor,
+    trim_trailing_empty_lines, ShellPopup, ShellPopupColors, MAX_TRAILING_EMPTY_LINES,
 };
 use ratatui::backend::TestBackend;
 use ratatui::prelude::*;
@@ -21,6 +20,8 @@ fn test_shell_popup_new() {
 #[test]
 fn test_shell_popup_scroll_up() {
     let mut popup = ShellPopup::new("Test".to_string(), "window".to_string());
+    // Add content with 20 lines so scroll has room
+    popup.cached_content = b"line\n".repeat(20).to_vec();
     assert_eq!(popup.scroll_offset, 0);
 
     popup.scroll_up(5);
@@ -28,6 +29,16 @@ fn test_shell_popup_scroll_up() {
 
     popup.scroll_up(10);
     assert_eq!(popup.scroll_offset, -15);
+}
+
+#[test]
+fn test_shell_popup_scroll_up_clamped_to_content() {
+    let mut popup = ShellPopup::new("Test".to_string(), "window".to_string());
+    // Only 3 lines of content
+    popup.cached_content = b"a\nb\nc\n".to_vec();
+
+    popup.scroll_up(100);
+    assert_eq!(popup.scroll_offset, -3); // Clamped to -(total lines)
 }
 
 #[test]
@@ -64,6 +75,7 @@ fn test_shell_popup_scroll_to_bottom() {
 #[test]
 fn test_shell_popup_is_at_bottom() {
     let mut popup = ShellPopup::new("Test".to_string(), "window".to_string());
+    popup.cached_content = b"line\n".repeat(10).to_vec();
     assert!(popup.is_at_bottom());
 
     popup.scroll_up(5);
@@ -208,10 +220,12 @@ fn test_render_shell_popup_basic() {
         Line::from("Line 3"),
     ];
 
-    terminal.draw(|frame| {
-        let area = Rect::new(0, 0, 80, 24);
-        render_shell_popup(&popup, frame, area, lines, &colors);
-    }).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = Rect::new(0, 0, 80, 24);
+            render_shell_popup(&popup, frame, area, lines, &colors);
+        })
+        .unwrap();
 
     // Verify the popup was rendered by checking the buffer
     let buffer = terminal.backend().buffer();
@@ -235,10 +249,12 @@ fn test_render_shell_popup_with_content() {
         Line::from("$ "),
     ];
 
-    terminal.draw(|frame| {
-        let area = Rect::new(0, 0, 80, 24);
-        render_shell_popup(&popup, frame, area, lines, &colors);
-    }).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = Rect::new(0, 0, 80, 24);
+            render_shell_popup(&popup, frame, area, lines, &colors);
+        })
+        .unwrap();
 
     let buffer = terminal.backend().buffer();
     let buffer_content: String = buffer.content().iter().map(|c| c.symbol()).collect();
@@ -260,10 +276,12 @@ fn test_render_shell_popup_scrolled_up() {
     let colors = ShellPopupColors::default();
     let lines: Vec<Line> = (0..30).map(|i| Line::from(format!("Line {}", i))).collect();
 
-    terminal.draw(|frame| {
-        let area = Rect::new(0, 0, 80, 24);
-        render_shell_popup(&popup, frame, area, lines, &colors);
-    }).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = Rect::new(0, 0, 80, 24);
+            render_shell_popup(&popup, frame, area, lines, &colors);
+        })
+        .unwrap();
 
     let buffer = terminal.backend().buffer();
     let buffer_content: String = buffer.content().iter().map(|c| c.symbol()).collect();
@@ -283,10 +301,12 @@ fn test_render_shell_popup_empty_content() {
     let colors = ShellPopupColors::default();
     let lines: Vec<Line> = vec![];
 
-    terminal.draw(|frame| {
-        let area = Rect::new(0, 0, 80, 24);
-        render_shell_popup(&popup, frame, area, lines, &colors);
-    }).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = Rect::new(0, 0, 80, 24);
+            render_shell_popup(&popup, frame, area, lines, &colors);
+        })
+        .unwrap();
 
     let buffer = terminal.backend().buffer();
     let buffer_content: String = buffer.content().iter().map(|c| c.symbol()).collect();
@@ -309,14 +329,18 @@ fn test_render_shell_popup_custom_colors() {
         header_bg: Color::Blue,
         footer_fg: Color::Yellow,
         footer_bg: Color::Magenta,
+        escalation_fg: Color::Black,
+        escalation_bg: Color::Yellow,
     };
 
     let lines: Vec<Line> = vec![Line::from("content")];
 
-    terminal.draw(|frame| {
-        let area = Rect::new(0, 0, 80, 24);
-        render_shell_popup(&popup, frame, area, lines, &colors);
-    }).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = Rect::new(0, 0, 80, 24);
+            render_shell_popup(&popup, frame, area, lines, &colors);
+        })
+        .unwrap();
 
     // Just verify it doesn't crash with custom colors
     let buffer = terminal.backend().buffer();
@@ -333,10 +357,12 @@ fn test_render_shell_popup_small_area() {
     let colors = ShellPopupColors::default();
     let lines: Vec<Line> = vec![Line::from("test")];
 
-    terminal.draw(|frame| {
-        let area = Rect::new(0, 0, 40, 10);
-        render_shell_popup(&popup, frame, area, lines, &colors);
-    }).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = Rect::new(0, 0, 40, 10);
+            render_shell_popup(&popup, frame, area, lines, &colors);
+        })
+        .unwrap();
 
     // Should handle small areas gracefully
     let buffer = terminal.backend().buffer();
@@ -426,7 +452,8 @@ fn test_trim_content_to_cursor_with_cursor_info() {
 fn test_trim_content_to_cursor_tui_cursor_mid_screen() {
     // TUI app (OpenCode, Gemini) with cursor in the middle — content below cursor is NOT empty
     // Should keep all content, not trim at cursor
-    let content = b"header\nstatus bar\n\ninput field\n\noutput area\nmore output\nbottom bar".to_vec();
+    let content =
+        b"header\nstatus bar\n\ninput field\n\noutput area\nmore output\nbottom bar".to_vec();
     let cursor_info = Some((3, 8)); // cursor_y=3 (mid-screen), pane_height=8
     let result = trim_content_to_cursor(content, cursor_info);
     let result_str = String::from_utf8_lossy(&result);

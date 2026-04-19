@@ -33,9 +33,7 @@ pub fn repo_root(path: &Path) -> Result<std::path::PathBuf> {
         .output()
         .context("Failed to get git root")?;
 
-    let root = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_string();
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     Ok(std::path::PathBuf::from(root))
 }
@@ -82,13 +80,51 @@ pub fn merge_branch(path: &Path, branch: &str, message: &str) -> Result<()> {
         .context("Failed to merge branch")?;
 
     if !output.status.success() {
-        anyhow::bail!(
-            "Merge failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        anyhow::bail!("Merge failed: {}", String::from_utf8_lossy(&output.stderr));
     }
 
     Ok(())
+}
+
+/// Check if merging a branch into the base branch would produce conflicts.
+/// Uses `git merge-tree --write-tree` (Git 2.38+) for a non-destructive check.
+/// Returns Ok((has_conflicts, conflicting_files)).
+pub fn check_merge_conflicts(path: &Path, base: &str, branch: &str) -> Result<(bool, Vec<String>)> {
+    let output = Command::new("git")
+        .current_dir(path)
+        .args(["merge-tree", "--write-tree", base, branch])
+        .output()
+        .context("Failed to run git merge-tree")?;
+
+    if output.status.success() {
+        return Ok((false, vec![]));
+    }
+
+    // Non-zero exit: parse structured output for conflicting files.
+    // git merge-tree outputs lines like "100644 <hash> <stage> <tab><filename>"
+    // where stage 1/2/3 indicates conflict (base/ours/theirs).
+    // This format is locale-independent (unlike the human-readable CONFLICT messages).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut seen = std::collections::HashSet::new();
+    let conflicting_files: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| {
+            // Match lines like: "100644 abc123 1\tpath/to/file" or "100644 abc123 2\tpath/to/file"
+            let parts: Vec<&str> = line.splitn(4, |c: char| c.is_whitespace()).collect();
+            if parts.len() == 4 {
+                let stage = parts[2];
+                if matches!(stage, "1" | "2" | "3") {
+                    let filename = parts[3].trim();
+                    if !filename.is_empty() && seen.insert(filename.to_string()) {
+                        return Some(filename.to_string());
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
+    Ok((true, conflicting_files))
 }
 
 /// Delete a branch

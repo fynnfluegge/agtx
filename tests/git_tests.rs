@@ -10,7 +10,7 @@ use tempfile::TempDir;
 #[test]
 fn test_worktree_path() {
     let project = PathBuf::from("/home/user/project");
-    let path = git::worktree_path(&project, "task-123");
+    let path = git::worktree_path(&project, "task-123", git::DEFAULT_WORKTREE_DIR);
     assert_eq!(
         path,
         PathBuf::from("/home/user/project/.agtx/worktrees/task-123")
@@ -20,7 +20,7 @@ fn test_worktree_path() {
 #[test]
 fn test_worktree_path_with_special_chars() {
     let project = PathBuf::from("/home/user/my-project");
-    let path = git::worktree_path(&project, "fix-bug-456");
+    let path = git::worktree_path(&project, "fix-bug-456", git::DEFAULT_WORKTREE_DIR);
     assert_eq!(
         path,
         PathBuf::from("/home/user/my-project/.agtx/worktrees/fix-bug-456")
@@ -30,10 +30,20 @@ fn test_worktree_path_with_special_chars() {
 #[test]
 fn test_worktree_path_nested_project() {
     let project = PathBuf::from("/home/user/projects/rust/agtx");
-    let path = git::worktree_path(&project, "feature-abc");
+    let path = git::worktree_path(&project, "feature-abc", git::DEFAULT_WORKTREE_DIR);
     assert_eq!(
         path,
         PathBuf::from("/home/user/projects/rust/agtx/.agtx/worktrees/feature-abc")
+    );
+}
+
+#[test]
+fn test_worktree_path_with_custom_dir() {
+    let project = PathBuf::from("/home/user/project");
+    let path = git::worktree_path_with_dir(&project, "task-123", ".worktrees");
+    assert_eq!(
+        path,
+        PathBuf::from("/home/user/project/.worktrees/task-123")
     );
 }
 
@@ -42,7 +52,6 @@ fn test_worktree_exists_false_for_nonexistent() {
     let temp_dir = TempDir::new().unwrap();
     assert!(!git::worktree_exists(temp_dir.path(), "nonexistent-task"));
 }
-
 
 // =============================================================================
 // Integration tests (require git)
@@ -138,7 +147,7 @@ fn test_create_and_remove_worktree() {
     assert!(git::worktree_exists(temp_dir.path(), "test-task"));
 
     // Remove worktree
-    git::remove_worktree(temp_dir.path(), "test-task").unwrap();
+    git::remove_worktree(temp_dir.path(), "test-task", git::DEFAULT_WORKTREE_DIR).unwrap();
 
     // Verify it's gone
     assert!(!worktree_path.exists());
@@ -233,7 +242,7 @@ fn test_remove_worktree_nonexistent() {
 
     // Removing a non-existent worktree should not panic
     // (it may return Ok or Err depending on git version, but shouldn't crash)
-    let result = git::remove_worktree(temp_dir.path(), "does-not-exist");
+    let result = git::remove_worktree(temp_dir.path(), "does-not-exist", git::DEFAULT_WORKTREE_DIR);
 
     // The function should complete without panicking
     // We don't assert success/failure since behavior may vary
@@ -278,9 +287,9 @@ fn test_create_multiple_worktrees() {
     assert_ne!(path1, path3);
 
     // Clean up
-    git::remove_worktree(temp_dir.path(), "task-1").unwrap();
-    git::remove_worktree(temp_dir.path(), "task-2").unwrap();
-    git::remove_worktree(temp_dir.path(), "task-3").unwrap();
+    git::remove_worktree(temp_dir.path(), "task-1", git::DEFAULT_WORKTREE_DIR).unwrap();
+    git::remove_worktree(temp_dir.path(), "task-2", git::DEFAULT_WORKTREE_DIR).unwrap();
+    git::remove_worktree(temp_dir.path(), "task-3", git::DEFAULT_WORKTREE_DIR).unwrap();
 
     assert!(!path1.exists());
     assert!(!path2.exists());
@@ -298,10 +307,9 @@ fn test_worktree_with_uncommitted_changes() {
     std::fs::write(worktree_path.join("dirty-file.txt"), "uncommitted content").unwrap();
 
     // Remove should still work (with --force)
-    let result = git::remove_worktree(temp_dir.path(), "dirty-task");
+    let result = git::remove_worktree(temp_dir.path(), "dirty-task", git::DEFAULT_WORKTREE_DIR);
     assert!(result.is_ok());
 }
-
 
 // =============================================================================
 // initialize_worktree tests
@@ -379,13 +387,8 @@ fn test_initialize_worktree_init_script_failure() {
     let temp_dir = setup_git_repo();
     let worktree_path = git::create_worktree(temp_dir.path(), "init-script-fail").unwrap();
 
-    let warnings = git::initialize_worktree(
-        temp_dir.path(),
-        &worktree_path,
-        None,
-        Some("exit 1"),
-        &[],
-    );
+    let warnings =
+        git::initialize_worktree(temp_dir.path(), &worktree_path, None, Some("exit 1"), &[]);
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("init_script"));
 }
@@ -439,13 +442,8 @@ fn test_initialize_worktree_empty_copy_files() {
     let temp_dir = setup_git_repo();
     let worktree_path = git::create_worktree(temp_dir.path(), "init-empty").unwrap();
 
-    let warnings = git::initialize_worktree(
-        temp_dir.path(),
-        &worktree_path,
-        Some(", , "),
-        None,
-        &[],
-    );
+    let warnings =
+        git::initialize_worktree(temp_dir.path(), &worktree_path, Some(", , "), None, &[]);
     assert!(warnings.is_empty());
 }
 
@@ -458,16 +456,114 @@ fn test_initialize_worktree_copy_directory_supported() {
 
     let worktree_path = git::create_worktree(temp_dir.path(), "init-dir").unwrap();
 
-    let warnings = git::initialize_worktree(
-        temp_dir.path(),
-        &worktree_path,
-        Some("config"),
-        None,
-        &[],
-    );
+    let warnings =
+        git::initialize_worktree(temp_dir.path(), &worktree_path, Some("config"), None, &[]);
     assert_eq!(warnings.len(), 0);
     // Directory and its contents should be copied
     assert!(worktree_path.join("config").join("app.toml").exists());
     let content = std::fs::read_to_string(worktree_path.join("config").join("app.toml")).unwrap();
     assert_eq!(content, "key = 1");
+}
+
+// =============================================================================
+// Conflict detection tests
+// =============================================================================
+
+#[test]
+fn test_check_merge_conflicts_no_conflict() {
+    let temp_dir = setup_git_repo();
+    let path = temp_dir.path();
+
+    // Create a feature branch with a non-conflicting change
+    Command::new("git")
+        .current_dir(path)
+        .args(["checkout", "-b", "task/feature"])
+        .output()
+        .unwrap();
+
+    std::fs::write(path.join("new_file.txt"), "feature content").unwrap();
+    Command::new("git")
+        .current_dir(path)
+        .args(["add", "."])
+        .output()
+        .unwrap();
+    Command::new("git")
+        .current_dir(path)
+        .args(["commit", "-m", "add new file"])
+        .output()
+        .unwrap();
+
+    // Switch back to main
+    Command::new("git")
+        .current_dir(path)
+        .args(["checkout", "main"])
+        .output()
+        .unwrap();
+
+    let (has_conflicts, files) = git::check_merge_conflicts(path, "main", "task/feature").unwrap();
+    assert!(!has_conflicts);
+    assert!(files.is_empty());
+}
+
+#[test]
+fn test_check_merge_conflicts_with_conflict() {
+    let temp_dir = setup_git_repo();
+    let path = temp_dir.path();
+
+    // Create a feature branch that modifies README.md
+    Command::new("git")
+        .current_dir(path)
+        .args(["checkout", "-b", "task/feature"])
+        .output()
+        .unwrap();
+
+    std::fs::write(path.join("README.md"), "# Feature branch change").unwrap();
+    Command::new("git")
+        .current_dir(path)
+        .args(["add", "."])
+        .output()
+        .unwrap();
+    Command::new("git")
+        .current_dir(path)
+        .args(["commit", "-m", "modify readme on feature"])
+        .output()
+        .unwrap();
+
+    // Switch back to main and make a conflicting change
+    Command::new("git")
+        .current_dir(path)
+        .args(["checkout", "main"])
+        .output()
+        .unwrap();
+
+    std::fs::write(path.join("README.md"), "# Main branch change").unwrap();
+    Command::new("git")
+        .current_dir(path)
+        .args(["add", "."])
+        .output()
+        .unwrap();
+    Command::new("git")
+        .current_dir(path)
+        .args(["commit", "-m", "modify readme on main"])
+        .output()
+        .unwrap();
+
+    let (has_conflicts, files) = git::check_merge_conflicts(path, "main", "task/feature").unwrap();
+    assert!(has_conflicts);
+    assert!(files.iter().any(|f| f.contains("README.md")));
+}
+
+#[test]
+fn test_check_merge_conflicts_nonexistent_branch() {
+    let temp_dir = setup_git_repo();
+    let result = git::check_merge_conflicts(temp_dir.path(), "main", "nonexistent");
+    // Should return error (git merge-tree fails on non-existent ref)
+    assert!(result.is_err() || result.unwrap().0);
+}
+
+#[test]
+fn test_detect_main_branch_public() {
+    let temp_dir = setup_git_repo();
+    let branch = git::detect_main_branch(temp_dir.path()).unwrap();
+    assert_eq!(branch, "main");
 }

@@ -1,4 +1,8 @@
-use agtx::{agent, config::{self, GlobalConfig}, git, tui, AppMode};
+use agtx::{
+    agent,
+    config::{self, GlobalConfig},
+    git, tui, AppMode, FeatureFlags,
+};
 use anyhow::Result;
 use crossterm::{
     cursor,
@@ -14,7 +18,32 @@ async fn main() -> Result<()> {
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
 
-    let mode = match args.get(1).map(|s| s.as_str()) {
+    // Extract flags (--experimental) from any position
+    let experimental = args.iter().any(|a| a == "--experimental");
+    let positional_args: Vec<&str> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .map(|s| s.as_str())
+        .collect();
+
+    let mode = match positional_args.first().copied() {
+        Some("mcp-serve") => {
+            let project_path = positional_args
+                .get(1)
+                .map(PathBuf::from);
+            let project_path = match project_path {
+                Some(p) => {
+                    let p = p.canonicalize()?;
+                    if !git::is_git_repo(&p) {
+                        anyhow::bail!("mcp-serve requires a git project directory");
+                    }
+                    Some(p)
+                }
+                None => None, // global mode
+            };
+            return agtx::mcp::serve(project_path).await;
+        }
         Some("-g") => AppMode::Dashboard,
         Some(".") => AppMode::Project(std::env::current_dir()?),
         Some(path) => AppMode::Project(PathBuf::from(path)),
@@ -28,6 +57,8 @@ async fn main() -> Result<()> {
             }
         }
     };
+
+    let flags = FeatureFlags { experimental };
 
     // First-run: determine action based on config/data state
     let config_path = GlobalConfig::config_path()?;
@@ -58,7 +89,7 @@ async fn main() -> Result<()> {
     }
 
     // Initialize and run the app
-    let mut app = tui::App::new(mode)?;
+    let mut app = tui::App::new(mode, flags)?;
     app.run().await?;
 
     Ok(())
@@ -96,18 +127,30 @@ fn prompt_agent_selection(agents: &[agent::Agent]) -> Result<&agent::Agent> {
     stdout.execute(cursor::Hide)?;
 
     // Print ASCII art banner
-    let gold = style::Color::Rgb { r: 234, g: 212, b: 154 }; // #ead49a
+    let gold = style::Color::Rgb {
+        r: 234,
+        g: 212,
+        b: 154,
+    }; // #ead49a
     let banner: &[(&str, &str)] = &[
         (" █████╗  ██████╗████████╗██╗  ██╗", ""),
         ("██╔══██╗██╔════╝╚══██╔══╝╚██╗██╔╝", ""),
-        ("███████║██║  ███╗  ██║    ╚███╔╝ ", "  Autonomous multi-session spec-driven"),
-        ("██╔══██║██║   ██║  ██║    ██╔██╗ ", "  AI coding orchestration in the terminal"),
+        (
+            "███████║██║  ███╗  ██║    ╚███╔╝ ",
+            "  Autonomous multi-session spec-driven",
+        ),
+        (
+            "██╔══██║██║   ██║  ██║    ██╔██╗ ",
+            "  AI coding orchestration in the terminal",
+        ),
         ("██║  ██║╚██████╔╝  ██║   ██╔╝ ██╗", ""),
         ("╚═╝  ╚═╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝", ""),
     ];
     stdout.execute(style::Print("\r\n"))?;
     for (art, tagline) in banner {
-        stdout.execute(style::PrintStyledContent(style::style(format!("  {}", art)).with(gold)))?;
+        stdout.execute(style::PrintStyledContent(
+            style::style(format!("  {}", art)).with(gold),
+        ))?;
         if !tagline.is_empty() {
             stdout.execute(style::PrintStyledContent((*tagline).dark_grey()))?;
         }
@@ -115,7 +158,9 @@ fn prompt_agent_selection(agents: &[agent::Agent]) -> Result<&agent::Agent> {
     }
     stdout.execute(style::Print("\r\n"))?;
     stdout.execute(style::Print("  Select your default coding agent "))?;
-    stdout.execute(style::PrintStyledContent("(can be changed later via config)\r\n\r\n".dark_grey()))?;
+    stdout.execute(style::PrintStyledContent(
+        "(can be changed later via config)\r\n\r\n".dark_grey(),
+    ))?;
 
     // Draw the list
     let draw = |stdout: &mut io::Stdout, selected: usize| -> Result<()> {
@@ -158,9 +203,7 @@ fn prompt_agent_selection(agents: &[agent::Agent]) -> Result<&agent::Agent> {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     break Err(anyhow::anyhow!("Selection cancelled"));
                 }
-                KeyCode::Char('c')
-                    if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                {
+                KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                     break Err(anyhow::anyhow!("Selection cancelled"));
                 }
                 _ => continue,

@@ -1,0 +1,123 @@
+# agtx
+
+> Terminal kanban board that orchestrates multiple AI coding agents in parallel.
+
+agtx manages coding agent sessions through a spec-driven workflow with phases: backlog, planning, implementation (running), review, and done. Each task gets its own git worktree and tmux window so agents run simultaneously without interfering with each other.
+
+## Supported Agents
+
+- Claude Code (anthropics/claude-code)
+- Codex (openai/codex)
+- Gemini CLI (google-gemini/gemini-cli)
+- OpenCode (sst/opencode)
+- Cursor Agent (cursor.com)
+- GitHub Copilot CLI (github/copilot-cli)
+
+## Architecture
+
+agtx runs as a TUI (terminal user interface) built in Rust. It manages:
+
+- A **tmux server** (`agtx-server`) where each agent session runs in its own window.
+- **Git worktrees** created per task for branch isolation.
+- A **kanban board** with columns: Backlog, Research, Planning, Running, Review, Done.
+- An optional **orchestrator agent** that picks tasks from the board and delegates to coding agents via MCP (Model Context Protocol).
+
+### Workflow Phases
+
+1. **Backlog**: Tasks waiting to be started.
+2. **Research**: Agent gathers context (optional, depends on plugin).
+3. **Planning**: Agent creates a plan/spec for the task.
+4. **Running**: Agent implements the plan.
+5. **Review**: Agent reviews its own work or another agent reviews it.
+6. **Done**: Task complete, ready to merge.
+
+Moving a task between phases starts the configured agent for that phase. Different agents can handle different phases (e.g. Gemini for research, Claude for implementation, Codex for review).
+
+### Plugins
+
+Spec-driven plugins define what the agent does in each phase. Available plugins:
+
+- **GSD** (Get Shit Done) - fynnfluegge/get-shit-done-cc
+- **Spec-kit** - github/spec-kit
+- **OpenSpec** - Fission-AI/OpenSpec
+- **BMAD** - bmad-code-org/BMAD-METHOD
+- **Superpowers** - obra/superpowers
+- **void** - No automatic spec execution; pure human-in-the-loop kanban board.
+
+Custom plugins are defined in a single TOML file.
+
+### Orchestrator Agent (Experimental)
+
+When enabled (`agtx --experimental` or pressing `O`), a dedicated AI agent manages the kanban board autonomously. It picks up tasks, delegates to coding agents, advances workflow phases, and checks for merge conflicts.
+
+## Configuration
+
+Global config: `~/.config/agtx/config.toml`
+Project config: `.agtx/config.toml` (overrides global)
+
+### Key Configuration Options
+
+```toml
+# Global config
+default_agent = "claude"
+
+[agents]
+research = "gemini"
+planning = "claude"
+running = "claude"
+review = "codex"
+
+[worktree]
+base_branch = "dev"
+worktree_dir = ".worktrees"  # default: ".agtx/worktrees"
+```
+
+```toml
+# Project config (.agtx/config.toml)
+base_branch = "dev"
+worktree_dir = ".worktrees"  # overrides global
+copy_files = ".env, .env.local"
+init_script = "scripts/init_worktree.sh"
+
+[agents]
+running = "codex"
+```
+
+## Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| h/l or arrows | Move between columns |
+| j/k or arrows | Move between tasks |
+| o | Create new task |
+| R | Enter research mode |
+| Enter | Open task / view agent session |
+| m | Move task forward |
+| r | Resume / move back |
+| d | Show git diff |
+| x | Delete task |
+| / | Search tasks |
+| P | Select plugin |
+| O | Toggle orchestrator |
+| q | Quit |
+
+## Quick Start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh | bash
+cd your-project && agtx
+```
+
+Dashboard mode (multi-project): `agtx -g`
+Orchestrator mode: `agtx --experimental`
+
+## Requirements
+
+- tmux (agent sessions run in a dedicated tmux server)
+- gh (optional, for GitHub PR operations)
+
+## Links
+
+- Repository: https://github.com/fynnfluegge/agtx
+- License: Apache-2.0
+- Contributing: https://github.com/fynnfluegge/agtx/blob/main/CONTRIBUTING.md

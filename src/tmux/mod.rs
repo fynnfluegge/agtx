@@ -141,6 +141,30 @@ pub fn kill_session(session_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Sanitize a project name for use as a tmux session name.
+/// Replaces any character that is not alphanumeric, `-`, or `_` with `-`,
+/// collapses consecutive replacements, and trims leading/trailing dashes.
+/// Returns `"project"` if the result would be empty.
+pub fn safe_session_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            slug.push(c);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "project".to_string()
+    } else {
+        slug
+    }
+}
+
 /// Information about a tmux session
 #[derive(Debug, Clone)]
 pub struct SessionInfo {

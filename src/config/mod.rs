@@ -20,6 +20,10 @@ pub struct GlobalConfig {
     /// UI theme/colors
     #[serde(default)]
     pub theme: ThemeConfig,
+
+    /// Whether to automatically fullscreen-attach to the tmux session when opening a task popup
+    #[serde(default)]
+    pub fullscreen_on_enter: bool,
 }
 
 impl Default for GlobalConfig {
@@ -29,6 +33,7 @@ impl Default for GlobalConfig {
             agents: PhaseAgentsConfig::default(),
             worktree: WorktreeConfig::default(),
             theme: ThemeConfig::default(),
+            fullscreen_on_enter: false,
         }
     }
 }
@@ -163,9 +168,13 @@ pub struct WorktreeConfig {
     #[serde(default = "default_true")]
     pub auto_cleanup: bool,
 
-    /// Base branch to create worktrees from
-    #[serde(default = "default_base_branch")]
+    /// Base branch to create worktrees from (empty = auto-detect main/master)
+    #[serde(default)]
     pub base_branch: String,
+
+    /// Directory (relative to project root) where worktrees are created
+    #[serde(default = "default_worktree_dir")]
+    pub worktree_dir: String,
 }
 
 impl Default for WorktreeConfig {
@@ -173,17 +182,18 @@ impl Default for WorktreeConfig {
         Self {
             enabled: true,
             auto_cleanup: true,
-            base_branch: "main".to_string(),
+            base_branch: String::new(),
+            worktree_dir: default_worktree_dir(),
         }
     }
 }
 
-fn default_true() -> bool {
-    true
+fn default_worktree_dir() -> String {
+    crate::git::DEFAULT_WORKTREE_DIR.to_string()
 }
 
-fn default_base_branch() -> String {
-    "main".to_string()
+fn default_true() -> bool {
+    true
 }
 
 /// Project-specific configuration (stored in .agtx/config.toml)
@@ -201,11 +211,17 @@ pub struct ProjectConfig {
     /// GitHub URL for this project
     pub github_url: Option<String>,
 
+    /// Directory (relative to project root) where worktrees are created
+    pub worktree_dir: Option<String>,
+
     /// Comma-separated list of files to copy from project root into worktrees
     pub copy_files: Option<String>,
 
     /// Shell command to run inside the worktree after creation and file copying
     pub init_script: Option<String>,
+
+    /// Shell command to run inside the worktree before removal
+    pub cleanup_script: Option<String>,
 
     /// Workflow plugin name (e.g. "gsd", "spec-kit")
     pub workflow_plugin: Option<String>,
@@ -243,7 +259,10 @@ impl GlobalConfig {
     /// Always uses ~/.config/agtx/ on all platforms
     pub fn config_path() -> Result<PathBuf> {
         let home = std::env::var("HOME").context("Could not determine home directory")?;
-        Ok(PathBuf::from(home).join(".config").join("agtx").join("config.toml"))
+        Ok(PathBuf::from(home)
+            .join(".config")
+            .join("agtx")
+            .join("config.toml"))
     }
 
     /// Get the path to the global data directory
@@ -323,11 +342,14 @@ pub struct MergedConfig {
     pub worktree_enabled: bool,
     pub auto_cleanup: bool,
     pub base_branch: String,
+    pub worktree_dir: String,
     pub github_url: Option<String>,
     pub theme: ThemeConfig,
     pub copy_files: Option<String>,
     pub init_script: Option<String>,
+    pub cleanup_script: Option<String>,
     pub workflow_plugin: Option<String>,
+    pub fullscreen_on_enter: bool,
 }
 
 impl MergedConfig {
@@ -351,11 +373,17 @@ impl MergedConfig {
                 .base_branch
                 .clone()
                 .unwrap_or_else(|| global.worktree.base_branch.clone()),
+            worktree_dir: project
+                .worktree_dir
+                .clone()
+                .unwrap_or_else(|| global.worktree.worktree_dir.clone()),
             github_url: project.github_url.clone(),
             theme: global.theme.clone(),
             copy_files: project.copy_files.clone(),
             init_script: project.init_script.clone(),
+            cleanup_script: project.cleanup_script.clone(),
             workflow_plugin: project.workflow_plugin.clone(),
+            fullscreen_on_enter: global.fullscreen_on_enter,
         }
     }
 
@@ -480,36 +508,44 @@ impl WorkflowPlugin {
     /// Check if a phase's command or prompt contains `{task}`, meaning the phase
     /// can receive task context directly and can be entered from Backlog.
     /// If neither command nor prompt has `{task}`, the phase depends on a prior phase.
+    /// If no command AND no prompt exist at all (e.g. void plugin), the phase is ungated.
     pub fn phase_accepts_task(&self, phase: &str) -> bool {
-        let cmd_has_task = match phase {
+        let cmd = match phase {
             "planning" => self.commands.planning.as_deref(),
             "running" => self.commands.running.as_deref(),
             _ => None,
-        }
-        .map_or(false, |c| c.contains("{task}"));
+        };
 
-        let prompt_has_task = match phase {
+        let prompt = match phase {
             "planning" => self.prompts.planning.as_deref(),
             "running" => self.prompts.running.as_deref(),
             _ => None,
-        }
-        .map_or(false, |p| p.contains("{task}"));
+        };
 
-        cmd_has_task || prompt_has_task
+        // No command and no prompt → ungated (e.g. void plugin)
+        if cmd.is_none() && prompt.is_none() {
+            return true;
+        }
+
+        cmd.map_or(false, |c| c.contains("{task}"))
+            || prompt.map_or(false, |p| p.contains("{task}"))
     }
 
     /// Check if the given agent is supported by this plugin.
     /// Returns true if supported_agents is empty (all agents allowed) or contains the agent.
     pub fn supports_agent(&self, agent_name: &str) -> bool {
-        self.supported_agents.is_empty()
-            || self.supported_agents.iter().any(|a| a == agent_name)
+        self.supported_agents.is_empty() || self.supported_agents.iter().any(|a| a == agent_name)
     }
 
     /// Load a plugin by name, checking project-local then global directories
     pub fn load(name: &str, project_path: Option<&Path>) -> Result<Self> {
         // 1. Check project-local
         if let Some(pp) = project_path {
-            let local_path = pp.join(".agtx").join("plugins").join(name).join("plugin.toml");
+            let local_path = pp
+                .join(".agtx")
+                .join("plugins")
+                .join(name)
+                .join("plugin.toml");
             if local_path.exists() {
                 let content = std::fs::read_to_string(&local_path)?;
                 return toml::from_str(&content).context("Failed to parse plugin.toml");

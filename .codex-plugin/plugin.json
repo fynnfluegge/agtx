@@ -1,0 +1,26 @@
+{
+  "name": "agtx",
+  "version": "0.1.0",
+  "description": "Manage and decompose work into feature-level tasks on the agtx kanban board",
+  "author": {
+    "name": "fynnfluegge",
+    "url": "https://github.com/fynnfluegge/agtx"
+  },
+  "homepage": "https://github.com/fynnfluegge/agtx",
+  "repository": "https://github.com/fynnfluegge/agtx",
+  "license": "MIT",
+  "keywords": ["kanban", "agents", "worktrees", "tasks", "orchestration"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "agtx",
+    "shortDescription": "Terminal kanban for coding agents",
+    "longDescription": "agtx is a terminal kanban board for managing parallel coding agent sessions. Each task gets its own git worktree, branch, tmux window, and agent session — producing one reviewable PR per task.",
+    "developerName": "fynnfluegge",
+    "category": "Productivity",
+    "defaultPrompt": [
+      "Use @agtx:brainstorm to explore a feature idea",
+      "Use @agtx:sweep to push this conversation to the agtx board as tasks"
+    ]
+  }
+}

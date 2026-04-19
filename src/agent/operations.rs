@@ -27,6 +27,18 @@ pub trait AgentOperations: Send + Sync {
     /// Build the shell command to start the agent interactively.
     /// When prompt is empty, the agent starts with no initial message.
     fn build_interactive_command(&self, prompt: &str) -> String;
+
+    /// Build the shell command to resume the agent's most recent session
+    /// in the current working directory. Used to recover from tmux/server restarts.
+    fn build_resume_command(&self) -> String;
+
+    /// Build the full shell command to run this agent as an orchestrator.
+    /// Includes MCP registration (if supported by the agent) and cleanup on exit.
+    /// Default implementation: no MCP, just launches the agent interactively.
+    fn build_orchestrator_command(&self, mcp_json: &str, agtx_bin: &str) -> String {
+        let _ = (mcp_json, agtx_bin);
+        self.build_interactive_command("")
+    }
 }
 
 /// Generic agent implementation that works with any Agent config
@@ -48,6 +60,7 @@ impl AgentOperations for CodingAgent {
             "codex" => ("codex", vec!["exec", "--full-auto", prompt]),
             "copilot" => ("copilot", vec!["-p", prompt]),
             "gemini" => ("gemini", vec!["-p", prompt]),
+            "cursor" => ("agent", vec!["--print", "--yolo", prompt]),
             _ => (self.agent.command.as_str(), vec![prompt]),
         };
 
@@ -70,6 +83,22 @@ impl AgentOperations for CodingAgent {
 
     fn build_interactive_command(&self, prompt: &str) -> String {
         self.agent.build_interactive_command(prompt)
+    }
+
+    fn build_resume_command(&self) -> String {
+        self.agent.build_resume_command()
+    }
+
+    fn build_orchestrator_command(&self, mcp_json: &str, _agtx_bin: &str) -> String {
+        match self.agent.name.as_str() {
+            "claude" => format!(
+                "claude mcp add-json agtx '{}' --scope local && {}; claude mcp remove agtx --scope local",
+                mcp_json,
+                self.build_interactive_command("")
+            ),
+            // To add a new orchestrator agent, add a match arm here.
+            _ => self.build_interactive_command(""),
+        }
     }
 }
 
@@ -118,14 +147,11 @@ impl RealAgentRegistry {
 
 impl AgentRegistry for RealAgentRegistry {
     fn get(&self, agent_name: &str) -> Arc<dyn AgentOperations> {
-        self.agents
-            .get(agent_name)
-            .cloned()
-            .unwrap_or_else(|| {
-                self.agents
-                    .get(&self.default_name)
-                    .cloned()
-                    .expect("Default agent must exist in registry")
-            })
+        self.agents.get(agent_name).cloned().unwrap_or_else(|| {
+            self.agents
+                .get(&self.default_name)
+                .cloned()
+                .expect("Default agent must exist in registry")
+        })
     }
 }

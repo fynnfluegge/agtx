@@ -54,7 +54,7 @@ fn test_global_config_default() {
     assert_eq!(config.default_agent, "claude");
     assert!(config.worktree.enabled);
     assert!(config.worktree.auto_cleanup);
-    assert_eq!(config.worktree.base_branch, "main");
+    assert_eq!(config.worktree.base_branch, "");
 }
 
 // === WorktreeConfig Tests ===
@@ -65,7 +65,7 @@ fn test_worktree_config_default() {
 
     assert!(config.enabled);
     assert!(config.auto_cleanup);
-    assert_eq!(config.base_branch, "main");
+    assert_eq!(config.base_branch, "");
 }
 
 // === ProjectConfig Tests ===
@@ -79,6 +79,7 @@ fn test_project_config_default() {
     assert!(config.github_url.is_none());
     assert!(config.copy_files.is_none());
     assert!(config.init_script.is_none());
+    assert!(config.cleanup_script.is_none());
 }
 
 // === MergedConfig Tests ===
@@ -91,11 +92,12 @@ fn test_merged_config_uses_global_defaults() {
     let merged = MergedConfig::merge(&global, &project);
 
     assert_eq!(merged.default_agent, "claude");
-    assert_eq!(merged.base_branch, "main");
+    assert_eq!(merged.base_branch, "");
     assert!(merged.worktree_enabled);
     assert!(merged.auto_cleanup);
     assert!(merged.copy_files.is_none());
     assert!(merged.init_script.is_none());
+    assert!(merged.cleanup_script.is_none());
 }
 
 #[test]
@@ -105,9 +107,11 @@ fn test_merged_config_project_overrides() {
         default_agent: Some("codex".to_string()),
         agents: None,
         base_branch: Some("develop".to_string()),
+        worktree_dir: None,
         github_url: Some("https://github.com/user/repo".to_string()),
         copy_files: Some(".env, .env.local".to_string()),
         init_script: Some("npm install".to_string()),
+        cleanup_script: Some("scripts/cleanup.sh".to_string()),
         workflow_plugin: None,
     };
 
@@ -115,9 +119,40 @@ fn test_merged_config_project_overrides() {
 
     assert_eq!(merged.default_agent, "codex");
     assert_eq!(merged.base_branch, "develop");
-    assert_eq!(merged.github_url, Some("https://github.com/user/repo".to_string()));
+    assert_eq!(
+        merged.github_url,
+        Some("https://github.com/user/repo".to_string())
+    );
     assert_eq!(merged.copy_files, Some(".env, .env.local".to_string()));
     assert_eq!(merged.init_script, Some("npm install".to_string()));
+    // worktree_dir not overridden, uses global default
+    assert_eq!(merged.worktree_dir, ".agtx/worktrees");
+    assert_eq!(
+        merged.cleanup_script,
+        Some("scripts/cleanup.sh".to_string())
+    );
+}
+
+#[test]
+fn test_merged_config_worktree_dir_override() {
+    let global = GlobalConfig::default();
+    let project = ProjectConfig {
+        worktree_dir: Some(".worktrees".to_string()),
+        ..Default::default()
+    };
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.worktree_dir, ".worktrees");
+}
+
+#[test]
+fn test_merged_config_worktree_dir_global() {
+    let mut global = GlobalConfig::default();
+    global.worktree.worktree_dir = ".wt".to_string();
+    let project = ProjectConfig::default();
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.worktree_dir, ".wt");
 }
 
 // === FirstRunAction Tests ===
@@ -176,10 +211,7 @@ fn test_first_run_new_user_prompt() {
 
 #[test]
 fn test_agent_for_phase_all_defaults() {
-    let config = MergedConfig::merge(
-        &GlobalConfig::default(),
-        &ProjectConfig::default(),
-    );
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
     assert_eq!(config.agent_for_phase("research"), "claude");
     assert_eq!(config.agent_for_phase("planning"), "claude");
     assert_eq!(config.agent_for_phase("running"), "claude");
@@ -290,4 +322,75 @@ default_agent = "claude"
     assert_eq!(config.agents.planning, None);
     assert_eq!(config.agents.running, None);
     assert_eq!(config.agents.review, None);
+}
+
+#[test]
+fn test_fullscreen_on_enter_defaults_to_false() {
+    let config: GlobalConfig = toml::from_str("").unwrap();
+    assert!(!config.fullscreen_on_enter);
+}
+
+#[test]
+fn test_fullscreen_on_enter_set_true() {
+    let toml_str = r#"
+fullscreen_on_enter = true
+"#;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.fullscreen_on_enter);
+}
+
+#[test]
+fn test_fullscreen_on_enter_merged() {
+    let mut global = GlobalConfig::default();
+    global.fullscreen_on_enter = true;
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    assert!(config.fullscreen_on_enter);
+}
+
+#[test]
+fn test_fullscreen_on_enter_from_real_config() {
+    let toml_str = r##"
+default_agent = "claude"
+fullscreen_on_enter = true
+
+[worktree]
+enabled = true
+
+[theme]
+color_selected = "#ead49a"
+"##;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.fullscreen_on_enter);
+    assert_eq!(config.default_agent, "claude");
+}
+
+#[test]
+fn test_fullscreen_on_enter_exact_user_config() {
+    let toml_str = r##"
+default_agent = "claude"
+fullscreen_on_enter = true
+
+[agents]
+
+[worktree]
+enabled = true
+auto_cleanup = true
+base_branch = ""
+worktree_dir = ".worktrees"
+
+[theme]
+color_selected = "#ead49a"
+color_normal = "#5cfff7"
+color_dimmed = "#9C9991"
+color_text = "#f2ece6"
+color_accent = "#5cfff7"
+color_description = "#C4B0AC"
+color_column_header = "#a0d2fa"
+color_popup_border = "#9ffcf8"
+color_popup_header = "#69fae7"
+"##;
+    let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.fullscreen_on_enter, "fullscreen_on_enter should be true");
+    let merged = MergedConfig::merge(&config, &ProjectConfig::default());
+    assert!(merged.fullscreen_on_enter, "merged fullscreen_on_enter should be true");
 }

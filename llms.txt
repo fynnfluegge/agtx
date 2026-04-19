@@ -1,0 +1,35 @@
+# agtx
+
+> Terminal kanban board that orchestrates multiple AI coding agents in parallel.
+
+agtx manages coding agent sessions through a spec-driven workflow: backlog, planning, implementation, review, done. Each task gets its own git worktree and tmux window, so agents run simultaneously without conflicts.
+
+## Supported Agents
+
+- Claude Code
+- Codex (OpenAI)
+- Gemini CLI
+- OpenCode
+- Cursor Agent
+- GitHub Copilot CLI
+
+## Key Concepts
+
+- **Orchestrator**: An AI agent that picks tasks from the board, delegates to coding agents, advances workflow phases, and checks for merge conflicts (experimental).
+- **Multi-agent workflow**: Different agents per phase (e.g. Gemini for research, Claude for implementation, Codex for review) with automatic session switching.
+- **Plugins**: Spec-driven plugins (GSD, Spec-kit, OpenSpec, BMAD, Superpowers) define what each agent does per phase. Custom plugins use a single TOML file.
+- **Worktrees**: Every task runs in its own git worktree for isolation.
+- **tmux architecture**: Each agent session runs in a tmux window managed by agtx.
+- **Dashboard mode**: `agtx -g` shows a multi-project view of all agent sessions.
+
+## Quick Start
+
+```
+curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh | bash
+cd your-project && agtx
+```
+
+## Links
+
+- Repo: https://github.com/fynnfluegge/agtx
+- License: Apache-2.0

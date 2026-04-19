@@ -1,0 +1,7 @@
+{
+  "agtx": {
+    "type": "stdio",
+    "command": "agtx",
+    "args": ["mcp-serve"]
+  }
+}

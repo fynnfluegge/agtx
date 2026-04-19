@@ -29,6 +29,10 @@ pub trait TmuxOperations: Send + Sync {
     /// Send keys to a window without pressing Enter
     fn send_keys_literal(&self, target: &str, keys: &str) -> Result<()>;
 
+    /// Paste a block of text into a pane using tmux load-buffer + paste-buffer.
+    /// This sends proper bracketed paste sequences to the target pane.
+    fn paste_text(&self, target: &str, text: &str) -> Result<()>;
+
     /// Capture pane content
     fn capture_pane(&self, target: &str) -> Result<String>;
 
@@ -63,8 +67,9 @@ impl TmuxOperations for RealTmuxOps {
         command: Option<String>,
     ) -> Result<()> {
         let mut cmd = std::process::Command::new("tmux");
+        let target = format!("{}:", session);
         cmd.args(["-L", super::AGENT_SERVER])
-            .args(["new-window", "-d", "-t", session, "-n", window_name])
+            .args(["new-window", "-d", "-t", &target, "-n", window_name])
             .args(["-c", working_dir]);
 
         if let Some(ref shell_cmd) = command {
@@ -76,7 +81,23 @@ impl TmuxOperations for RealTmuxOps {
         let output = cmd.output()?;
 
         if !output.status.success() {
-            anyhow::bail!("Failed to create tmux window");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut details = String::new();
+            if !stderr.trim().is_empty() {
+                details.push_str(stderr.trim());
+            }
+            if !stdout.trim().is_empty() {
+                if !details.is_empty() {
+                    details.push_str(" | ");
+                }
+                details.push_str(stdout.trim());
+            }
+            if details.is_empty() {
+                anyhow::bail!("Failed to create tmux window");
+            } else {
+                anyhow::bail!("Failed to create tmux window: {}", details);
+            }
         }
         Ok(())
     }
@@ -113,6 +134,24 @@ impl TmuxOperations for RealTmuxOps {
         std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
             .args(["send-keys", "-t", target, keys])
+            .output()?;
+        Ok(())
+    }
+
+    fn paste_text(&self, target: &str, text: &str) -> Result<()> {
+        use std::io::Write;
+        let mut child = std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["load-buffer", "-"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        child.wait()?;
+        std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["paste-buffer", "-p", "-t", target])
             .output()?;
         Ok(())
     }
@@ -172,7 +211,11 @@ impl TmuxOperations for RealTmuxOps {
             .ok()?;
         if output.status.success() {
             let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !cmd.is_empty() { Some(cmd) } else { None }
+            if !cmd.is_empty() {
+                Some(cmd)
+            } else {
+                None
+            }
         } else {
             None
         }

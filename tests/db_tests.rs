@@ -1,4 +1,4 @@
-use agtx::db::{Database, Task, TaskStatus, Project};
+use agtx::db::{Database, Notification, Project, Task, TaskStatus};
 
 // === TaskStatus Tests ===
 
@@ -82,6 +82,15 @@ fn test_task_generate_session_name_special_chars() {
     assert!(!session_name.contains("("));
     assert!(!session_name.contains(")"));
     assert!(!session_name.contains("!"));
+}
+
+#[test]
+fn test_task_generate_session_name_project_dots() {
+    let task = Task::new("Task Title", "claude", "proj");
+    let session_name = task.generate_session_name("lazygit.nvim");
+
+    assert!(session_name.contains("--lazygit-nvim--"));
+    assert!(!session_name.contains(".nvim"));
 }
 
 #[test]
@@ -191,4 +200,109 @@ fn test_in_memory_dbs_are_isolated() {
     // db2 should be empty — each in-memory DB is independent
     let tasks = db2.get_tasks_by_status(TaskStatus::Backlog).unwrap();
     assert_eq!(tasks.len(), 0);
+}
+
+// === Notification Tests ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_notifications_create_and_consume() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let n1 = Notification::new("Task created: foo");
+    let n2 = Notification::new("Phase completed: bar");
+    db.create_notification(&n1).unwrap();
+    db.create_notification(&n2).unwrap();
+
+    // First consume returns both
+    let notifs = db.consume_notifications().unwrap();
+    assert_eq!(notifs.len(), 2);
+    assert_eq!(notifs[0].message, "Task created: foo");
+    assert_eq!(notifs[1].message, "Phase completed: bar");
+
+    // Second consume returns empty (they were deleted)
+    let notifs = db.consume_notifications().unwrap();
+    assert_eq!(notifs.len(), 0);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_notifications_empty_queue() {
+    let db = Database::open_in_memory_project().unwrap();
+    let notifs = db.consume_notifications().unwrap();
+    assert_eq!(notifs.len(), 0);
+}
+
+// === Dependency Satisfaction Tests ===
+
+#[test]
+fn test_deps_satisfied_no_refs() {
+    let db = Database::open_in_memory_project().unwrap();
+    let task = Task::new("No deps", "claude", "proj");
+    db.create_task(&task).unwrap();
+    assert!(db.deps_satisfied(&task));
+}
+
+#[test]
+fn test_deps_satisfied_all_review_or_done() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let mut dep1 = Task::new("Dep 1", "claude", "proj");
+    dep1.status = TaskStatus::Review;
+    db.create_task(&dep1).unwrap();
+
+    let mut dep2 = Task::new("Dep 2", "claude", "proj");
+    dep2.status = TaskStatus::Done;
+    db.create_task(&dep2).unwrap();
+
+    let mut task = Task::new("Main task", "claude", "proj");
+    task.referenced_tasks = Some(format!("{},{}", dep1.id, dep2.id));
+    db.create_task(&task).unwrap();
+
+    assert!(db.deps_satisfied(&task));
+}
+
+#[test]
+fn test_deps_not_satisfied_dep_in_backlog() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let dep1 = Task::new("Dep in backlog", "claude", "proj");
+    db.create_task(&dep1).unwrap();
+
+    let mut dep2 = Task::new("Dep done", "claude", "proj");
+    dep2.status = TaskStatus::Done;
+    db.create_task(&dep2).unwrap();
+
+    let mut task = Task::new("Blocked task", "claude", "proj");
+    task.referenced_tasks = Some(format!("{},{}", dep1.id, dep2.id));
+    db.create_task(&task).unwrap();
+
+    assert!(!db.deps_satisfied(&task));
+}
+
+#[test]
+fn test_deps_satisfied_missing_ref_treated_as_ok() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let mut task = Task::new("Task with missing ref", "claude", "proj");
+    task.referenced_tasks = Some("nonexistent-id".to_string());
+    db.create_task(&task).unwrap();
+
+    // Missing refs are treated as satisfied (task may have been deleted)
+    assert!(db.deps_satisfied(&task));
+}
+
+#[test]
+fn test_deps_not_satisfied_dep_in_planning() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let mut dep = Task::new("Dep in planning", "claude", "proj");
+    dep.status = TaskStatus::Planning;
+    db.create_task(&dep).unwrap();
+
+    let mut task = Task::new("Blocked task", "claude", "proj");
+    task.referenced_tasks = Some(dep.id.clone());
+    db.create_task(&task).unwrap();
+
+    assert!(!db.deps_satisfied(&task));
 }

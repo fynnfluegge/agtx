@@ -1,3 +1,4 @@
+use crate::tmux::safe_session_name;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -70,12 +71,19 @@ pub struct Task {
     pub pr_url: Option<String>,
     pub plugin: Option<String>,
     pub cycle: i32,
+    pub referenced_tasks: Option<String>,
+    pub escalation_note: Option<String>,
+    pub base_branch: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl Task {
-    pub fn new(title: impl Into<String>, agent: impl Into<String>, project_id: impl Into<String>) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        agent: impl Into<String>,
+        project_id: impl Into<String>,
+    ) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
         Self {
@@ -92,6 +100,9 @@ impl Task {
             pr_url: None,
             plugin: None,
             cycle: 1,
+            referenced_tasks: None,
+            escalation_note: None,
+            base_branch: None,
             created_at: now,
             updated_at: now,
         }
@@ -99,11 +110,15 @@ impl Task {
 
     /// Returns the task description if present, otherwise the title.
     pub fn content_text(&self) -> String {
-        self.description.as_deref().unwrap_or(&self.title).to_string()
+        self.description
+            .as_deref()
+            .unwrap_or(&self.title)
+            .to_string()
     }
 
     /// Generate tmux session name: task-{id}--{project}--{slug}
     pub fn generate_session_name(&self, project_name: &str) -> String {
+        let project_name = safe_session_name(project_name);
         let slug = self
             .title
             .to_lowercase()
@@ -141,6 +156,33 @@ impl Project {
     }
 }
 
+/// A queued request for a task state transition (used by MCP server).
+/// The TUI polls this table and executes transitions with full side effects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitionRequest {
+    pub id: String,
+    pub task_id: String,
+    pub action: String,
+    pub reason: Option<String>,
+    pub requested_at: DateTime<Utc>,
+    pub processed_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
+impl TransitionRequest {
+    pub fn new(task_id: impl Into<String>, action: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_id: task_id.into(),
+            action: action.into(),
+            reason: None,
+            requested_at: Utc::now(),
+            processed_at: None,
+            error: None,
+        }
+    }
+}
+
 /// Represents a running agent session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunningAgent {
@@ -165,6 +207,25 @@ impl AgentStatus {
             AgentStatus::Running => "running",
             AgentStatus::Waiting => "waiting",
             AgentStatus::Completed => "completed",
+        }
+    }
+}
+
+/// A notification for the orchestrator agent (pull-based).
+/// Events are written to the DB by the TUI and fetched by the orchestrator via MCP.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Notification {
+    pub id: String,
+    pub message: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Notification {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            message: message.into(),
+            created_at: Utc::now(),
         }
     }
 }

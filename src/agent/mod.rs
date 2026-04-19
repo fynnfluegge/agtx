@@ -33,6 +33,20 @@ impl Agent {
         which::which(&self.command).is_ok()
     }
 
+    /// Build the shell command to resume the agent's most recent session
+    /// in the current working directory. Used to recover from tmux/server restarts.
+    pub fn build_resume_command(&self) -> String {
+        match self.name.as_str() {
+            "claude" => "claude --dangerously-skip-permissions --continue".to_string(),
+            "codex" => "codex resume --last".to_string(),
+            "copilot" => "copilot --allow-all-tools --continue".to_string(),
+            "gemini" => "gemini --approval-mode yolo --resume".to_string(),
+            "opencode" => "opencode --continue".to_string(),
+            "cursor" => "agent --yolo --continue".to_string(),
+            _ => self.build_interactive_command(""),
+        }
+    }
+
     /// Build the shell command to start the agent interactively.
     /// When prompt is empty, the agent starts with no initial message
     /// (task content and skill commands are sent later via tmux send_keys).
@@ -44,6 +58,7 @@ impl Agent {
                 "copilot" => "copilot --allow-all-tools".to_string(),
                 "gemini" => "gemini --approval-mode yolo".to_string(),
                 "opencode" => "opencode".to_string(),
+                "cursor" => "agent --yolo".to_string(),
                 _ => self.command.clone(),
             };
         }
@@ -55,6 +70,7 @@ impl Agent {
             "copilot" => format!("copilot --allow-all-tools -p '{}'", escaped_prompt),
             "gemini" => format!("gemini --approval-mode yolo -i '{}'", escaped_prompt),
             "opencode" => format!("opencode -p '{}'", escaped_prompt),
+            "cursor" => format!("agent --yolo '{}'", escaped_prompt),
             _ => format!("{} '{}'", self.command, escaped_prompt),
         }
     }
@@ -63,11 +79,42 @@ impl Agent {
 /// Get the list of known agents
 pub fn known_agents() -> Vec<Agent> {
     vec![
-        Agent::new("claude", "claude", "Anthropic's Claude Code CLI", "Claude <noreply@anthropic.com>"),
-        Agent::new("codex", "codex", "OpenAI's Codex CLI", "Codex <noreply@openai.com>"),
-        Agent::new("copilot", "copilot", "GitHub Copilot CLI", "GitHub Copilot <noreply@github.com>"),
-        Agent::new("gemini", "gemini", "Google Gemini CLI", "Gemini <noreply@google.com>"),
-        Agent::new("opencode", "opencode", "AI-powered coding assistant", "OpenCode <noreply@opencode.ai>"),
+        Agent::new(
+            "claude",
+            "claude",
+            "Anthropic's Claude Code CLI",
+            "Claude <noreply@anthropic.com>",
+        ),
+        Agent::new(
+            "codex",
+            "codex",
+            "OpenAI's Codex CLI",
+            "Codex <noreply@openai.com>",
+        ),
+        Agent::new(
+            "copilot",
+            "copilot",
+            "GitHub Copilot CLI",
+            "GitHub Copilot <noreply@github.com>",
+        ),
+        Agent::new(
+            "gemini",
+            "gemini",
+            "Google Gemini CLI",
+            "Gemini <noreply@google.com>",
+        ),
+        Agent::new(
+            "opencode",
+            "opencode",
+            "AI-powered coding assistant",
+            "OpenCode <noreply@opencode.ai>",
+        ),
+        Agent::new(
+            "cursor",
+            "agent",
+            "Cursor Agent CLI",
+            "Cursor Agent <noreply@cursor.com>",
+        ),
         // TODO: investigate CLI usage before enabling
         // Agent::new("aider", "aider", "AI pair programming in your terminal", "Aider <noreply@aider.chat>"),
         // Agent::new("cline", "cline", "AI coding assistant for VS Code", "Cline <noreply@cline.bot>"),
@@ -121,25 +168,3 @@ pub fn parse_agent_selection(input: &str, agent_count: usize) -> Option<usize> {
     None
 }
 
-
-/// Build the command arguments for spawning an agent
-pub fn build_spawn_args(agent: &Agent, prompt: &str, task_id: &str) -> Vec<String> {
-    let mut args = agent.args.clone();
-
-    match agent.name.as_str() {
-        "claude" => {
-            // Claude Code supports session persistence
-            args.extend(["--session".to_string(), task_id.to_string()]);
-            args.push(prompt.to_string());
-        }
-        "copilot" => {
-            args.extend(["-p".to_string(), prompt.to_string()]);
-        }
-        _ => {
-            // Default: just pass the prompt
-            args.push(prompt.to_string());
-        }
-    }
-
-    args
-}

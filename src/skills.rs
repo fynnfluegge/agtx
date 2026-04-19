@@ -6,6 +6,8 @@ pub const RESEARCH_SKILL: &str = include_str!("../plugins/agtx/skills/research.m
 pub const PLAN_SKILL: &str = include_str!("../plugins/agtx/skills/plan.md");
 pub const EXECUTE_SKILL: &str = include_str!("../plugins/agtx/skills/execute.md");
 pub const REVIEW_SKILL: &str = include_str!("../plugins/agtx/skills/review.md");
+pub const ORCHESTRATE_SKILL: &str = include_str!("../plugins/agtx/skills/orchestrate.md");
+pub const MERGE_CONFLICTS_SKILL: &str = include_str!("../plugins/agtx/skills/merge-conflicts.md");
 
 /// Default built-in skills: (directory_name, SKILL.md content)
 /// Used for worktree phases (Research, Planning, Running, Review)
@@ -14,6 +16,8 @@ pub const BUILTIN_SKILLS: &[(&str, &str)] = &[
     ("agtx-plan", PLAN_SKILL),
     ("agtx-execute", EXECUTE_SKILL),
     ("agtx-review", REVIEW_SKILL),
+    ("agtx-orchestrate", ORCHESTRATE_SKILL),
+    ("agtx-merge-conflicts", MERGE_CONFLICTS_SKILL),
 ];
 
 /// Load a bundled plugin by name from compile-time embedded TOML.
@@ -32,8 +36,9 @@ pub fn agent_native_skill_dir(agent_name: &str) -> Option<(&'static str, &'stati
     match agent_name {
         "claude" => Some((".claude/commands", "agtx")),
         "gemini" => Some((".gemini/commands", "agtx")),
-        "opencode" => Some((".opencode/commands", "")),
+        "opencode" => Some((".opencode/command", "")),
         "codex" => Some((".codex/skills", "")),
+        "cursor" => Some((".cursor/skills", "")),
         "copilot" => Some((".github/agents", "agtx")),
         _ => None,
     }
@@ -57,7 +62,9 @@ pub fn skill_name_to_command(skill_name: &str) -> String {
 pub fn skill_dir_to_filename(skill_dir_name: &str, agent_name: &str) -> String {
     match agent_name {
         "gemini" => {
-            let short = skill_dir_name.strip_prefix("agtx-").unwrap_or(skill_dir_name);
+            let short = skill_dir_name
+                .strip_prefix("agtx-")
+                .unwrap_or(skill_dir_name);
             format!("{}.toml", short)
         }
         "opencode" => {
@@ -65,7 +72,9 @@ pub fn skill_dir_to_filename(skill_dir_name: &str, agent_name: &str) -> String {
             format!("{}.md", skill_dir_name)
         }
         _ => {
-            let short = skill_dir_name.strip_prefix("agtx-").unwrap_or(skill_dir_name);
+            let short = skill_dir_name
+                .strip_prefix("agtx-")
+                .unwrap_or(skill_dir_name);
             format!("{}.md", short)
         }
     }
@@ -96,6 +105,10 @@ pub fn transform_plugin_command(canonical_cmd: &str, agent_name: &str) -> Option
             } else {
                 Some(transformed)
             }
+        }
+        "cursor" => {
+            // /agtx:plan → /agtx-plan (slash kept, colon → hyphen)
+            Some(canonical_cmd.replacen(':', "-", 1))
         }
         _ => None,
     }
@@ -195,8 +208,8 @@ pub fn enumerate_available_skills(agent_name: &str) -> Vec<(String, String)> {
             Some(cmd) => cmd,
             None => canonical,
         };
-        let description = extract_description(skill_content)
-            .unwrap_or_else(|| skill_name.replace('-', " "));
+        let description =
+            extract_description(skill_content).unwrap_or_else(|| skill_name.replace('-', " "));
         results.push((command, description));
     }
     results
@@ -235,7 +248,10 @@ fn extract_description_from_toml(path: &std::path::Path) -> Option<String> {
 
 /// Scan the active agent's native command directory for available skills.
 /// Returns `(command, description)` tuples in agent-native invocation format.
-pub fn scan_agent_skills(agent_name: &str, project_path: &std::path::Path) -> Vec<(String, String)> {
+pub fn scan_agent_skills(
+    agent_name: &str,
+    project_path: &std::path::Path,
+) -> Vec<(String, String)> {
     let mut results = Vec::new();
 
     match agent_name {
@@ -326,6 +342,27 @@ pub fn scan_agent_skills(agent_name: &str, project_path: &std::path::Path) -> Ve
                 let skill_file = dir_entry.path().join("SKILL.md");
                 if skill_file.exists() {
                     let command = format!("${}", dirname);
+                    let description = extract_description_from_file(&skill_file)
+                        .unwrap_or_else(|| dirname.replace('-', " "));
+                    results.push((command, description));
+                }
+            }
+        }
+        "cursor" => {
+            // Skill subdirectories with SKILL.md, invoked as /skill-name
+            let base = project_path.join(".cursor/skills");
+            let entries = match std::fs::read_dir(&base) {
+                Ok(e) => e,
+                Err(_) => return results,
+            };
+            for dir_entry in entries.flatten() {
+                if !dir_entry.path().is_dir() {
+                    continue;
+                }
+                let dirname = dir_entry.file_name().to_string_lossy().to_string();
+                let skill_file = dir_entry.path().join("SKILL.md");
+                if skill_file.exists() {
+                    let command = format!("/{}", dirname);
                     let description = extract_description_from_file(&skill_file)
                         .unwrap_or_else(|| dirname.replace('-', " "));
                     results.push((command, description));

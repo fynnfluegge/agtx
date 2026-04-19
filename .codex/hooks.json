@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "echo 'agtx MCP available. Tools: list_tasks, create_task, create_tasks_batch. When user asks to sweep or push to board: call list_tasks first, extract work items from conversation, confirm with user, then create_tasks_batch. Sweeping only — do not implement.'"
+      }
+    ]
+  }
+}

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::Path;
 
-use super::models::{Project, Task, TaskStatus};
+use super::models::{Notification, Project, Task, TaskStatus, TransitionRequest};
 
 /// Database wrapper for SQLite operations
 pub struct Database {
@@ -110,11 +110,56 @@ impl Database {
         )?;
 
         // Migration: add new columns if they don't exist
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN branch_name TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN pr_number INTEGER", []);
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN pr_url TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN plugin TEXT", []);
-        let _ = self.conn.execute("ALTER TABLE tasks ADD COLUMN cycle INTEGER NOT NULL DEFAULT 1", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN branch_name TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN pr_number INTEGER", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN pr_url TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN plugin TEXT", []);
+        let _ = self.conn.execute(
+            "ALTER TABLE tasks ADD COLUMN cycle INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN referenced_tasks TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN escalation_note TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN base_branch TEXT", []);
+
+        // MCP transition request queue
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS transition_requests (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                processed_at TEXT,
+                error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS notifications (
+                id TEXT PRIMARY KEY,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )?;
+
+        // Migration: add reason column to transition_requests if it doesn't exist
+        let _ = self
+            .conn
+            .execute("ALTER TABLE transition_requests ADD COLUMN reason TEXT", []);
 
         Ok(())
     }
@@ -152,8 +197,8 @@ impl Database {
     pub fn create_task(&self, task: &Task) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
             "#,
             params![
                 task.id,
@@ -169,10 +214,47 @@ impl Database {
                 task.pr_url,
                 task.plugin,
                 task.cycle,
+                task.referenced_tasks,
+                task.escalation_note,
+                task.base_branch,
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn create_tasks_batch(&mut self, tasks: &[Task]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for task in tasks {
+            tx.execute(
+                r#"
+                INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                "#,
+                params![
+                    task.id,
+                    task.title,
+                    task.description,
+                    task.status.as_str(),
+                    task.agent,
+                    task.project_id,
+                    task.session_name,
+                    task.worktree_path,
+                    task.branch_name,
+                    task.pr_number,
+                    task.pr_url,
+                    task.plugin,
+                    task.cycle,
+                    task.referenced_tasks,
+                    task.escalation_note,
+                    task.base_branch,
+                    task.created_at.to_rfc3339(),
+                    task.updated_at.to_rfc3339(),
+                ],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -191,7 +273,10 @@ impl Database {
                 pr_url = ?10,
                 plugin = ?11,
                 cycle = ?12,
-                updated_at = ?13
+                referenced_tasks = ?13,
+                escalation_note = ?14,
+                base_branch = ?15,
+                updated_at = ?16
             WHERE id = ?1
             "#,
             params![
@@ -207,6 +292,9 @@ impl Database {
                 task.pr_url,
                 task.plugin,
                 task.cycle,
+                task.referenced_tasks,
+                task.escalation_note,
+                task.base_branch,
                 task.updated_at.to_rfc3339(),
             ],
         )?;
@@ -235,6 +323,9 @@ impl Database {
             pr_url: row.get("pr_url").ok().flatten(),
             plugin: row.get("plugin").ok().flatten(),
             cycle: row.get("cycle").unwrap_or(1),
+            referenced_tasks: row.get("referenced_tasks").ok().flatten(),
+            escalation_note: row.get("escalation_note").ok().flatten(),
+            base_branch: row.get("base_branch").ok().flatten(),
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>("created_at")?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
@@ -245,13 +336,9 @@ impl Database {
     }
 
     pub fn get_task(&self, task_id: &str) -> Result<Option<Task>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM tasks WHERE id = ?1")?;
+        let mut stmt = self.conn.prepare("SELECT * FROM tasks WHERE id = ?1")?;
 
-        let task = stmt
-            .query_row(params![task_id], Self::task_from_row)
-            .ok();
+        let task = stmt.query_row(params![task_id], Self::task_from_row).ok();
 
         Ok(task)
     }
@@ -282,6 +369,21 @@ impl Database {
         Ok(tasks)
     }
 
+    /// Check whether all referenced_tasks (dependencies) are in Review or Done.
+    /// Returns true if the task has no dependencies or all deps are satisfied.
+    pub fn deps_satisfied(&self, task: &Task) -> bool {
+        let refs_str = match &task.referenced_tasks {
+            Some(s) if !s.is_empty() => s,
+            _ => return true,
+        };
+        refs_str.split(',').filter(|s| !s.is_empty()).all(|ref_id| {
+            self.get_task(ref_id)
+                .ok()
+                .flatten()
+                .map_or(true, |t| matches!(t.status, TaskStatus::Review | TaskStatus::Done))
+        })
+    }
+
     // === Project Operations (for global db) ===
 
     pub fn upsert_project(&self, project: &Project) -> Result<()> {
@@ -305,6 +407,31 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn get_project_by_id(&self, id: &str) -> Result<Option<Project>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM projects WHERE id = ?1")?;
+
+        let project = stmt
+            .query_row(params![id], |row| {
+                Ok(Project {
+                    id: row.get("id")?,
+                    name: row.get("name")?,
+                    path: row.get("path")?,
+                    github_url: row.get("github_url")?,
+                    default_agent: row.get("default_agent")?,
+                    last_opened: chrono::DateTime::parse_from_rfc3339(
+                        &row.get::<_, String>("last_opened")?,
+                    )
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            })
+            .ok();
+
+        Ok(project)
     }
 
     pub fn get_all_projects(&self) -> Result<Vec<Project>> {
@@ -331,5 +458,158 @@ impl Database {
             .collect();
 
         Ok(projects)
+    }
+
+    // === Transition Request Operations (MCP command queue) ===
+
+    pub fn create_transition_request(&self, req: &TransitionRequest) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO transition_requests (id, task_id, action, reason, requested_at, processed_at, error)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                req.id,
+                req.task_id,
+                req.action,
+                req.reason,
+                req.requested_at.to_rfc3339(),
+                req.processed_at.map(|dt| dt.to_rfc3339()),
+                req.error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_transition_request(&self, id: &str) -> Result<Option<TransitionRequest>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM transition_requests WHERE id = ?1")?;
+
+        let req = stmt
+            .query_row(params![id], Self::transition_request_from_row)
+            .ok();
+
+        Ok(req)
+    }
+
+    pub fn get_pending_transition_requests(&self) -> Result<Vec<TransitionRequest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM transition_requests WHERE processed_at IS NULL ORDER BY requested_at ASC",
+        )?;
+
+        let requests = stmt
+            .query_map([], Self::transition_request_from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(requests)
+    }
+
+    pub fn mark_transition_processed(&self, id: &str, error: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE transition_requests SET processed_at = ?1, error = ?2 WHERE id = ?3",
+            params![chrono::Utc::now().to_rfc3339(), error, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn cleanup_old_transition_requests(&self) -> Result<()> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        self.conn.execute(
+            "DELETE FROM transition_requests WHERE processed_at IS NOT NULL AND processed_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(())
+    }
+
+    /// Directly set processed_at to an arbitrary timestamp (for testing cleanup logic only).
+    #[cfg(feature = "test-mocks")]
+    pub fn backdate_transition_processed_at(&self, id: &str, processed_at: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE transition_requests SET processed_at = ?1 WHERE id = ?2",
+            params![processed_at, id],
+        )?;
+        Ok(())
+    }
+
+    fn transition_request_from_row(row: &rusqlite::Row) -> rusqlite::Result<TransitionRequest> {
+        Ok(TransitionRequest {
+            id: row.get("id")?,
+            task_id: row.get("task_id")?,
+            action: row.get("action")?,
+            reason: row.get("reason").ok().flatten(),
+            requested_at: chrono::DateTime::parse_from_rfc3339(
+                &row.get::<_, String>("requested_at")?,
+            )
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now()),
+            processed_at: row.get::<_, Option<String>>("processed_at")?.and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .ok()
+            }),
+            error: row.get("error")?,
+        })
+    }
+
+    // ── Notifications ───────────────────────────────────────────────────
+
+    pub fn create_notification(&self, notif: &Notification) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO notifications (id, message, created_at) VALUES (?1, ?2, ?3)",
+            params![notif.id, notif.message, notif.created_at.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Peek at pending notifications without consuming them.
+    pub fn peek_notifications(&self) -> Result<Vec<Notification>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM notifications ORDER BY created_at ASC")?;
+
+        let notifs: Vec<Notification> = stmt
+            .query_map([], |row| {
+                Ok(Notification {
+                    id: row.get("id")?,
+                    message: row.get("message")?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(
+                        &row.get::<_, String>("created_at")?,
+                    )
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(notifs)
+    }
+
+    /// Fetch and delete all pending notifications (atomic consume).
+    pub fn consume_notifications(&self) -> Result<Vec<Notification>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM notifications ORDER BY created_at ASC")?;
+
+        let notifs: Vec<Notification> = stmt
+            .query_map([], |row| {
+                Ok(Notification {
+                    id: row.get("id")?,
+                    message: row.get("message")?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(
+                        &row.get::<_, String>("created_at")?,
+                    )
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        self.conn.execute("DELETE FROM notifications", [])?;
+
+        Ok(notifs)
     }
 }
