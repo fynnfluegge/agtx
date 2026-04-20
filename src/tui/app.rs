@@ -5750,8 +5750,22 @@ impl App {
     /// Suspend the TUI and attach directly to a tmux window for full interaction.
     /// Restores the TUI when the user detaches (Ctrl+b d).
     fn attach_to_tmux_fullscreen(&mut self, window_name: &str) -> Result<()> {
+        // window_name is the full session:window target (e.g. "docugap:task-75189cbb-test")
+        // Check if the tmux window still exists before attempting to attach.
+        if !self
+            .state
+            .tmux_ops
+            .window_exists(window_name)
+            .unwrap_or(true)
+        {
+            self.state.warning_message = Some((
+                "Session window no longer exists".to_string(),
+                std::time::Instant::now(),
+            ));
+            return Ok(());
+        }
+
         let session = &self.state.tmux_project_name;
-        let window_target = format!("{}:{}", session, window_name);
 
         // Check if we're already inside the agtx tmux server — if so, just
         // switch windows instead of nesting with attach.
@@ -5761,14 +5775,14 @@ impl App {
 
         if inside_agtx {
             // Already inside agtx tmux — just switch to the task window.
-            // Use session:window target to work across multiple project sessions.
+            // window_name is already session:window format, use it directly.
             let _ = std::process::Command::new("tmux")
                 .args([
                     "-L", tmux::AGENT_SERVER,
-                    "select-window", "-t", &window_target,
+                    "select-window", "-t", window_name,
                     ";", "resize-window", "-A",
                 ])
-                .status();
+                .output();
         } else {
             // Leave alternate screen and disable raw mode
             match self.terminal.backend_mut() {
