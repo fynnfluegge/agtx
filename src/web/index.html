@@ -468,7 +468,7 @@ function mkCard(task, projectId) {
     ? task.description.replace(/\n/g, ' ').slice(0, 90)
     : '';
   const pr = task.pr_url
-    ? `<a class="badge badge-pr" href="${esc(task.pr_url)}" target="_blank">#${task.pr_number}</a>`
+    ? `<a class="badge badge-pr" href="${esc(task.pr_url)}" target="_blank">#${task.pr_number ?? '?'}</a>`
     : '';
 
   card.innerHTML =

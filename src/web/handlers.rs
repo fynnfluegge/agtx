@@ -49,8 +49,8 @@ pub async fn list_projects() -> Result<Json<Vec<ProjectResponse>>, StatusCode> {
         Ok(responses)
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| { eprintln!("web: spawn error: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?
+    .map_err(|e| { eprintln!("web: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
 
     Ok(Json(result))
 }
@@ -90,8 +90,8 @@ pub async fn project_tasks(
         })
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| { eprintln!("web: spawn error: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?
+    .map_err(|e| { eprintln!("web: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
 
     Ok(Json(result))
 }
@@ -126,8 +126,8 @@ pub async fn task_detail(
         })
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| { eprintln!("web: spawn error: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?
+    .map_err(|e| { eprintln!("web: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
 
     Ok(Json(result))
 }
@@ -150,8 +150,8 @@ pub async fn get_artifact(
         }
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| { eprintln!("web: spawn error: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?
+    .map_err(|e| { eprintln!("web: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
 
     match result {
         Some(html) => Ok(Html(html)),
@@ -186,7 +186,9 @@ fn task_slug(task: &Task) -> String {
         .as_deref()
         .and_then(|b| b.strip_prefix("task/"))
         .unwrap_or(&task.id)
-        .to_string()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
 }
 
 fn resolve_artifacts(
