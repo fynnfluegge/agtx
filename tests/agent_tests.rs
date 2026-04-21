@@ -1,4 +1,4 @@
-use agtx::agent::{known_agents, parse_agent_selection};
+use agtx::agent::{known_agents, parse_agent_selection, AgentOperations, CodingAgent};
 use agtx::skills::{agent_native_skill_dir, transform_plugin_command};
 
 #[test]
@@ -154,6 +154,31 @@ fn test_build_resume_command_unknown_agent_falls_back_to_interactive() {
     let agent = Agent::new("custom-agent", "my-agent", "A custom agent", "Custom <noreply@example.com>");
     // Unknown agent should fall back to build_interactive_command("")
     assert_eq!(agent.build_resume_command(), agent.build_interactive_command(""));
+}
+
+// === build_orchestrator_command ===
+
+#[test]
+fn test_build_orchestrator_command_claude_is_idempotent() {
+    let agents = known_agents();
+    let claude = agents.iter().find(|a| a.name == "claude").unwrap().clone();
+    let ops = CodingAgent::new(claude);
+    let cmd = ops.build_orchestrator_command("{\"type\":\"stdio\"}", "/usr/bin/agtx");
+
+    let pre_remove_idx = cmd
+        .find("claude mcp remove agtx")
+        .expect("pre-remove stale registration");
+    let add_idx = cmd
+        .find("claude mcp add-json agtx")
+        .expect("register MCP");
+    assert!(pre_remove_idx < add_idx, "pre-remove must precede add-json:\n{cmd}");
+
+    let pre_section = &cmd[..add_idx];
+    assert!(
+        pre_section.contains("|| true") || pre_section.contains("2>/dev/null"),
+        "pre-remove must tolerate missing prior state:\n{cmd}"
+    );
+    assert!(cmd.contains("&& claude"), "&& must gate interactive claude:\n{cmd}");
 }
 
 // =============================================================================

@@ -1523,7 +1523,7 @@ fn test_setup_task_worktree_success() {
 
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _| Ok(()));
 
     let mut task = Task::new("Add login feature", "claude", "project-1");
     task.status = TaskStatus::Backlog;
@@ -1577,7 +1577,7 @@ fn test_setup_task_worktree_sets_task_fields() {
     mock_tmux.expect_has_session().returning(|_| true);
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _| Ok(()));
 
     let mut task = Task::new("Fix bug", "claude", "project-1");
 
@@ -1638,7 +1638,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     mock_tmux.expect_has_session().returning(|_| true);
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _| Ok(()));
 
     let mut task = Task::new("Test task", "claude", "project-1");
 
@@ -1694,7 +1694,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
     // Tmux window creation fails
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _| Err(anyhow::anyhow!("tmux not running")));
+        .returning(|_, _, _, _, _| Err(anyhow::anyhow!("tmux not running")));
 
     let mut task = Task::new("Test task", "claude", "project-1");
 
@@ -1746,7 +1746,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
     mock_tmux.expect_create_session().returning(|_, _| Ok(()));
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _| Ok(()));
 
     let mut task = Task::new("New task", "claude", "project-1");
 
@@ -1801,7 +1801,7 @@ fn test_setup_task_worktree_passes_init_config() {
     mock_tmux.expect_has_session().returning(|_| true);
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _| Ok(()));
 
     let mut task = Task::new("Task with config", "claude", "project-1");
 
@@ -2981,6 +2981,65 @@ fn test_is_pane_at_shell_returns_false_when_none() {
         .returning(|_| None);
 
     assert!(!is_pane_at_shell(&mock, "sess:win"));
+}
+
+// === kill_windows_by_name tests ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_kill_windows_by_name_returns_true_when_cleared() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut mock = MockTmuxOperations::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_clone = Arc::clone(&calls);
+    mock.expect_window_exists()
+        .withf(|t| t == "proj:orchestrator")
+        .returning(move |_| Ok(calls_clone.fetch_add(1, Ordering::SeqCst) == 0));
+    mock.expect_kill_window()
+        .withf(|t| t == "proj:orchestrator")
+        .returning(|_| Ok(()));
+
+    assert!(kill_windows_by_name(&mock, "proj:orchestrator"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_kill_windows_by_name_returns_false_when_cap_exhausted() {
+    // Pins the 16-iteration cap: lowering it regresses `.times(16)`.
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_window_exists()
+        .withf(|t| t == "proj:orchestrator")
+        .returning(|_| Ok(true));
+    mock.expect_kill_window()
+        .withf(|t| t == "proj:orchestrator")
+        .times(16)
+        .returning(|_| Ok(()));
+
+    assert!(!kill_windows_by_name(&mock, "proj:orchestrator"));
+}
+
+// === is_orchestrator_live tests ===
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_orchestrator_live_false_when_window_missing() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_window_exists()
+        .withf(|t| t == "proj:orchestrator")
+        .returning(|_| Ok(false));
+
+    assert!(!is_orchestrator_live(&mock, "proj:orchestrator"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_orchestrator_live_ignores_pane_current_command() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_window_exists()
+        .withf(|t| t == "proj:orchestrator")
+        .returning(|_| Ok(true));
+
+    assert!(is_orchestrator_live(&mock, "proj:orchestrator"));
 }
 
 // === switch_agent_in_tmux tests ===
@@ -6029,6 +6088,36 @@ fn test_process_transition_requests_empty_is_noop() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
+fn test_process_transition_requests_skips_other_instance_claims() {
+    let mut app = make_test_app();
+    let db = app.state.db.as_ref().unwrap();
+
+    let req = crate::db::TransitionRequest::new("missing-task", "move_forward");
+    db.create_transition_request(&req).unwrap();
+
+    assert!(db
+        .claim_transition_request(&req.id, "other-instance")
+        .unwrap());
+
+    app.process_transition_requests().unwrap();
+
+    let fresh = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_transition_request(&req.id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        fresh.processed_at.is_none(),
+        "other-instance claim must keep this instance from touching the request"
+    );
+    assert!(fresh.error.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
 fn test_execute_transition_request_unknown_action_errors() {
     let mut app = make_test_app();
     let db = app.state.db.as_ref().unwrap();
@@ -6697,14 +6786,16 @@ fn test_toggle_orchestrator_warns_in_dashboard_mode() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_toggle_orchestrator_spawns_new_session() {
-    // No existing orchestrator → creates window, sets orchestrator_session
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
     mock_tmux.expect_create_session().returning(|_, _| Ok(()));
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _| Ok(()));
+        .withf(|_session, window_name, _dir, _cmd, keep_shell_on_exit: &bool| {
+            window_name == "orchestrator" && !keep_shell_on_exit
+        })
+        .returning(|_, _, _, _, _| Ok(()));
     mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
     mock_tmux
         .expect_capture_pane_with_history()
@@ -6739,9 +6830,11 @@ fn test_toggle_orchestrator_spawns_new_session() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_toggle_orchestrator_opens_popup_when_already_running() {
-    // orchestrator_session is set AND window still exists → opens popup, no new spawn
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
+    mock_tmux
+        .expect_pane_current_command()
+        .returning(|_| Some("claude".to_string()));
     mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
     mock_tmux
         .expect_capture_pane_with_history()
@@ -6778,6 +6871,55 @@ fn test_toggle_orchestrator_opens_popup_when_already_running() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
+fn test_toggle_orchestrator_reattaches_to_live_orchestrator_from_other_instance() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux
+        .expect_window_exists()
+        .withf(|t| t == "test-project:orchestrator")
+        .returning(|_| Ok(true));
+    mock_tmux
+        .expect_pane_current_command()
+        .withf(|t| t == "test-project:orchestrator")
+        .returning(|_| Some("claude".to_string()));
+    mock_tmux
+        .expect_capture_pane()
+        .withf(|t| t == "test-project:orchestrator")
+        .returning(|_| Ok("Claude Code\n".to_string()));
+    mock_tmux
+        .expect_resize_window()
+        .returning(|_, _, _| Ok(()));
+    mock_tmux
+        .expect_capture_pane_with_history()
+        .returning(|_, _| vec![]);
+    mock_tmux.expect_get_cursor_info().returning(|_| None);
+
+    let mut mock_registry = MockAgentRegistry::new();
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
+
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(mock_registry),
+    )
+    .unwrap();
+
+    assert!(app.state.orchestrator_session.is_none());
+
+    app.toggle_orchestrator().unwrap();
+
+    assert!(app.state.shell_popup.is_some());
+    assert_eq!(
+        app.state.orchestrator_session.as_deref(),
+        Some("test-project:orchestrator")
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
 fn test_toggle_orchestrator_clears_stale_session_and_respawns() {
     // orchestrator_session set but window is GONE → clears session, spawns new one
     let mut mock_tmux = MockTmuxOperations::new();
@@ -6786,9 +6928,13 @@ fn test_toggle_orchestrator_clears_stale_session_and_respawns() {
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
     mock_tmux.expect_create_session().returning(|_, _| Ok(()));
+    // Respawn must keep `keep_shell_on_exit=false` — else zombie shell on exit.
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _| Ok(()));
+        .withf(|_session, window_name, _dir, _cmd, keep_shell_on_exit: &bool| {
+            window_name == "orchestrator" && !keep_shell_on_exit
+        })
+        .returning(|_, _, _, _, _| Ok(()));
     mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
     mock_tmux
         .expect_capture_pane_with_history()
@@ -6927,6 +7073,9 @@ fn test_deliver_orchestrator_notifications_busy_when_content_changed() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
     mock_tmux
+        .expect_pane_current_command()
+        .returning(|_| Some("claude".to_string()));
+    mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("new content here".to_string()));
     // send_keys must NOT be called
@@ -6962,6 +7111,9 @@ fn test_deliver_orchestrator_notifications_delivers_when_idle_signal() {
     // Content changed AND has [agtx:idle] → sends combined notification
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
+    mock_tmux
+        .expect_pane_current_command()
+        .returning(|_| Some("claude".to_string()));
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("stuff [agtx:idle]".to_string()));
@@ -7014,6 +7166,9 @@ fn test_deliver_orchestrator_notifications_delivers_via_stability_fallback() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
     mock_tmux
+        .expect_pane_current_command()
+        .returning(|_| Some("claude".to_string()));
+    mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("same content".to_string()));
     mock_tmux
@@ -7063,6 +7218,9 @@ fn test_deliver_orchestrator_notifications_noop_when_no_notifications() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
     mock_tmux
+        .expect_pane_current_command()
+        .returning(|_| Some("claude".to_string()));
+    mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("stuff [agtx:idle]".to_string()));
     // send_keys must NOT be called — mockall will panic if it is
@@ -7089,6 +7247,224 @@ fn test_deliver_orchestrator_notifications_noop_when_no_notifications() {
 
     app.deliver_orchestrator_notifications();
     // No panic = correct (send_keys not called)
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_orchestrator_notifications_clears_state_when_window_gone() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux
+        .expect_window_exists()
+        .withf(|t| t == "proj:orchestrator")
+        .returning(|_| Ok(false));
+
+    let mut mock_registry = MockAgentRegistry::new();
+    mock_registry
+        .expect_get()
+        .returning(|_| Arc::new(MockAgentOperations::new()));
+
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(mock_registry),
+    )
+    .unwrap();
+
+    let db = app.state.db.as_ref().unwrap();
+    db.create_notification(&crate::db::Notification::new(
+        "Task \"foo\" (deadbeef) completed phase: planning",
+    ))
+    .unwrap();
+
+    app.state.orchestrator_last_check = Instant::now() - std::time::Duration::from_secs(10);
+    app.state.orchestrator_session = Some("proj:orchestrator".to_string());
+    app.state.orchestrator_ready.store(true, Ordering::Release);
+
+    app.deliver_orchestrator_notifications();
+
+    assert!(app.state.orchestrator_session.is_none());
+    assert!(!app.state.orchestrator_ready.load(Ordering::Acquire));
+    let remaining = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .peek_notifications()
+        .unwrap();
+    assert_eq!(remaining.len(), 1, "notifications preserved for next spawn");
+}
+
+// =============================================================================
+// Tests for run_orchestrator_catchup helper
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_run_orchestrator_catchup_emits_for_planning_artifact() {
+    let tmp = std::env::temp_dir().join("agtx_test_catchup_planning");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let agtx_dir = tmp.join(".agtx");
+    std::fs::create_dir_all(&agtx_dir).unwrap();
+    std::fs::write(agtx_dir.join("plan.md"), "# Plan").unwrap();
+
+    let db = crate::db::Database::open_in_memory_project().unwrap();
+
+    let mut task = Task::new("compose release notes", "claude", "proj");
+    task.id = "abcdef1234".to_string();
+    task.status = TaskStatus::Planning;
+    task.worktree_path = Some(tmp.to_string_lossy().to_string());
+    task.plugin = None; // None → bundled agtx plugin
+    db.create_task(&task).unwrap();
+
+    run_orchestrator_catchup(&db, &[task.clone()], None);
+
+    let notifs = db.peek_notifications().unwrap();
+    assert_eq!(notifs.len(), 1, "expected exactly one catch-up notification");
+    assert!(
+        notifs[0].message.contains("compose release notes"),
+        "message should include task title, got: {}",
+        notifs[0].message
+    );
+    assert!(
+        notifs[0].message.contains("planning"),
+        "message should include phase name, got: {}",
+        notifs[0].message
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_run_orchestrator_catchup_deduplicates_existing_notifications() {
+    let tmp = std::env::temp_dir().join("agtx_test_catchup_dedup");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let agtx_dir = tmp.join(".agtx");
+    std::fs::create_dir_all(&agtx_dir).unwrap();
+    std::fs::write(agtx_dir.join("plan.md"), "# Plan").unwrap();
+
+    let db = crate::db::Database::open_in_memory_project().unwrap();
+
+    let mut task = Task::new("compose release notes", "claude", "proj");
+    task.id = "abcdef1234".to_string();
+    task.status = TaskStatus::Planning;
+    task.worktree_path = Some(tmp.to_string_lossy().to_string());
+    task.plugin = None;
+    db.create_task(&task).unwrap();
+
+    let expected = format!(
+        "Task \"{}\" ({}) completed phase: {}",
+        task.title,
+        &task.id[..8],
+        task.status.as_str()
+    );
+    db.create_notification(&crate::db::Notification::new(expected.clone()))
+        .unwrap();
+
+    run_orchestrator_catchup(&db, &[task.clone()], None);
+
+    let notifs = db.peek_notifications().unwrap();
+    assert_eq!(
+        notifs.len(),
+        1,
+        "helper must dedupe against existing notifications"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_run_orchestrator_catchup_skips_non_planning_or_running() {
+    let tmp = std::env::temp_dir().join("agtx_test_catchup_skip");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let agtx_dir = tmp.join(".agtx");
+    std::fs::create_dir_all(&agtx_dir).unwrap();
+    std::fs::write(agtx_dir.join("plan.md"), "# Plan").unwrap();
+
+    let db = crate::db::Database::open_in_memory_project().unwrap();
+
+    let mut task = Task::new("done task", "claude", "proj");
+    task.id = "11111111ff".to_string();
+    task.status = TaskStatus::Backlog;
+    task.worktree_path = Some(tmp.to_string_lossy().to_string());
+    task.plugin = None;
+    db.create_task(&task).unwrap();
+
+    run_orchestrator_catchup(&db, &[task.clone()], None);
+
+    let notifs = db.peek_notifications().unwrap();
+    assert!(
+        notifs.is_empty(),
+        "Backlog tasks must be ignored by catch-up"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// =============================================================================
+// Tests for detect_existing_orchestrator helper (TUI-startup reattachment)
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_detect_existing_orchestrator_returns_none_when_experimental_off() {
+    let mock = MockTmuxOperations::new();
+    let db = crate::db::Database::open_in_memory_project().unwrap();
+
+    let result = detect_existing_orchestrator(false, &mock, "proj", Some(&db), &[], None);
+    assert!(result.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_detect_existing_orchestrator_reattaches_even_when_pane_is_bash() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_window_exists()
+        .withf(|t| t == "proj:orchestrator")
+        .returning(|_| Ok(true));
+
+    let db = crate::db::Database::open_in_memory_project().unwrap();
+    let result = detect_existing_orchestrator(true, &mock, "proj", Some(&db), &[], None);
+    assert_eq!(
+        result.as_deref(),
+        Some("proj:orchestrator"),
+        "live window (regardless of pane command) must reattach, not respawn"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_detect_existing_orchestrator_runs_catchup() {
+    let tmp = std::env::temp_dir().join("agtx_test_detect_catchup");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let agtx_dir = tmp.join(".agtx");
+    std::fs::create_dir_all(&agtx_dir).unwrap();
+    std::fs::write(agtx_dir.join("plan.md"), "# Plan").unwrap();
+
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_window_exists().returning(|_| Ok(true));
+    mock.expect_pane_current_command()
+        .returning(|_| Some("claude".to_string()));
+
+    let db = crate::db::Database::open_in_memory_project().unwrap();
+    let mut task = Task::new("compose release notes", "claude", "proj");
+    task.id = "abcdef1234".to_string();
+    task.status = TaskStatus::Planning;
+    task.worktree_path = Some(tmp.to_string_lossy().to_string());
+    task.plugin = None;
+    db.create_task(&task).unwrap();
+
+    let tasks = vec![task];
+    let result = detect_existing_orchestrator(true, &mock, "proj", Some(&db), &tasks, None);
+    assert!(result.is_some());
+
+    let notifs = db.peek_notifications().unwrap();
+    assert_eq!(notifs.len(), 1, "catch-up should have queued one notification");
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 // =============================================================================

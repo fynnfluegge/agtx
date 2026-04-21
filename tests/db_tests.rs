@@ -1,4 +1,4 @@
-use agtx::db::{Database, Notification, Project, Task, TaskStatus};
+use agtx::db::{Database, Notification, Project, Task, TaskStatus, TransitionRequest};
 
 // === TaskStatus Tests ===
 
@@ -305,4 +305,171 @@ fn test_deps_not_satisfied_dep_in_planning() {
     db.create_task(&task).unwrap();
 
     assert!(!db.deps_satisfied(&task));
+}
+
+// === transition_request claim tests ===
+
+#[test]
+fn test_claim_transition_request_first_claimant_wins() {
+    let db = Database::open_in_memory_project().unwrap();
+    let req = TransitionRequest::new("task-1", "move_forward");
+    db.create_transition_request(&req).unwrap();
+
+    assert!(db.claim_transition_request(&req.id, "agtx-A").unwrap());
+    assert!(!db.claim_transition_request(&req.id, "agtx-B").unwrap());
+    assert!(!db.claim_transition_request(&req.id, "agtx-A").unwrap());
+}
+
+#[test]
+fn test_claim_transition_request_fails_if_already_processed() {
+    let db = Database::open_in_memory_project().unwrap();
+    let req = TransitionRequest::new("task-1", "move_forward");
+    db.create_transition_request(&req).unwrap();
+    db.mark_transition_processed(&req.id, None).unwrap();
+
+    assert!(!db.claim_transition_request(&req.id, "agtx-A").unwrap());
+}
+
+#[test]
+fn test_claim_transition_request_fails_for_unknown_id() {
+    let db = Database::open_in_memory_project().unwrap();
+    assert!(!db.claim_transition_request("does-not-exist", "agtx-A").unwrap());
+}
+
+#[test]
+fn test_cleanup_old_transition_requests_sweeps_stale_claims() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let fresh_claim = TransitionRequest::new("task-fresh", "move_forward");
+    let stale_claim = TransitionRequest::new("task-stale", "move_forward");
+    let fresh_unclaimed = TransitionRequest::new("task-unclaimed", "move_forward");
+    db.create_transition_request(&fresh_claim).unwrap();
+    db.create_transition_request(&stale_claim).unwrap();
+    db.create_transition_request(&fresh_unclaimed).unwrap();
+
+    db.claim_transition_request(&fresh_claim.id, "agtx-A").unwrap();
+    db.claim_transition_request(&stale_claim.id, "agtx-A").unwrap();
+    let two_hours_ago = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+    db.backdate_transition_requested_at(&stale_claim.id, &two_hours_ago).unwrap();
+
+    db.cleanup_old_transition_requests().unwrap();
+
+    assert!(db.get_transition_request(&stale_claim.id).unwrap().is_none());
+    assert!(db.get_transition_request(&fresh_claim.id).unwrap().is_some());
+    assert!(db.get_transition_request(&fresh_unclaimed.id).unwrap().is_some());
+}
+
+#[test]
+fn test_get_pending_transition_requests_excludes_claimed() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    let req_a = TransitionRequest::new("task-a", "move_forward");
+    let req_b = TransitionRequest::new("task-b", "move_forward");
+    db.create_transition_request(&req_a).unwrap();
+    db.create_transition_request(&req_b).unwrap();
+    db.claim_transition_request(&req_a.id, "other-instance").unwrap();
+
+    let pending = db.get_pending_transition_requests().unwrap();
+    let ids: Vec<&str> = pending.iter().map(|r| r.id.as_str()).collect();
+
+    assert!(!ids.contains(&req_a.id.as_str()));
+    assert!(ids.contains(&req_b.id.as_str()));
+}
+
+// N threads race one claim → exactly one winner (read-then-update would allow multiple).
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_claim_transition_request_atomic_under_concurrent_claims() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_path_buf();
+
+    let setup = Database::open_project_at_path(&db_path).unwrap();
+    let req = TransitionRequest::new("task-race", "move_forward");
+    setup.create_transition_request(&req).unwrap();
+    drop(setup);
+
+    const THREADS: usize = 16;
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let mut handles = Vec::with_capacity(THREADS);
+    for i in 0..THREADS {
+        let path = db_path.clone();
+        let req_id = req.id.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let db = Database::open_project_at_path(&path).unwrap();
+            let claimant = format!("agtx-{}", i);
+            barrier.wait();
+            db.claim_transition_request(&req_id, &claimant).unwrap()
+        }));
+    }
+
+    let wins: usize = handles.into_iter().filter_map(|h| h.join().ok()).filter(|w| *w).count();
+    assert_eq!(wins, 1, "exactly one thread must win the claim; got {wins}");
+
+    // Row must now be excluded from pending — a late claim must also fail.
+    let followup = Database::open_project_at_path(&db_path).unwrap();
+    assert!(
+        followup.get_pending_transition_requests().unwrap().is_empty(),
+        "claimed request must be filtered from pending"
+    );
+    assert!(
+        !followup.claim_transition_request(&req.id, "late-comer").unwrap(),
+        "a later claim after the race must return false"
+    );
+}
+
+// N consumers drain the queue → each row returned exactly once (SELECT-then-DELETE would dupe).
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_consume_notifications_atomic_under_concurrent_consumers() {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_path_buf();
+
+    const NOTIFS: usize = 64;
+    let setup = Database::open_project_at_path(&db_path).unwrap();
+    for i in 0..NOTIFS {
+        setup.create_notification(&Notification::new(format!("msg-{i}"))).unwrap();
+    }
+    drop(setup);
+
+    const THREADS: usize = 8;
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let mut handles = Vec::with_capacity(THREADS);
+    for _ in 0..THREADS {
+        let path = db_path.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let db = Database::open_project_at_path(&path).unwrap();
+            barrier.wait();
+            db.consume_notifications().unwrap()
+        }));
+    }
+
+    let mut seen: Vec<Notification> = Vec::new();
+    for h in handles {
+        seen.extend(h.join().unwrap());
+    }
+
+    assert_eq!(seen.len(), NOTIFS, "total consumed must equal total created");
+    let unique_ids: HashSet<&str> = seen.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(
+        unique_ids.len(),
+        NOTIFS,
+        "each notification must be consumed exactly once (no peer double-reads)"
+    );
+    assert!(
+        Database::open_project_at_path(&db_path)
+            .unwrap()
+            .peek_notifications()
+            .unwrap()
+            .is_empty(),
+        "DB must be drained after concurrent consume"
+    );
 }

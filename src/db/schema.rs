@@ -75,6 +75,16 @@ impl Database {
         Ok(db)
     }
 
+    /// Open a project DB at an arbitrary file path (for concurrency tests — in-memory is per-connection).
+    #[cfg(feature = "test-mocks")]
+    pub fn open_project_at_path(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path)
+            .with_context(|| format!("Failed to open database at {:?}", path))?;
+        let db = Self { conn };
+        db.init_project_schema()?;
+        Ok(db)
+    }
+
     /// Open an in-memory global database (for testing only)
     #[cfg(feature = "test-mocks")]
     pub fn open_in_memory_global() -> Result<Self> {
@@ -160,6 +170,11 @@ impl Database {
         let _ = self
             .conn
             .execute("ALTER TABLE transition_requests ADD COLUMN reason TEXT", []);
+
+        let _ = self.conn.execute(
+            "ALTER TABLE transition_requests ADD COLUMN claimed_by TEXT",
+            [],
+        );
 
         Ok(())
     }
@@ -495,7 +510,9 @@ impl Database {
 
     pub fn get_pending_transition_requests(&self) -> Result<Vec<TransitionRequest>> {
         let mut stmt = self.conn.prepare(
-            "SELECT * FROM transition_requests WHERE processed_at IS NULL ORDER BY requested_at ASC",
+            "SELECT * FROM transition_requests
+             WHERE processed_at IS NULL AND claimed_by IS NULL
+             ORDER BY requested_at ASC",
         )?;
 
         let requests = stmt
@@ -514,10 +531,23 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically claim a pending request. Returns true iff this caller won.
+    pub fn claim_transition_request(&self, id: &str, claimant: &str) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE transition_requests
+             SET claimed_by = ?1
+             WHERE id = ?2 AND claimed_by IS NULL AND processed_at IS NULL",
+            params![claimant, id],
+        )?;
+        Ok(rows == 1)
+    }
+
     pub fn cleanup_old_transition_requests(&self) -> Result<()> {
         let cutoff = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
         self.conn.execute(
-            "DELETE FROM transition_requests WHERE processed_at IS NOT NULL AND processed_at < ?1",
+            "DELETE FROM transition_requests
+             WHERE (processed_at IS NOT NULL AND processed_at < ?1)
+                OR (processed_at IS NULL AND claimed_by IS NOT NULL AND requested_at < ?1)",
             params![cutoff],
         )?;
         Ok(())
@@ -529,6 +559,16 @@ impl Database {
         self.conn.execute(
             "UPDATE transition_requests SET processed_at = ?1 WHERE id = ?2",
             params![processed_at, id],
+        )?;
+        Ok(())
+    }
+
+    /// Directly set requested_at to an arbitrary timestamp (for testing cleanup logic only).
+    #[cfg(feature = "test-mocks")]
+    pub fn backdate_transition_requested_at(&self, id: &str, requested_at: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE transition_requests SET requested_at = ?1 WHERE id = ?2",
+            params![requested_at, id],
         )?;
         Ok(())
     }
@@ -587,13 +627,13 @@ impl Database {
         Ok(notifs)
     }
 
-    /// Fetch and delete all pending notifications (atomic consume).
+    /// Atomic fetch-and-delete via `DELETE ... RETURNING`.
     pub fn consume_notifications(&self) -> Result<Vec<Notification>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT * FROM notifications ORDER BY created_at ASC")?;
+            .prepare("DELETE FROM notifications RETURNING id, message, created_at")?;
 
-        let notifs: Vec<Notification> = stmt
+        let mut notifs: Vec<Notification> = stmt
             .query_map([], |row| {
                 Ok(Notification {
                     id: row.get("id")?,
@@ -608,8 +648,8 @@ impl Database {
             .filter_map(|r| r.ok())
             .collect();
 
-        self.conn.execute("DELETE FROM notifications", [])?;
-
+        // `RETURNING` doesn't guarantee any particular row order — sort in Rust.
+        notifs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         Ok(notifs)
     }
 }

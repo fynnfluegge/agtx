@@ -91,8 +91,13 @@ impl AgentOperations for CodingAgent {
 
     fn build_orchestrator_command(&self, mcp_json: &str, _agtx_bin: &str) -> String {
         match self.agent.name.as_str() {
+            // Pre-remove any stale `agtx` registration (last run crashed before
+            // its own `mcp remove`) so `add-json` doesn't fail with "already
+            // exists" and short-circuit the `&&` into an empty shell.
             "claude" => format!(
-                "claude mcp add-json agtx '{}' --scope local && {}; claude mcp remove agtx --scope local",
+                "claude mcp remove agtx --scope local 2>/dev/null || true; \
+                 claude mcp add-json agtx '{}' --scope local && {}; \
+                 claude mcp remove agtx --scope local",
                 mcp_json,
                 self.build_interactive_command("")
             ),

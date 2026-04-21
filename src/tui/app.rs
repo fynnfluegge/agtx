@@ -313,6 +313,7 @@ struct AppState {
     session_refresh_rx: Option<mpsc::Receiver<SessionRefreshResult>>,
     // Cache of dependency satisfaction per task ID (refreshed with tasks)
     deps_satisfied_cache: HashMap<String, bool>,
+    instance_id: String,
 }
 
 /// State for confirming move to Done
@@ -634,6 +635,7 @@ impl App {
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
                 deps_satisfied_cache: HashMap::new(),
+                instance_id: uuid::Uuid::new_v4().to_string(),
             },
         };
 
@@ -684,60 +686,22 @@ impl App {
             }
         }
 
-        // Detect existing orchestrator session (survives agtx restarts)
-        if app.state.flags.experimental {
-            let orch_target = format!("{}:orchestrator", app.state.tmux_project_name);
-            if app
-                .state
-                .tmux_ops
-                .window_exists(&orch_target)
-                .unwrap_or(false)
-            {
-                app.state.orchestrator_session = Some(orch_target);
-                app.state.orchestrator_ready.store(true, Ordering::Release);
-
-                // Catch up: notify orchestrator about tasks that completed while TUI was down
-                if let Some(ref db) = app.state.db {
-                    // Check existing notifications to avoid duplicates
-                    let existing: HashSet<String> = db
-                        .peek_notifications()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|n| n.message)
-                        .collect();
-
-                    for task in &app.state.board.tasks {
-                        if !matches!(task.status, TaskStatus::Planning | TaskStatus::Running) {
-                            continue;
-                        }
-                        let plugin = match &task.plugin {
-                            Some(name) => {
-                                WorkflowPlugin::load(name, app.state.project_path.as_deref()).ok()
-                            }
-                            None => skills::load_bundled_plugin("agtx"),
-                        };
-                        if let Some(ref wt) = task.worktree_path {
-                            if phase_artifact_exists(wt, task.status, &plugin, task.cycle) {
-                                let short_id = if task.id.len() >= 8 {
-                                    &task.id[..8]
-                                } else {
-                                    &task.id
-                                };
-                                let message = format!(
-                                    "Task \"{}\" ({}) completed phase: {}",
-                                    task.title,
-                                    short_id,
-                                    task.status.as_str()
-                                );
-                                if !existing.contains(&message) {
-                                    let notif = crate::db::Notification::new(message);
-                                    let _ = db.create_notification(&notif);
-                                }
-                            }
-                        }
-                    }
+        if let Some(orch_target) = detect_existing_orchestrator(
+            app.state.flags.experimental,
+            app.state.tmux_ops.as_ref(),
+            &app.state.tmux_project_name,
+            app.state.db.as_ref(),
+            &app.state.board.tasks,
+            app.state.project_path.as_deref(),
+        ) {
+            app.state.orchestrator_session = Some(orch_target.clone());
+            let tmux_ops = Arc::clone(&app.state.tmux_ops);
+            let ready_flag = Arc::clone(&app.state.orchestrator_ready);
+            std::thread::spawn(move || {
+                if wait_for_agent_ready(&tmux_ops, &orch_target).is_some() {
+                    ready_flag.store(true, Ordering::Release);
                 }
-            }
+            });
         }
 
         Ok(app)
@@ -846,6 +810,7 @@ impl App {
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
                 deps_satisfied_cache: HashMap::new(),
+                instance_id: uuid::Uuid::new_v4().to_string(),
             },
         })
     }
@@ -5326,25 +5291,36 @@ impl App {
 
     /// Poll the transition_requests table for unprocessed requests and execute them.
     fn process_transition_requests(&mut self) -> Result<()> {
-        let Some(db) = &self.state.db else {
-            return Ok(());
+        // `self.state.db` is re-borrowed per use site to avoid holding it across `&mut self`.
+        let pending = match self.state.db.as_ref() {
+            Some(db) => db.get_pending_transition_requests()?,
+            None => return Ok(()),
         };
-        let pending = db.get_pending_transition_requests()?;
         if pending.is_empty() {
             return Ok(());
         }
+        let instance_id = self.state.instance_id.clone();
 
         for req in pending {
+            let claimed = self
+                .state
+                .db
+                .as_ref()
+                .map(|db| db.claim_transition_request(&req.id, &instance_id))
+                .and_then(Result::ok)
+                .unwrap_or(false);
+            if !claimed {
+                continue;
+            }
+
             let result = self.execute_transition_request(&req);
             if let Some(db) = &self.state.db {
-                match &result {
-                    Ok(()) => {
-                        let _ = db.mark_transition_processed(&req.id, None);
-                    }
+                let _ = match &result {
+                    Ok(()) => db.mark_transition_processed(&req.id, None),
                     Err(e) => {
-                        let _ = db.mark_transition_processed(&req.id, Some(&e.to_string()));
+                        db.mark_transition_processed(&req.id, Some(&e.to_string()))
                     }
-                }
+                };
             }
             self.refresh_tasks()?;
         }
@@ -5570,38 +5546,66 @@ impl App {
         let orch_target = format!("{}:{}", tmux_project_name, window_name);
 
         // If orchestrator is running, open the popup to view it
-        if let Some(ref orch_target) = self.state.orchestrator_session {
-            if self
-                .state
-                .tmux_ops
-                .window_exists(orch_target)
-                .unwrap_or(false)
-            {
-                let mut popup = ShellPopup::new("Orchestrator".to_string(), orch_target.clone());
-                if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
-                    let pane_width = SHELL_POPUP_CONTENT_WIDTH;
-                    let popup_height =
-                        (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
-                    let pane_height = popup_height.saturating_sub(4);
-                    let _ = self
-                        .state
-                        .tmux_ops
-                        .resize_window(orch_target, pane_width, pane_height);
-                    popup.last_pane_size = Some((pane_width, pane_height));
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                }
-                popup.cached_content =
-                    capture_tmux_pane_with_history(orch_target, 500, self.state.tmux_ops.as_ref());
-                self.state.shell_popup = Some(popup);
-                return Ok(());
-            } else {
-                // Window gone, clear the session
-                self.state.orchestrator_session = None;
+        if is_orchestrator_live(self.state.tmux_ops.as_ref(), &orch_target) {
+            let first_time =
+                self.state.orchestrator_session.as_deref() != Some(&orch_target);
+            self.state.orchestrator_session = Some(orch_target.clone());
+
+            if first_time {
+                // Cross-instance reattach: verify ready, replay phase events (deduped).
                 self.state
                     .orchestrator_ready
                     .store(false, Ordering::Release);
+                if let Some(ref db) = self.state.db {
+                    run_orchestrator_catchup(
+                        db,
+                        &self.state.board.tasks,
+                        self.state.project_path.as_deref(),
+                    );
+                }
+                let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                let ready_flag = Arc::clone(&self.state.orchestrator_ready);
+                let target = orch_target.clone();
+                std::thread::spawn(move || {
+                    if wait_for_agent_ready(&tmux_ops, &target).is_some() {
+                        ready_flag.store(true, Ordering::Release);
+                    }
+                });
             }
+
+            let mut popup = ShellPopup::new("Orchestrator".to_string(), orch_target.clone());
+            if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
+                let pane_width = SHELL_POPUP_CONTENT_WIDTH;
+                let popup_height =
+                    (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
+                let pane_height = popup_height.saturating_sub(4);
+                let _ = self
+                    .state
+                    .tmux_ops
+                    .resize_window(&orch_target, pane_width, pane_height);
+                popup.last_pane_size = Some((pane_width, pane_height));
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            popup.cached_content =
+                capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
+            self.state.shell_popup = Some(popup);
+            return Ok(());
         }
+
+        if !kill_windows_by_name(self.state.tmux_ops.as_ref(), &orch_target) {
+            self.state.warning_message = Some((
+                format!(
+                    "Could not clear lingering `{}` window; try `tmux -L agtx kill-window -t {}`",
+                    orch_target, orch_target,
+                ),
+                Instant::now(),
+            ));
+            return Ok(());
+        }
+        self.state.orchestrator_session = None;
+        self.state
+            .orchestrator_ready
+            .store(false, Ordering::Release);
 
         // Spawn new orchestrator
         let default_agent = self.state.config.default_agent.clone();
@@ -5635,6 +5639,7 @@ impl App {
             window_name,
             &project_path_str,
             Some(agent_cmd),
+            false,
         )?;
 
         self.state.orchestrator_session = Some(orch_target.clone());
@@ -5666,6 +5671,10 @@ impl App {
             skills::ORCHESTRATE_SKILL,
             &default_agent,
         );
+
+        if let Some(ref db) = self.state.db {
+            run_orchestrator_catchup(db, &self.state.board.tasks, self.state.project_path.as_deref());
+        }
 
         // Send the /agtx:orchestrate command once the agent is ready
         let skill_cmd = skills::transform_plugin_command("/agtx:orchestrate", &default_agent)
@@ -5888,12 +5897,9 @@ impl App {
         }
 
         // Check window still exists
-        if !self
-            .state
-            .tmux_ops
-            .window_exists(&orch_target)
-            .unwrap_or(false)
-        {
+        if !is_orchestrator_live(self.state.tmux_ops.as_ref(), &orch_target) {
+            self.state.orchestrator_session = None;
+            self.state.orchestrator_ready.store(false, Ordering::Release);
             return;
         }
 
@@ -6491,7 +6497,7 @@ fn recover_task_session(
 
     let resume_cmd = agent_ops.build_resume_command();
 
-    tmux_ops.create_window(session, window, worktree_path, Some(resume_cmd))?;
+    tmux_ops.create_window(session, window, worktree_path, Some(resume_cmd), true)?;
 
     Ok(target.clone())
 }
@@ -6815,6 +6821,7 @@ fn setup_task_worktree(
         &window_name,
         &worktree_path_str,
         Some(agent_cmd),
+        true,
     )?;
 
     task.session_name = Some(target.clone());
@@ -8053,6 +8060,89 @@ fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
     }
 }
 
+/// Orchestrator is live iff its tmux window exists (no pane-command peeking).
+fn is_orchestrator_live(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
+    tmux_ops.window_exists(target).unwrap_or(false)
+}
+
+/// Startup reattach: returns the target if a window survives, replaying catch-up.
+fn detect_existing_orchestrator(
+    experimental: bool,
+    tmux_ops: &dyn TmuxOperations,
+    tmux_project_name: &str,
+    db: Option<&Database>,
+    tasks: &[Task],
+    project_path: Option<&Path>,
+) -> Option<String> {
+    if !experimental {
+        return None;
+    }
+    let target = format!("{}:orchestrator", tmux_project_name);
+    if !tmux_ops.window_exists(&target).unwrap_or(false) {
+        return None;
+    }
+    if let Some(db) = db {
+        run_orchestrator_catchup(db, tasks, project_path);
+    }
+    Some(target)
+}
+
+/// Kill all windows matching `target` (tmux allows duplicates); false if the 16-iter cap is hit.
+fn kill_windows_by_name(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
+    for _ in 0..16 {
+        if !tmux_ops.window_exists(target).unwrap_or(false) {
+            return true;
+        }
+        let _ = tmux_ops.kill_window(target);
+    }
+    !tmux_ops.window_exists(target).unwrap_or(false)
+}
+
+/// Replay "completed phase" notifications for tasks whose artifact is on disk.
+fn run_orchestrator_catchup(
+    db: &Database,
+    tasks: &[Task],
+    project_path: Option<&Path>,
+) {
+    let existing: HashSet<String> = db
+        .peek_notifications()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|n| n.message)
+        .collect();
+
+    for task in tasks {
+        if !matches!(task.status, TaskStatus::Planning | TaskStatus::Running) {
+            continue;
+        }
+        let plugin = match &task.plugin {
+            Some(name) => WorkflowPlugin::load(name, project_path).ok(),
+            None => skills::load_bundled_plugin("agtx"),
+        };
+        let Some(ref wt) = task.worktree_path else {
+            continue;
+        };
+        if !phase_artifact_exists(wt, task.status, &plugin, task.cycle) {
+            continue;
+        }
+        let short_id = if task.id.len() >= 8 {
+            &task.id[..8]
+        } else {
+            &task.id
+        };
+        let message = format!(
+            "Task \"{}\" ({}) completed phase: {}",
+            task.title,
+            short_id,
+            task.status.as_str()
+        );
+        if existing.contains(&message) {
+            continue;
+        }
+        let _ = db.create_notification(&crate::db::Notification::new(message));
+    }
+}
+
 /// Check if an agent is actively running in the pane.
 /// Uses both `pane_current_command` (works for Claude, Codex, Copilot) and
 /// pane content indicators (works for Gemini which runs inside bash).
@@ -8101,7 +8191,7 @@ fn ensure_window_or_recover(
         let _ = tmux_ops.create_session(session, wt_path);
     }
     let resume_cmd = agent_ops.build_resume_command();
-    let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd));
+    let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd), true);
 }
 
 /// Gracefully switch the agent running in a tmux window.
