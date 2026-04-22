@@ -37,7 +37,7 @@ uuid = { version = "1.16", features = ["v4"] }
 rmcp = { version = "0.16", features = ["server", "macros", "transport-io"] }
 
 # Web server
-axum = "0.7"
+axum = "0.8"
 pulldown-cmark = "0.12"
 
 [features]

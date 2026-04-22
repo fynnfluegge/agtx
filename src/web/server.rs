@@ -6,13 +6,13 @@ pub async fn serve(port: u16) -> Result<()> {
     let app = Router::new()
         .route("/", get(handlers::index))
         .route("/api/projects", get(handlers::list_projects))
-        .route("/api/projects/:project_id/tasks", get(handlers::project_tasks))
+        .route("/api/projects/{project_id}/tasks", get(handlers::project_tasks))
         .route(
-            "/api/projects/:project_id/tasks/:task_id",
+            "/api/projects/{project_id}/tasks/{task_id}",
             get(handlers::task_detail),
         )
         .route(
-            "/api/projects/:project_id/tasks/:task_id/artifacts/:name",
+            "/api/projects/{project_id}/tasks/{task_id}/artifacts/{name}",
             get(handlers::get_artifact),
         );
 
