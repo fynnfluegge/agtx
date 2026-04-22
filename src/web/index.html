@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>agtx</title>
+<title>__TITLE__</title>
 <style>
 :root {
   --gold:    #ead49a;
@@ -43,8 +43,11 @@ body {
 }
 #hdr .logo { color: var(--gold); font-weight: bold; font-size: 13px; letter-spacing: .04em; }
 #hdr .sep  { color: var(--border2); }
-#hdr-proj  { color: var(--cyan); }
-#hdr-ts    { margin-left: auto; color: var(--dimmed); font-size: 11px; }
+#hdr-crumbs { color: var(--cyan); }
+.crumb-sep  { color: var(--border2); }
+.crumb-task { color: var(--text); }
+.crumb-art  { color: var(--dimmed); }
+#hdr-ts     { margin-left: auto; color: var(--dimmed); font-size: 11px; }
 
 /* ── Layout ───────────────────────────────────────────────────── */
 #layout { display: flex; flex: 1; overflow: hidden; }
@@ -282,7 +285,7 @@ body {
 <div id="hdr">
   <span class="logo">agtx</span>
   <span class="sep">/</span>
-  <span id="hdr-proj">—</span>
+  <span id="hdr-crumbs">—</span>
   <span id="hdr-ts"></span>
 </div>
 
@@ -309,6 +312,7 @@ body {
   </div>
 </div>
 
+<script>window.__state__ = __STATE__;</script>
 <script>
 'use strict';
 
@@ -319,6 +323,7 @@ const S = {
   taskId: null,
   task: null,
   artifact: null,
+  skipPush: false,
 };
 
 let refreshTimer = null;
@@ -344,8 +349,20 @@ async function init() {
   try {
     S.projects = await getJSON('/api/projects');
     renderProjects();
-    if (S.projects.length > 0) await selectProject(S.projects[0].id);
+    const initial = window.__state__;
+    S.skipPush = true;
+    if (initial && initial.project_id) {
+      await selectProject(initial.project_id);
+      if (initial.task_id) {
+        await selectTask(initial.project_id, initial.task_id);
+        if (initial.artifact) await selectArtifact(initial.project_id, initial.task_id, initial.artifact);
+      }
+    } else if (S.projects.length > 0) {
+      await selectProject(S.projects[0].id);
+    }
+    S.skipPush = false;
   } catch (e) { console.error('init:', e); }
+  window.addEventListener('popstate', onPopState);
   refreshTimer = setInterval(autoRefresh, 5000);
   setInterval(tickTimestamp, 1000);
 }
@@ -375,6 +392,61 @@ function tickTimestamp() {
     s < 2 ? 'refreshed just now' : `refreshed ${s}s ago`;
 }
 
+// ── URL / nav state ────────────────────────────────────────────────
+
+function updateUrl(replace) {
+  let url = '/';
+  if (S.projectId) {
+    url = `/project/${S.projectId}`;
+    if (S.taskId) {
+      url += `/task/${S.taskId}`;
+      if (S.artifact) url += `/${S.artifact}`;
+    }
+  }
+  if (replace || S.skipPush) history.replaceState(null, '', url);
+  else history.pushState(null, '', url);
+}
+
+function updateNavState() {
+  const proj = S.projects.find(x => x.id === S.projectId);
+  const projName = proj ? proj.name : (S.projectId || null);
+  const taskTitle = S.task ? S.task.title : null;
+  const artLabel = S.artifact && S.task
+    ? (S.task.artifacts.find(a => a.name === S.artifact)?.label || S.artifact)
+    : null;
+
+  const el = document.getElementById('hdr-crumbs');
+  if (!projName) {
+    el.innerHTML = '<span style="color:var(--dimmed)">—</span>';
+  } else {
+    let h = `<span style="color:var(--cyan)">${esc(projName)}</span>`;
+    if (taskTitle) {
+      h += `<span class="crumb-sep"> / </span><span class="crumb-task">${esc(taskTitle)}</span>`;
+      if (artLabel) h += `<span class="crumb-sep"> / </span><span class="crumb-art">${esc(artLabel)}</span>`;
+    }
+    el.innerHTML = h;
+  }
+
+  const parts = [artLabel, taskTitle, projName, 'agtx'].filter(Boolean);
+  document.title = parts.join(' — ');
+}
+
+async function onPopState() {
+  const m = location.pathname.match(/^\/project\/([^/]+)(?:\/task\/([^/]+)(?:\/([^/]+))?)?/);
+  S.skipPush = true;
+  if (m) {
+    const [, pid, tid, art] = m;
+    await selectProject(pid);
+    if (tid) {
+      await selectTask(pid, tid);
+      if (art) await selectArtifact(pid, tid, art);
+    }
+  } else if (S.projects.length > 0) {
+    await selectProject(S.projects[0].id);
+  }
+  S.skipPush = false;
+}
+
 // ── Projects ──────────────────────────────────────────────────────
 
 async function selectProject(id) {
@@ -383,10 +455,9 @@ async function selectProject(id) {
   S.task = null;
   S.artifact = null;
   document.getElementById('panel').classList.add('hidden');
-
-  const p = S.projects.find(x => x.id === id);
-  document.getElementById('hdr-proj').textContent = p ? p.name : id;
   renderProjects();
+  updateNavState();
+  updateUrl();
 
   try {
     S.kanban = await getJSON(`/api/projects/${id}/tasks`);
@@ -493,7 +564,6 @@ async function selectTask(projectId, taskId) {
   S.taskId = taskId;
   S.artifact = null;
 
-  // Switch board to collapsed mode and highlight selected card
   if (S.kanban) renderBoard(S.kanban);
   document.querySelectorAll('.card').forEach(c =>
     c.classList.toggle('sel', c.dataset.id === taskId));
@@ -505,9 +575,12 @@ async function selectTask(projectId, taskId) {
   document.getElementById('art-tabs').innerHTML = '';
   document.getElementById('artifact').innerHTML = '<span class="hint">Loading…</span>';
 
+  updateUrl();
+
   try {
     S.task = await getJSON(`/api/projects/${projectId}/tasks/${taskId}`);
     renderPanel(S.task, projectId);
+    updateNavState();
     const first = S.task.artifacts.find(a => a.available);
     if (first) await selectArtifact(projectId, taskId, first.name);
     else document.getElementById('artifact').innerHTML =
@@ -560,6 +633,9 @@ async function selectArtifact(projectId, taskId, name) {
   const el = document.getElementById('artifact');
   el.innerHTML = '<span class="hint">Loading…</span>';
 
+  updateUrl(true);
+  updateNavState();
+
   const html = await getText(`/api/projects/${projectId}/tasks/${taskId}/artifacts/${name}`);
   el.innerHTML = html || '<span class="hint">Artifact not available.</span>';
 }
@@ -568,6 +644,8 @@ document.getElementById('btn-close').onclick = () => {
   S.taskId = null; S.task = null; S.artifact = null;
   document.getElementById('panel').classList.add('hidden');
   if (S.kanban) renderBoard(S.kanban);
+  updateNavState();
+  updateUrl();
 };
 
 // ── Util ──────────────────────────────────────────────────────────

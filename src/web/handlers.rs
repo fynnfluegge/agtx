@@ -13,8 +13,21 @@ use crate::web::models::{
 
 static INDEX_HTML: &str = include_str!("index.html");
 
-pub async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+#[derive(serde::Serialize)]
+struct InitialState {
+    project_id: Option<String>,
+    task_id: Option<String>,
+    artifact: Option<String>,
+}
+
+fn render_shell(title: &str, state: &InitialState) -> Html<String> {
+    let state_json = serde_json::to_string(state).unwrap_or_else(|_| "null".to_string());
+    let safe_title = title.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    Html(INDEX_HTML.replace("__TITLE__", &safe_title).replace("__STATE__", &state_json))
+}
+
+pub async fn index() -> Html<String> {
+    render_shell("agtx", &InitialState { project_id: None, task_id: None, artifact: None })
 }
 
 pub async fn list_projects() -> Result<Json<Vec<ProjectResponse>>, StatusCode> {
@@ -224,6 +237,76 @@ fn resolve_artifacts(
             (info, found)
         })
         .collect()
+}
+
+pub async fn page_project(Path(pid): Path<String>) -> Html<String> {
+    let pid2 = pid.clone();
+    let name = tokio::task::spawn_blocking(move || -> Option<String> {
+        let db = Database::open_global().ok()?;
+        db.get_project_by_id(&pid2).ok()?.map(|p| p.name)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| pid.clone());
+
+    render_shell(
+        &format!("{name} — agtx"),
+        &InitialState { project_id: Some(pid), task_id: None, artifact: None },
+    )
+}
+
+pub async fn page_task(Path((pid, tid)): Path<(String, String)>) -> Html<String> {
+    let pid2 = pid.clone();
+    let tid2 = tid.clone();
+    let names = tokio::task::spawn_blocking(move || -> Option<(String, String)> {
+        let db = Database::open_global().ok()?;
+        let project = db.get_project_by_id(&pid2).ok()??;
+        let project_path = PathBuf::from(&project.path);
+        let pdb = Database::open_project(&project_path).ok()?;
+        let task = pdb.get_task(&tid2).ok()??;
+        Some((project.name, task.title))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| (pid.clone(), tid.clone()));
+
+    let (proj_name, task_title) = names;
+    render_shell(
+        &format!("{task_title} — {proj_name} — agtx"),
+        &InitialState { project_id: Some(pid), task_id: Some(tid), artifact: None },
+    )
+}
+
+pub async fn page_artifact(
+    Path((pid, tid, artifact)): Path<(String, String, String)>,
+) -> Html<String> {
+    let pid2 = pid.clone();
+    let tid2 = tid.clone();
+    let names = tokio::task::spawn_blocking(move || -> Option<(String, String)> {
+        let db = Database::open_global().ok()?;
+        let project = db.get_project_by_id(&pid2).ok()??;
+        let project_path = PathBuf::from(&project.path);
+        let pdb = Database::open_project(&project_path).ok()?;
+        let task = pdb.get_task(&tid2).ok()??;
+        Some((project.name, task.title))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| (pid.clone(), tid.clone()));
+
+    let art_label = ARTIFACTS
+        .iter()
+        .find(|(name, _, _)| *name == artifact.as_str())
+        .map(|(_, label, _)| label.to_string())
+        .unwrap_or_else(|| artifact.clone());
+    let (proj_name, task_title) = names;
+    render_shell(
+        &format!("{art_label} — {task_title} — {proj_name} — agtx"),
+        &InitialState { project_id: Some(pid), task_id: Some(tid), artifact: Some(artifact) },
+    )
 }
 
 fn task_to_summary(task: &Task) -> TaskSummary {
