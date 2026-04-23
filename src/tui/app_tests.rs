@@ -3502,6 +3502,87 @@ fn test_send_skill_and_prompt_claude_with_trigger() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
+fn test_send_skill_and_prompt_clear_context_claude() {
+    // When clear_context=true and agent is Claude, /clear must be sent first,
+    // before the skill and then the task prompt.
+    let mut mock = MockTmuxOperations::new();
+    let keys_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keys_c = keys_calls.clone();
+
+    mock.expect_send_keys().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    // Simulate stable pane after /clear so the poll exits quickly.
+    mock.expect_capture_pane()
+        .returning(|_| Ok("✻ Welcome to Claude Code!".to_string()));
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    send_skill_and_prompt(
+        &tmux,
+        "sess:win",
+        &Some("/agtx:plan".to_string()),
+        "do the thing",
+        &None,
+        "do the thing",
+        "claude",
+        &[],
+        true,
+    );
+    let calls = keys_calls.lock().unwrap();
+    // /clear must appear and must come before the skill command.
+    let clear_pos = calls.iter().position(|c| c == "/clear");
+    let skill_pos = calls.iter().position(|c| c == "/agtx:plan");
+    assert!(clear_pos.is_some(), "/clear should be sent");
+    assert!(skill_pos.is_some(), "skill should be sent");
+    assert!(
+        clear_pos.unwrap() < skill_pos.unwrap(),
+        "/clear must be sent before the skill command"
+    );
+    assert!(
+        calls.iter().any(|c| c == "do the thing"),
+        "task prompt should be sent"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_send_skill_and_prompt_clear_context_ignored_for_non_claude() {
+    // When clear_context=true but agent is not Claude, /clear must NOT be sent.
+    let mut mock = MockTmuxOperations::new();
+    let keys_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keys_c = keys_calls.clone();
+
+    mock.expect_send_keys().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok(String::new()));
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    send_skill_and_prompt(
+        &tmux,
+        "sess:win",
+        &None,
+        "do the thing",
+        &None,
+        "do the thing",
+        "gemini",
+        &[],
+        true,
+    );
+    let calls = keys_calls.lock().unwrap();
+    assert!(
+        !calls.iter().any(|c| c == "/clear"),
+        "/clear must not be sent for non-Claude agents"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
 fn test_send_skill_and_prompt_prompt_only() {
     let mut mock = MockTmuxOperations::new();
     let keys_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
