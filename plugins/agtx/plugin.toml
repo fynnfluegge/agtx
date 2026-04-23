@@ -1,5 +1,6 @@
 name = "agtx"
 description = "Built-in workflow with skills and prompts"
+clear_context_on_advance = true
 
 [artifacts]
 research = ".agtx/research.md"

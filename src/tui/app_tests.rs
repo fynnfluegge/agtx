@@ -2177,6 +2177,7 @@ fn test_resolve_skill_command_with_plugin() {
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
+        clear_context_on_advance: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
     });
@@ -2239,6 +2240,7 @@ fn test_plugin_supports_agent() {
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
+        clear_context_on_advance: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
     };
@@ -2264,6 +2266,7 @@ fn test_plugin_supports_agent() {
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
+        clear_context_on_advance: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
     };
@@ -2335,6 +2338,7 @@ fn test_phase_artifact_exists_with_glob() {
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
+        clear_context_on_advance: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
     });
@@ -2656,6 +2660,7 @@ fn test_resolve_prompt_trigger_with_gsd() {
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
+        clear_context_on_advance: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
     });
@@ -2694,6 +2699,7 @@ fn test_resolve_prompt_trigger_empty_string_filtered() {
         copy_dirs: vec![],
         copy_files: vec![],
         cyclic: false,
+        clear_context_on_advance: false,
         copy_back: std::collections::HashMap::new(),
         auto_dismiss: vec![],
     });

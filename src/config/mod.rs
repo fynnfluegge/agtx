@@ -435,6 +435,11 @@ pub struct WorkflowPlugin {
     /// When true, enables Review → Planning transition for multi-phase workflows.
     #[serde(default)]
     pub cyclic: bool,
+    /// When true, send a "clear context" command (agent-specific) before the
+    /// phase skill and prompt on phase transitions. Currently honored only for
+    /// Claude Code (`/clear`); other agents fall through to normal send.
+    #[serde(default)]
+    pub clear_context_on_advance: bool,
     /// Files/dirs to copy from worktree back to project root after a phase completes.
     /// Keyed by phase name (e.g. { research = ["PROJECT.md", ".planning"] }).
     #[serde(default)]

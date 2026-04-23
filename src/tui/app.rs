@@ -4508,6 +4508,7 @@ impl App {
                             &task_content,
                             &planning_agent_clone,
                             &auto_dismiss,
+                            false,
                         );
                     }
                 }
@@ -4880,6 +4881,7 @@ impl App {
                             &task_content,
                             &agent_name,
                             &auto_dismiss,
+                            false,
                         );
                     }
                 }
@@ -4986,6 +4988,9 @@ impl App {
         let auto_dismiss = plugin
             .as_ref()
             .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+        let clear_context_on_advance = plugin
+            .as_ref()
+            .map_or(false, |p| p.clear_context_on_advance);
 
         // If a live session already exists (e.g. from a prior research/planning phase),
         // reuse it instead of creating a duplicate tmux window.
@@ -5085,6 +5090,7 @@ impl App {
                             &task_content,
                             &running_agent_clone,
                             &auto_dismiss,
+                            clear_context_on_advance,
                         );
                     }
                 }
@@ -5226,6 +5232,7 @@ impl App {
                             &task_content_clone,
                             &planning_agent_clone,
                             &auto_dismiss,
+                            false,
                         );
                     });
                 }
@@ -6267,6 +6274,7 @@ impl App {
                                             "",
                                             &agent_name,
                                             &[],
+                                            false,
                                         );
                                     }
                                     Ok(false) | Err(_) => {}
@@ -7653,6 +7661,7 @@ fn spawn_send_to_agent(
             &task_content,
             &target_agent,
             &auto_dismiss,
+            false,
         );
     });
 }
@@ -7670,7 +7679,35 @@ fn send_skill_and_prompt(
     task_content: &str,
     agent_name: &str,
     auto_dismiss: &[crate::config::AutoDismiss],
+    clear_context: bool,
 ) {
+    // Opt-in context clear on phase advance. Only Claude Code has a known
+    // clear command; other agents are tbd per issue #46 and fall through
+    // to normal send unchanged.
+    if clear_context && agent_name == "claude" {
+        let _ = tmux_ops.send_keys(target, "/clear");
+        // Wait for Claude to clear its buffer and return to idle prompt.
+        // Pattern mirrors the stability-poll loops used elsewhere in this
+        // function: poll until pane content stabilises (no changes for ~1s),
+        // capped at ~5s total.
+        let mut last_content = String::new();
+        let mut stable_ticks = 0u32;
+        for _ in 0..25 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if let Ok(content) = tmux_ops.capture_pane(target) {
+                if content != last_content {
+                    last_content = content;
+                    stable_ticks = 0;
+                } else {
+                    stable_ticks += 1;
+                    if stable_ticks >= 5 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // Gemini, Codex & OpenCode: always combine skill+prompt into a single message.
     // Gemini: sending separately causes it to execute the skill and queue the
     //   prompt, which gets lost or arrives too late.
