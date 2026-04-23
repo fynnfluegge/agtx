@@ -7652,6 +7652,10 @@ fn spawn_send_to_agent(
             switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_agent, &new_cmd);
             let _ = wait_for_agent_ready(&tmux_ops, &target);
         }
+        let clear_context = plugin
+            .as_ref()
+            .map(|p| p.clear_context_on_advance)
+            .unwrap_or(false);
         send_skill_and_prompt(
             &tmux_ops,
             &target,
@@ -7661,7 +7665,7 @@ fn spawn_send_to_agent(
             &task_content,
             &target_agent,
             &auto_dismiss,
-            false,
+            clear_context,
         );
     });
 }

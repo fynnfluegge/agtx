@@ -3419,6 +3419,7 @@ fn test_send_skill_and_prompt_gemini_combined() {
         "my task",
         "gemini",
         &[],
+        false,
     );
     let calls = literal_calls.lock().unwrap();
     assert!(calls
@@ -3451,6 +3452,7 @@ fn test_send_skill_and_prompt_codex_combined() {
         "do the thing",
         "codex",
         &[],
+        false,
     );
     let calls = literal_calls.lock().unwrap();
     assert!(calls
@@ -3485,6 +3487,7 @@ fn test_send_skill_and_prompt_claude_with_trigger() {
         "implement this",
         "claude",
         &[],
+        false,
     );
     let calls = keys_calls.lock().unwrap();
     assert!(
@@ -3519,6 +3522,7 @@ fn test_send_skill_and_prompt_prompt_only() {
         "just a prompt",
         "claude",
         &[],
+        false,
     );
     let calls = keys_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
@@ -3547,6 +3551,7 @@ fn test_send_skill_and_prompt_void_prefill() {
         "fix the login bug",
         "claude",
         &[],
+        false,
     );
     let calls = literal_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
@@ -8967,6 +8972,7 @@ fn test_send_skill_and_prompt_opencode_combined_with_double_enter() {
         "do the thing",
         "opencode",
         &[],
+        false,
     );
     let calls = literal_calls.lock().unwrap();
     // Combined message sent
@@ -9009,6 +9015,7 @@ fn test_send_skill_and_prompt_cursor_combined_single_enter() {
         "my task",
         "cursor",
         &[],
+        false,
     );
     let calls = literal_calls.lock().unwrap();
     assert!(
