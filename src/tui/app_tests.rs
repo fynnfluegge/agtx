@@ -1506,7 +1506,7 @@ fn test_setup_task_worktree_success() {
     // Expect worktree creation
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
 
     // Expect worktree initialization
     mock_git
@@ -1535,6 +1535,7 @@ fn test_setup_task_worktree_success() {
         "implement this",
         "main",
         ".agtx/worktrees",
+        "task",
         None,
         None,
         &None,
@@ -1568,7 +1569,7 @@ fn test_setup_task_worktree_sets_task_fields() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -1589,6 +1590,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         "fix the bug",
         "main",
         ".agtx/worktrees",
+        "task",
         Some("CLAUDE.md".to_string()),
         Some("./init.sh".to_string()),
         &None,
@@ -1610,8 +1612,8 @@ fn test_setup_task_worktree_sets_task_fields() {
         .as_ref()
         .unwrap()
         .contains(".agtx/worktrees/"));
-    // branch_name should be task/{slug}
-    let slug = &task.branch_name.as_ref().unwrap()["task/".len()..];
+    // branch_name should be {prefix}/{slug}
+    let slug = task.branch_name.as_ref().unwrap().rsplit_once('/').unwrap().1;
     assert!(task.worktree_path.as_ref().unwrap().ends_with(slug));
 }
 
@@ -1628,7 +1630,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     // Worktree creation fails
     mock_git
         .expect_create_worktree()
-        .returning(|_, _, _, _| Err(anyhow::anyhow!("worktree already exists")));
+        .returning(|_, _, _, _, _| Err(anyhow::anyhow!("worktree already exists")));
 
     // Should still initialize and create window with fallback path
     mock_git
@@ -1651,6 +1653,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         "do something",
         "main",
         ".agtx/worktrees",
+        "task",
         None,
         None,
         &None,
@@ -1685,7 +1688,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -1708,6 +1711,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         "do something",
         "main",
         ".agtx/worktrees",
+        "task",
         None,
         None,
         &None,
@@ -1737,7 +1741,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
 
     mock_git
         .expect_create_worktree()
-        .returning(|_, slug, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .returning(|_, slug, _, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
         .returning(|_, _, _, _, _| vec![]);
@@ -1761,6 +1765,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         "do work",
         "main",
         ".agtx/worktrees",
+        "task",
         None,
         None,
         &None,
@@ -1788,8 +1793,8 @@ fn test_setup_task_worktree_passes_init_config() {
 
     mock_git
         .expect_create_worktree()
-        .withf(|_, _, base_branch, _| base_branch == "development")
-        .returning(|_, slug, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
+        .withf(|_, _, base_branch, _, _| base_branch == "development")
+        .returning(|_, slug, _, _, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
 
     // Verify copy_files and init_script are passed through
     mock_git
@@ -1817,6 +1822,7 @@ fn test_setup_task_worktree_passes_init_config() {
         "implement feature",
         "development",
         ".agtx/worktrees",
+        "task",
         Some("CLAUDE.md,.env".to_string()),
         Some("./setup.sh".to_string()),
         &None,

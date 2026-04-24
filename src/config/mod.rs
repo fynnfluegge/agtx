@@ -175,6 +175,10 @@ pub struct WorktreeConfig {
     /// Directory (relative to project root) where worktrees are created
     #[serde(default = "default_worktree_dir")]
     pub worktree_dir: String,
+
+    /// Prefix for branch names (e.g. "user/pablospe" → "user/pablospe/slug")
+    #[serde(default = "default_branch_prefix")]
+    pub branch_prefix: String,
 }
 
 impl Default for WorktreeConfig {
@@ -184,12 +188,17 @@ impl Default for WorktreeConfig {
             auto_cleanup: true,
             base_branch: String::new(),
             worktree_dir: default_worktree_dir(),
+            branch_prefix: default_branch_prefix(),
         }
     }
 }
 
 fn default_worktree_dir() -> String {
     crate::git::DEFAULT_WORKTREE_DIR.to_string()
+}
+
+fn default_branch_prefix() -> String {
+    "task".to_string()
 }
 
 fn default_true() -> bool {
@@ -225,6 +234,9 @@ pub struct ProjectConfig {
 
     /// Workflow plugin name (e.g. "gsd", "spec-kit")
     pub workflow_plugin: Option<String>,
+
+    /// Override branch prefix for this project (e.g. "user/pablospe")
+    pub branch_prefix: Option<String>,
 }
 
 impl GlobalConfig {
@@ -350,6 +362,7 @@ pub struct MergedConfig {
     pub cleanup_script: Option<String>,
     pub workflow_plugin: Option<String>,
     pub fullscreen_on_enter: bool,
+    pub branch_prefix: String,
 }
 
 impl MergedConfig {
@@ -384,6 +397,10 @@ impl MergedConfig {
             cleanup_script: project.cleanup_script.clone(),
             workflow_plugin: project.workflow_plugin.clone(),
             fullscreen_on_enter: global.fullscreen_on_enter,
+            branch_prefix: project
+                .branch_prefix
+                .clone()
+                .unwrap_or_else(|| global.worktree.branch_prefix.clone()),
         }
     }
 

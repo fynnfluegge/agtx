@@ -18,6 +18,17 @@ pub fn create_worktree_from_base(
     base_branch: &str,
     worktree_dir: &str,
 ) -> Result<PathBuf> {
+    create_worktree_with_prefix(project_path, task_slug, base_branch, worktree_dir, "task")
+}
+
+/// Create a new git worktree for a task with a configurable branch prefix.
+pub fn create_worktree_with_prefix(
+    project_path: &Path,
+    task_slug: &str,
+    base_branch: &str,
+    worktree_dir: &str,
+    branch_prefix: &str,
+) -> Result<PathBuf> {
     let worktree_path = project_path
         .join(worktree_dir)
         .join(task_slug);
@@ -40,7 +51,7 @@ pub fn create_worktree_from_base(
     let base_branch = resolve_base_branch(project_path, base_branch)?;
 
     // Create worktree with a new branch based on the requested base branch
-    let branch_name = format!("task/{}", task_slug);
+    let branch_name = format!("{}/{}", branch_prefix, task_slug);
 
     // First, try to delete the branch if it exists (from a previous failed attempt)
     let _ = Command::new("git")
