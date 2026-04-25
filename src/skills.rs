@@ -147,6 +147,11 @@ pub const BUNDLED_PLUGINS: &[(&str, &str, &str)] = &[
         include_str!("../plugins/agtx/plugin.toml"),
     ),
     (
+        "agtx-terse",
+        "Token-efficient workflow — compressed output, ~65% fewer output tokens",
+        include_str!("../plugins/agtx-terse/plugin.toml"),
+    ),
+    (
         "gsd",
         "Get Shit Done - structured spec-driven development",
         include_str!("../plugins/gsd/plugin.toml"),

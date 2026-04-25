@@ -330,12 +330,13 @@ running = "codex"
 
 Plug any spec-driven framework into the task lifecycle. Define commands, prompts, and artifacts — agtx handles phase gating, artifact polling, worktree sync, agent switching, and autonomous execution.
 
-Press `P` to switch plugins. Ships with 9 built-in:
+Press `P` to switch plugins. Ships with 10 built-in:
 
 | Plugin | Description |
 |--------|-------------|
 | **void** | Plain agent session - no prompting or skills, task description prefilled in input |
 | **agtx** (default) | Built-in workflow with skills and prompts for each phase |
+| **agtx-terse** | Token-efficient variant of agtx — same workflow with compressed output (~65% fewer tokens) |
 | **gsd** | [Get Shit Done](https://github.com/fynnfluegge/get-shit-done-cc) - structured spec-driven development with interactive planning |
 | **spec-kit** | [Spec-Driven Development](https://github.com/github/spec-kit) by GitHub - specifications become executable artifacts |
 | **openspec** | [OpenSpec](https://github.com/Fission-AI/OpenSpec) - lightweight AI-guided specification framework |
