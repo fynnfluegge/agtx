@@ -1,5 +1,5 @@
 name = "agtx-terse"
-description = "Token-efficient workflow — compressed output, ~65% fewer output tokens"
+description = "Token-efficient workflow with compressed output and minimal token usage."
 clear_context_on_advance = true
 
 [artifacts]
