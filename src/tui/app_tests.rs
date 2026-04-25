@@ -2396,7 +2396,8 @@ fn test_bundled_plugins_list() {
     assert!(names.contains(&"bmad"));
     assert!(names.contains(&"superpowers"));
     assert!(names.contains(&"oh-my-claudecode"));
-    assert_eq!(names.len(), 8);
+    assert!(names.contains(&"agent-skills"));
+    assert_eq!(names.len(), 9);
 }
 
 #[test]
