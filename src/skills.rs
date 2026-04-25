@@ -148,7 +148,7 @@ pub const BUNDLED_PLUGINS: &[(&str, &str, &str)] = &[
     ),
     (
         "agtx-terse",
-        "Token-efficient workflow — compressed output, ~65% fewer output tokens",
+        "Token-efficient workflow - same workflow with compressed output and minimal tokens",
         include_str!("../plugins/agtx-terse/plugin.toml"),
     ),
     (
