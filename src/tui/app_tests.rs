@@ -2392,6 +2392,7 @@ fn test_bundled_plugins_are_valid_toml() {
 #[test]
 fn test_bundled_plugins_list() {
     let names: Vec<&str> = skills::BUNDLED_PLUGINS.iter().map(|(n, _, _)| *n).collect();
+    assert!(names.contains(&"agtx-terse"));
     assert!(names.contains(&"agtx"));
     assert!(names.contains(&"gsd"));
     assert!(names.contains(&"spec-kit"));
@@ -2401,7 +2402,7 @@ fn test_bundled_plugins_list() {
     assert!(names.contains(&"superpowers"));
     assert!(names.contains(&"oh-my-claudecode"));
     assert!(names.contains(&"agent-skills"));
-    assert_eq!(names.len(), 9);
+    assert_eq!(names.len(), 10);
 }
 
 #[test]
@@ -2453,11 +2454,11 @@ fn test_plugin_select_popup_construction_gsd_active() {
         });
     }
     let selected = options.iter().position(|o| o.active).unwrap_or(0);
-    // gsd is the second option (index 1)
-    assert_eq!(selected, 1);
+    // gsd is the third option (index 2), after agtx-terse
+    assert_eq!(selected, 2);
     assert!(!options[0].active);
-    assert!(options[1].active);
-    assert_eq!(options[1].name, "gsd");
+    assert!(options[2].active);
+    assert_eq!(options[2].name, "gsd");
 }
 
 #[test]
