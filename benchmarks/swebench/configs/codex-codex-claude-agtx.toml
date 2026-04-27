@@ -1,0 +1,11 @@
+# Codex researches and plans, Claude implements and reviews
+# Hypothesis: Codex's code-native research, Claude's broader reasoning for implementation
+default_agent = "claude"
+workflow_plugin = "agtx"
+worktree_dir = ".agtx/worktrees"
+
+[agents]
+research = "codex"
+planning = "codex"
+running  = "claude"
+review   = "claude"

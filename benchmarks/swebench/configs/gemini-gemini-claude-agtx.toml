@@ -1,0 +1,11 @@
+# Gemini researches and plans, Claude implements and reviews
+# Hypothesis: Gemini's large context for exploration, Claude's precision for coding
+default_agent = "claude"
+workflow_plugin = "agtx"
+worktree_dir = ".agtx/worktrees"
+
+[agents]
+research = "gemini"
+planning = "gemini"
+running  = "claude"
+review   = "claude"

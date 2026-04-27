@@ -61,7 +61,7 @@ workflow_plugin = "agtx"
 worktree_dir = ".agtx/worktrees"
 ```
 
-Mixed agents (different agent per phase) — `configs/mixed.toml`:
+Mixed agents (different agent per phase) — `configs/gemini-claude-codex-agtx.toml`:
 ```toml
 default_agent = "claude"
 workflow_plugin = "agtx"
