@@ -282,6 +282,8 @@ struct AppState {
     delete_confirm_popup: Option<DeleteConfirmPopup>,
     // Confirmation popup for asking if user wants to create PR when moving to Review
     review_confirm_popup: Option<ReviewConfirmPopup>,
+    // Trust-on-first-use confirmation popup
+    trust_confirm_popup: Option<TrustConfirmPopup>,
     // Channel for receiving background worktree setup results
     setup_rx: Option<mpsc::Receiver<SetupResult>>,
     // Phase detection
@@ -476,6 +478,12 @@ struct DeleteConfirmPopup {
     task_title: String,
 }
 
+/// State for trust-on-first-use confirmation popup
+#[derive(Debug, Clone)]
+struct TrustConfirmPopup {
+    project_path: std::path::PathBuf,
+}
+
 /// State for asking if user wants to create PR when moving to Review
 #[derive(Debug, Clone)]
 struct ReviewConfirmPopup {
@@ -646,6 +654,7 @@ impl App {
                 skip_move_confirm: false,
                 delete_confirm_popup: None,
                 review_confirm_popup: None,
+                trust_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
@@ -731,9 +740,13 @@ impl App {
             });
         }
 
-        // Display trust warning if project config was suppressed
-        if let Some(msg) = trust_warning {
-            app.state.warning_message = Some((msg, Instant::now()));
+        // Display trust confirmation popup if project config was suppressed
+        if trust_warning.is_some() {
+            if let Some(ref path) = app.state.project_path {
+                app.state.trust_confirm_popup = Some(TrustConfirmPopup {
+                    project_path: path.clone(),
+                });
+            }
         }
 
         Ok(app)
@@ -826,6 +839,7 @@ impl App {
                 skip_move_confirm: false,
                 delete_confirm_popup: None,
                 review_confirm_popup: None,
+                trust_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
@@ -2000,6 +2014,36 @@ impl App {
             frame.render_widget(content, inner);
         }
 
+        // Trust confirmation popup
+        if let Some(ref popup) = state.trust_confirm_popup {
+            let popup_area = centered_rect(60, 30, area);
+            frame.render_widget(Clear, popup_area);
+
+            let main_block = Block::default()
+                .title(" Untrusted Project Config ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow));
+            frame.render_widget(main_block, popup_area);
+
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 2,
+            });
+            let text = format!(
+                "This project's .agtx/config.toml has not been trusted yet.\n\n\
+                Dangerous fields (init_script, cleanup_script, copy_files) are\n\
+                currently disabled to protect against untrusted code execution.\n\n\
+                Project: {}\n\n\
+                Press any key to trust this project and continue.",
+                popup.project_path.display()
+            );
+            let content = Paragraph::new(text)
+                .style(Style::default().fg(Color::White))
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(content, inner);
+        }
+
         // Plugin selection popup
         if let Some(ref popup) = state.plugin_select_popup {
             let popup_area = centered_rect(50, 40, area);
@@ -2510,6 +2554,11 @@ impl App {
             return self.handle_review_confirm_key(key);
         }
 
+        // Handle trust confirmation popup if open
+        if self.state.trust_confirm_popup.is_some() {
+            return self.handle_trust_confirm_key(key);
+        }
+
         // Handle diff popup if open
         if self.state.diff_popup.is_some() {
             return self.handle_diff_popup_key(key);
@@ -2634,6 +2683,31 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    fn handle_trust_confirm_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let _ = key;
+        if let Some(popup) = self.state.trust_confirm_popup.clone() {
+            self.state.trust_confirm_popup = None;
+            // Trust the project: save hash to trust store
+            let mut store = crate::config::TrustStore::load().unwrap_or_default();
+            if let Err(e) = store.trust_project(&popup.project_path) {
+                self.state.warning_message =
+                    Some((format!("Failed to trust project: {}", e), Instant::now()));
+                return Ok(());
+            }
+            // Re-enable scripts by reloading project config and re-merging
+            let project_config =
+                crate::config::ProjectConfig::load(&popup.project_path).unwrap_or_default();
+            let global_config = crate::config::GlobalConfig::load().unwrap_or_default();
+            self.state.config = crate::config::MergedConfig::merge(&global_config, &project_config);
+            self.state.flags.no_init_scripts = false;
+            self.state.warning_message = Some((
+                "Project trusted. init_script, cleanup_script, and copy_files are now active.".to_string(),
+                Instant::now(),
+            ));
         }
         Ok(())
     }

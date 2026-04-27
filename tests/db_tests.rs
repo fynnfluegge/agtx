@@ -514,26 +514,31 @@ fn test_open_project_different_paths_are_isolated() {
 #[cfg(unix)]
 #[test]
 fn test_project_db_file_permissions_are_0600() {
+    use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
 
     let temp_dir = TempDir::new().unwrap();
     let _db = Database::open_project(temp_dir.path()).unwrap();
 
-    // Find the DB file in the config directory
-    let config_dir = directories::ProjectDirs::from("", "", "agtx")
-        .unwrap();
-    let projects_dir = config_dir.config_dir().join("projects");
+    // Replicate the same hash logic used by Database::open_project to find
+    // the exact DB file created for this temp dir, avoiding checking unrelated
+    // DB files that may have been created by other tests or real usage.
+    let path_str = temp_dir.path().to_string_lossy();
+    let mut hasher = Sha256::new();
+    hasher.update(path_str.as_bytes());
+    let result = hasher.finalize();
+    let path_hash = format!("{:016x}", u64::from_be_bytes(result[..8].try_into().unwrap()));
 
-    if projects_dir.exists() {
-        for entry in std::fs::read_dir(&projects_dir).unwrap() {
-            let entry = entry.unwrap();
-            if entry.path().extension().map_or(false, |e| e == "db") {
-                let perms = std::fs::metadata(entry.path()).unwrap().permissions();
-                let mode = perms.mode() & 0o777;
-                assert_eq!(mode, 0o600, "DB file should be owner-only read/write");
-            }
-        }
-    }
+    let config_dir = directories::ProjectDirs::from("", "", "agtx").unwrap();
+    let db_path = config_dir
+        .config_dir()
+        .join("projects")
+        .join(format!("{}.db", path_hash));
+
+    assert!(db_path.exists(), "Expected DB file not found at {:?}", db_path);
+    let perms = std::fs::metadata(&db_path).unwrap().permissions();
+    let mode = perms.mode() & 0o777;
+    assert_eq!(mode, 0o600, "DB file should be owner-only read/write");
 }
 
 #[cfg(unix)]

@@ -631,7 +631,7 @@ pub struct TrustStore {
 }
 
 impl TrustStore {
-    /// Load the trust store from `~/.config/agtx/trusted_projects.toml`.
+    /// Load the trust store from the platform config directory (e.g. `~/.config/agtx/trusted_projects.toml` on Linux, `~/Library/Application Support/agtx/` on macOS).
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
         if path.exists() {
@@ -653,12 +653,9 @@ impl TrustStore {
     }
 
     fn path() -> Result<PathBuf> {
-        let home = std::env::var("HOME")
-            .context("Could not determine home directory")?;
-        Ok(PathBuf::from(home)
-            .join(".config")
-            .join("agtx")
-            .join("trusted_projects.toml"))
+        let dirs = directories::ProjectDirs::from("", "", "agtx")
+            .context("Could not determine config directory")?;
+        Ok(dirs.config_dir().join("trusted_projects.toml"))
     }
 
     /// Compute SHA-256 of a project's `.agtx/config.toml` content.
