@@ -1,0 +1,3 @@
+default_agent = "claude"
+workflow_plugin = "agtx"
+worktree_dir = ".agtx/worktrees"
