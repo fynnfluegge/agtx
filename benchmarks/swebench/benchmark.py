@@ -786,8 +786,9 @@ class TaskRunner:
         branch_name = task.get("branch_name")
         if not branch_name:
             return ""
+        base_commit = self.instance["base_commit"]
         result = subprocess.run(
-            ["git", "diff", f"HEAD...{branch_name}",
+            ["git", "diff", f"{base_commit}..{branch_name}",
              "--", ".", ":!.agtx/"],
             cwd=self.repo_path,
             capture_output=True,
