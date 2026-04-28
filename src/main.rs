@@ -15,11 +15,30 @@ use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize audit logging to ~/.config/agtx/logs/
+    let log_dir = GlobalConfig::config_path()?
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "agtx.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .json()
+        .init();
+
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
 
-    // Extract flags (--experimental) from any position
+    // Extract flags from any position
     let experimental = args.iter().any(|a| a == "--experimental");
+    let no_init_scripts = args.iter().any(|a| a == "--no-init-scripts");
     let positional_args: Vec<&str> = args
         .iter()
         .skip(1)
@@ -44,6 +63,13 @@ async fn main() -> Result<()> {
             };
             return agtx::mcp::serve(project_path).await;
         }
+        Some("trust") => {
+            let project_path = std::env::current_dir()?.canonicalize()?;
+            let mut store = config::TrustStore::load().unwrap_or_default();
+            store.trust_project(&project_path)?;
+            println!("Trusted project config at {}", project_path.display());
+            return Ok(());
+        }
         Some("-g") => AppMode::Dashboard,
         Some(".") => AppMode::Project(std::env::current_dir()?),
         Some(path) => AppMode::Project(PathBuf::from(path)),
@@ -58,7 +84,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let flags = FeatureFlags { experimental };
+    let flags = FeatureFlags { experimental, no_init_scripts };
 
     // First-run: determine action based on config/data state
     let config_path = GlobalConfig::config_path()?;

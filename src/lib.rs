@@ -20,4 +20,6 @@ pub enum AppMode {
 pub struct FeatureFlags {
     /// Enable experimental features (orchestrator agent, etc.)
     pub experimental: bool,
+    /// When true, init_script fields in project and plugin configs are not executed.
+    pub no_init_scripts: bool,
 }

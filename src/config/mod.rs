@@ -542,8 +542,31 @@ impl WorkflowPlugin {
         self.supported_agents.is_empty() || self.supported_agents.iter().any(|a| a == agent_name)
     }
 
+    /// Validate that a plugin name is safe for use in filesystem paths.
+    /// Rejects names containing path separators, traversal sequences, or
+    /// characters outside [a-zA-Z0-9_-].
+    pub fn validate_plugin_name(name: &str) -> Result<()> {
+        if name.is_empty() {
+            anyhow::bail!("Plugin name must not be empty");
+        }
+        if name.contains('.') || name.contains('/') || name.contains('\\') {
+            anyhow::bail!(
+                "Plugin name '{}' contains invalid characters (., /, \\)",
+                name
+            );
+        }
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            anyhow::bail!(
+                "Plugin name '{}' contains invalid characters (only a-z, A-Z, 0-9, -, _ allowed)",
+                name
+            );
+        }
+        Ok(())
+    }
+
     /// Load a plugin by name, checking project-local then global directories
     pub fn load(name: &str, project_path: Option<&Path>) -> Result<Self> {
+        Self::validate_plugin_name(name)?;
         // 1. Check project-local
         if let Some(pp) = project_path {
             let local_path = pp
@@ -573,6 +596,9 @@ impl WorkflowPlugin {
 
     /// Get the plugin directory path (for reading skill files)
     pub fn plugin_dir(name: &str, project_path: Option<&Path>) -> Option<PathBuf> {
+        if Self::validate_plugin_name(name).is_err() {
+            return None;
+        }
         // Same lookup order: project-local first, then global
         if let Some(pp) = project_path {
             let local = pp.join(".agtx").join("plugins").join(name);
@@ -590,5 +616,78 @@ impl WorkflowPlugin {
             return Some(global);
         }
         None
+    }
+}
+
+/// Trust-on-first-use store for project configs.
+///
+/// Tracks SHA-256 hashes of `.agtx/config.toml` contents keyed by canonical project path.
+/// When a project's config hash doesn't match the stored value, dangerous fields
+/// (`init_script`, `copy_files`) are suppressed until the user explicitly trusts the project.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrustStore {
+    #[serde(default)]
+    pub projects: std::collections::HashMap<String, String>,
+}
+
+impl TrustStore {
+    /// Load the trust store from the platform config directory (e.g. `~/.config/agtx/trusted_projects.toml` on Linux, `~/Library/Application Support/agtx/` on macOS).
+    pub fn load() -> Result<Self> {
+        let path = Self::path()?;
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            Ok(toml::from_str(&content)?)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
+    /// Persist the trust store to disk.
+    pub fn save(&self) -> Result<()> {
+        let path = Self::path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, toml::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    fn path() -> Result<PathBuf> {
+        let dirs = directories::ProjectDirs::from("", "", "agtx")
+            .context("Could not determine config directory")?;
+        Ok(dirs.config_dir().join("trusted_projects.toml"))
+    }
+
+    /// Compute SHA-256 of a project's `.agtx/config.toml` content.
+    pub fn hash_config(project_path: &Path) -> Option<String> {
+        let config_path = project_path.join(".agtx").join("config.toml");
+        let content = std::fs::read(&config_path).ok()?;
+        use sha2::{Sha256, Digest};
+        let hash = Sha256::digest(&content);
+        Some(format!("{:x}", hash))
+    }
+
+    /// Check if a project's config is trusted (hash matches stored value).
+    pub fn is_trusted(&self, project_path: &Path) -> bool {
+        let canonical = project_path.canonicalize()
+            .unwrap_or_else(|_| project_path.to_path_buf());
+        let key = canonical.to_string_lossy().to_string();
+        match (self.projects.get(&key), Self::hash_config(project_path)) {
+            (Some(stored), Some(current)) => stored == &current,
+            (None, None) => true, // No .agtx/config.toml — nothing to distrust
+            _ => false,
+        }
+    }
+
+    /// Mark a project's current config as trusted.
+    pub fn trust_project(&mut self, project_path: &Path) -> Result<()> {
+        let canonical = project_path.canonicalize()
+            .unwrap_or_else(|_| project_path.to_path_buf());
+        let key = canonical.to_string_lossy().to_string();
+        if let Some(hash) = Self::hash_config(project_path) {
+            self.projects.insert(key, hash);
+            self.save()?;
+        }
+        Ok(())
     }
 }

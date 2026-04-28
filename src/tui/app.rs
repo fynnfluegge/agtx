@@ -282,6 +282,8 @@ struct AppState {
     delete_confirm_popup: Option<DeleteConfirmPopup>,
     // Confirmation popup for asking if user wants to create PR when moving to Review
     review_confirm_popup: Option<ReviewConfirmPopup>,
+    // Trust-on-first-use confirmation popup
+    trust_confirm_popup: Option<TrustConfirmPopup>,
     // Channel for receiving background worktree setup results
     setup_rx: Option<mpsc::Receiver<SetupResult>>,
     // Phase detection
@@ -476,6 +478,12 @@ struct DeleteConfirmPopup {
     task_title: String,
 }
 
+/// State for trust-on-first-use confirmation popup
+#[derive(Debug, Clone)]
+struct TrustConfirmPopup {
+    project_path: std::path::PathBuf,
+}
+
 /// State for asking if user wants to create PR when moving to Review
 #[derive(Debug, Clone)]
 struct ReviewConfirmPopup {
@@ -538,13 +546,14 @@ impl App {
         let available_agents = agent::detect_available_agents();
 
         // Setup based on mode
-        let (db, project_path, project_name, tmux_project_name, project_config) = match &mode {
+        let (db, project_path, project_name, tmux_project_name, project_config, trust_warning) = match &mode {
             AppMode::Dashboard => (
                 None,
                 None,
                 "Dashboard".to_string(),
                 tmux::safe_session_name("Dashboard"),
                 ProjectConfig::default(),
+                None,
             ),
             AppMode::Project(path) => {
                 let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
@@ -554,8 +563,27 @@ impl App {
                     .unwrap_or("unknown")
                     .to_string();
                 let tmux_name = tmux::safe_session_name(&name);
-                let project_config = ProjectConfig::load(&canonical).unwrap_or_default();
+                let mut project_config = ProjectConfig::load(&canonical).unwrap_or_default();
                 let db = Database::open_project(&canonical)?;
+
+                // Trust-on-first-use: suppress dangerous config fields from untrusted projects
+                let trust_store = crate::config::TrustStore::load().unwrap_or_default();
+                let trust_warning = if !trust_store.is_trusted(&canonical) {
+                    if project_config.init_script.is_some() || project_config.copy_files.is_some() || project_config.cleanup_script.is_some() {
+                        tracing::warn!(
+                            project = %canonical.display(),
+                            "Untrusted project config — init_script, cleanup_script, and copy_files suppressed"
+                        );
+                        project_config.init_script = None;
+                        project_config.cleanup_script = None;
+                        project_config.copy_files = None;
+                        Some("Untrusted project config: init_script, cleanup_script, and copy_files disabled. Run `agtx trust` to enable.".to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
 
                 // Register project in global database
                 let project = crate::db::Project::new(&name, canonical.to_string_lossy());
@@ -564,11 +592,18 @@ impl App {
                 // Ensure tmux session exists for this project
                 ensure_project_tmux_session(&tmux_name, &canonical, tmux_ops.as_ref());
 
-                (Some(db), Some(canonical), name, tmux_name, project_config)
+                (Some(db), Some(canonical), name, tmux_name, project_config, trust_warning)
             }
         };
 
         let config = MergedConfig::merge(&global_config, &project_config);
+
+        // If the project is untrusted, also suppress plugin init_scripts
+        // by forcing no_init_scripts in the flags
+        let mut flags = flags;
+        if trust_warning.is_some() {
+            flags.no_init_scripts = true;
+        }
 
         let mut app = Self {
             terminal,
@@ -619,6 +654,7 @@ impl App {
                 skip_move_confirm: false,
                 delete_confirm_popup: None,
                 review_confirm_popup: None,
+                trust_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
@@ -702,6 +738,15 @@ impl App {
                     ready_flag.store(true, Ordering::Release);
                 }
             });
+        }
+
+        // Display trust confirmation popup if project config was suppressed
+        if trust_warning.is_some() {
+            if let Some(ref path) = app.state.project_path {
+                app.state.trust_confirm_popup = Some(TrustConfirmPopup {
+                    project_path: path.clone(),
+                });
+            }
         }
 
         Ok(app)
@@ -794,6 +839,7 @@ impl App {
                 skip_move_confirm: false,
                 delete_confirm_popup: None,
                 review_confirm_popup: None,
+                trust_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
@@ -1968,6 +2014,36 @@ impl App {
             frame.render_widget(content, inner);
         }
 
+        // Trust confirmation popup
+        if let Some(ref popup) = state.trust_confirm_popup {
+            let popup_area = centered_rect(60, 30, area);
+            frame.render_widget(Clear, popup_area);
+
+            let main_block = Block::default()
+                .title(" Untrusted Project Config ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow));
+            frame.render_widget(main_block, popup_area);
+
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 2,
+            });
+            let text = format!(
+                "This project's .agtx/config.toml has not been trusted yet.\n\n\
+                Dangerous fields (init_script, cleanup_script, copy_files) are\n\
+                currently disabled to protect against untrusted code execution.\n\n\
+                Project: {}\n\n\
+                Press any key to trust this project and continue.",
+                popup.project_path.display()
+            );
+            let content = Paragraph::new(text)
+                .style(Style::default().fg(Color::White))
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(content, inner);
+        }
+
         // Plugin selection popup
         if let Some(ref popup) = state.plugin_select_popup {
             let popup_area = centered_rect(50, 40, area);
@@ -2478,6 +2554,11 @@ impl App {
             return self.handle_review_confirm_key(key);
         }
 
+        // Handle trust confirmation popup if open
+        if self.state.trust_confirm_popup.is_some() {
+            return self.handle_trust_confirm_key(key);
+        }
+
         // Handle diff popup if open
         if self.state.diff_popup.is_some() {
             return self.handle_diff_popup_key(key);
@@ -2606,6 +2687,31 @@ impl App {
         Ok(())
     }
 
+    fn handle_trust_confirm_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let _ = key;
+        if let Some(popup) = self.state.trust_confirm_popup.clone() {
+            self.state.trust_confirm_popup = None;
+            // Trust the project: save hash to trust store
+            let mut store = crate::config::TrustStore::load().unwrap_or_default();
+            if let Err(e) = store.trust_project(&popup.project_path) {
+                self.state.warning_message =
+                    Some((format!("Failed to trust project: {}", e), Instant::now()));
+                return Ok(());
+            }
+            // Re-enable scripts by reloading project config and re-merging
+            let project_config =
+                crate::config::ProjectConfig::load(&popup.project_path).unwrap_or_default();
+            let global_config = crate::config::GlobalConfig::load().unwrap_or_default();
+            self.state.config = crate::config::MergedConfig::merge(&global_config, &project_config);
+            self.state.flags.no_init_scripts = false;
+            self.state.warning_message = Some((
+                "Project trusted. init_script, cleanup_script, and copy_files are now active.".to_string(),
+                Instant::now(),
+            ));
+        }
+        Ok(())
+    }
+
     fn open_plugin_select_popup(&mut self) {
         let current = self
             .state
@@ -2718,7 +2824,11 @@ impl App {
                 let tmux_ops = Arc::clone(&self.state.tmux_ops);
                 let git_ops = Arc::clone(&self.state.git_ops);
                 let task_id = task.id.clone();
-                let cleanup_script = self.state.config.cleanup_script.clone();
+                let cleanup_script = if self.state.flags.no_init_scripts {
+                    None
+                } else {
+                    self.state.config.cleanup_script.clone()
+                };
                 std::thread::spawn(move || {
                     cleanup_task_resources(
                         &task_id,
@@ -4175,9 +4285,14 @@ impl App {
     fn perform_delete_task(&mut self, task_id: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(task) = db.get_task(task_id)? {
+                let cleanup_script = if self.state.flags.no_init_scripts {
+                    None
+                } else {
+                    self.state.config.cleanup_script.clone()
+                };
                 delete_task_resources(
                     &task,
-                    self.state.config.cleanup_script.as_deref(),
+                    cleanup_script.as_deref(),
                     project_path,
                     self.state.tmux_ops.as_ref(),
                     self.state.git_ops.as_ref(),
@@ -4424,7 +4539,12 @@ impl App {
             .unwrap_or_else(|| self.state.config.base_branch.clone());
         let worktree_dir = self.state.config.worktree_dir.clone();
         let copy_files = self.state.config.copy_files.clone();
-        let init_script = self.state.config.init_script.clone();
+        let init_script = if self.state.flags.no_init_scripts {
+            None
+        } else {
+            self.state.config.init_script.clone()
+        };
+        let skip_init_scripts = self.state.flags.no_init_scripts;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
         let agent_ops = self.state.agent_registry.get(&planning_agent);
@@ -4484,6 +4604,7 @@ impl App {
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
                 &referenced_tasks,
+                skip_init_scripts,
             );
 
             match result {
@@ -4704,7 +4825,11 @@ impl App {
         let git_ops = Arc::clone(&self.state.git_ops);
         let task_id_clone = task.id.clone();
         let project_path_clone = project_path.to_path_buf();
-        let cleanup_script = self.state.config.cleanup_script.clone();
+        let cleanup_script = if self.state.flags.no_init_scripts {
+            None
+        } else {
+            self.state.config.cleanup_script.clone()
+        };
         std::thread::spawn(move || {
             cleanup_task_resources(
                 &task_id_clone,
@@ -4780,7 +4905,12 @@ impl App {
             .unwrap_or_else(|| self.state.config.base_branch.clone());
         let worktree_dir = self.state.config.worktree_dir.clone();
         let copy_files = self.state.config.copy_files.clone();
-        let init_script = self.state.config.init_script.clone();
+        let init_script = if self.state.flags.no_init_scripts {
+            None
+        } else {
+            self.state.config.init_script.clone()
+        };
+        let skip_init_scripts = self.state.flags.no_init_scripts;
 
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
@@ -4820,6 +4950,7 @@ impl App {
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
                 &[],
+                skip_init_scripts,
             );
 
             match result {
@@ -5033,7 +5164,12 @@ impl App {
             .unwrap_or_else(|| self.state.config.base_branch.clone());
         let worktree_dir = self.state.config.worktree_dir.clone();
         let copy_files = self.state.config.copy_files.clone();
-        let init_script = self.state.config.init_script.clone();
+        let init_script = if self.state.flags.no_init_scripts {
+            None
+        } else {
+            self.state.config.init_script.clone()
+        };
+        let skip_init_scripts = self.state.flags.no_init_scripts;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
         let agent_ops = self.state.agent_registry.get(&running_agent);
@@ -5065,6 +5201,7 @@ impl App {
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
                 &[],
+                skip_init_scripts,
             );
 
             match result {
@@ -5341,6 +5478,12 @@ impl App {
     }
 
     fn execute_transition_request(&mut self, req: &TransitionRequest) -> Result<()> {
+        tracing::info!(
+            task_id = %req.task_id,
+            action = %req.action,
+            "Processing transition request"
+        );
+
         let Some(db) = &self.state.db else {
             anyhow::bail!("No project database");
         };
@@ -6575,6 +6718,12 @@ fn run_cleanup_script_for_worktree(cleanup_script: Option<&str>, worktree_path: 
         return;
     }
 
+    tracing::info!(
+        script = script,
+        worktree = %worktree_path.display(),
+        "Executing cleanup_script"
+    );
+
     match git::run_worktree_script(script, worktree_path, &[]) {
         Err(e) => eprintln!("cleanup_script failed to run: {}", e),
         Ok(output) => {
@@ -6702,6 +6851,7 @@ fn setup_task_worktree(
     git_ops: &dyn GitOperations,
     agent_ops: &dyn AgentOperations,
     referenced_tasks: &[ReferencedTaskInfo],
+    skip_init_scripts: bool,
 ) -> Result<String> {
     let unique_slug = generate_task_slug(&task.id, &task.title);
     let window_name = format!("task-{}", unique_slug);
@@ -6799,28 +6949,36 @@ fn setup_task_worktree(
 
     // Run plugin init_script (in addition to project init_script)
     // Supports {agent} placeholder for agent-specific initialization
-    if let Some(ref p) = plugin {
-        if let Some(ref script) = p.init_script {
-            let script = script.replace("{agent}", agent_name);
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&script)
-                .current_dir(&worktree_path_str)
-                .output();
-            match output {
-                Ok(o) if !o.status.success() => {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    anyhow::bail!(
-                        "Plugin init_script failed (exit {}): {}\n{}",
-                        o.status.code().unwrap_or(-1),
-                        script,
-                        stderr.trim()
-                    );
+    if !skip_init_scripts {
+        if let Some(ref p) = plugin {
+            if let Some(ref script) = p.init_script {
+                let script = script.replace("{agent}", agent_name);
+                tracing::info!(
+                    script = %script,
+                    agent = agent_name,
+                    worktree = %worktree_path_str,
+                    "Executing plugin init_script"
+                );
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&script)
+                    .current_dir(&worktree_path_str)
+                    .output();
+                match output {
+                    Ok(o) if !o.status.success() => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        anyhow::bail!(
+                            "Plugin init_script failed (exit {}): {}\n{}",
+                            o.status.code().unwrap_or(-1),
+                            script,
+                            stderr.trim()
+                        );
+                    }
+                    Err(e) => {
+                        anyhow::bail!("Plugin init_script failed to run: {}\n{}", script, e);
+                    }
+                    _ => {}
                 }
-                Err(e) => {
-                    anyhow::bail!("Plugin init_script failed to run: {}\n{}", script, e);
-                }
-                _ => {}
             }
         }
     }
@@ -6837,6 +6995,13 @@ fn setup_task_worktree(
 
     // Ensure project tmux session exists
     ensure_project_tmux_session(tmux_project_name, project_path, tmux_ops);
+
+    tracing::info!(
+        task_id = %task.id,
+        agent = agent_name,
+        worktree = %worktree_path_str,
+        "Agent session spawned"
+    );
 
     tmux_ops.create_window(
         tmux_project_name,
@@ -7888,6 +8053,12 @@ fn wait_for_prompt_trigger(
             if stable_ticks >= 4 {
                 for rule in auto_dismiss {
                     if rule.detect.iter().all(|p| content.contains(p.as_str())) {
+                        tracing::info!(
+                            target = target,
+                            patterns = ?rule.detect,
+                            response = %rule.response,
+                            "Auto-dismiss rule triggered"
+                        );
                         for key in rule.response.split('\n') {
                             let _ = tmux_ops.send_keys_literal(target, key);
                             std::thread::sleep(std::time::Duration::from_millis(100));
