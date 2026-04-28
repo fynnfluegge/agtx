@@ -20,7 +20,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 **tokscale** (token/cost tracking — optional but recommended):
 ```bash
-cargo install tokscale
+npm install -g tokscale
 ```
 If not installed, `cost_usd` and token fields will be `null` in results.
 

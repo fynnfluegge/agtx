@@ -14,7 +14,7 @@ drive artifact polling.
 
 Token/cost metrics use tokscale (https://github.com/junhoyeo/tokscale) if
 available. Supports claude, codex, gemini, and 20+ other agents. Install with:
-    cargo install tokscale
+    npm install -g tokscale
 If tokscale is not installed, cost fields are null.
 
 Usage:
@@ -326,13 +326,13 @@ def kill_tmux_session(slug: str, repo_path: Path | None = None) -> None:
 # Token/cost tracking via tokscale
 # ---------------------------------------------------------------------------
 
-# tokscale client names that map to agtx agent names
-_TOKSCALE_CLIENT: dict[str, str] = {
-    "claude":    "claude",
-    "codex":     "codex",
-    "gemini":    "gemini",
-    "opencode":  "opencode",
-    "copilot":   "copilot",
+# CLI flag that filters tokscale output to a specific agent
+_TOKSCALE_FLAG: dict[str, str] = {
+    "claude":   "--claude",
+    "codex":    "--codex",
+    "gemini":   "--gemini",
+    "copilot":  "--copilot",
+    "opencode": "--opencode",
 }
 
 # Cached result of tokscale availability check
@@ -349,39 +349,37 @@ def _find_tokscale() -> str | None:
     return _tokscale_bin  # type: ignore
 
 
-def _tokscale_snapshot(client: str) -> dict:
+def _tokscale_snapshot(agent: str) -> dict:
     """
-    Run `tokscale --json --client {client} --today` and return aggregated totals:
+    Run `tokscale --json --today --{agent}` and return aggregated totals across all models:
         {input, output, cache_read, cache_write, reasoning, cost_usd}
-    Returns zeros if tokscale is unavailable or the client has no records today.
+    Returns zeros if tokscale is unavailable or the agent has no records today.
     """
     tokscale = _find_tokscale()
     if not tokscale:
         return {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0, "cost_usd": 0.0}
 
+    flag = _TOKSCALE_FLAG.get(agent)
+    cmd = [tokscale, "--json", "--today"]
+    if flag:
+        cmd.append(flag)
+
     try:
-        result = subprocess.run(
-            [tokscale, "--json", "--client", client, "--today"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if result.returncode != 0 or not result.stdout.strip():
             return {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0, "cost_usd": 0.0}
 
-        records = json.loads(result.stdout)
-        if not isinstance(records, list):
-            records = [records]
+        data = json.loads(result.stdout)
+        entries = data.get("entries", [])
 
         totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0, "cost_usd": 0.0}
-        for rec in records:
-            tokens = rec.get("tokens", {})
-            totals["input"]       += tokens.get("input", 0)
-            totals["output"]      += tokens.get("output", 0)
-            totals["cache_read"]  += tokens.get("cache_read", 0)
-            totals["cache_write"] += tokens.get("cache_write", 0)
-            totals["reasoning"]   += tokens.get("reasoning", 0)
-            totals["cost_usd"]    += rec.get("cost", 0.0)
+        for entry in entries:
+            totals["input"]       += entry.get("input", 0)
+            totals["output"]      += entry.get("output", 0)
+            totals["cache_read"]  += entry.get("cacheRead", 0)
+            totals["cache_write"] += entry.get("cacheWrite", 0)
+            totals["reasoning"]   += entry.get("reasoning", 0)
+            totals["cost_usd"]    += entry.get("cost", 0.0)
         return totals
 
     except Exception:
@@ -399,15 +397,15 @@ def tokscale_diff(before: dict, after: dict) -> dict:
     inp  = max(0, after["input"]   - before["input"])
     out  = max(0, after["output"]  - before["output"])
     cost = max(0.0, after["cost_usd"] - before["cost_usd"])
-    total = inp + out + max(0, after["cache_read"] - before["cache_read"]) + \
-            max(0, after["cache_write"] - before["cache_write"]) + \
-            max(0, after["reasoning"] - before["reasoning"])
+    total = inp + out + max(0, after["cache_read"]  - before["cache_read"]) + \
+                        max(0, after["cache_write"] - before["cache_write"]) + \
+                        max(0, after["reasoning"]   - before["reasoning"])
 
     return {
         "cost_usd":      round(cost, 6) if cost > 0 else None,
-        "input_tokens":  inp  if (inp or out) else None,
-        "output_tokens": out  if (inp or out) else None,
-        "cost_tokens":   total if total > 0 else None,
+        "input_tokens":  inp   if (inp or out) else None,
+        "output_tokens": out   if (inp or out) else None,
+        "cost_tokens":   total if total > 0    else None,
     }
 
 
@@ -669,6 +667,7 @@ class TaskRunner:
                 + "\n\n---\n"
                 + "Note: the repo may not be fully installable in this environment. "
                 + "Do not attempt to build, install, or run tests. "
+                + "Do not run any git commands (no fetch, pull, merge, or commit). "
                 + "Read the source code, understand the bug, and fix it by editing the relevant files directly."
             )
             task_resp = self.mcp.call(
@@ -692,8 +691,7 @@ class TaskRunner:
             worktree_path = planning_task.get("worktree_path", "")
 
             # Snapshot tokscale before agent starts working
-            client = _TOKSCALE_CLIENT.get(self.running_agent, self.running_agent)
-            cost_before = _tokscale_snapshot(client)
+            cost_before = _tokscale_snapshot(self.running_agent)
 
             # Wait for planning phase artifact (.agtx/plan.md for agtx/agtx-terse plugins)
             planning_artifact = PLUGIN_PLANNING_ARTIFACTS.get(self.plugin)
@@ -732,7 +730,7 @@ class TaskRunner:
                 self._wait_for_pane_stable(task_id, self.phase_timeout)
 
             # Snapshot again and diff to get this task's usage
-            cost_data = tokscale_diff(cost_before, _tokscale_snapshot(client))
+            cost_data = tokscale_diff(cost_before, _tokscale_snapshot(self.running_agent))
 
             if self.verbose:
                 print(f"  [{self.instance_id}] Running done, moving to Review...", file=sys.stderr)
@@ -783,14 +781,18 @@ class TaskRunner:
                 self.mcp.close()
 
     def _collect_patch(self, task: dict) -> str:
-        branch_name = task.get("branch_name")
-        if not branch_name:
+        worktree_path = task.get("worktree_path")
+        if not worktree_path:
             return ""
         base_commit = self.instance["base_commit"]
+        # Diff the worktree's actual files against the base commit.
+        # Using the worktree path directly avoids picking up any extra commits
+        # the agent may have merged/fetched onto the branch — we only care about
+        # file-level changes, not git history.
         result = subprocess.run(
-            ["git", "diff", f"{base_commit}..{branch_name}",
+            ["git", "diff", base_commit,
              "--", ".", ":!.agtx/"],
-            cwd=self.repo_path,
+            cwd=worktree_path,
             capture_output=True,
         )
         if result.returncode != 0:
