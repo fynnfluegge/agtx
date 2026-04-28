@@ -9,13 +9,16 @@ You are in the **planning phase** of an agtx-managed task.
 
 ## Input
 
-- **Task description** — provided inline with this command (when entering directly from Backlog)
-- **`.agtx/research.md`** — prior analysis from research phase (when research was completed first)
+The argument to this command is a task ID. Fetch the task description using the agtx MCP tool:
+```
+mcp__agtx__get_task(task_id: "<the id passed to this command>")
+```
+Use the `description` field as the task to work on. Also check for `.agtx/research.md` if a research phase was completed first.
 
 ## Instructions
 
-1. If `.agtx/research.md` exists, read it for prior analysis
-2. Read and understand the task description
+1. Fetch the task description via `get_task`
+2. If `.agtx/research.md` exists, read it for prior analysis
 3. Explore the codebase to understand relevant files, patterns, and architecture
 4. Identify all files that need to be created or modified
 5. Create a detailed implementation plan

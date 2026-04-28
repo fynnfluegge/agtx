@@ -1,9 +1,8 @@
 default_agent = "claude"
-workflow_plugin = "agtx-terse"
+workflow_plugin = "agtx"
 worktree_dir = ".agtx/worktrees"
 
 [agents]
-research = "gemini"
 planning = "claude"
 running  = "codex"
-review   = "claude"
+review   = "gemini"

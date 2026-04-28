@@ -13,7 +13,7 @@ collects git diff patches, and outputs SWE-bench-compatible results.
 cargo build --release
 ```
 
-**uv** (Python package manager):
+**uv** (Python package manager — used both to run the script and to install each benchmark repo):
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
@@ -42,7 +42,17 @@ At least one coding agent CLI must be installed and authenticated:
 
 ### Setup
 
-**1. Create a config file** for your benchmark run.
+**1. Initialize the Python environment:**
+```bash
+cd benchmarks/swebench
+uv sync
+cd ../..
+```
+
+This creates a `.venv` inside `benchmarks/swebench/` and installs all dependencies.
+Only needed once (or after updating `pyproject.toml`).
+
+**2. Create a config file** for your benchmark run.
 
 Config files live in `benchmarks/swebench/configs/`. Each file is a standard agtx
 `ProjectConfig` TOML that gets written to `.agtx/config.toml` in every cloned repo.
@@ -74,28 +84,19 @@ review   = "codex"
 
 Available plugins: `void`, `agtx`, `agtx-terse`, `gsd`, `spec-kit`, `bmad`, `openspec`, `superpowers`
 
-**2. Install Python dependencies:**
-```bash
-uv sync --project benchmarks/swebench
-```
-
-Or without a project file:
-```bash
-uv pip install -r benchmarks/swebench/requirements.txt
-```
-
 ---
 
 ### Running
 
-All commands are run from the repo root.
+All commands are run from the repo root. `uv run` picks up the venv in
+`benchmarks/swebench/.venv` via the `--project` flag.
 
 **Single task (smoke test):**
 ```bash
 uv run --project benchmarks/swebench \
   python benchmarks/swebench/benchmark.py \
   --config benchmarks/swebench/configs/claude-void.toml \
-  --instances 1
+  --instances 1 --verbose
 ```
 
 **Specific instance IDs:**
@@ -129,6 +130,13 @@ uv run --project benchmarks/swebench \
   --output-dir swebench_output/agtx_claude_20260427_120000
 ```
 
+Alternatively, activate the venv directly for a shorter prompt:
+```bash
+source benchmarks/swebench/.venv/bin/activate
+python benchmarks/swebench/benchmark.py --config benchmarks/swebench/configs/claude-agtx.toml
+deactivate
+```
+
 #### All options
 
 | Flag | Default | Description |
@@ -143,6 +151,7 @@ uv run --project benchmarks/swebench \
 | `--phase-timeout SECS` | 1200 | Per-phase max seconds (20 min) |
 | `--model-name STRING` | `agtx-{plugin}-{agent}` | Label in predictions.jsonl |
 | `--split STRING` | `test` | HuggingFace dataset split |
+| `--verbose` / `-v` | off | Print step-by-step progress to stderr (good for debugging) |
 
 ---
 
@@ -180,6 +189,50 @@ cat swebench_output/*/results.json | \
 
 ---
 
+### Cleanup
+
+After an interrupted or completed run, stale state (worktrees, tmux sessions, SQLite DBs) can be
+cleaned up manually.
+
+**Clean all repos** (wipe worktrees + task DBs, keep clones so the next run doesn't re-clone):
+```bash
+# Remove all .agtx/ dirs from every repo clone
+find /tmp/swebench_repos -maxdepth 2 -name ".agtx" -type d -exec rm -rf {} + 2>/dev/null
+
+# Kill both tmux servers (swebench = TUI sessions, agtx = agent windows)
+tmux -L swebench kill-server 2>/dev/null
+tmux -L agtx kill-server 2>/dev/null
+```
+
+**Clean a specific instance** (e.g. `astropy__astropy-12907`):
+```bash
+INSTANCE=astropy__astropy-12907
+SLUG=$(echo "$INSTANCE" | tr '[:upper:]' '[:lower:]' | tr '_' '-' | cut -c1-50)
+
+rm -rf /tmp/swebench_repos/$INSTANCE/.agtx
+tmux -L swebench kill-session -t $SLUG 2>/dev/null
+tmux -L agtx kill-session -t $INSTANCE 2>/dev/null
+```
+
+**Clean the SQLite project DB** for a specific instance:
+```bash
+INSTANCE=astropy__astropy-12907
+AGTX_DB_DIR=~/Library/Application\ Support/agtx  # macOS; Linux: ~/.config/agtx
+
+# Find which project DB contains the instance
+for db in "$AGTX_DB_DIR/projects/"*.db; do
+  result=$(sqlite3 "$db" "SELECT title FROM tasks WHERE title LIKE '%$INSTANCE%' LIMIT 1" 2>/dev/null)
+  if [ -n "$result" ]; then
+    echo "Found in: $db"
+    rm "$db"
+    sqlite3 "$AGTX_DB_DIR/index.db" "DELETE FROM projects WHERE path LIKE '%$INSTANCE%';"
+    echo "Deleted."
+  fi
+done
+```
+
+---
+
 ### Evaluation
 
 After the run, evaluate patches against the SWE-bench test harness
@@ -207,15 +260,17 @@ benchmark.py
   ├── Starts agtx TUI per task in detached tmux (tmux -L swebench)
   ├── Spawns agtx mcp-serve as subprocess (JSON-RPC 2.0 over stdio)
   ├── Drives task via MCP:
-  │     create_task → move_forward (Planning) → move_forward (Running)
-  │     → poll artifact file or pane stability → move_forward (Review)
-  │     → git diff HEAD...{branch} → move_to_done
+  │     create_task → move_forward (Planning)
+  │     → poll planning artifact → move_forward (Running)
+  │     → poll running artifact  → move_forward (Review)
+  │     → poll review artifact   → git diff HEAD...{branch} → move_to_done
   ├── Snapshots tokscale before/after running phase for token counts
   └── Appends to predictions.jsonl + rewrites results.json atomically
 ```
 
-Phase completion detection (in priority order):
-1. **Artifact file** — if the plugin defines a `running` artifact (e.g. `.agtx/execute.md`
-   for the `agtx` plugin), polls for its existence every 5 seconds
+Phase completion detection (per phase, in priority order):
+1. **Artifact file** — if the plugin defines an artifact for that phase (e.g. `.agtx/plan.md`,
+   `.agtx/execute.md`, `.agtx/review.md` for the `agtx`/`agtx-terse` plugins), polls for its
+   existence every 5 seconds
 2. **Pane stability** — fallback for plugins without artifacts (e.g. `void`): two
    consecutive unchanged pane reads at 30-second intervals (≥60s stable)

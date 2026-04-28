@@ -1,3 +1,0 @@
-default_agent = "opencode"
-workflow_plugin = "agtx"
-worktree_dir = ".agtx/worktrees"

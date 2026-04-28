@@ -3,7 +3,6 @@ workflow_plugin = "agtx-terse"
 worktree_dir = ".agtx/worktrees"
 
 [agents]
-research = "gemini"
 planning = "gemini"
 running  = "claude"
-review   = "claude"
+review   = "codex"

@@ -532,8 +532,8 @@ impl WorkflowPlugin {
             return true;
         }
 
-        cmd.map_or(false, |c| c.contains("{task}"))
-            || prompt.map_or(false, |p| p.contains("{task}"))
+        cmd.map_or(false, |c| c.contains("{task}") || c.contains("{task_id}"))
+            || prompt.map_or(false, |p| p.contains("{task}") || p.contains("{task_id}"))
     }
 
     /// Check if the given agent is supported by this plugin.

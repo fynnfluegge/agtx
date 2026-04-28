@@ -1,11 +1,8 @@
-# Claude researches and plans, Codex implements, Claude reviews
-# Hypothesis: Claude's planning + Codex's code-focused execution
 default_agent = "claude"
 workflow_plugin = "agtx"
 worktree_dir = ".agtx/worktrees"
 
 [agents]
-research = "claude"
 planning = "claude"
 running  = "codex"
 review   = "claude"

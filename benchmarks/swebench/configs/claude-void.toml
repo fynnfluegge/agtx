@@ -1,2 +1,0 @@
-default_agent = "claude"
-workflow_plugin = "void"

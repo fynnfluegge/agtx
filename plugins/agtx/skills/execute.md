@@ -9,13 +9,16 @@ You are in the **execution phase** of an agtx-managed task.
 
 ## Input
 
-- **Task description** — provided inline with this command (when entering directly from Backlog)
-- **`.agtx/plan.md`** — approved implementation plan (when planning was completed first)
+The argument to this command is a task ID. Fetch the task description using the agtx MCP tool:
+```
+mcp__agtx__get_task(task_id: "<the id passed to this command>")
+```
+Use the `description` field as the task to work on. Also check for `.agtx/plan.md` if a planning phase was completed first.
 
 ## Instructions
 
-1. If `.agtx/plan.md` exists, read it for the approved plan
-2. Read and understand the task description
+1. Fetch the task description via `get_task`
+2. If `.agtx/plan.md` exists, read it for the approved plan
 3. Implement the changes
 4. Run relevant tests to verify your changes
 5. Fix any issues found during testing

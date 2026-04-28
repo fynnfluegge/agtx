@@ -195,7 +195,7 @@ class McpClient:
 # Repo Setup
 # ---------------------------------------------------------------------------
 
-def setup_repo(instance: dict, workdir: str, config_path: Path) -> Path:
+def setup_repo(instance: dict, workdir: str, config_path: Path, verbose: bool = False) -> Path:
     """
     Clone the repo at base_commit and write .agtx/config.toml.
     Returns repo path. Safe to call again on an existing clone (resumable).
@@ -213,53 +213,113 @@ def setup_repo(instance: dict, workdir: str, config_path: Path) -> Path:
             text=True,
         )
         if result.returncode == 0 and result.stdout.strip() == base_commit:
-            # Already at the right commit — just refresh the config
+            if verbose:
+                print(f"  [setup] Using cached repo at {repo_path}", file=sys.stderr)
             _write_agtx_config(repo_path, config_path)
             return repo_path
+        if verbose:
+            print(f"  [setup] Stale clone, removing {repo_path}", file=sys.stderr)
         subprocess.run(["rm", "-rf", str(repo_path)], check=True)
 
+    if verbose:
+        print(f"  [setup] Cloning {repo_url} → {repo_path}", file=sys.stderr)
     repo_path.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["git", "clone", "--quiet", repo_url, str(repo_path)],
+        ["git", "clone", "--quiet", "--depth=1", repo_url, str(repo_path)],
         check=True,
         capture_output=True,
+        timeout=300,
     )
+    if verbose:
+        print(f"  [setup] Checking out {base_commit}", file=sys.stderr)
+    fetch_result = subprocess.run(
+        ["git", "fetch", "--depth=1", "origin", base_commit],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if fetch_result.returncode != 0:
+        subprocess.run(
+            ["git", "fetch", "--unshallow"],
+            cwd=repo_path,
+            capture_output=True,
+            timeout=600,
+        )
     subprocess.run(
         ["git", "checkout", base_commit],
         cwd=repo_path,
         check=True,
         capture_output=True,
+        timeout=60,
     )
     _write_agtx_config(repo_path, config_path)
     return repo_path
 
 
 def _write_agtx_config(repo_path: Path, config_path: Path) -> None:
-    """Copy the benchmark config.toml into the repo's .agtx/ directory."""
+    """
+    Write config.toml and wipe any stale agtx state (old worktrees, task DB, old artifacts).
+    This ensures each benchmark run starts clean even if the repo clone is reused.
+    """
     agtx_dir = repo_path / ".agtx"
+    # Remove stale worktrees and the project DB so the TUI starts fresh
+    for stale in ["worktrees", "db"]:
+        stale_path = agtx_dir / stale
+        if stale_path.exists():
+            subprocess.run(["rm", "-rf", str(stale_path)], check=True)
     agtx_dir.mkdir(exist_ok=True)
     dest = agtx_dir / "config.toml"
     dest.write_text(config_path.read_text())
 
+    # Ensure .agtx/ is gitignored
+    gitignore = repo_path / ".gitignore"
+    marker = ".agtx/"
+    existing = gitignore.read_text() if gitignore.exists() else ""
+    if marker not in existing:
+        with gitignore.open("a") as f:
+            f.write(f"\n# agtx benchmark artifacts\n{marker}\n")
 
-def start_tui_in_tmux(slug: str, repo_path: Path, agtx_bin: str) -> None:
+
+def start_tui_in_tmux(slug: str, repo_path: Path, agtx_bin: str, verbose: bool = False) -> None:
     """Start an agtx TUI instance in a detached tmux session on the swebench server."""
+    # Kill any stale session with the same slug on the swebench server
     subprocess.run(
+        ["tmux", "-L", "swebench", "kill-session", "-t", slug],
+        capture_output=True,
+    )
+    # Also kill the agtx-server session for this repo (named after the repo dir)
+    # so the new TUI doesn't inherit stale task windows from a previous run
+    repo_session = repo_path.name  # e.g. "astropy__astropy-12907"
+    subprocess.run(
+        ["tmux", "-L", "agtx", "kill-session", "-t", repo_session],
+        capture_output=True,
+    )
+    if verbose:
+        print(f"  [tmux] Starting TUI session '{slug}' for {repo_path}", file=sys.stderr)
+    result = subprocess.run(
         [
             "tmux", "-L", "swebench",
             "new-session", "-d", "-s", slug,
             f"{agtx_bin} {repo_path}",
         ],
-        check=True,
         capture_output=True,
+        text=True,
     )
+    if result.returncode != 0:
+        raise RuntimeError(f"tmux new-session failed: {result.stderr.strip()}")
 
 
-def kill_tmux_session(slug: str) -> None:
+def kill_tmux_session(slug: str, repo_path: Path | None = None) -> None:
     subprocess.run(
         ["tmux", "-L", "swebench", "kill-session", "-t", slug],
         capture_output=True,
     )
+    if repo_path is not None:
+        subprocess.run(
+            ["tmux", "-L", "agtx", "kill-session", "-t", repo_path.name],
+            capture_output=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -428,8 +488,21 @@ class ResultsStore:
 # Phase artifact paths per bundled plugin
 # ---------------------------------------------------------------------------
 
+# Artifact path for the "planning" phase (relative to worktree root).
+# None means the plugin has no planning artifact → fall back to pane stability.
+PLUGIN_PLANNING_ARTIFACTS: dict[str, str | None] = {
+    "agtx":             ".agtx/plan.md",
+    "agtx-terse":       ".agtx/plan.md",
+    "gsd":              ".planning/phases/*/{phase}-CONTEXT.md",
+    "spec-kit":         None,
+    "bmad":             None,
+    "openspec":         None,
+    "superpowers":      None,
+    "oh-my-claudecode": None,
+    "void":             None,
+}
+
 # Artifact path for the "running" phase (relative to worktree root).
-# Supports * globs and {phase} placeholder (expanded to 01, 02, ... by agtx).
 # None means the plugin has no running artifact → fall back to pane stability.
 PLUGIN_RUNNING_ARTIFACTS: dict[str, str | None] = {
     "agtx":             ".agtx/execute.md",
@@ -438,6 +511,20 @@ PLUGIN_RUNNING_ARTIFACTS: dict[str, str | None] = {
     "spec-kit":         None,
     "bmad":             "_bmad-output/implementation-artifacts/*.md",
     "openspec":         "openspec/changes/*/tasks.md",
+    "superpowers":      None,
+    "oh-my-claudecode": None,
+    "void":             None,
+}
+
+# Artifact path for the "review" phase (relative to worktree root).
+# None means no review artifact → collect patch immediately after entering Review.
+PLUGIN_REVIEW_ARTIFACTS: dict[str, str | None] = {
+    "agtx":             ".agtx/review.md",
+    "agtx-terse":       ".agtx/review.md",
+    "gsd":              None,
+    "spec-kit":         None,
+    "bmad":             None,
+    "openspec":         None,
     "superpowers":      None,
     "oh-my-claudecode": None,
     "void":             None,
@@ -481,6 +568,7 @@ class TaskRunner:
         running_agent: str,
         model_name: str,
         phase_timeout: int,
+        verbose: bool = False,
     ):
         self.instance = instance
         self.instance_id = instance["instance_id"]
@@ -491,6 +579,7 @@ class TaskRunner:
         self.running_agent = running_agent
         self.model_name = model_name
         self.phase_timeout = phase_timeout
+        self.verbose = verbose
         self.mcp: McpClient | None = None
 
     def _poll_transition(self, request_id: str, timeout: int = 120) -> None:
@@ -518,35 +607,37 @@ class TaskRunner:
             time.sleep(3)
         raise TimeoutError(f"Task never reached {target_status} within {timeout}s")
 
-    def _wait_for_phase_complete(self, task_id: str, worktree_path: str | None) -> str:
+    def _wait_for_worktree(self, task_id: str, timeout: int = 180) -> dict:
         """
-        Wait for the running phase to finish.
-
-        1. If the plugin defines a running artifact: poll for its existence in
-           the worktree every 5s. Same signal the TUI uses internally.
-        2. Otherwise: pane content stability — 2 consecutive unchanged reads
-           at 30s intervals (≥60s stable).
-
-        Returns the final pane content (used for /cost scraping).
+        Wait until the task has a worktree_path set in the DB.
+        This is populated asynchronously by the TUI's background setup thread
+        after transition_to_planning/running completes — the transition request
+        being marked 'completed' only means the TUI accepted it, not that
+        worktree setup is done.
         """
-        artifact_pattern = PLUGIN_RUNNING_ARTIFACTS.get(self.plugin)
-        worktree = Path(worktree_path) if worktree_path else None
-        deadline = time.monotonic() + self.phase_timeout
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            task = self.mcp.call("get_task", task_id=task_id)
+            if task.get("worktree_path"):
+                return task
+            time.sleep(3)
+        raise TimeoutError(f"Worktree never populated for task {task_id} within {timeout}s")
 
-        if artifact_pattern and worktree:
-            while time.monotonic() < deadline:
-                if _artifact_exists(worktree, artifact_pattern):
-                    try:
-                        result = self.mcp.call("read_pane_content", task_id=task_id, lines=80)
-                        return result.get("content", "")
-                    except McpError:
-                        return ""
-                time.sleep(5)
-            return ""
+    def _wait_for_artifact(self, task_id: str, worktree_path: str, artifact_pattern: str, timeout: int) -> bool:
+        """Poll for an artifact file in the worktree. Returns True if found, False on timeout."""
+        worktree = Path(worktree_path)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if _artifact_exists(worktree, artifact_pattern):
+                return True
+            time.sleep(5)
+        return False
 
-        # Pane stability fallback
+    def _wait_for_pane_stable(self, task_id: str, timeout: int) -> None:
+        """Wait for pane content to be stable for 2 consecutive 30s checks (no artifact available)."""
         prev_content: str | None = None
         stable_count = 0
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             time.sleep(30)
             try:
@@ -557,60 +648,116 @@ class TaskRunner:
             if content == prev_content:
                 stable_count += 1
                 if stable_count >= 2:
-                    return content
+                    return
             else:
                 stable_count = 0
                 prev_content = content
-        return prev_content or ""
-
-    def _collect_patch(self, task: dict) -> str:
-        branch_name = task.get("branch_name")
-        if not branch_name:
-            return ""
-        result = subprocess.run(
-            ["git", "diff", f"HEAD...{branch_name}"],
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-        )
-        return result.stdout if result.returncode == 0 else ""
 
     def run(self) -> dict:
         start = time.monotonic()
+        if self.verbose:
+            print(f"  [{self.instance_id}] Starting MCP handshake...", file=sys.stderr)
         self.mcp = McpClient(self.agtx_bin, str(self.repo_path))
         task_id = None
 
         try:
+            if self.verbose:
+                print(f"  [{self.instance_id}] Creating task...", file=sys.stderr)
+            problem = self.instance.get("problem_statement", "")
+            description = (
+                problem
+                + "\n\n---\n"
+                + "Note: the repo may not be fully installable in this environment. "
+                + "Do not attempt to build, install, or run tests. "
+                + "Read the source code, understand the bug, and fix it by editing the relevant files directly."
+            )
             task_resp = self.mcp.call(
                 "create_task",
                 title=self.instance_id,
-                description=self.instance.get("problem_statement", ""),
+                description=description,
                 plugin=self.plugin,
             )
             task_id = task_resp["id"]
 
-            # Backlog → Planning → Running
+            if self.verbose:
+                print(f"  [{self.instance_id}] task_id={task_id}, moving to Planning...", file=sys.stderr)
+            # Backlog → Planning
             self._move_task(task_id, "move_forward")
             self._wait_for_status(task_id, "planning", timeout=120)
+
+            # Wait for worktree to be created (set by TUI background thread)
+            if self.verbose:
+                print(f"  [{self.instance_id}] Waiting for worktree...", file=sys.stderr)
+            planning_task = self._wait_for_worktree(task_id, timeout=180)
+            worktree_path = planning_task.get("worktree_path", "")
 
             # Snapshot tokscale before agent starts working
             client = _TOKSCALE_CLIENT.get(self.running_agent, self.running_agent)
             cost_before = _tokscale_snapshot(client)
 
+            # Wait for planning phase artifact (.agtx/plan.md for agtx/agtx-terse plugins)
+            planning_artifact = PLUGIN_PLANNING_ARTIFACTS.get(self.plugin)
+            if planning_artifact and worktree_path:
+                if self.verbose:
+                    print(f"  [{self.instance_id}] Waiting for planning artifact ({planning_artifact})...", file=sys.stderr)
+                found = self._wait_for_artifact(task_id, worktree_path, planning_artifact, self.phase_timeout)
+                if not found:
+                    raise TimeoutError(f"Planning artifact not found within {self.phase_timeout}s")
+            else:
+                if self.verbose:
+                    print(f"  [{self.instance_id}] Waiting for planning phase (pane stability)...", file=sys.stderr)
+                self._wait_for_pane_stable(task_id, self.phase_timeout)
+
+            if self.verbose:
+                print(f"  [{self.instance_id}] Planning done, moving to Running...", file=sys.stderr)
+            # Small delay: let the agent finish any final output after writing the artifact
+            # before the TUI sends /exit (clear_context_on_advance) and restarts it.
+            time.sleep(5)
+            # Planning → Running
             self._move_task(task_id, "move_forward")
             running_task = self._wait_for_status(task_id, "running", timeout=60)
+            worktree_path = running_task.get("worktree_path") or worktree_path
 
-            # Wait for phase completion (artifact or pane stability)
-            self._wait_for_phase_complete(task_id, running_task.get("worktree_path"))
+            # Wait for running phase artifact (.agtx/execute.md for agtx/agtx-terse plugins)
+            running_artifact = PLUGIN_RUNNING_ARTIFACTS.get(self.plugin)
+            if running_artifact and worktree_path:
+                if self.verbose:
+                    print(f"  [{self.instance_id}] Waiting for running artifact ({running_artifact})...", file=sys.stderr)
+                found = self._wait_for_artifact(task_id, worktree_path, running_artifact, self.phase_timeout)
+                if not found:
+                    raise TimeoutError(f"Running artifact not found within {self.phase_timeout}s")
+            else:
+                if self.verbose:
+                    print(f"  [{self.instance_id}] Waiting for running phase (pane stability)...", file=sys.stderr)
+                self._wait_for_pane_stable(task_id, self.phase_timeout)
 
             # Snapshot again and diff to get this task's usage
             cost_data = tokscale_diff(cost_before, _tokscale_snapshot(client))
 
-            # Running → Review, collect patch
+            if self.verbose:
+                print(f"  [{self.instance_id}] Running done, moving to Review...", file=sys.stderr)
+            # Running → Review
             self._move_task(task_id, "move_forward")
             review_task = self._wait_for_status(task_id, "review", timeout=60)
+            worktree_path = review_task.get("worktree_path") or worktree_path
+
+            # Wait for review phase artifact (.agtx/review.md for agtx/agtx-terse plugins)
+            review_artifact = PLUGIN_REVIEW_ARTIFACTS.get(self.plugin)
+            if review_artifact and worktree_path:
+                if self.verbose:
+                    print(f"  [{self.instance_id}] Waiting for review artifact ({review_artifact})...", file=sys.stderr)
+                found = self._wait_for_artifact(task_id, worktree_path, review_artifact, self.phase_timeout)
+                if not found:
+                    raise TimeoutError(f"Review artifact not found within {self.phase_timeout}s")
+            else:
+                if self.verbose:
+                    print(f"  [{self.instance_id}] Waiting for review phase (pane stability)...", file=sys.stderr)
+                self._wait_for_pane_stable(task_id, self.phase_timeout)
+
             model_patch = self._collect_patch(review_task)
 
+            if self.verbose:
+                print(f"  [{self.instance_id}] Done. patch_len={len(model_patch)}", file=sys.stderr)
             # Review → Done (cleanup worktree)
             try:
                 self._move_task(task_id, "move_to_done")
@@ -634,6 +781,21 @@ class TaskRunner:
         finally:
             if self.mcp:
                 self.mcp.close()
+
+    def _collect_patch(self, task: dict) -> str:
+        branch_name = task.get("branch_name")
+        if not branch_name:
+            return ""
+        result = subprocess.run(
+            ["git", "diff", f"HEAD...{branch_name}",
+             "--", ".", ":!.agtx/"],
+            cwd=self.repo_path,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            return ""
+        # Decode as UTF-8, replacing undecodable bytes so binary files don't crash the run
+        return result.stdout.decode("utf-8", errors="replace")
 
     def _cleanup(self, task_id: str | None) -> None:
         if task_id:
@@ -675,6 +837,7 @@ class BenchmarkOrchestrator:
         workdir: str,
         output_dir: Path,
         concurrency: int,
+        verbose: bool = False,
     ):
         self.instances = instances
         self.agtx_bin = agtx_bin
@@ -687,6 +850,7 @@ class BenchmarkOrchestrator:
         self.workdir = workdir
         self.store = ResultsStore(output_dir)
         self.concurrency = concurrency
+        self.verbose = verbose
 
     def _run_one(self, instance: dict, progress: tqdm) -> None:
         instance_id = instance["instance_id"]
@@ -698,8 +862,10 @@ class BenchmarkOrchestrator:
         slug = re.sub(r"[^a-z0-9]+", "-", instance_id.lower()).strip("-")[:50]
         start = time.monotonic()
 
+        if self.verbose:
+            print(f"\n[{instance_id}] Setting up repo...", file=sys.stderr)
         try:
-            repo_path = setup_repo(instance, self.workdir, self.config_path)
+            repo_path = setup_repo(instance, self.workdir, self.config_path, verbose=self.verbose)
         except Exception as e:
             self.store.save_result(
                 instance_id=instance_id,
@@ -711,8 +877,10 @@ class BenchmarkOrchestrator:
             progress.update(1)
             return
 
+        if self.verbose:
+            print(f"[{instance_id}] Starting TUI...", file=sys.stderr)
         try:
-            start_tui_in_tmux(slug, repo_path, self.agtx_bin)
+            start_tui_in_tmux(slug, repo_path, self.agtx_bin, verbose=self.verbose)
             time.sleep(3)  # Wait for TUI startup + project registration
         except Exception as e:
             self.store.save_result(
@@ -725,6 +893,8 @@ class BenchmarkOrchestrator:
             progress.update(1)
             return
 
+        if self.verbose:
+            print(f"[{instance_id}] Connecting MCP client...", file=sys.stderr)
         runner = TaskRunner(
             instance=instance,
             repo_path=repo_path,
@@ -734,9 +904,10 @@ class BenchmarkOrchestrator:
             running_agent=self.running_agent,
             model_name=self.model_name,
             phase_timeout=self.phase_timeout,
+            verbose=self.verbose,
         )
         result = runner.run()
-        kill_tmux_session(slug)
+        kill_tmux_session(slug, repo_path)
 
         self.store.save_result(
             instance_id=instance_id,
@@ -866,6 +1037,11 @@ other agtx project settings. Example:
         default="test",
         help="HuggingFace dataset split (default: test)",
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Print step-by-step progress to stderr",
+    )
     args = parser.parse_args()
 
     # Load and validate config
@@ -916,6 +1092,7 @@ other agtx project settings. Example:
         workdir=args.workdir,
         output_dir=output_dir,
         concurrency=args.concurrency,
+        verbose=args.verbose,
     )
     orchestrator.run()
 
