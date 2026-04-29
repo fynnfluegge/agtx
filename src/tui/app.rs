@@ -4488,6 +4488,7 @@ impl App {
                 &planning_agent,
                 &task_content,
                 task.cycle,
+                &task.id,
             );
             let prompt =
                 resolve_prompt(&plugin, planning_phase, &task_content, &task.id, task.cycle);
@@ -4528,6 +4529,7 @@ impl App {
             &planning_agent,
             &task_content,
             task.cycle,
+            &task.id,
         );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
         let all_agents = collect_phase_agents(&self.state.config);
@@ -4672,6 +4674,7 @@ impl App {
                 &running_agent,
                 &task_content,
                 task.cycle,
+                &task.id,
             );
             let prompt = resolve_prompt(&plugin, run_phase, &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, run_phase);
@@ -4707,7 +4710,7 @@ impl App {
             let plugin = self.load_task_plugin(task);
             let task_content = task.content_text();
             let skill_cmd =
-                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle);
+                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle, &task.id);
             let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
             let auto_dismiss = plugin
@@ -4987,6 +4990,7 @@ impl App {
                         &agent_name,
                         &task_content,
                         task_cycle,
+                        &task_id,
                     );
                     let prompt_trigger = resolve_prompt_trigger(&plugin, research_phase);
 
@@ -5114,6 +5118,7 @@ impl App {
             &running_agent,
             &task_content,
             task.cycle,
+            &task.id,
         );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
         let auto_dismiss = plugin
@@ -5325,6 +5330,7 @@ impl App {
                     &planning_agent,
                     &task_content,
                     task.cycle,
+                    &task.id,
                 );
                 let prompt =
                     resolve_prompt(&plugin, "planning", &task_content, &task.id, task.cycle);
@@ -5646,7 +5652,7 @@ impl App {
             let plugin = self.load_task_plugin(task);
             let task_content = task.content_text();
             let skill_cmd =
-                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle);
+                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle, &task.id);
             let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
             let auto_dismiss = plugin
@@ -6537,6 +6543,15 @@ impl App {
         self.state.stuck_task_notified.clear();
         self.state.stuck_task_idle_since.clear();
 
+        // Reload config for the new project so per-phase agent overrides are respected
+        let global_config = GlobalConfig::load().unwrap_or_default();
+        let project_config = ProjectConfig::load(&project_path).unwrap_or_default();
+        self.state.config = MergedConfig::merge(&global_config, &project_config);
+        self.state.cached_plugin = Some(load_plugin_if_configured(
+            &self.state.config,
+            Some(&project_path),
+        ));
+
         // Reload tasks for new project
         self.refresh_tasks()?;
 
@@ -6986,7 +7001,7 @@ fn setup_task_worktree(
     // Build the interactive command. For agents with skill/command support,
     // start with no prompt — the skill command and task content are sent via send_keys.
     let has_skill_support =
-        resolve_skill_command(plugin, "planning", agent_name, "", task.cycle).is_some();
+        resolve_skill_command(plugin, "planning", agent_name, "", task.cycle, &task.id).is_some();
     let agent_cmd = if has_skill_support {
         agent_ops.build_interactive_command("")
     } else {
@@ -7721,6 +7736,7 @@ fn resolve_skill_command(
     agent_name: &str,
     task_content: &str,
     cycle: i32,
+    task_id: &str,
 ) -> Option<String> {
     let p = plugin.as_ref()?;
 
@@ -7759,6 +7775,7 @@ fn resolve_skill_command(
             cmd.replace("{task}", &task_oneline)
         };
     let expanded = expanded.replace("{phase}", &cycle.to_string());
+    let expanded = expanded.replace("{task_id}", task_id);
     skills::transform_plugin_command(&expanded, agent_name)
 }
 
@@ -8235,7 +8252,8 @@ fn glob_path_exists(pattern: &str) -> bool {
 /// Uses the phase-specific agent if configured, otherwise falls back to default_agent.
 fn needs_agent_switch(config: &MergedConfig, task: &Task, phase: &str) -> (String, bool) {
     let target = config.agent_for_phase(phase);
-    let switch = task.agent != target;
+    // Empty task.agent means agent not yet assigned (SetupResult pending) — no switch needed
+    let switch = !task.agent.is_empty() && task.agent != target;
     (target.to_string(), switch)
 }
 
@@ -8403,21 +8421,20 @@ fn ensure_window_or_recover(
     agent_ops: &dyn AgentOperations,
     worktree_path: Option<&str>,
 ) {
-    if tmux_ops.window_exists(target).unwrap_or(true) {
-        return;
+    if !tmux_ops.window_exists(target).unwrap_or(true) {
+        let Some(wt_path) = worktree_path else { return };
+        if !Path::new(wt_path).exists() {
+            return;
+        }
+        let Some((session, window)) = target.split_once(':') else {
+            return;
+        };
+        if !tmux_ops.has_session(session) {
+            let _ = tmux_ops.create_session(session, wt_path);
+        }
+        let resume_cmd = agent_ops.build_resume_command();
+        let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd), true);
     }
-    let Some(wt_path) = worktree_path else { return };
-    if !Path::new(wt_path).exists() {
-        return;
-    }
-    let Some((session, window)) = target.split_once(':') else {
-        return;
-    };
-    if !tmux_ops.has_session(session) {
-        let _ = tmux_ops.create_session(session, wt_path);
-    }
-    let resume_cmd = agent_ops.build_resume_command();
-    let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd), true);
 }
 
 /// Gracefully switch the agent running in a tmux window.

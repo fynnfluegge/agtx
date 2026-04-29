@@ -1,0 +1,8 @@
+default_agent = "gemini"
+workflow_plugin = "agtx"
+worktree_dir = ".agtx/worktrees"
+
+[agents]
+planning = "gemini"
+running  = "gemini"
+review   = "gemini"

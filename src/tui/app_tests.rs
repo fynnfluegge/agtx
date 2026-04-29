@@ -2089,15 +2089,15 @@ fn test_agtx_plugin_has_commands() {
     let plugin = skills::load_bundled_plugin("agtx").expect("agtx plugin should load");
     assert_eq!(
         plugin.commands.research.as_deref(),
-        Some("/agtx:research {task}")
+        Some("/agtx:research {task_id}")
     );
     assert_eq!(
         plugin.commands.planning.as_deref(),
-        Some("/agtx:plan {task}")
+        Some("/agtx:plan {task_id}")
     );
     assert_eq!(
         plugin.commands.running.as_deref(),
-        Some("/agtx:execute {task}")
+        Some("/agtx:execute {task_id}")
     );
     assert_eq!(plugin.commands.review.as_deref(), Some("/agtx:review"));
 }
@@ -2139,23 +2139,23 @@ fn test_enumerate_available_skills_opencode() {
 fn test_resolve_skill_command_no_plugin() {
     // No plugin: no commands, returns None for all agents/phases
     assert_eq!(
-        resolve_skill_command(&None, "planning", "claude", "", 1),
+        resolve_skill_command(&None, "planning", "claude", "", 1, ""),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "running", "codex", "", 1),
+        resolve_skill_command(&None, "running", "codex", "", 1, ""),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "review", "gemini", "", 1),
+        resolve_skill_command(&None, "review", "gemini", "", 1, ""),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "planning", "opencode", "", 1),
+        resolve_skill_command(&None, "planning", "opencode", "", 1, ""),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "planning", "copilot", "", 1),
+        resolve_skill_command(&None, "planning", "copilot", "", 1, ""),
         None
     );
 }
@@ -2189,42 +2189,42 @@ fn test_resolve_skill_command_with_plugin() {
     });
     // Claude/Gemini: canonical form unchanged
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "claude", "", 1),
+        resolve_skill_command(&plugin, "planning", "claude", "", 1, ""),
         Some("/gsd:plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "running", "claude", "", 1),
+        resolve_skill_command(&plugin, "running", "claude", "", 1, ""),
         Some("/gsd:execute-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "review", "gemini", "", 1),
+        resolve_skill_command(&plugin, "review", "gemini", "", 1, ""),
         Some("/gsd:verify-work 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "research", "claude", "", 1),
+        resolve_skill_command(&plugin, "research", "claude", "", 1, ""),
         Some("/gsd:discuss-phase 1".to_string())
     );
     // OpenCode: colon → hyphen
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "opencode", "", 1),
+        resolve_skill_command(&plugin, "planning", "opencode", "", 1, ""),
         Some("/gsd-plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "research", "opencode", "", 1),
+        resolve_skill_command(&plugin, "research", "opencode", "", 1, ""),
         Some("/gsd-discuss-phase 1".to_string())
     );
     // Codex: slash → dollar, colon → hyphen
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "codex", "", 1),
+        resolve_skill_command(&plugin, "planning", "codex", "", 1, ""),
         Some("$gsd-plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "running", "codex", "", 1),
+        resolve_skill_command(&plugin, "running", "codex", "", 1, ""),
         Some("$gsd-execute-phase 1".to_string())
     );
     // Unsupported agents: None (will use file-path fallback in prompt)
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "copilot", "", 1),
+        resolve_skill_command(&plugin, "planning", "copilot", "", 1, ""),
         None
     );
 }
@@ -2566,7 +2566,7 @@ fn test_resolve_skill_command_research_phase() {
         [artifacts]
     "#;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
-    let cmd = resolve_skill_command(&Some(plugin), "research", "claude", "", 1);
+    let cmd = resolve_skill_command(&Some(plugin), "research", "claude", "", 1, "");
     assert_eq!(cmd, Some("/gsd:new-project".to_string()));
 }
 
@@ -2585,7 +2585,7 @@ fn test_resolve_skill_command_planning_with_plugin() {
         [artifacts]
     "#;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
-    let cmd = resolve_skill_command(&Some(plugin), "planning", "claude", "", 1);
+    let cmd = resolve_skill_command(&Some(plugin), "planning", "claude", "", 1, "");
     assert_eq!(cmd, Some("/gsd:plan-phase 1".to_string()));
 }
 
@@ -3181,35 +3181,35 @@ fn test_resolve_skill_command_phase_substitution() {
 
     // Cycle 1: {phase} → "1"
     assert_eq!(
-        resolve_skill_command(&p, "planning", "claude", "", 1),
+        resolve_skill_command(&p, "planning", "claude", "", 1, ""),
         Some("/gsd:plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "running", "claude", "", 1),
+        resolve_skill_command(&p, "running", "claude", "", 1, ""),
         Some("/gsd:execute-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "review", "claude", "", 1),
+        resolve_skill_command(&p, "review", "claude", "", 1, ""),
         Some("/gsd:verify-work 1".to_string())
     );
 
     // Cycle 2: {phase} → "2"
     assert_eq!(
-        resolve_skill_command(&p, "planning", "claude", "", 2),
+        resolve_skill_command(&p, "planning", "claude", "", 2, ""),
         Some("/gsd:plan-phase 2".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "running", "claude", "", 2),
+        resolve_skill_command(&p, "running", "claude", "", 2, ""),
         Some("/gsd:execute-phase 2".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "review", "claude", "", 2),
+        resolve_skill_command(&p, "review", "claude", "", 2, ""),
         Some("/gsd:verify-work 2".to_string())
     );
 
     // preresearch also gets {phase} substitution (falls back to research command)
     assert_eq!(
-        resolve_skill_command(&p, "preresearch", "claude", "", 1),
+        resolve_skill_command(&p, "preresearch", "claude", "", 1, ""),
         Some("/gsd:new-project".to_string())
     );
 }
@@ -3345,7 +3345,7 @@ fn test_resolve_skill_command_preresearch_fallback() {
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
     let p = Some(plugin);
     assert_eq!(
-        resolve_skill_command(&p, "preresearch", "claude", "", 1),
+        resolve_skill_command(&p, "preresearch", "claude", "", 1, ""),
         Some("/test:discuss".to_string())
     );
 }
@@ -9945,4 +9945,59 @@ fn test_handle_paste_noop_in_normal_mode() {
     app.handle_paste("should be ignored".to_string()).unwrap();
 
     assert!(app.state.input_buffer.is_empty());
+}
+
+/// Test that switching projects via the sidebar reloads the config from the new project.
+/// Before the fix, config was only loaded at startup so switching projects in the sidebar
+/// would keep the old project's agent settings, causing incorrect agent selection.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_switch_to_project_reloads_config() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    // Create a temp dir simulating a project with review = "codex"
+    let project_dir = TempDir::new().unwrap();
+    let agtx_dir = project_dir.path().join(".agtx");
+    fs::create_dir_all(&agtx_dir).unwrap();
+    fs::write(
+        agtx_dir.join("config.toml"),
+        "[agents]\nreview = \"codex\"\n",
+    )
+    .unwrap();
+
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+    mock_tmux
+        .expect_create_session()
+        .returning(|_, _| Ok(()));
+
+    // App starts with default config (no per-phase overrides)
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+
+    // Confirm initial config does not have codex for review
+    assert_ne!(app.state.config.agent_for_phase("review"), "codex");
+
+    // Switch to the project that has review = "codex"
+    let project_info = ProjectInfo {
+        name: project_dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        path: project_dir.path().to_string_lossy().to_string(),
+    };
+    app.switch_to_project_keep_sidebar(&project_info).unwrap();
+
+    // Config should now reflect the new project's settings
+    assert_eq!(app.state.config.agent_for_phase("review"), "codex");
 }

@@ -1,0 +1,8 @@
+default_agent = "codex"
+workflow_plugin = "agtx"
+worktree_dir = ".agtx/worktrees"
+
+[agents]
+planning = "codex"
+running  = "codex"
+review   = "codex"

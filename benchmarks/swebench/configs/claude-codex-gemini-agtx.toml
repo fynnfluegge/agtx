@@ -1,0 +1,8 @@
+default_agent = "claude"
+workflow_plugin = "agtx"
+worktree_dir = ".agtx/worktrees"
+
+[agents]
+planning = "claude"
+running  = "codex"
+review   = "gemini"
