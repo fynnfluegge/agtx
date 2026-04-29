@@ -4538,6 +4538,7 @@ impl App {
             .clone()
             .unwrap_or_else(|| self.state.config.base_branch.clone());
         let worktree_dir = self.state.config.worktree_dir.clone();
+        let branch_prefix = self.state.config.branch_prefix.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = if self.state.flags.no_init_scripts {
             None
@@ -4595,6 +4596,7 @@ impl App {
                 &prompt,
                 &base_branch,
                 &worktree_dir,
+                &branch_prefix,
                 copy_files,
                 init_script,
                 &plugin,
@@ -4904,6 +4906,7 @@ impl App {
             .clone()
             .unwrap_or_else(|| self.state.config.base_branch.clone());
         let worktree_dir = self.state.config.worktree_dir.clone();
+        let branch_prefix = self.state.config.branch_prefix.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = if self.state.flags.no_init_scripts {
             None
@@ -4941,6 +4944,7 @@ impl App {
                 "",
                 &base_branch,
                 &worktree_dir,
+                &branch_prefix,
                 copy_files,
                 init_script,
                 &plugin,
@@ -5163,6 +5167,7 @@ impl App {
             .clone()
             .unwrap_or_else(|| self.state.config.base_branch.clone());
         let worktree_dir = self.state.config.worktree_dir.clone();
+        let branch_prefix = self.state.config.branch_prefix.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = if self.state.flags.no_init_scripts {
             None
@@ -5192,6 +5197,7 @@ impl App {
                 &prompt,
                 &base_branch,
                 &worktree_dir,
+                &branch_prefix,
                 copy_files,
                 init_script,
                 &plugin,
@@ -6754,7 +6760,7 @@ fn cleanup_task_for_done(
             let slug = task
                 .branch_name
                 .as_deref()
-                .and_then(|b| b.strip_prefix("task/"))
+                .and_then(|b| b.rsplit_once('/').map(|(_, s)| s))
                 .unwrap_or(&task.id);
             let archive_dir = project_path.join(".agtx").join("archive").join(slug);
             if let Ok(()) = std::fs::create_dir_all(&archive_dir) {
@@ -6802,7 +6808,7 @@ fn cleanup_task_resources(
         if artifacts_dir.exists() {
             let slug = branch_name
                 .as_deref()
-                .and_then(|b| b.strip_prefix("task/"))
+                .and_then(|b| b.rsplit_once('/').map(|(_, s)| s))
                 .unwrap_or(task_id);
             let archive_dir = project_path.join(".agtx").join("archive").join(slug);
             if let Ok(()) = std::fs::create_dir_all(&archive_dir) {
@@ -6842,6 +6848,7 @@ fn setup_task_worktree(
     prompt: &str,
     base_branch: &str,
     worktree_dir: &str,
+    branch_prefix: &str,
     copy_files: Option<String>,
     init_script: Option<String>,
     plugin: &Option<WorkflowPlugin>,
@@ -6859,7 +6866,7 @@ fn setup_task_worktree(
 
     // Create git worktree from the configured base branch
     let worktree_path_str =
-        match git_ops.create_worktree(project_path, &unique_slug, base_branch, worktree_dir) {
+        match git_ops.create_worktree(project_path, &unique_slug, base_branch, worktree_dir, branch_prefix) {
             Ok(path) => path,
             Err(e) => {
                 eprintln!("Failed to create worktree: {}", e);
@@ -7013,7 +7020,7 @@ fn setup_task_worktree(
 
     task.session_name = Some(target.clone());
     task.worktree_path = Some(worktree_path_str);
-    task.branch_name = Some(format!("task/{}", unique_slug));
+    task.branch_name = Some(format!("{}/{}", branch_prefix, unique_slug));
 
     Ok(target)
 }

@@ -112,6 +112,7 @@ fn test_merged_config_project_overrides() {
         copy_files: Some(".env, .env.local".to_string()),
         init_script: Some("npm install".to_string()),
         cleanup_script: Some("scripts/cleanup.sh".to_string()),
+        branch_prefix: None,
         workflow_plugin: None,
     };
 
@@ -127,6 +128,8 @@ fn test_merged_config_project_overrides() {
     assert_eq!(merged.init_script, Some("npm install".to_string()));
     // worktree_dir not overridden, uses global default
     assert_eq!(merged.worktree_dir, ".agtx/worktrees");
+    // branch_prefix not overridden, uses global default
+    assert_eq!(merged.branch_prefix, "task");
     assert_eq!(
         merged.cleanup_script,
         Some("scripts/cleanup.sh".to_string())
