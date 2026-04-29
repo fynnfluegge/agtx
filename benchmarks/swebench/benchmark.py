@@ -438,7 +438,7 @@ def tokscale_diff(before: dict, after: dict) -> dict:
     Returns the standard cost_data dict used throughout the script.
     """
     if not _find_tokscale():
-        return {"cost_usd": None, "input_tokens": None, "output_tokens": None, "cost_tokens": None}
+        return {"cost_usd": None, "cost_tokens": None}
 
     inp  = max(0, after["input"]   - before["input"])
     out  = max(0, after["output"]  - before["output"])
@@ -448,10 +448,8 @@ def tokscale_diff(before: dict, after: dict) -> dict:
                         max(0, after["reasoning"]   - before["reasoning"])
 
     return {
-        "cost_usd":      round(cost, 6) if cost > 0 else None,
-        "input_tokens":  inp   if (inp or out) else None,
-        "output_tokens": out   if (inp or out) else None,
-        "cost_tokens":   total if total > 0    else None,
+        "cost_usd":    round(cost, 6) if cost > 0 else None,
+        "cost_tokens": total if total > 0 else None,
     }
 
 
@@ -494,8 +492,6 @@ class ResultsStore:
         model_patch: str = "",
         cost_usd: float | None = None,
         cost_tokens: int | None = None,
-        input_tokens: int | None = None,
-        output_tokens: int | None = None,
         error: str | None = None,
     ) -> None:
         with self._lock:
@@ -505,8 +501,6 @@ class ResultsStore:
                 "duration_seconds": round(duration_seconds, 1),
                 "cost_usd": cost_usd,
                 "cost_tokens": cost_tokens,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
                 "model_patch": model_patch,
                 "error": error,
             }
@@ -860,8 +854,6 @@ class TaskRunner:
             "model_patch": "",
             "cost_usd": None,
             "cost_tokens": None,
-            "input_tokens": None,
-            "output_tokens": None,
             "error": error,
         }
 

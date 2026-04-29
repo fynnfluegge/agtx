@@ -172,8 +172,6 @@ Results are written to `./swebench_output/{plugin}_{agent}_{timestamp}/`:
   "duration_seconds": 342.1,
   "cost_usd": 0.23,
   "cost_tokens": 54000,
-  "input_tokens": 45000,
-  "output_tokens": 9000,
   "model_patch": "diff --git ...",
   "error": null
 }]
