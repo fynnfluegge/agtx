@@ -9940,3 +9940,58 @@ fn test_handle_paste_noop_in_normal_mode() {
 
     assert!(app.state.input_buffer.is_empty());
 }
+
+/// Test that switching projects via the sidebar reloads the config from the new project.
+/// Before the fix, config was only loaded at startup so switching projects in the sidebar
+/// would keep the old project's agent settings, causing incorrect agent selection.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_switch_to_project_reloads_config() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    // Create a temp dir simulating a project with review = "codex"
+    let project_dir = TempDir::new().unwrap();
+    let agtx_dir = project_dir.path().join(".agtx");
+    fs::create_dir_all(&agtx_dir).unwrap();
+    fs::write(
+        agtx_dir.join("config.toml"),
+        "[agents]\nreview = \"codex\"\n",
+    )
+    .unwrap();
+
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+    mock_tmux
+        .expect_create_session()
+        .returning(|_, _| Ok(()));
+
+    // App starts with default config (no per-phase overrides)
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+
+    // Confirm initial config does not have codex for review
+    assert_ne!(app.state.config.agent_for_phase("review"), "codex");
+
+    // Switch to the project that has review = "codex"
+    let project_info = ProjectInfo {
+        name: project_dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        path: project_dir.path().to_string_lossy().to_string(),
+    };
+    app.switch_to_project_keep_sidebar(&project_info).unwrap();
+
+    // Config should now reflect the new project's settings
+    assert_eq!(app.state.config.agent_for_phase("review"), "codex");
+}
