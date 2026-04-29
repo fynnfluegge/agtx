@@ -9,7 +9,7 @@ You are in the **review phase** of an agtx-managed task.
 
 ## Instructions
 
-1. Review all changes made during execution (use git diff)
+1. Review all changes made during execution: run `git diff HEAD` (staged+unstaged) and `git log --oneline $(git merge-base HEAD origin/HEAD)..HEAD` to see only your commits. Do NOT diff against `main` or `origin/main` — those may include unrelated upstream history.
 2. Check for:
    - Correctness and edge cases
    - Error handling

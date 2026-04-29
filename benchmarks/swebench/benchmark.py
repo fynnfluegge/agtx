@@ -206,20 +206,35 @@ def setup_repo(instance: dict, workdir: str, config_path: Path, verbose: bool = 
 
     repo_path = Path(workdir) / instance_id
     if repo_path.exists():
-        result = subprocess.run(
+        # Check if the repo is clean: HEAD must be at base_commit and no task/* branches.
+        head_result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=repo_path,
             capture_output=True,
             text=True,
         )
-        if result.returncode == 0 and result.stdout.strip() == base_commit:
+        branch_result = subprocess.run(
+            ["git", "branch", "--list", "task/*"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+        )
+        head_ok = head_result.returncode == 0 and head_result.stdout.strip() == base_commit
+        no_task_branches = branch_result.returncode != 0 or not branch_result.stdout.strip()
+
+        if head_ok and no_task_branches:
             if verbose:
                 print(f"  [setup] Using cached repo at {repo_path}", file=sys.stderr)
-            _write_agtx_config(repo_path, config_path)
+            _write_agtx_config(repo_path, config_path, base_commit)
             return repo_path
-        if verbose:
-            print(f"  [setup] Stale clone, removing {repo_path}", file=sys.stderr)
-        subprocess.run(["rm", "-rf", str(repo_path)], check=True)
+        else:
+            if verbose:
+                print(
+                    f"  [setup] Contaminated clone (head_ok={head_ok}, "
+                    f"task_branches={not no_task_branches}), removing {repo_path}",
+                    file=sys.stderr,
+                )
+            subprocess.run(["rm", "-rf", str(repo_path)], check=True)
 
     if verbose:
         print(f"  [setup] Cloning {repo_url} → {repo_path}", file=sys.stderr)
@@ -253,11 +268,11 @@ def setup_repo(instance: dict, workdir: str, config_path: Path, verbose: bool = 
         capture_output=True,
         timeout=60,
     )
-    _write_agtx_config(repo_path, config_path)
+    _write_agtx_config(repo_path, config_path, base_commit)
     return repo_path
 
 
-def _write_agtx_config(repo_path: Path, config_path: Path) -> None:
+def _write_agtx_config(repo_path: Path, config_path: Path, base_commit: str) -> None:
     """
     Write config.toml and wipe any stale agtx state (old worktrees, task DB, old artifacts).
     This ensures each benchmark run starts clean even if the repo clone is reused.
@@ -270,14 +285,45 @@ def _write_agtx_config(repo_path: Path, config_path: Path) -> None:
             subprocess.run(["rm", "-rf", str(stale_path)], check=True)
     agtx_dir.mkdir(exist_ok=True)
     dest = agtx_dir / "config.toml"
-    dest.write_text(config_path.read_text())
+    # Insert base_branch = "<commit>" before any [section] headers so it stays
+    # a top-level key. Appending at the end would put it inside the last section
+    # (e.g. [agents]) and TOML would parse it as agents.base_branch instead.
+    content = config_path.read_text()
+    base_branch_line = f'base_branch = "{base_commit}"\n'
+    # Remove any existing base_branch line first (idempotent)
+    lines = [l for l in content.splitlines(keepends=True) if not l.startswith("base_branch =")]
+    # Find the first [section] line and insert before it; if none, append at end
+    insert_at = next((i for i, l in enumerate(lines) if l.startswith("[")), len(lines))
+    lines.insert(insert_at, base_branch_line)
+    dest.write_text("".join(lines))
 
-    # Ensure .agtx/ is gitignored
-    gitignore = repo_path / ".gitignore"
+    # Prune stale git worktree registrations and delete old task branches.
+    # git worktree prune won't remove registrations whose gitdir is gone until the
+    # grace period expires (default 3 months). Delete .git/worktrees/ directly so
+    # the task/* branches become deletable immediately.
+    git_worktrees_meta = repo_path / ".git" / "worktrees"
+    if git_worktrees_meta.exists():
+        subprocess.run(["rm", "-rf", str(git_worktrees_meta)], check=True)
+    subprocess.run(["git", "worktree", "prune"], cwd=repo_path, capture_output=True)
+    result = subprocess.run(
+        ["git", "branch", "--list", "task/*"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    for branch in result.stdout.splitlines():
+        branch = branch.strip().lstrip("*").strip()
+        if branch:
+            subprocess.run(
+                ["git", "branch", "-D", branch],
+                cwd=repo_path, capture_output=True,
+            )
+
+    # Ensure .agtx/ is ignored locally without touching .gitignore (which is a tracked file).
+    # .git/info/exclude is a local-only ignore file — changes never appear in git diff.
+    exclude_file = repo_path / ".git" / "info" / "exclude"
     marker = ".agtx/"
-    existing = gitignore.read_text() if gitignore.exists() else ""
+    existing = exclude_file.read_text() if exclude_file.exists() else ""
     if marker not in existing:
-        with gitignore.open("a") as f:
+        with exclude_file.open("a") as f:
             f.write(f"\n# agtx benchmark artifacts\n{marker}\n")
 
 

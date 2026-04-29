@@ -6400,6 +6400,15 @@ impl App {
         self.state.stuck_task_notified.clear();
         self.state.stuck_task_idle_since.clear();
 
+        // Reload config for the new project so per-phase agent overrides are respected
+        let global_config = GlobalConfig::load().unwrap_or_default();
+        let project_config = ProjectConfig::load(&project_path).unwrap_or_default();
+        self.state.config = MergedConfig::merge(&global_config, &project_config);
+        self.state.cached_plugin = Some(load_plugin_if_configured(
+            &self.state.config,
+            Some(&project_path),
+        ));
+
         // Reload tasks for new project
         self.refresh_tasks()?;
 
@@ -8241,21 +8250,20 @@ fn ensure_window_or_recover(
     agent_ops: &dyn AgentOperations,
     worktree_path: Option<&str>,
 ) {
-    if tmux_ops.window_exists(target).unwrap_or(true) {
-        return;
+    if !tmux_ops.window_exists(target).unwrap_or(true) {
+        let Some(wt_path) = worktree_path else { return };
+        if !Path::new(wt_path).exists() {
+            return;
+        }
+        let Some((session, window)) = target.split_once(':') else {
+            return;
+        };
+        if !tmux_ops.has_session(session) {
+            let _ = tmux_ops.create_session(session, wt_path);
+        }
+        let resume_cmd = agent_ops.build_resume_command();
+        let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd), true);
     }
-    let Some(wt_path) = worktree_path else { return };
-    if !Path::new(wt_path).exists() {
-        return;
-    }
-    let Some((session, window)) = target.split_once(':') else {
-        return;
-    };
-    if !tmux_ops.has_session(session) {
-        let _ = tmux_ops.create_session(session, wt_path);
-    }
-    let resume_cmd = agent_ops.build_resume_command();
-    let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd), true);
 }
 
 /// Gracefully switch the agent running in a tmux window.

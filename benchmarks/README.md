@@ -192,43 +192,29 @@ cat swebench_output/*/results.json | \
 ### Cleanup
 
 After an interrupted or completed run, stale state (worktrees, tmux sessions, SQLite DBs) can be
-cleaned up manually.
+cleaned up with the included script.
 
-**Clean all repos** (wipe worktrees + task DBs, keep clones so the next run doesn't re-clone):
+**Clean all instances:**
 ```bash
-# Remove all .agtx/ dirs from every repo clone
-find /tmp/swebench_repos -maxdepth 2 -name ".agtx" -type d -exec rm -rf {} + 2>/dev/null
-
-# Kill both tmux servers (swebench = TUI sessions, agtx = agent windows)
-tmux -L swebench kill-server 2>/dev/null
-tmux -L agtx kill-server 2>/dev/null
+./benchmarks/swebench/cleanup.sh
 ```
 
-**Clean a specific instance** (e.g. `astropy__astropy-12907`):
+**Clean a specific instance:**
 ```bash
-INSTANCE=astropy__astropy-12907
-SLUG=$(echo "$INSTANCE" | tr '[:upper:]' '[:lower:]' | tr '_' '-' | cut -c1-50)
-
-rm -rf /tmp/swebench_repos/$INSTANCE/.agtx
-tmux -L swebench kill-session -t $SLUG 2>/dev/null
-tmux -L agtx kill-session -t $INSTANCE 2>/dev/null
+./benchmarks/swebench/cleanup.sh astropy__astropy-12907
 ```
 
-**Clean the SQLite project DB** for a specific instance:
+**Clean multiple specific instances:**
 ```bash
-INSTANCE=astropy__astropy-12907
-AGTX_DB_DIR=~/Library/Application\ Support/agtx  # macOS; Linux: ~/.config/agtx
+./benchmarks/swebench/cleanup.sh astropy__astropy-12907 sympy__sympy-20590
+```
 
-# Find which project DB contains the instance
-for db in "$AGTX_DB_DIR/projects/"*.db; do
-  result=$(sqlite3 "$db" "SELECT title FROM tasks WHERE title LIKE '%$INSTANCE%' LIMIT 1" 2>/dev/null)
-  if [ -n "$result" ]; then
-    echo "Found in: $db"
-    rm "$db"
-    sqlite3 "$AGTX_DB_DIR/index.db" "DELETE FROM projects WHERE path LIKE '%$INSTANCE%';"
-    echo "Deleted."
-  fi
-done
+The script removes `.agtx/` dirs, tmux sessions, and central SQLite project DBs.
+Repo clones under `/tmp/swebench_repos/` are preserved so the next run skips re-cloning.
+
+Override the repo clone directory with `SWEBENCH_WORKDIR`:
+```bash
+SWEBENCH_WORKDIR=/my/custom/path ./benchmarks/swebench/cleanup.sh
 ```
 
 ---
