@@ -1,4 +1,4 @@
-# agtx Benchmarks
+# agtx benchmarks 📊
 
 ## SWE-bench Lite
 
