@@ -195,12 +195,31 @@ class McpClient:
 # Repo Setup
 # ---------------------------------------------------------------------------
 
-def setup_repo(instance: dict, workdir: str, config_path: Path, verbose: bool = False) -> Path:
+def setup_repo(instance: dict, workdir: str, config_path: Path, verbose: bool = False, smoke_test: bool = False) -> Path:
     """
     Clone the repo at base_commit and write .agtx/config.toml.
     Returns repo path. Safe to call again on an existing clone (resumable).
+    In smoke test mode, initializes an empty git repo instead of cloning.
     """
     instance_id = instance["instance_id"]
+
+    if smoke_test:
+        repo_path = Path(workdir) / instance_id
+        if not repo_path.exists():
+            repo_path.mkdir(parents=True)
+            subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init"],
+                cwd=repo_path,
+                capture_output=True,
+                check=True,
+                env={**__import__("os").environ, "GIT_AUTHOR_NAME": "smoke", "GIT_AUTHOR_EMAIL": "smoke@test", "GIT_COMMITTER_NAME": "smoke", "GIT_COMMITTER_EMAIL": "smoke@test"},
+            )
+            if verbose:
+                print(f"  [setup] Initialized empty git repo at {repo_path}", file=sys.stderr)
+        _write_agtx_config(repo_path, config_path, "HEAD")
+        return repo_path
+
     repo_url = f"https://github.com/{instance['repo']}.git"
     base_commit = instance["base_commit"]
 
@@ -596,6 +615,17 @@ def _artifact_exists(worktree: Path, pattern: str) -> bool:
 class TaskRunner:
     """Runs a single SWE-bench instance through the full agtx lifecycle."""
 
+    SMOKE_TEST_DESCRIPTION = (
+        "This is a smoke test run. Do not modify any source files.\n\n"
+        "Planning phase: write the following content to `.agtx/plan.md` in the current working directory:\n"
+        "```\n"
+        "# Smoke Test Plan\n"
+        "This is a smoke test. In the running phase: write an empty `.agtx/execute.md`. "
+        "In the review phase: write an empty `.agtx/review.md`. Do not modify any source files.\n"
+        "```\n"
+        "Then stop and wait."
+    )
+
     def __init__(
         self,
         instance: dict,
@@ -607,6 +637,7 @@ class TaskRunner:
         model_name: str,
         phase_timeout: int,
         verbose: bool = False,
+        smoke_test: bool = False,
     ):
         self.instance = instance
         self.instance_id = instance["instance_id"]
@@ -618,6 +649,7 @@ class TaskRunner:
         self.model_name = model_name
         self.phase_timeout = phase_timeout
         self.verbose = verbose
+        self.smoke_test = smoke_test
         self.mcp: McpClient | None = None
 
     def _poll_transition(self, request_id: str, timeout: int = 120) -> None:
@@ -702,14 +734,17 @@ class TaskRunner:
             if self.verbose:
                 print(f"  [{self.instance_id}] Creating task...", file=sys.stderr)
             problem = self.instance.get("problem_statement", "")
-            description = (
-                problem
-                + "\n\n---\n"
-                + "Note: the repo may not be fully installable in this environment. "
-                + "Do not attempt to build, install, or run tests. "
-                + "Do not run any git commands (no fetch, pull, merge, or commit). "
-                + "Read the source code, understand the bug, and fix it by editing the relevant files directly."
-            )
+            if self.smoke_test:
+                description = self.SMOKE_TEST_DESCRIPTION
+            else:
+                description = (
+                    problem
+                    + "\n\n---\n"
+                    + "Note: the repo may not be fully installable in this environment. "
+                    + "Do not attempt to build, install, or run tests. "
+                    + "Do not run any git commands (no fetch, pull, merge, or commit). "
+                    + "Read the source code, understand the bug, and fix it by editing the relevant files directly."
+                )
             task_resp = self.mcp.call(
                 "create_task",
                 title=self.instance_id,
@@ -879,6 +914,7 @@ class BenchmarkOrchestrator:
         output_dir: Path,
         concurrency: int,
         verbose: bool = False,
+        smoke_test: bool = False,
     ):
         self.instances = instances
         self.agtx_bin = agtx_bin
@@ -892,6 +928,7 @@ class BenchmarkOrchestrator:
         self.store = ResultsStore(output_dir)
         self.concurrency = concurrency
         self.verbose = verbose
+        self.smoke_test = smoke_test
 
     def _run_one(self, instance: dict, progress: tqdm) -> None:
         instance_id = instance["instance_id"]
@@ -906,7 +943,7 @@ class BenchmarkOrchestrator:
         if self.verbose:
             print(f"\n[{instance_id}] Setting up repo...", file=sys.stderr)
         try:
-            repo_path = setup_repo(instance, self.workdir, self.config_path, verbose=self.verbose)
+            repo_path = setup_repo(instance, self.workdir, self.config_path, verbose=self.verbose, smoke_test=self.smoke_test)
         except Exception as e:
             self.store.save_result(
                 instance_id=instance_id,
@@ -922,7 +959,7 @@ class BenchmarkOrchestrator:
             print(f"[{instance_id}] Starting TUI...", file=sys.stderr)
         try:
             start_tui_in_tmux(slug, repo_path, self.agtx_bin, verbose=self.verbose)
-            time.sleep(3)  # Wait for TUI startup + project registration
+            time.sleep(8)  # Wait for TUI startup + project registration
         except Exception as e:
             self.store.save_result(
                 instance_id=instance_id,
@@ -946,6 +983,7 @@ class BenchmarkOrchestrator:
             model_name=self.model_name,
             phase_timeout=self.phase_timeout,
             verbose=self.verbose,
+            smoke_test=self.smoke_test,
         )
         result = runner.run()
         kill_tmux_session(slug, repo_path)
@@ -1083,6 +1121,13 @@ other agtx project settings. Example:
         action="store_true",
         help="Print step-by-step progress to stderr",
     )
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        dest="smoke_test",
+        help="Replace task description with a trivial prompt (create artifact files and stop). "
+             "Use to verify the full pipeline works without spending tokens on real coding work.",
+    )
     args = parser.parse_args()
 
     # Load and validate config
@@ -1110,16 +1155,20 @@ other agtx project settings. Example:
     else:
         output_dir = Path(args.output_dir).resolve()
 
-    instances = load_swebench(args.split)
-
-    if args.instance_ids:
-        id_set = set(args.instance_ids)
-        instances = [i for i in instances if i["instance_id"] in id_set]
-        if not instances:
-            print("No matching instance IDs found.", file=sys.stderr)
-            sys.exit(1)
-    elif args.instances is not None:
-        instances = instances[: args.instances]
+    # In smoke test mode with no explicit instance selection, skip loading the dataset
+    # entirely and use a single synthetic instance.
+    if args.smoke_test and args.instance_ids is None and args.instances is None:
+        instances = [{"instance_id": "smoke-test", "repo": "", "base_commit": "HEAD", "problem_statement": ""}]
+    else:
+        instances = load_swebench(args.split)
+        if args.instance_ids:
+            id_set = set(args.instance_ids)
+            instances = [i for i in instances if i["instance_id"] in id_set]
+            if not instances:
+                print("No matching instance IDs found.", file=sys.stderr)
+                sys.exit(1)
+        elif args.instances is not None:
+            instances = instances[: args.instances]
 
     orchestrator = BenchmarkOrchestrator(
         instances=instances,
@@ -1134,6 +1183,7 @@ other agtx project settings. Example:
         output_dir=output_dir,
         concurrency=args.concurrency,
         verbose=args.verbose,
+        smoke_test=args.smoke_test,
     )
     orchestrator.run()
 

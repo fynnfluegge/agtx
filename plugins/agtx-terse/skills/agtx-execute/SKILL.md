@@ -9,23 +9,25 @@ You are in the **execution phase** of an agtx-managed task.
 
 ## Input
 
-The argument to this command is a task ID. Fetch the task description using the agtx MCP tool:
+The argument to this command is a task ID.
+
+If `.agtx/plan.md` exists in the current working directory, read it — it already contains the approved plan and all needed context. Do NOT call `get_task`.
+
+If `.agtx/plan.md` does not exist, fetch the task description:
 ```
 mcp__agtx__get_task(task_id: "<the id passed to this command>")
 ```
-Use the `description` field as the task to work on. Also check for `.agtx/plan.md` if a planning phase was completed first.
 
 ## Instructions
 
-1. Fetch the task description via `get_task`
-2. If `.agtx/plan.md` exists, read it for the approved plan
-3. Implement the changes
-4. Run relevant tests to verify your changes
-5. Fix any issues found during testing
+1. Read `.agtx/plan.md` if it exists (skip `get_task`), otherwise fetch via `get_task`
+2. Implement the changes
+3. Run relevant tests to verify your changes
+4. Fix any issues found during testing
 
 ## Output
 
-When implementation is complete, write a summary to `.agtx/execute.md` with these sections:
+When implementation is complete, write a summary to `.agtx/execute.md` in the **current working directory** with these sections:
 
 ## Changes
 What files were modified/created and what was changed in each.
@@ -35,7 +37,7 @@ How you verified the changes — tests run, results, manual checks.
 
 ## CRITICAL: Stop After Writing
 
-After writing `.agtx/execute.md`:
+After writing `.agtx/execute.md` (in the current working directory):
 - Do NOT start new work beyond the plan
 - Say: "Implementation complete. Summary written to `.agtx/execute.md`."
 - Wait for further instructions

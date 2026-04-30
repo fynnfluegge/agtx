@@ -3838,6 +3838,79 @@ fn test_write_skills_to_worktree_opencode() {
     );
 }
 
+#[test]
+fn test_write_skills_to_worktree_mcp_claude() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"]);
+
+    let mcp = dir.path().join(".mcp.json");
+    assert!(mcp.exists(), ".mcp.json should be written for claude");
+    let content = std::fs::read_to_string(&mcp).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+    assert_eq!(v["mcpServers"]["agtx"]["args"][0], "mcp-serve");
+}
+
+#[test]
+fn test_write_skills_to_worktree_mcp_gemini() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"]);
+
+    let cfg = dir.path().join(".gemini/settings.json");
+    assert!(cfg.exists(), ".gemini/settings.json should be written for gemini");
+    let content = std::fs::read_to_string(&cfg).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+}
+
+#[test]
+fn test_write_skills_to_worktree_mcp_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"]);
+
+    let cfg = dir.path().join(".cursor/mcp.json");
+    assert!(cfg.exists(), ".cursor/mcp.json should be written for cursor");
+    let content = std::fs::read_to_string(&cfg).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+}
+
+#[test]
+fn test_write_skills_to_worktree_mcp_codex() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"]);
+
+    let cfg = dir.path().join(".codex/config.toml");
+    assert!(cfg.exists(), ".codex/config.toml should be written for codex");
+    let content = std::fs::read_to_string(&cfg).unwrap();
+    assert!(content.contains("[mcp_servers.agtx]"));
+    assert!(content.contains("mcp-serve"));
+}
+
+#[test]
+fn test_write_skills_to_worktree_mcp_opencode() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"]);
+
+    let cfg = dir.path().join("opencode.json");
+    assert!(cfg.exists(), "opencode.json should be written for opencode");
+    let content = std::fs::read_to_string(&cfg).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(v["mcp"]["agtx"]["type"], "local");
+    assert!(v["mcp"]["agtx"]["command"].is_array());
+    assert_eq!(v["mcp"]["agtx"]["command"][1], "mcp-serve");
+}
+
 // =============================================================================
 // Tests for load_task_plugin
 // =============================================================================

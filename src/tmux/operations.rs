@@ -77,11 +77,21 @@ impl TmuxOperations for RealTmuxOps {
             .args(["-c", working_dir]);
 
         if let Some(ref shell_cmd) = command {
+            // Unset Claude Code's nesting-detection env vars so that agents
+            // launched in task panes are not blocked by the "launched inside
+            // another Claude Code session" check.
             if keep_shell_on_exit {
-                let wrapped = format!("{}; exec $SHELL", shell_cmd);
+                let wrapped = format!(
+                    "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT sh -c '{}'; exec $SHELL",
+                    shell_cmd
+                );
                 cmd.args(["sh", "-c", &wrapped]);
             } else {
-                cmd.args(["sh", "-c", shell_cmd]);
+                let wrapped = format!(
+                    "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT sh -c '{}'",
+                    shell_cmd
+                );
+                cmd.args(["sh", "-c", &wrapped]);
             }
         }
 

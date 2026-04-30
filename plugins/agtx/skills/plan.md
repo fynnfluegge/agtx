@@ -25,7 +25,7 @@ Use the `description` field as the task to work on. Also check for `.agtx/resear
 
 ## Output
 
-Write your plan to `.agtx/plan.md` with these sections:
+Write your plan to `.agtx/plan.md` in the **current working directory** (do NOT navigate up — write directly to `.agtx/plan.md` relative to where you are now) with these sections:
 
 ## Analysis
 What you found in the codebase — relevant files, patterns, dependencies.
@@ -38,7 +38,7 @@ What could go wrong — edge cases, breaking changes, areas needing extra care.
 
 ## CRITICAL: Stop After Writing
 
-After writing `.agtx/plan.md`:
+After writing `.agtx/plan.md` (in the current working directory):
 - Do NOT start implementing
 - Do NOT modify any source files
 - Say: "Plan written to `.agtx/plan.md`. Waiting for approval."

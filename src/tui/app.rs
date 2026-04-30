@@ -7729,13 +7729,104 @@ fn send_skill_and_prompt(
         }
     }
 
-    // Gemini, Codex & OpenCode: always combine skill+prompt into a single message.
+    // OpenCode command picker handles args differently: when a command has arguments
+    // (e.g. `/agtx-plan abc123`), typing the full string and pressing Enter causes the
+    // picker to confirm/insert only the command name — stripping the args. Commands
+    // without args (e.g. `/agtx-review`) work fine with a single Enter confirm + submit.
+    //
+    // Fix: send just the command name, wait for picker, Enter to confirm (inserts cmd),
+    // then send the args (picker dismissed, input now has just the command), then Enter.
+    if agent_name == "opencode" {
+        // Build the full message: skill command (if any) + prompt (if any)
+        let full_text = if let Some(cmd) = skill_cmd {
+            if !prompt.is_empty() {
+                format!("{}\n\n{}", cmd, prompt)
+            } else {
+                cmd.clone()
+            }
+        } else if !prompt.is_empty() {
+            prompt.to_string()
+        } else {
+            let oneline = task_content
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            oneline
+        };
+
+        if !full_text.is_empty() {
+            // Check if the first token looks like a slash command (starts with /)
+            let first_line = full_text.lines().next().unwrap_or(&full_text);
+            if let Some(space_pos) = first_line.find(' ') {
+                let cmd_name = &first_line[..space_pos];
+                let cmd_args = &first_line[space_pos..]; // includes leading space
+                let rest = &full_text[first_line.len()..]; // rest of the message after first line
+
+                if cmd_name.starts_with('/') {
+                    // Send just the command name to trigger the picker
+                    let _ = tmux_ops.send_keys_literal(target, cmd_name);
+                    // Wait for picker to appear (command name visible in pane)
+                    for _ in 0..20 {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        if let Ok(content) = tmux_ops.capture_pane(target) {
+                            if content.contains(cmd_name) {
+                                break;
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    // Enter confirms/inserts the command from picker
+                    let _ = tmux_ops.send_keys_literal(target, "Enter");
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    // Now send the args + any remaining prompt text
+                    let remaining = format!("{}{}", cmd_args, rest);
+                    let _ = tmux_ops.send_keys_literal(target, &remaining);
+                    // Wait for args to appear in pane
+                    let check = cmd_args.trim();
+                    if !check.is_empty() {
+                        for _ in 0..20 {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            if let Ok(content) = tmux_ops.capture_pane(target) {
+                                if content.contains(check) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let _ = tmux_ops.send_keys_literal(target, "Enter");
+                    return;
+                }
+            }
+
+            // No args (or no slash command): simple send + wait for visibility + Enter
+            let _ = tmux_ops.send_keys_literal(target, &full_text);
+            let check_str = full_text.lines().next().unwrap_or(&full_text);
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = tmux_ops.capture_pane(target) {
+                    if content.contains(check_str) {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            // Enter to confirm picker (if any), then second Enter to submit
+            let _ = tmux_ops.send_keys_literal(target, "Enter");
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let _ = tmux_ops.send_keys_literal(target, "Enter");
+        }
+        return;
+    }
+
+    // Gemini, Codex & cursor: always combine skill+prompt into a single message.
     // Gemini: sending separately causes it to execute the skill and queue the
     //   prompt, which gets lost or arrives too late.
     // Codex: skill mentions ($skill-name) are inline references that must be
     //   part of a message — sending just "$skill" standalone does nothing.
-    // OpenCode: same Ink TUI behavior as Gemini/Codex, needs combined send + double Enter.
-    if matches!(agent_name, "gemini" | "codex" | "cursor" | "opencode") {
+    if matches!(agent_name, "gemini" | "codex" | "cursor") {
         let text_to_send = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
                 Some(format!("{}\n\n{}", cmd, prompt))
@@ -7774,11 +7865,9 @@ fn send_skill_and_prompt(
             std::thread::sleep(std::time::Duration::from_millis(200));
             let _ = tmux_ops.send_keys_literal(target, "Enter");
 
-            // Codex and OpenCode show a command picker popup when a skill is typed.
+            // Codex shows a command picker popup when a skill is typed.
             // The first Enter confirms/closes the picker; a second Enter is needed
             // to actually submit the message.
-            // - Codex: wait for "Press enter to insert" to disappear
-            // - OpenCode: wait a short delay (picker closes immediately on Enter)
             if agent_name == "codex" {
                 for _ in 0..20 {
                     // up to 4s
@@ -7790,9 +7879,6 @@ fn send_skill_and_prompt(
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
-            } else if agent_name == "opencode" {
-                std::thread::sleep(std::time::Duration::from_millis(400));
                 let _ = tmux_ops.send_keys_literal(target, "Enter");
             }
         }
@@ -7813,6 +7899,26 @@ fn send_skill_and_prompt(
         // Skill + prompt, no trigger: send separately, wait for agent to finish processing
         (Some(cmd), None) => {
             let _ = tmux_ops.send_keys(target, cmd);
+
+            // Verify the command was received: check that pane content changes within
+            // ~3s (agent picked it up). If nothing changed, the agent wasn't ready yet —
+            // wait 1s and resend once.
+            let baseline = tmux_ops.capture_pane(target).unwrap_or_default();
+            let mut received = false;
+            for _ in 0..15 {
+                // up to 3s
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = tmux_ops.capture_pane(target) {
+                    if content != baseline {
+                        received = true;
+                        break;
+                    }
+                }
+            }
+            if !received {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let _ = tmux_ops.send_keys(target, cmd);
+            }
             if !prompt.is_empty() {
                 // Wait for agent to process the skill command and become idle again.
                 // Requires at least 1 content change (agent started processing) before
@@ -8479,6 +8585,11 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
         }
     }
 
+    // Fixed 2s grace period after stability is detected. There is a small window
+    // where the agent's prompt indicator is visible but the input buffer is not
+    // yet accepting keystrokes (e.g. Claude finishing async tool registration).
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
     Some(target.to_string())
 }
 
@@ -8567,6 +8678,101 @@ fn write_skills_to_worktree(
             let skill_dir = skills_dir.join(skill_name);
             let _ = std::fs::create_dir_all(&skill_dir);
             let _ = std::fs::write(skill_dir.join("SKILL.md"), skill_content);
+        }
+    }
+
+    // Write project-scoped MCP server config for each configured agent.
+    // Use the project root path (not the worktree path) so the MCP server opens
+    // the correct project DB where tasks are stored.
+    let agtx_bin = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("agtx"))
+        .to_string_lossy()
+        .to_string();
+    let project_path_str = project_path.to_string_lossy().to_string();
+    for agent_name in agent_names {
+        match *agent_name {
+            "claude" => {
+                let cfg = serde_json::json!({
+                    "mcpServers": {
+                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
+                    }
+                });
+                let _ = std::fs::write(
+                    Path::new(worktree_path).join(".mcp.json"),
+                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                );
+            }
+            "codex" => {
+                let toml = format!(
+                    "[mcp_servers.agtx]\ncommand = \"{}\"\nargs = [\"mcp-serve\", \"{}\"]\n",
+                    agtx_bin, project_path_str
+                );
+                let dir = Path::new(worktree_path).join(".codex");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(dir.join("config.toml"), toml);
+
+                // Codex only loads project-local .codex/config.toml for trusted paths.
+                // Add a trust entry for this worktree to ~/.codex/config.toml.
+                if let Ok(home) = std::env::var("HOME") {
+                    let global_config_path = Path::new(&home).join(".codex").join("config.toml");
+                    let trust_entry = format!(
+                        "\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                        worktree_path
+                    );
+                    let existing = std::fs::read_to_string(&global_config_path).unwrap_or_default();
+                    if !existing.contains(worktree_path) {
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&global_config_path)
+                            .and_then(|mut f| {
+                                use std::io::Write;
+                                f.write_all(trust_entry.as_bytes())
+                            });
+                    }
+                }
+            }
+            "gemini" => {
+                let cfg = serde_json::json!({
+                    "mcpServers": {
+                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
+                    }
+                });
+                let dir = Path::new(worktree_path).join(".gemini");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(
+                    dir.join("settings.json"),
+                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                );
+            }
+            "cursor" => {
+                let cfg = serde_json::json!({
+                    "mcpServers": {
+                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
+                    }
+                });
+                let dir = Path::new(worktree_path).join(".cursor");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(
+                    dir.join("mcp.json"),
+                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                );
+            }
+            "opencode" => {
+                let cfg = serde_json::json!({
+                    "mcp": {
+                        "agtx": {
+                            "type": "local",
+                            "command": [&agtx_bin, "mcp-serve", &project_path_str]
+                        }
+                    }
+                });
+                let _ = std::fs::write(
+                    Path::new(worktree_path).join("opencode.json"),
+                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                );
+            }
+            _ => {}
         }
     }
 
