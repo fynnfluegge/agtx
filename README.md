@@ -27,7 +27,8 @@
   <a href="#mcp-server">MCP Server</a> •
   <a href="#plugins">Plugins</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
-  <a href="#configuration">Configuration</a>
+  <a href="#configuration">Configuration</a> •
+  <a href="#benchmarks">Benchmarks</a>
 </p>
 
 ---
@@ -643,6 +644,12 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 5. If a task has been idle for 1+ minute without a phase artifact, the orchestrator is notified — it reads the pane with `read_pane_content`, then either nudges the agent with `send_to_task` or calls `move_task` with `escalate_to_user` to flag it for your attention
 6. Escalated tasks show a `⚠` badge on the kanban board; opening the task popup shows the reason and dismisses the flag
 7. MCP registration is cleaned up when the orchestrator is stopped
+
+## Benchmarks
+
+agtx includes a [SWE-bench Lite](https://www.swebench.com) benchmark runner that uses agtx itself as the agent orchestration layer — driving coding agent workflows against 300 real GitHub bug-fix tasks via the MCP server.
+
+See **[benchmarks/README.md](benchmarks/README.md)** for setup, usage, bundled configs, and evaluation instructions.
 
 ## Contributing
 

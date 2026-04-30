@@ -84,6 +84,8 @@ review   = "codex"
 
 Available plugins: `void`, `agtx`, `agtx-terse`, `gsd`, `spec-kit`, `bmad`, `openspec`, `superpowers`
 
+Pre-built configs for common single-agent and multi-agent combinations are in [`benchmarks/swebench/configs/`](swebench/configs/).
+
 ---
 
 ### Running
