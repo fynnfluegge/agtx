@@ -2,11 +2,11 @@
 
 [//]: <img src="https://github.com/user-attachments/assets/54ac039b-085e-490b-aacc-36c8e244e313" width="428" />
 
-# agtx
+# 🏄🏼‍♂️ agtx
 
 <div align="left">
     
-> **An AI agent that manages other coding agents in a terminal kanban board** - Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates to multiple coding agents running in parallel. Come back to changes ready to merge.
+> **The blackboard for coding agents** - Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates to multiple coding agents running in parallel. Come back to changes ready to merge.
 >
 > **Let different AI coding agents collaborate** autonomously on the same task with automatic session switching and context awareness - e.g. **Gemini** → research | **Claude** → implement | **Codex** → review
 >
@@ -18,6 +18,8 @@
 [![Release](https://img.shields.io/github/v/release/fynnfluegge/agtx)](https://github.com/fynnfluegge/agtx/releases)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+<a href="https://trendshift.io/repositories/23889" target="_blank"><img src="https://trendshift.io/api/badge/repositories/23889" alt="fynnfluegge%2Fagtx | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
