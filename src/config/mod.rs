@@ -235,7 +235,7 @@ pub struct ProjectConfig {
     /// Workflow plugin name (e.g. "gsd", "spec-kit")
     pub workflow_plugin: Option<String>,
 
-    /// Override branch prefix for this project (e.g. "user/pablospe")
+    /// Override branch prefix for this project (e.g. "user/name")
     pub branch_prefix: Option<String>,
 }
 
