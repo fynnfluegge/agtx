@@ -176,7 +176,7 @@ pub struct WorktreeConfig {
     #[serde(default = "default_worktree_dir")]
     pub worktree_dir: String,
 
-    /// Prefix for branch names (e.g. "user/pablospe" → "user/pablospe/slug")
+    /// Prefix for branch names (e.g. "user/name" → "user/name/slug")
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
 }
