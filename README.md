@@ -30,7 +30,7 @@
   <a href="#plugins">Plugins</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
   <a href="#configuration">Configuration</a> •
-  <a href="#benchmarks">Benchmarks</a>
+  <a href="#benchmark">Benchmark</a>
 </p>
 
 ---
