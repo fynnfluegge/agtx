@@ -6290,6 +6290,18 @@ impl App {
                 let content_hash = if phase_status == PhaseStatus::Working && !window_gone {
                     session_name.as_ref().and_then(|sn| {
                         tmux_ops.capture_pane(sn).ok().map(|content| {
+                            // Auto-dismiss Codex MCP tool approval prompt ("Always allow")
+                            // so agents can call agtx MCP tools without manual confirmation.
+                            if agent == "codex"
+                                && content.contains("Allow the")
+                                && content.contains("MCP server to run tool")
+                                && content.contains("Always allow")
+                            {
+                                let _ = tmux_ops.send_keys_literal(sn, "3");
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                                let _ = tmux_ops.send_keys_literal(sn, "Enter");
+                            }
+
                             use std::hash::{Hash, Hasher};
                             let mut hasher = std::collections::hash_map::DefaultHasher::new();
                             content.hash(&mut hasher);
@@ -8664,7 +8676,15 @@ fn switch_agent_in_tmux(
     std::thread::sleep(std::time::Duration::from_millis(2000));
 
     // 5. Start the new agent
-    let _ = tmux_ops.send_keys(target, new_agent_cmd);
+    // Wrap with env -u to clear Claude Code's nesting-detection vars — the
+    // persistent shell inherited them at window creation time, so they must
+    // be stripped explicitly here (unlike create_window which uses env -u
+    // on the initial command only).
+    let cmd = format!(
+        "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT {}",
+        new_agent_cmd
+    );
+    let _ = tmux_ops.send_keys(target, &cmd);
 
     // 6. Wait for the new agent process to actually start (pane_current_command != shell).
     //    Without this, wait_for_agent_ready may see stale ">" from old pane content
@@ -8718,6 +8738,20 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
                 let _ = tmux_ops.send_keys_literal(target, "Enter");
                 // Fall through to settle wait below
                 break;
+            }
+
+            // Handle Gemini trust dialog — auto-trust the folder so MCP servers
+            // and skills are loaded. After answering, Gemini restarts; reset
+            // stabilization counters so we wait for the new instance to be ready.
+            if content.contains("Do you trust the files in this folder?") {
+                let _ = tmux_ops.send_keys_literal(target, "1");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _ = tmux_ops.send_keys_literal(target, "Enter");
+                // Reset stabilization — Gemini will restart and we must wait again
+                last_content = String::new();
+                stable_ticks = 0;
+                change_count = 0;
+                continue;
             }
 
             // Check 2: known ready indicator in pane content
@@ -8913,7 +8947,7 @@ fn write_skills_to_worktree(
             "gemini" => {
                 let cfg = serde_json::json!({
                     "mcpServers": {
-                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
+                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str], "trust": true }
                     }
                 });
                 let dir = Path::new(worktree_path).join(".gemini");
