@@ -105,7 +105,7 @@ fn test_build_interactive_command_existing_agents_unchanged() {
     );
     assert_eq!(
         by_name("gemini").build_interactive_command(""),
-        "gemini --approval-mode yolo"
+        "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo"
     );
     assert_eq!(
         by_name("opencode").build_interactive_command(""),
@@ -136,7 +136,7 @@ fn test_build_resume_command_all_agents() {
     );
     assert_eq!(
         by_name("gemini").build_resume_command(),
-        "gemini --approval-mode yolo --resume"
+        "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo --resume"
     );
     assert_eq!(
         by_name("opencode").build_resume_command(),
