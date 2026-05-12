@@ -1244,11 +1244,21 @@ impl App {
             };
             let step_labels = ["Title", "Plugin", "Prompt"];
 
-            let mut lines: Vec<Line> = Vec::new();
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            // Pre-wrap every line we push so `lines.len()` always reflects the
+            // exact visual-row count. The cursor anchor below depends on this:
+            // if any preceding line wrapped silently in the Paragraph, the
+            // cursor would land one row too high.
+            let wrap_width = input_area.width.saturating_sub(2) as usize;
+            let push_wrapped = |dst: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>| {
+                for visual in wrap_spans(spans, wrap_width) {
+                    dst.push(visual);
+                }
+            };
 
             // Step indicator breadcrumb
-            let mut breadcrumb_spans: Vec<Span> = Vec::new();
-            breadcrumb_spans.push(Span::raw("  "));
+            let mut breadcrumb_spans: Vec<Span<'static>> = Vec::new();
+            breadcrumb_spans.push(Span::raw("  ".to_string()));
             for (i, label) in step_labels.iter().enumerate() {
                 let style = if i == step {
                     Style::default()
@@ -1259,41 +1269,63 @@ impl App {
                 } else {
                     Style::default().fg(dimmed_color)
                 };
-                breadcrumb_spans.push(Span::styled(*label, style));
+                breadcrumb_spans.push(Span::styled((*label).to_string(), style));
                 if i < step_labels.len() - 1 {
-                    breadcrumb_spans.push(Span::styled("  ›  ", Style::default().fg(dimmed_color)));
+                    breadcrumb_spans.push(Span::styled(
+                        "  ›  ".to_string(),
+                        Style::default().fg(dimmed_color),
+                    ));
                 }
             }
-            lines.push(Line::from(breadcrumb_spans));
+            push_wrapped(&mut lines, breadcrumb_spans);
 
             // Separator
             let inner_width = input_area.width.saturating_sub(4) as usize;
-            lines.push(Line::from(Span::styled(
-                format!("  {}", "─".repeat(inner_width.saturating_sub(2))),
-                Style::default().fg(dimmed_color),
-            )));
-            lines.push(Line::from(""));
+            push_wrapped(
+                &mut lines,
+                vec![Span::styled(
+                    format!("  {}", "─".repeat(inner_width.saturating_sub(2))),
+                    Style::default().fg(dimmed_color),
+                )],
+            );
+            lines.push(Line::from(String::new()));
 
             // Completed fields shown as read-only context
             if step >= 1 {
-                lines.push(Line::from(vec![
-                    Span::styled("  Title: ", Style::default().fg(dimmed_color)),
-                    Span::styled(&state.pending_task_title, Style::default().fg(text_color)),
-                ]));
+                push_wrapped(
+                    &mut lines,
+                    vec![
+                        Span::styled(
+                            "  Title: ".to_string(),
+                            Style::default().fg(dimmed_color),
+                        ),
+                        Span::styled(
+                            state.pending_task_title.clone(),
+                            Style::default().fg(text_color),
+                        ),
+                    ],
+                );
             }
             if step >= 2 {
                 let plugin_name = state
                     .wizard_plugin_options
                     .get(state.wizard_selected_plugin)
                     .map(|o| o.label.as_str())
-                    .unwrap_or("agtx");
-                lines.push(Line::from(vec![
-                    Span::styled("  Plugin: ", Style::default().fg(dimmed_color)),
-                    Span::styled(plugin_name, Style::default().fg(text_color)),
-                ]));
+                    .unwrap_or("agtx")
+                    .to_string();
+                push_wrapped(
+                    &mut lines,
+                    vec![
+                        Span::styled(
+                            "  Plugin: ".to_string(),
+                            Style::default().fg(dimmed_color),
+                        ),
+                        Span::styled(plugin_name, Style::default().fg(text_color)),
+                    ],
+                );
             }
             if step >= 1 {
-                lines.push(Line::from(""));
+                lines.push(Line::from(String::new()));
             }
 
             // Active area content. Track the insertion point so the native
@@ -1304,23 +1336,29 @@ impl App {
             let cursor_line_start = lines.len();
             match state.input_mode {
                 InputMode::InputTitle => {
-                    let (buf_col, buf_row) =
-                        cursor_display_pos(&state.input_buffer, state.input_cursor);
                     let prefix_cols = Span::raw("  Title: ").width();
-                    let col = prefix_cols + buf_col;
-                    cursor_display = Some((col as u16, (cursor_line_start + buf_row) as u16));
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "  Title: ",
-                            Style::default()
-                                .fg(selected_color)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            state.input_buffer.clone(),
-                            Style::default().fg(text_color),
-                        ),
-                    ]));
+                    let (col, row) = wrapped_cursor_pos(
+                        &state.input_buffer,
+                        state.input_cursor,
+                        prefix_cols,
+                        wrap_width,
+                    );
+                    cursor_display = Some((col as u16, (cursor_line_start + row) as u16));
+                    push_wrapped(
+                        &mut lines,
+                        vec![
+                            Span::styled(
+                                "  Title: ".to_string(),
+                                Style::default()
+                                    .fg(selected_color)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                state.input_buffer.clone(),
+                                Style::default().fg(text_color),
+                            ),
+                        ],
+                    );
                 }
                 InputMode::SelectPlugin => {
                     let active_plugin = state.config.workflow_plugin.as_deref().unwrap_or("");
@@ -1337,26 +1375,36 @@ impl App {
                         } else {
                             Style::default().fg(text_color)
                         };
-                        lines.push(Line::from(vec![
-                            Span::styled(marker, name_style),
-                            Span::styled(format!("{:<14}", &opt.label), name_style),
-                            Span::styled(&opt.description, Style::default().fg(desc_color)),
-                            Span::styled(check, Style::default().fg(Color::Green)),
-                        ]));
+                        push_wrapped(
+                            &mut lines,
+                            vec![
+                                Span::styled(marker.to_string(), name_style),
+                                Span::styled(format!("{:<14}", &opt.label), name_style),
+                                Span::styled(
+                                    opt.description.clone(),
+                                    Style::default().fg(desc_color),
+                                ),
+                                Span::styled(
+                                    check.to_string(),
+                                    Style::default().fg(Color::Green),
+                                ),
+                            ],
+                        );
                     }
                 }
                 InputMode::InputDescription => {
-                    let (buf_col, buf_row) =
-                        cursor_display_pos(&state.input_buffer, state.input_cursor);
                     let prefix_cols = Span::raw("  Prompt: ").width();
-                    let col = if buf_row == 0 {
-                        prefix_cols + buf_col
-                    } else {
-                        buf_col
-                    };
-                    cursor_display = Some((col as u16, (cursor_line_start + buf_row) as u16));
+                    let (col, row) = wrapped_cursor_pos(
+                        &state.input_buffer,
+                        state.input_cursor,
+                        prefix_cols,
+                        wrap_width,
+                    );
+                    cursor_display = Some((col as u16, (cursor_line_start + row) as u16));
                     let full_text = format!("  Prompt: {}", state.input_buffer);
-                    // Split on newlines to handle multi-line descriptions
+                    // Split on newlines to handle multi-line descriptions.
+                    // Each logical line is then pre-wrapped via push_wrapped so
+                    // visual layout matches wrapped_cursor_pos exactly.
                     for part in full_text.split('\n') {
                         if !state.highlighted_references.is_empty() {
                             let styled = build_highlighted_text(
@@ -1371,22 +1419,27 @@ impl App {
                                     .into_iter()
                                     .map(|s| Span::styled(s.content.into_owned(), s.style))
                                     .collect();
-                                lines.push(Line::from(owned_spans));
+                                push_wrapped(&mut lines, owned_spans);
                             }
                         } else {
-                            lines.push(Line::from(Span::styled(
-                                part.to_string(),
-                                Style::default().fg(text_color),
-                            )));
+                            push_wrapped(
+                                &mut lines,
+                                vec![Span::styled(
+                                    part.to_string(),
+                                    Style::default().fg(text_color),
+                                )],
+                            );
                         }
                     }
                 }
                 _ => {}
             }
 
+            // No `.wrap(...)` — `lines` is already pre-wrapped by `wrap_spans`
+            // to fit `wrap_width`. Letting Ratatui re-wrap would re-introduce
+            // the two-source-of-truth bug between renderer and cursor.
             let content = Paragraph::new(Text::from(lines))
                 .style(Style::default().fg(text_color))
-                .wrap(Wrap { trim: false })
                 .block(
                     Block::default()
                         .title(block_title)
@@ -7281,16 +7334,100 @@ fn parse_sgr(seq: &str, mut style: Style) -> Style {
     style
 }
 
-/// Map a byte offset in `text` to the (column, row) of the terminal cell it
-/// renders on. Column uses Unicode display width so wide chars (CJK, emoji)
-/// take two cells — a plain byte/char count would misplace the cursor.
-fn cursor_display_pos(text: &str, cursor_byte: usize) -> (usize, usize) {
-    let end = cursor_byte.min(text.len());
-    let before = &text[..end];
-    let row = before.bytes().filter(|b| *b == b'\n').count();
-    let last_line = before.rsplit('\n').next().unwrap_or("");
-    let col = ratatui::text::Span::raw(last_line).width();
+/// Display width of a single character, matching what the renderer draws.
+fn char_display_width(ch: char) -> usize {
+    ratatui::text::Span::raw(ch.to_string()).width()
+}
+
+/// Map a byte offset in `text` to the (col, row) of the terminal cell it
+/// will render on, using the same char-by-char wrap rule as `wrap_spans`.
+///
+/// - `prefix_width` is the display width preceding `text` on the first visual
+///   row (e.g. the `"  Prompt: "` label). It is consumed only on row 0; after
+///   any wrap or `'\n'`, the next visual row starts at column 0.
+/// - `wrap_width` is the inner width of the block (border-subtracted). A
+///   width of 0 short-circuits to (prefix_width, 0).
+/// - `'\n'` in `text` is treated as a hard line break.
+///
+/// This function and `wrap_spans` MUST stay in lock-step: any change to the
+/// wrap rule has to land in both, otherwise the cursor drifts off what was
+/// actually drawn. Both use lazy wrap (wrap only when the next char would
+/// overflow), so a cursor at end-of-row sits at col=wrap_width on that row
+/// — which is still inside the inner area (wrap_width = area.width - 2).
+fn wrapped_cursor_pos(
+    text: &str,
+    cursor_byte: usize,
+    prefix_width: usize,
+    wrap_width: usize,
+) -> (usize, usize) {
+    let cursor_byte = cursor_byte.min(text.len());
+    let mut col = prefix_width;
+    let mut row = 0usize;
+    if wrap_width == 0 {
+        return (col, row);
+    }
+    let mut byte = 0usize;
+    for ch in text.chars() {
+        if byte >= cursor_byte {
+            break;
+        }
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            let w = char_display_width(ch);
+            if col + w > wrap_width {
+                row += 1;
+                col = 0;
+            }
+            col += w;
+        }
+        byte += ch.len_utf8();
+    }
     (col, row)
+}
+
+/// Pre-wrap a sequence of styled spans into visual `Line`s by display width.
+///
+/// Char-by-char lazy wrap (no word-boundary detection). This makes our layout
+/// authoritative: each produced `Line` has display width ≤ `wrap_width`, so
+/// `Paragraph::wrap(Wrap { trim: false })` leaves it untouched and the cursor
+/// position computed by `wrapped_cursor_pos` lines up exactly with what was
+/// drawn — no two-source-of-truth between renderer and cursor.
+///
+/// Span styles are preserved across wrap points by splitting the span text
+/// at the wrap boundary and re-emitting both halves with the same style.
+/// `'\n'` inside span content is NOT handled here — callers split on `'\n'`
+/// before calling so each invocation wraps a single logical line.
+fn wrap_spans(spans: Vec<Span<'static>>, wrap_width: usize) -> Vec<Line<'static>> {
+    if wrap_width == 0 || spans.is_empty() {
+        return vec![Line::from(spans)];
+    }
+    let mut visual: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut col = 0usize;
+    for span in spans {
+        let style = span.style;
+        let mut chunk = String::new();
+        for ch in span.content.chars() {
+            let w = char_display_width(ch);
+            if col + w > wrap_width {
+                if !chunk.is_empty() {
+                    visual
+                        .last_mut()
+                        .unwrap()
+                        .push(Span::styled(std::mem::take(&mut chunk), style));
+                }
+                visual.push(Vec::new());
+                col = 0;
+            }
+            chunk.push(ch);
+            col += w;
+        }
+        if !chunk.is_empty() {
+            visual.last_mut().unwrap().push(Span::styled(chunk, style));
+        }
+    }
+    visual.into_iter().map(Line::from).collect()
 }
 
 /// Snap `pos` back to the nearest UTF-8 char boundary at or before it.

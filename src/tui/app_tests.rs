@@ -4631,61 +4631,271 @@ fn test_delete_removes_whole_multibyte_char_in_description() {
     assert_eq!(app.state.input_cursor, 0);
 }
 
-// --- Cursor display position (for IME composition anchoring) ---
+// --- Wrapped cursor position (for IME composition anchoring under wrap) ---
 
 #[test]
-fn test_cursor_display_pos_ascii_only() {
-    // "hello", cursor at byte 3 → col 3, row 0
-    let (col, row) = super::cursor_display_pos("hello", 3);
+fn test_wrapped_cursor_pos_ascii_no_wrap() {
+    let (col, row) = super::wrapped_cursor_pos("hello", 3, 0, 20);
     assert_eq!((col, row), (3, 0));
 }
 
 #[test]
-fn test_cursor_display_pos_korean_is_wide() {
-    // "가나", cursor at byte 6 (end) → col 4 (2 wide chars * 2 cols), row 0
-    let (col, row) = super::cursor_display_pos("가나", 6);
+fn test_wrapped_cursor_pos_with_prefix() {
+    // prefix occupies 10 cols, cursor after 3 chars → col 13, row 0
+    let (col, row) = super::wrapped_cursor_pos("hello", 3, 10, 40);
+    assert_eq!((col, row), (13, 0));
+}
+
+#[test]
+fn test_wrapped_cursor_pos_korean_is_wide() {
+    // "가나" at end → 4 cells, row 0
+    let (col, row) = super::wrapped_cursor_pos("가나", 6, 0, 20);
     assert_eq!((col, row), (4, 0));
 }
 
 #[test]
-fn test_cursor_display_pos_korean_mid() {
-    // "가나", cursor at byte 3 (between 가 and 나) → col 2, row 0
-    let (col, row) = super::cursor_display_pos("가나", 3);
+fn test_wrapped_cursor_pos_korean_mid() {
+    let (col, row) = super::wrapped_cursor_pos("가나", 3, 0, 20);
     assert_eq!((col, row), (2, 0));
 }
 
 #[test]
-fn test_cursor_display_pos_mixed_ascii_korean() {
-    // "a가b" bytes: a(1) + 가(3) + b(1) = 5 bytes
-    // cursor after 가 (byte 4) → col 3 (1 + 2), row 0
-    let (col, row) = super::cursor_display_pos("a가b", 4);
+fn test_wrapped_cursor_pos_mixed_ascii_korean() {
+    // "a가b": cursor after 가 (byte 4) → col 1 (a) + 2 (가) = 3
+    let (col, row) = super::wrapped_cursor_pos("a가b", 4, 0, 20);
     assert_eq!((col, row), (3, 0));
 }
 
 #[test]
-fn test_cursor_display_pos_with_newline() {
+fn test_wrapped_cursor_pos_hard_newline() {
     // "가나\n다", cursor at end (byte 10) → col 2 (just 다), row 1
-    let (col, row) = super::cursor_display_pos("가나\n다", 10);
+    let (col, row) = super::wrapped_cursor_pos("가나\n다", 10, 0, 20);
     assert_eq!((col, row), (2, 1));
 }
 
 #[test]
-fn test_cursor_display_pos_at_start() {
-    let (col, row) = super::cursor_display_pos("hello", 0);
+fn test_wrapped_cursor_pos_hard_newline_drops_prefix() {
+    // After a hard newline, the next visual row starts at column 0, NOT prefix.
+    // "a\nb", cursor at byte 3 (after b) → row 1, col 1
+    let (col, row) = super::wrapped_cursor_pos("a\nb", 3, 10, 20);
+    assert_eq!((col, row), (1, 1));
+}
+
+#[test]
+fn test_wrapped_cursor_pos_at_start() {
+    // Empty buffer with prefix → cursor sits at prefix_width on row 0
+    let (col, row) = super::wrapped_cursor_pos("hello", 0, 10, 20);
+    assert_eq!((col, row), (10, 0));
+}
+
+#[test]
+fn test_wrapped_cursor_pos_empty_string() {
+    let (col, row) = super::wrapped_cursor_pos("", 0, 0, 20);
     assert_eq!((col, row), (0, 0));
 }
 
 #[test]
-fn test_cursor_display_pos_empty_string() {
-    let (col, row) = super::cursor_display_pos("", 0);
-    assert_eq!((col, row), (0, 0));
-}
-
-#[test]
-fn test_cursor_display_pos_emoji_is_wide() {
-    // "👋" is 4 bytes UTF-8, display width 2. Cursor at end → col 2.
-    let (col, row) = super::cursor_display_pos("👋", 4);
+fn test_wrapped_cursor_pos_emoji_is_wide() {
+    let (col, row) = super::wrapped_cursor_pos("👋", 4, 0, 20);
     assert_eq!((col, row), (2, 0));
+}
+
+#[test]
+fn test_wrapped_cursor_pos_soft_wrap_long_run() {
+    // wrap_width=15, prefix=10: row 0 fits 5 chars (cols 10..15), then wrap.
+    // "xxxxxxxxxx" (10 x's), cursor at end → 5 chars on row 0, 5 chars on row 1
+    let (col, row) = super::wrapped_cursor_pos("xxxxxxxxxx", 10, 10, 15);
+    assert_eq!((col, row), (5, 1));
+}
+
+#[test]
+fn test_wrapped_cursor_pos_soft_wrap_cjk() {
+    // "가나다" with wrap_width=4: 가나 (4 cells) fills row 0, 다 starts row 1
+    let (col, row) = super::wrapped_cursor_pos("가나다", 9, 0, 4);
+    assert_eq!((col, row), (2, 1));
+}
+
+#[test]
+fn test_wrapped_cursor_pos_at_exact_wrap_edge_stays_on_row() {
+    // Lazy wrap: cursor at end of a buffer that exactly fills wrap_width
+    // stays at (wrap_width, 0). The next typed char triggers wrap.
+    let (col, row) = super::wrapped_cursor_pos("xxxxx", 5, 0, 5);
+    assert_eq!((col, row), (5, 0));
+}
+
+#[test]
+fn test_wrapped_cursor_pos_cursor_past_end_clamps() {
+    // cursor_byte > text.len() should clamp to text.len()
+    let (col, row) = super::wrapped_cursor_pos("hi", 999, 0, 20);
+    assert_eq!((col, row), (2, 0));
+}
+
+#[test]
+fn test_wrapped_cursor_pos_zero_wrap_width_short_circuits() {
+    let (col, row) = super::wrapped_cursor_pos("anything", 4, 7, 0);
+    assert_eq!((col, row), (7, 0));
+}
+
+// --- wrap_spans (authoritative pre-wrap for cursor/render consistency) ---
+
+fn line_width(line: &ratatui::text::Line<'static>) -> usize {
+    line.spans
+        .iter()
+        .map(|s| ratatui::text::Span::raw(s.content.to_string()).width())
+        .sum()
+}
+
+#[test]
+fn test_wrap_spans_no_wrap_when_fits() {
+    let spans = vec![ratatui::text::Span::raw("hello".to_string())];
+    let lines = super::wrap_spans(spans, 20);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(line_width(&lines[0]), 5);
+}
+
+#[test]
+fn test_wrap_spans_wraps_long_ascii() {
+    let spans = vec![ratatui::text::Span::raw("xxxxxxxxxx".to_string())]; // 10 x's
+    let lines = super::wrap_spans(spans, 5);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(line_width(&lines[0]), 5);
+    assert_eq!(line_width(&lines[1]), 5);
+}
+
+#[test]
+fn test_wrap_spans_preserves_styles_across_wrap() {
+    use ratatui::style::{Color, Style};
+    let red = Style::default().fg(Color::Red);
+    let blue = Style::default().fg(Color::Blue);
+    let spans = vec![
+        ratatui::text::Span::styled("aaa".to_string(), red),
+        ratatui::text::Span::styled("bbbb".to_string(), blue),
+    ];
+    // wrap_width=5: row 0 = "aaa"+"bb" (3+2), row 1 = "bb"
+    let lines = super::wrap_spans(spans, 5);
+    assert_eq!(lines.len(), 2);
+    // Row 0 has two distinct styled spans
+    assert_eq!(lines[0].spans.len(), 2);
+    assert_eq!(lines[0].spans[0].content, "aaa");
+    assert_eq!(lines[0].spans[0].style, red);
+    assert_eq!(lines[0].spans[1].content, "bb");
+    assert_eq!(lines[0].spans[1].style, blue);
+    // Row 1 has the remainder, still styled blue
+    assert_eq!(lines[1].spans.len(), 1);
+    assert_eq!(lines[1].spans[0].content, "bb");
+    assert_eq!(lines[1].spans[0].style, blue);
+}
+
+#[test]
+fn test_wrap_spans_cjk_wraps_at_cell_width() {
+    let spans = vec![ratatui::text::Span::raw("가나다".to_string())];
+    let lines = super::wrap_spans(spans, 4);
+    // 가나 fits exactly (4 cells); 다 wraps to row 1
+    assert_eq!(lines.len(), 2);
+    assert_eq!(line_width(&lines[0]), 4);
+    assert_eq!(line_width(&lines[1]), 2);
+}
+
+#[test]
+fn test_wrap_spans_wide_char_does_not_split() {
+    // wrap_width=3, "가나": 가 fits (col 0→2), 나 needs 2 but only 1 left,
+    // so 나 wraps whole to next row.
+    let spans = vec![ratatui::text::Span::raw("가나".to_string())];
+    let lines = super::wrap_spans(spans, 3);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(line_width(&lines[0]), 2);
+    assert_eq!(line_width(&lines[1]), 2);
+}
+
+#[test]
+fn test_wrap_spans_zero_width_passthrough() {
+    let spans = vec![ratatui::text::Span::raw("anything".to_string())];
+    let lines = super::wrap_spans(spans.clone(), 0);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(line_width(&lines[0]), 8);
+}
+
+#[test]
+fn test_wrap_spans_empty_input() {
+    let lines = super::wrap_spans(Vec::new(), 10);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(line_width(&lines[0]), 0);
+}
+
+// --- Invariant: wrap_spans and wrapped_cursor_pos agree on layout ---
+//
+// This is the contract that makes the cursor appear where the text was drawn.
+// For any text + wrap_width, the cursor's reported (col, row) at the end of
+// the text must match the (width, count-1) of the wrapped visual lines.
+
+fn assert_cursor_matches_wrap(text: &str, prefix: usize, wrap_width: usize) {
+    let mut combined = String::with_capacity(prefix + text.len());
+    for _ in 0..prefix {
+        combined.push(' ');
+    }
+    combined.push_str(text);
+    let spans = vec![ratatui::text::Span::raw(combined)];
+    let lines = super::wrap_spans(spans, wrap_width);
+
+    let (col, row) =
+        super::wrapped_cursor_pos(text, text.len(), prefix, wrap_width);
+
+    assert_eq!(
+        row,
+        lines.len() - 1,
+        "row mismatch for text={text:?} prefix={prefix} wrap_width={wrap_width}"
+    );
+    assert_eq!(
+        col,
+        line_width(&lines[lines.len() - 1]),
+        "col mismatch for text={text:?} prefix={prefix} wrap_width={wrap_width}"
+    );
+}
+
+#[test]
+fn test_invariant_ascii_no_wrap() {
+    assert_cursor_matches_wrap("hello", 0, 20);
+}
+
+#[test]
+fn test_invariant_ascii_with_prefix() {
+    assert_cursor_matches_wrap("hello world", 10, 30);
+}
+
+#[test]
+fn test_invariant_ascii_wraps() {
+    assert_cursor_matches_wrap("aaaaaaaaaaaa", 0, 5);
+}
+
+#[test]
+fn test_invariant_ascii_with_prefix_wraps() {
+    assert_cursor_matches_wrap("aaaaaaaaaa", 10, 15);
+}
+
+#[test]
+fn test_invariant_cjk_wraps_evenly() {
+    assert_cursor_matches_wrap("가나다라", 0, 4);
+}
+
+#[test]
+fn test_invariant_cjk_wide_char_no_split() {
+    // odd wrap_width forces a wide char to wrap whole
+    assert_cursor_matches_wrap("가나다", 0, 3);
+}
+
+#[test]
+fn test_invariant_emoji() {
+    assert_cursor_matches_wrap("👋👋👋", 0, 3);
+}
+
+#[test]
+fn test_invariant_long_buffer_with_prefix() {
+    // exactly the failing-bug scenario: long sentence after a prefix
+    assert_cursor_matches_wrap(
+        "this is a fairly long sentence that should wrap to multiple lines",
+        10,
+        20,
+    );
 }
 
 // --- Footer text ---
