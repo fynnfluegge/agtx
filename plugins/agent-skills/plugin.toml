@@ -1,0 +1,18 @@
+name = "agent-skills"
+description = "Agent Skills by Addy Osmani - production-grade engineering skills covering the full spec-to-ship lifecycle"
+# Claude: /plugin marketplace add addyosmani/agent-skills
+# then: /plugin install agent-skills@addy-agent-skills
+# Other agents: clone https://github.com/addyosmani/agent-skills and follow docs/ setup guides
+init_script = "[ \"{agent}\" = \"claude\" ] && (claude plugin marketplace add addyosmani/agent-skills 2>/dev/null; claude plugin install agent-skills@addy-agent-skills --scope local 2>/dev/null) || true"
+
+[commands]
+research = "/spec"
+planning = "/plan"
+running  = "/build"
+review   = "/review"
+
+[prompts]
+research = "{task}"
+planning = "{task}"
+running  = "Implement the plan. Use /test to verify as you go and /ship when ready."
+review   = "Review the completed work using /review, then run /ship to prepare for production."

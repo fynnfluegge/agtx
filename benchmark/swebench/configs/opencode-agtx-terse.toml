@@ -1,0 +1,8 @@
+default_agent = "opencode"
+workflow_plugin = "agtx-terse"
+worktree_dir = ".agtx/worktrees"
+
+[agents]
+planning = "opencode"
+running  = "opencode"
+review   = "opencode"

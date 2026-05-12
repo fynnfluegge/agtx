@@ -8,13 +8,16 @@ use mockall::automock;
 /// Operations for tmux window management
 #[cfg_attr(feature = "test-mocks", automock)]
 pub trait TmuxOperations: Send + Sync {
-    /// Create a new tmux window in a session with an optional command to run
+    /// Create a new tmux window. `keep_shell_on_exit=true` drops to a shell
+    /// after `command` exits (task panes); `false` lets tmux close the window
+    /// (orchestrator, where a leftover shell looks like a zombie).
     fn create_window(
         &self,
         session: &str,
         window_name: &str,
         working_dir: &str,
         command: Option<String>,
+        keep_shell_on_exit: bool,
     ) -> Result<()>;
 
     /// Kill a tmux window
@@ -65,6 +68,7 @@ impl TmuxOperations for RealTmuxOps {
         window_name: &str,
         working_dir: &str,
         command: Option<String>,
+        keep_shell_on_exit: bool,
     ) -> Result<()> {
         let mut cmd = std::process::Command::new("tmux");
         let target = format!("{}:", session);
@@ -73,9 +77,22 @@ impl TmuxOperations for RealTmuxOps {
             .args(["-c", working_dir]);
 
         if let Some(ref shell_cmd) = command {
-            // Wrap command so it drops to a shell after the agent exits
-            let wrapped = format!("{}; exec $SHELL", shell_cmd);
-            cmd.args(["sh", "-c", &wrapped]);
+            // Unset Claude Code's nesting-detection env vars so that agents
+            // launched in task panes are not blocked by the "launched inside
+            // another Claude Code session" check.
+            if keep_shell_on_exit {
+                let wrapped = format!(
+                    "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT sh -c '{}'; exec $SHELL",
+                    shell_cmd
+                );
+                cmd.args(["sh", "-c", &wrapped]);
+            } else {
+                let wrapped = format!(
+                    "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT sh -c '{}'",
+                    shell_cmd
+                );
+                cmd.args(["sh", "-c", &wrapped]);
+            }
         }
 
         let output = cmd.output()?;

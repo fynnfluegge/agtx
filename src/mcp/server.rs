@@ -65,6 +65,11 @@ pub struct MoveTaskParams {
     /// Optional reason (used with escalate_to_user action)
     #[schemars(description = "Optional reason, used with escalate_to_user action")]
     pub reason: Option<String>,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -72,6 +77,11 @@ pub struct GetTransitionStatusParams {
     /// The transition request ID returned by move_task
     #[schemars(description = "The transition request ID returned by move_task")]
     pub request_id: String,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -79,10 +89,21 @@ pub struct CheckConflictsParams {
     /// Optional task ID. If omitted, checks all tasks in Review status.
     #[schemars(description = "Optional task ID. If omitted, checks all tasks in Review status.")]
     pub task_id: Option<String>,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct GetNotificationsParams {}
+pub struct GetNotificationsParams {
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadPaneParams {
@@ -92,6 +113,11 @@ pub struct ReadPaneParams {
     /// Number of lines to read from the end of the pane (default 50)
     #[schemars(description = "Number of lines to read from the end of the pane (default 50)")]
     pub lines: Option<i32>,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -99,9 +125,14 @@ pub struct SendToTaskParams {
     /// The task ID (UUID)
     #[schemars(description = "The task ID (UUID)")]
     pub task_id: String,
-    /// Message to send to the task's agent pane (followed by Enter)
-    #[schemars(description = "Message to send to the task's agent pane (followed by Enter)")]
+    /// Message to send to the task's agent pane (followed by Enter). Max 4096 bytes, no null bytes.
+    #[schemars(description = "Message to send to the task's agent pane (followed by Enter). Max 4096 bytes.")]
     pub message: String,
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -491,6 +522,7 @@ impl AgtxMcpServer {
 impl AgtxMcpServer {
     #[tool(description = "List all projects indexed by agtx")]
     fn list_projects(&self, _params: Parameters<ListProjectsParams>) -> String {
+        tracing::info!(tool = "list_projects", "MCP tool called");
         match self.open_global_db() {
             Ok(db) => match db.get_all_projects() {
                 Ok(projects) => {
@@ -515,6 +547,7 @@ impl AgtxMcpServer {
         description = "List tasks for a project, optionally filtered by status (backlog, planning, running, review, done). In global mode, project_id is required — call list_projects first."
     )]
     fn list_tasks(&self, Parameters(params): Parameters<ListTasksParams>) -> String {
+        tracing::info!(tool = "list_tasks", status = ?params.status, project_id = ?params.project_id, "MCP tool called");
         match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => {
                 let tasks_result = if let Some(status_str) = &params.status {
@@ -560,6 +593,7 @@ impl AgtxMcpServer {
         description = "Get full details of a specific task by its ID. Includes allowed_actions based on the task's current status and plugin rules. In global mode, project_id is required — call list_projects first."
     )]
     fn get_task(&self, Parameters(params): Parameters<GetTaskParams>) -> String {
+        tracing::info!(tool = "get_task", task_id = %params.task_id, "MCP tool called");
         match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => match db.get_task(&params.task_id) {
                 Ok(Some(t)) => {
@@ -625,6 +659,7 @@ impl AgtxMcpServer {
         description = "Queue a task state transition. The agtx TUI will process it and execute all side effects (worktree creation, agent spawning, etc). Use get_transition_status to check completion. Actions: research (start research phase for backlog task), move_forward, move_to_planning, move_to_running, move_to_review, move_to_done, resume, escalate_to_user (flag task for user attention with an optional reason)"
     )]
     fn move_task(&self, Parameters(params): Parameters<MoveTaskParams>) -> String {
+        tracing::info!(tool = "move_task", task_id = %params.task_id, action = %params.action, "MCP tool called");
         let valid_actions = [
             "research",
             "move_forward",
@@ -643,7 +678,7 @@ impl AgtxMcpServer {
             );
         }
 
-        match self.open_project_db() {
+        match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => {
                 // Verify task exists
                 let task = match db.get_task(&params.task_id) {
@@ -696,7 +731,8 @@ impl AgtxMcpServer {
         &self,
         Parameters(params): Parameters<GetTransitionStatusParams>,
     ) -> String {
-        match self.open_project_db() {
+        tracing::info!(tool = "get_transition_status", request_id = %params.request_id, "MCP tool called");
+        match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => match db.get_transition_request(&params.request_id) {
                 Ok(Some(req)) => {
                     let status = if req.processed_at.is_some() {
@@ -727,7 +763,8 @@ impl AgtxMcpServer {
         description = "Check if task branches have merge conflicts with the main branch. Pass a task_id to check one task, or omit it to check all Review tasks. Uses a read-only git check — no files are modified."
     )]
     fn check_conflicts(&self, Parameters(params): Parameters<CheckConflictsParams>) -> String {
-        let project_path = match self.resolve_project_path(None) {
+        tracing::info!(tool = "check_conflicts", task_id = ?params.task_id, "MCP tool called");
+        let project_path = match self.resolve_project_path(params.project_id.as_deref()) {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -736,7 +773,7 @@ impl AgtxMcpServer {
             Err(e) => return format!("Failed to detect main branch: {}", e),
         };
 
-        let tasks = match self.open_project_db() {
+        let tasks = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => {
                 if let Some(task_id) = &params.task_id {
                     match db.get_task(task_id) {
@@ -803,8 +840,9 @@ impl AgtxMcpServer {
     #[tool(
         description = "Fetch and consume pending notifications. Returns new events (task created, phase completed, etc.) and removes them from the queue. Note: notifications are also pushed to your input automatically when you are idle, so you usually don't need to call this manually."
     )]
-    fn get_notifications(&self, _params: Parameters<GetNotificationsParams>) -> String {
-        match self.open_project_db() {
+    fn get_notifications(&self, Parameters(params): Parameters<GetNotificationsParams>) -> String {
+        tracing::info!(tool = "get_notifications", "MCP tool called");
+        match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => match db.consume_notifications() {
                 Ok(notifs) => {
                     let items: Vec<NotificationItem> = notifs
@@ -830,7 +868,8 @@ impl AgtxMcpServer {
         description = "Read the last N lines of a task's agent tmux pane. Use this to understand what the agent is showing — e.g., when a task has been idle for a while. Returns pane content as text."
     )]
     fn read_pane_content(&self, Parameters(params): Parameters<ReadPaneParams>) -> String {
-        let db = match self.open_project_db() {
+        tracing::info!(tool = "read_pane_content", task_id = %params.task_id, "MCP tool called");
+        let db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,
         };
@@ -846,7 +885,7 @@ impl AgtxMcpServer {
             None => return format!("Task {} has no active session", params.task_id),
         };
 
-        let lines = params.lines.unwrap_or(50);
+        let lines = params.lines.unwrap_or(50).max(1).min(10000);
         let lines_arg = format!("-{}", lines);
 
         let output = Command::new("tmux")
@@ -882,7 +921,22 @@ impl AgtxMcpServer {
         description = "Send a message to a task's agent pane (followed by Enter). Only works for tasks in Planning or Running status. Use this to nudge a stuck agent, answer a CLI prompt (e.g. 'y' for yes), or provide guidance."
     )]
     fn send_to_task(&self, Parameters(params): Parameters<SendToTaskParams>) -> String {
-        let db = match self.open_project_db() {
+        tracing::info!(tool = "send_to_task", task_id = %params.task_id, "MCP tool called");
+
+        // Input validation: limit message length and reject null bytes
+        const MAX_MESSAGE_LENGTH: usize = 4096;
+        if params.message.len() > MAX_MESSAGE_LENGTH {
+            return format!(
+                "Error: message too long ({} bytes, max {})",
+                params.message.len(),
+                MAX_MESSAGE_LENGTH
+            );
+        }
+        if params.message.contains('\x00') {
+            return "Error: message contains null bytes".to_string();
+        }
+
+        let db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,
         };
@@ -946,6 +1000,7 @@ impl AgtxMcpServer {
         description = "Create a new task in the Backlog column. Returns the created task's ID. Use create_tasks_batch for multiple tasks with dependencies. In global mode, project_id is required — call list_projects first."
     )]
     fn create_task(&self, Parameters(params): Parameters<CreateTaskParams>) -> String {
+        tracing::info!(tool = "create_task", title = %params.title, "MCP tool called");
         let db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,
@@ -993,6 +1048,7 @@ impl AgtxMcpServer {
         &self,
         Parameters(params): Parameters<CreateTasksBatchParams>,
     ) -> String {
+        tracing::info!(tool = "create_tasks_batch", count = params.tasks.len(), "MCP tool called");
         if params.tasks.is_empty() {
             return "Error: tasks array is empty".to_string();
         }
@@ -1078,6 +1134,7 @@ impl AgtxMcpServer {
         description = "Update a backlog task's fields. Only tasks in Backlog status can be updated. All fields are optional — only provided fields are changed. In global mode, project_id is required — call list_projects first."
     )]
     fn update_task(&self, Parameters(params): Parameters<UpdateTaskParams>) -> String {
+        tracing::info!(tool = "update_task", task_id = %params.task_id, "MCP tool called");
         let db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,
@@ -1150,6 +1207,7 @@ impl AgtxMcpServer {
         description = "Delete a task. Only tasks in Backlog status can be deleted. In global mode, project_id is required — call list_projects first."
     )]
     fn delete_task(&self, Parameters(params): Parameters<DeleteTaskParams>) -> String {
+        tracing::info!(tool = "delete_task", task_id = %params.task_id, "MCP tool called");
         let db = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => db,
             Err(e) => return e,

@@ -102,6 +102,25 @@ main() {
         error "Download failed. Check if release exists: ${DOWNLOAD_URL}"
     fi
 
+    # Verify checksum (if available)
+    CHECKSUM_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE_NAME}.sha256"
+    info "Verifying checksum..."
+    if curl -fsSL "${CHECKSUM_URL}" -o "${TMP_DIR}/${ARCHIVE_NAME}.sha256" 2>/dev/null; then
+        PREV_DIR=$(pwd)
+        cd "${TMP_DIR}"
+        if command -v sha256sum &> /dev/null; then
+            sha256sum -c "${ARCHIVE_NAME}.sha256" || error "Checksum verification failed"
+        elif command -v shasum &> /dev/null; then
+            shasum -a 256 -c "${ARCHIVE_NAME}.sha256" || error "Checksum verification failed"
+        else
+            warn "No sha256sum or shasum found, skipping checksum verification"
+        fi
+        cd "${PREV_DIR}"
+        success "Checksum verified"
+    else
+        warn "Checksum file not found, skipping verification"
+    fi
+
     # Extract
     info "Extracting..."
     tar -xzf "${TMP_DIR}/${ARCHIVE_NAME}" -C "${TMP_DIR}"

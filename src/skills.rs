@@ -147,6 +147,11 @@ pub const BUNDLED_PLUGINS: &[(&str, &str, &str)] = &[
         include_str!("../plugins/agtx/plugin.toml"),
     ),
     (
+        "agtx-terse",
+        "Token-efficient workflow - same workflow with compressed output and minimal tokens",
+        include_str!("../plugins/agtx-terse/plugin.toml"),
+    ),
+    (
         "gsd",
         "Get Shit Done - structured spec-driven development",
         include_str!("../plugins/gsd/plugin.toml"),
@@ -175,6 +180,16 @@ pub const BUNDLED_PLUGINS: &[(&str, &str, &str)] = &[
         "superpowers",
         "Superpowers - brainstorming, plans, TDD, subagent-driven development",
         include_str!("../plugins/superpowers/plugin.toml"),
+    ),
+    (
+        "oh-my-claudecode",
+        "oh-my-claudecode - Multi-agent orchestration",
+        include_str!("../plugins/oh-my-claudecode/plugin.toml"),
+    ),
+    (
+        "agent-skills",
+        "Agent Skills - production-grade engineering skills for the full spec-to-ship lifecycle",
+        include_str!("../plugins/agent-skills/plugin.toml"),
     ),
 ];
 

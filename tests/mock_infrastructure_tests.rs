@@ -119,7 +119,7 @@ fn test_tmux_session_management() {
     mock_tmux
         .expect_create_window()
         .times(1)
-        .returning(|_, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _| Ok(()));
 
     // Session exists after creation
     mock_tmux
@@ -139,6 +139,7 @@ fn test_tmux_session_management() {
             "task-1",
             "/home/user/project/.agtx/worktrees/task-1",
             None,
+            true,
         )
         .unwrap();
     assert!(mock_tmux.has_session("my-project"));

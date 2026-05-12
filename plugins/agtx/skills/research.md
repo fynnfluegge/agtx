@@ -9,14 +9,18 @@ You are in the **research phase** of an agtx-managed task. This is a read-only e
 
 ## Input
 
-- **Task description** — provided inline with this command
+The argument to this command is a task ID. Fetch the task description using the agtx MCP tool:
+```
+mcp__agtx__get_task(task_id: "<the id passed to this command>")
+```
+Use the `description` field as the task to work on.
 
 ## Instructions
 
-1. Read and understand the task description
+1. Fetch the task description via `get_task`
 2. Explore the codebase to find relevant files, patterns, and architecture
-4. Identify dependencies, related code, and potential complexity
-5. Assess feasibility and estimate scope
+3. Identify dependencies, related code, and potential complexity
+4. Assess feasibility and estimate scope
 
 ## Output
 

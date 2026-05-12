@@ -32,6 +32,12 @@ which = "7.0"
 directories = "6.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.16", features = ["v4"] }
+sha2 = "0.10"
+
+# Logging / audit trail
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 
 # MCP server
 rmcp = { version = "0.16", features = ["server", "macros", "transport-io"] }

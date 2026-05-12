@@ -1,0 +1,8 @@
+default_agent = "cursor"
+workflow_plugin = "agtx"
+worktree_dir = ".agtx/worktrees"
+
+[agents]
+planning = "cursor"
+running  = "cursor"
+review   = "cursor"

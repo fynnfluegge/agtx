@@ -282,6 +282,8 @@ struct AppState {
     delete_confirm_popup: Option<DeleteConfirmPopup>,
     // Confirmation popup for asking if user wants to create PR when moving to Review
     review_confirm_popup: Option<ReviewConfirmPopup>,
+    // Trust-on-first-use confirmation popup
+    trust_confirm_popup: Option<TrustConfirmPopup>,
     // Channel for receiving background worktree setup results
     setup_rx: Option<mpsc::Receiver<SetupResult>>,
     // Phase detection
@@ -313,6 +315,7 @@ struct AppState {
     session_refresh_rx: Option<mpsc::Receiver<SessionRefreshResult>>,
     // Cache of dependency satisfaction per task ID (refreshed with tasks)
     deps_satisfied_cache: HashMap<String, bool>,
+    instance_id: String,
 }
 
 /// State for confirming move to Done
@@ -475,6 +478,12 @@ struct DeleteConfirmPopup {
     task_title: String,
 }
 
+/// State for trust-on-first-use confirmation popup
+#[derive(Debug, Clone)]
+struct TrustConfirmPopup {
+    project_path: std::path::PathBuf,
+}
+
 /// State for asking if user wants to create PR when moving to Review
 #[derive(Debug, Clone)]
 struct ReviewConfirmPopup {
@@ -537,13 +546,14 @@ impl App {
         let available_agents = agent::detect_available_agents();
 
         // Setup based on mode
-        let (db, project_path, project_name, tmux_project_name, project_config) = match &mode {
+        let (db, project_path, project_name, tmux_project_name, project_config, trust_warning) = match &mode {
             AppMode::Dashboard => (
                 None,
                 None,
                 "Dashboard".to_string(),
                 tmux::safe_session_name("Dashboard"),
                 ProjectConfig::default(),
+                None,
             ),
             AppMode::Project(path) => {
                 let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
@@ -553,8 +563,27 @@ impl App {
                     .unwrap_or("unknown")
                     .to_string();
                 let tmux_name = tmux::safe_session_name(&name);
-                let project_config = ProjectConfig::load(&canonical).unwrap_or_default();
+                let mut project_config = ProjectConfig::load(&canonical).unwrap_or_default();
                 let db = Database::open_project(&canonical)?;
+
+                // Trust-on-first-use: suppress dangerous config fields from untrusted projects
+                let trust_store = crate::config::TrustStore::load().unwrap_or_default();
+                let trust_warning = if !trust_store.is_trusted(&canonical) {
+                    if project_config.init_script.is_some() || project_config.copy_files.is_some() || project_config.cleanup_script.is_some() {
+                        tracing::warn!(
+                            project = %canonical.display(),
+                            "Untrusted project config — init_script, cleanup_script, and copy_files suppressed"
+                        );
+                        project_config.init_script = None;
+                        project_config.cleanup_script = None;
+                        project_config.copy_files = None;
+                        Some("Untrusted project config: init_script, cleanup_script, and copy_files disabled. Run `agtx trust` to enable.".to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
 
                 // Register project in global database
                 let project = crate::db::Project::new(&name, canonical.to_string_lossy());
@@ -563,11 +592,18 @@ impl App {
                 // Ensure tmux session exists for this project
                 ensure_project_tmux_session(&tmux_name, &canonical, tmux_ops.as_ref());
 
-                (Some(db), Some(canonical), name, tmux_name, project_config)
+                (Some(db), Some(canonical), name, tmux_name, project_config, trust_warning)
             }
         };
 
         let config = MergedConfig::merge(&global_config, &project_config);
+
+        // If the project is untrusted, also suppress plugin init_scripts
+        // by forcing no_init_scripts in the flags
+        let mut flags = flags;
+        if trust_warning.is_some() {
+            flags.no_init_scripts = true;
+        }
 
         let mut app = Self {
             terminal,
@@ -618,6 +654,7 @@ impl App {
                 skip_move_confirm: false,
                 delete_confirm_popup: None,
                 review_confirm_popup: None,
+                trust_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
@@ -634,6 +671,7 @@ impl App {
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
                 deps_satisfied_cache: HashMap::new(),
+                instance_id: uuid::Uuid::new_v4().to_string(),
             },
         };
 
@@ -684,59 +722,30 @@ impl App {
             }
         }
 
-        // Detect existing orchestrator session (survives agtx restarts)
-        if app.state.flags.experimental {
-            let orch_target = format!("{}:orchestrator", app.state.tmux_project_name);
-            if app
-                .state
-                .tmux_ops
-                .window_exists(&orch_target)
-                .unwrap_or(false)
-            {
-                app.state.orchestrator_session = Some(orch_target);
-                app.state.orchestrator_ready.store(true, Ordering::Release);
-
-                // Catch up: notify orchestrator about tasks that completed while TUI was down
-                if let Some(ref db) = app.state.db {
-                    // Check existing notifications to avoid duplicates
-                    let existing: HashSet<String> = db
-                        .peek_notifications()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|n| n.message)
-                        .collect();
-
-                    for task in &app.state.board.tasks {
-                        if !matches!(task.status, TaskStatus::Planning | TaskStatus::Running) {
-                            continue;
-                        }
-                        let plugin = match &task.plugin {
-                            Some(name) => {
-                                WorkflowPlugin::load(name, app.state.project_path.as_deref()).ok()
-                            }
-                            None => skills::load_bundled_plugin("agtx"),
-                        };
-                        if let Some(ref wt) = task.worktree_path {
-                            if phase_artifact_exists(wt, task.status, &plugin, task.cycle) {
-                                let short_id = if task.id.len() >= 8 {
-                                    &task.id[..8]
-                                } else {
-                                    &task.id
-                                };
-                                let message = format!(
-                                    "Task \"{}\" ({}) completed phase: {}",
-                                    task.title,
-                                    short_id,
-                                    task.status.as_str()
-                                );
-                                if !existing.contains(&message) {
-                                    let notif = crate::db::Notification::new(message);
-                                    let _ = db.create_notification(&notif);
-                                }
-                            }
-                        }
-                    }
+        if let Some(orch_target) = detect_existing_orchestrator(
+            app.state.flags.experimental,
+            app.state.tmux_ops.as_ref(),
+            &app.state.tmux_project_name,
+            app.state.db.as_ref(),
+            &app.state.board.tasks,
+            app.state.project_path.as_deref(),
+        ) {
+            app.state.orchestrator_session = Some(orch_target.clone());
+            let tmux_ops = Arc::clone(&app.state.tmux_ops);
+            let ready_flag = Arc::clone(&app.state.orchestrator_ready);
+            std::thread::spawn(move || {
+                if wait_for_agent_ready(&tmux_ops, &orch_target).is_some() {
+                    ready_flag.store(true, Ordering::Release);
                 }
+            });
+        }
+
+        // Display trust confirmation popup if project config was suppressed
+        if trust_warning.is_some() {
+            if let Some(ref path) = app.state.project_path {
+                app.state.trust_confirm_popup = Some(TrustConfirmPopup {
+                    project_path: path.clone(),
+                });
             }
         }
 
@@ -830,6 +839,7 @@ impl App {
                 skip_move_confirm: false,
                 delete_confirm_popup: None,
                 review_confirm_popup: None,
+                trust_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
@@ -846,6 +856,7 @@ impl App {
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
                 deps_satisfied_cache: HashMap::new(),
+                instance_id: uuid::Uuid::new_v4().to_string(),
             },
         })
     }
@@ -1279,11 +1290,21 @@ impl App {
             };
             let step_labels = ["Title", "Plugin", "Prompt"];
 
-            let mut lines: Vec<Line> = Vec::new();
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            // Pre-wrap every line we push so `lines.len()` always reflects the
+            // exact visual-row count. The cursor anchor below depends on this:
+            // if any preceding line wrapped silently in the Paragraph, the
+            // cursor would land one row too high.
+            let wrap_width = input_area.width.saturating_sub(2) as usize;
+            let push_wrapped = |dst: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>| {
+                for visual in wrap_spans(spans, wrap_width) {
+                    dst.push(visual);
+                }
+            };
 
             // Step indicator breadcrumb
-            let mut breadcrumb_spans: Vec<Span> = Vec::new();
-            breadcrumb_spans.push(Span::raw("  "));
+            let mut breadcrumb_spans: Vec<Span<'static>> = Vec::new();
+            breadcrumb_spans.push(Span::raw("  ".to_string()));
             for (i, label) in step_labels.iter().enumerate() {
                 let style = if i == step {
                     Style::default()
@@ -1294,41 +1315,63 @@ impl App {
                 } else {
                     Style::default().fg(dimmed_color)
                 };
-                breadcrumb_spans.push(Span::styled(*label, style));
+                breadcrumb_spans.push(Span::styled((*label).to_string(), style));
                 if i < step_labels.len() - 1 {
-                    breadcrumb_spans.push(Span::styled("  ›  ", Style::default().fg(dimmed_color)));
+                    breadcrumb_spans.push(Span::styled(
+                        "  ›  ".to_string(),
+                        Style::default().fg(dimmed_color),
+                    ));
                 }
             }
-            lines.push(Line::from(breadcrumb_spans));
+            push_wrapped(&mut lines, breadcrumb_spans);
 
             // Separator
             let inner_width = input_area.width.saturating_sub(4) as usize;
-            lines.push(Line::from(Span::styled(
-                format!("  {}", "─".repeat(inner_width.saturating_sub(2))),
-                Style::default().fg(dimmed_color),
-            )));
-            lines.push(Line::from(""));
+            push_wrapped(
+                &mut lines,
+                vec![Span::styled(
+                    format!("  {}", "─".repeat(inner_width.saturating_sub(2))),
+                    Style::default().fg(dimmed_color),
+                )],
+            );
+            lines.push(Line::from(String::new()));
 
             // Completed fields shown as read-only context
             if step >= 1 {
-                lines.push(Line::from(vec![
-                    Span::styled("  Title: ", Style::default().fg(dimmed_color)),
-                    Span::styled(&state.pending_task_title, Style::default().fg(text_color)),
-                ]));
+                push_wrapped(
+                    &mut lines,
+                    vec![
+                        Span::styled(
+                            "  Title: ".to_string(),
+                            Style::default().fg(dimmed_color),
+                        ),
+                        Span::styled(
+                            state.pending_task_title.clone(),
+                            Style::default().fg(text_color),
+                        ),
+                    ],
+                );
             }
             if step >= 2 {
                 let plugin_name = state
                     .wizard_plugin_options
                     .get(state.wizard_selected_plugin)
                     .map(|o| o.label.as_str())
-                    .unwrap_or("agtx");
-                lines.push(Line::from(vec![
-                    Span::styled("  Plugin: ", Style::default().fg(dimmed_color)),
-                    Span::styled(plugin_name, Style::default().fg(text_color)),
-                ]));
+                    .unwrap_or("agtx")
+                    .to_string();
+                push_wrapped(
+                    &mut lines,
+                    vec![
+                        Span::styled(
+                            "  Plugin: ".to_string(),
+                            Style::default().fg(dimmed_color),
+                        ),
+                        Span::styled(plugin_name, Style::default().fg(text_color)),
+                    ],
+                );
             }
             if step >= 1 {
-                lines.push(Line::from(""));
+                lines.push(Line::from(String::new()));
             }
 
             // Active area content. Track the insertion point so the native
@@ -1339,23 +1382,29 @@ impl App {
             let cursor_line_start = lines.len();
             match state.input_mode {
                 InputMode::InputTitle => {
-                    let (buf_col, buf_row) =
-                        cursor_display_pos(&state.input_buffer, state.input_cursor);
                     let prefix_cols = Span::raw("  Title: ").width();
-                    let col = prefix_cols + buf_col;
-                    cursor_display = Some((col as u16, (cursor_line_start + buf_row) as u16));
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "  Title: ",
-                            Style::default()
-                                .fg(selected_color)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            state.input_buffer.clone(),
-                            Style::default().fg(text_color),
-                        ),
-                    ]));
+                    let (col, row) = wrapped_cursor_pos(
+                        &state.input_buffer,
+                        state.input_cursor,
+                        prefix_cols,
+                        wrap_width,
+                    );
+                    cursor_display = Some((col as u16, (cursor_line_start + row) as u16));
+                    push_wrapped(
+                        &mut lines,
+                        vec![
+                            Span::styled(
+                                "  Title: ".to_string(),
+                                Style::default()
+                                    .fg(selected_color)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                state.input_buffer.clone(),
+                                Style::default().fg(text_color),
+                            ),
+                        ],
+                    );
                 }
                 InputMode::SelectPlugin => {
                     let active_plugin = state.config.workflow_plugin.as_deref().unwrap_or("");
@@ -1372,26 +1421,36 @@ impl App {
                         } else {
                             Style::default().fg(text_color)
                         };
-                        lines.push(Line::from(vec![
-                            Span::styled(marker, name_style),
-                            Span::styled(format!("{:<14}", &opt.label), name_style),
-                            Span::styled(&opt.description, Style::default().fg(desc_color)),
-                            Span::styled(check, Style::default().fg(Color::Green)),
-                        ]));
+                        push_wrapped(
+                            &mut lines,
+                            vec![
+                                Span::styled(marker.to_string(), name_style),
+                                Span::styled(format!("{:<14}", &opt.label), name_style),
+                                Span::styled(
+                                    opt.description.clone(),
+                                    Style::default().fg(desc_color),
+                                ),
+                                Span::styled(
+                                    check.to_string(),
+                                    Style::default().fg(Color::Green),
+                                ),
+                            ],
+                        );
                     }
                 }
                 InputMode::InputDescription => {
-                    let (buf_col, buf_row) =
-                        cursor_display_pos(&state.input_buffer, state.input_cursor);
                     let prefix_cols = Span::raw("  Prompt: ").width();
-                    let col = if buf_row == 0 {
-                        prefix_cols + buf_col
-                    } else {
-                        buf_col
-                    };
-                    cursor_display = Some((col as u16, (cursor_line_start + buf_row) as u16));
+                    let (col, row) = wrapped_cursor_pos(
+                        &state.input_buffer,
+                        state.input_cursor,
+                        prefix_cols,
+                        wrap_width,
+                    );
+                    cursor_display = Some((col as u16, (cursor_line_start + row) as u16));
                     let full_text = format!("  Prompt: {}", state.input_buffer);
-                    // Split on newlines to handle multi-line descriptions
+                    // Split on newlines to handle multi-line descriptions.
+                    // Each logical line is then pre-wrapped via push_wrapped so
+                    // visual layout matches wrapped_cursor_pos exactly.
                     for part in full_text.split('\n') {
                         if !state.highlighted_references.is_empty() {
                             let styled = build_highlighted_text(
@@ -1406,22 +1465,27 @@ impl App {
                                     .into_iter()
                                     .map(|s| Span::styled(s.content.into_owned(), s.style))
                                     .collect();
-                                lines.push(Line::from(owned_spans));
+                                push_wrapped(&mut lines, owned_spans);
                             }
                         } else {
-                            lines.push(Line::from(Span::styled(
-                                part.to_string(),
-                                Style::default().fg(text_color),
-                            )));
+                            push_wrapped(
+                                &mut lines,
+                                vec![Span::styled(
+                                    part.to_string(),
+                                    Style::default().fg(text_color),
+                                )],
+                            );
                         }
                     }
                 }
                 _ => {}
             }
 
+            // No `.wrap(...)` — `lines` is already pre-wrapped by `wrap_spans`
+            // to fit `wrap_width`. Letting Ratatui re-wrap would re-introduce
+            // the two-source-of-truth bug between renderer and cursor.
             let content = Paragraph::new(Text::from(lines))
                 .style(Style::default().fg(text_color))
-                .wrap(Wrap { trim: false })
                 .block(
                     Block::default()
                         .title(block_title)
@@ -2003,6 +2067,36 @@ impl App {
             frame.render_widget(content, inner);
         }
 
+        // Trust confirmation popup
+        if let Some(ref popup) = state.trust_confirm_popup {
+            let popup_area = centered_rect(60, 30, area);
+            frame.render_widget(Clear, popup_area);
+
+            let main_block = Block::default()
+                .title(" Untrusted Project Config ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow));
+            frame.render_widget(main_block, popup_area);
+
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 2,
+            });
+            let text = format!(
+                "This project's .agtx/config.toml has not been trusted yet.\n\n\
+                Dangerous fields (init_script, cleanup_script, copy_files) are\n\
+                currently disabled to protect against untrusted code execution.\n\n\
+                Project: {}\n\n\
+                Press any key to trust this project and continue.",
+                popup.project_path.display()
+            );
+            let content = Paragraph::new(text)
+                .style(Style::default().fg(Color::White))
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(content, inner);
+        }
+
         // Plugin selection popup
         if let Some(ref popup) = state.plugin_select_popup {
             let popup_area = centered_rect(50, 40, area);
@@ -2513,6 +2607,11 @@ impl App {
             return self.handle_review_confirm_key(key);
         }
 
+        // Handle trust confirmation popup if open
+        if self.state.trust_confirm_popup.is_some() {
+            return self.handle_trust_confirm_key(key);
+        }
+
         // Handle diff popup if open
         if self.state.diff_popup.is_some() {
             return self.handle_diff_popup_key(key);
@@ -2641,6 +2740,31 @@ impl App {
         Ok(())
     }
 
+    fn handle_trust_confirm_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let _ = key;
+        if let Some(popup) = self.state.trust_confirm_popup.clone() {
+            self.state.trust_confirm_popup = None;
+            // Trust the project: save hash to trust store
+            let mut store = crate::config::TrustStore::load().unwrap_or_default();
+            if let Err(e) = store.trust_project(&popup.project_path) {
+                self.state.warning_message =
+                    Some((format!("Failed to trust project: {}", e), Instant::now()));
+                return Ok(());
+            }
+            // Re-enable scripts by reloading project config and re-merging
+            let project_config =
+                crate::config::ProjectConfig::load(&popup.project_path).unwrap_or_default();
+            let global_config = crate::config::GlobalConfig::load().unwrap_or_default();
+            self.state.config = crate::config::MergedConfig::merge(&global_config, &project_config);
+            self.state.flags.no_init_scripts = false;
+            self.state.warning_message = Some((
+                "Project trusted. init_script, cleanup_script, and copy_files are now active.".to_string(),
+                Instant::now(),
+            ));
+        }
+        Ok(())
+    }
+
     fn open_plugin_select_popup(&mut self) {
         let current = self
             .state
@@ -2753,7 +2877,11 @@ impl App {
                 let tmux_ops = Arc::clone(&self.state.tmux_ops);
                 let git_ops = Arc::clone(&self.state.git_ops);
                 let task_id = task.id.clone();
-                let cleanup_script = self.state.config.cleanup_script.clone();
+                let cleanup_script = if self.state.flags.no_init_scripts {
+                    None
+                } else {
+                    self.state.config.cleanup_script.clone()
+                };
                 std::thread::spawn(move || {
                     cleanup_task_resources(
                         &task_id,
@@ -4210,9 +4338,14 @@ impl App {
     fn perform_delete_task(&mut self, task_id: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(task) = db.get_task(task_id)? {
+                let cleanup_script = if self.state.flags.no_init_scripts {
+                    None
+                } else {
+                    self.state.config.cleanup_script.clone()
+                };
                 delete_task_resources(
                     &task,
-                    self.state.config.cleanup_script.as_deref(),
+                    cleanup_script.as_deref(),
                     project_path,
                     self.state.tmux_ops.as_ref(),
                     self.state.git_ops.as_ref(),
@@ -4408,6 +4541,7 @@ impl App {
                 &planning_agent,
                 &task_content,
                 task.cycle,
+                &task.id,
             );
             let prompt =
                 resolve_prompt(&plugin, planning_phase, &task_content, &task.id, task.cycle);
@@ -4448,6 +4582,7 @@ impl App {
             &planning_agent,
             &task_content,
             task.cycle,
+            &task.id,
         );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
         let all_agents = collect_phase_agents(&self.state.config);
@@ -4458,8 +4593,14 @@ impl App {
             .clone()
             .unwrap_or_else(|| self.state.config.base_branch.clone());
         let worktree_dir = self.state.config.worktree_dir.clone();
+        let branch_prefix = self.state.config.branch_prefix.clone();
         let copy_files = self.state.config.copy_files.clone();
-        let init_script = self.state.config.init_script.clone();
+        let init_script = if self.state.flags.no_init_scripts {
+            None
+        } else {
+            self.state.config.init_script.clone()
+        };
+        let skip_init_scripts = self.state.flags.no_init_scripts;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
         let agent_ops = self.state.agent_registry.get(&planning_agent);
@@ -4510,6 +4651,7 @@ impl App {
                 &prompt,
                 &base_branch,
                 &worktree_dir,
+                &branch_prefix,
                 copy_files,
                 init_script,
                 &plugin,
@@ -4519,6 +4661,7 @@ impl App {
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
                 &referenced_tasks,
+                skip_init_scripts,
             );
 
             match result {
@@ -4543,6 +4686,7 @@ impl App {
                             &task_content,
                             &planning_agent_clone,
                             &auto_dismiss,
+                            false,
                         );
                     }
                 }
@@ -4585,6 +4729,7 @@ impl App {
                 &running_agent,
                 &task_content,
                 task.cycle,
+                &task.id,
             );
             let prompt = resolve_prompt(&plugin, run_phase, &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, run_phase);
@@ -4620,7 +4765,7 @@ impl App {
             let plugin = self.load_task_plugin(task);
             let task_content = task.content_text();
             let skill_cmd =
-                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle);
+                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle, &task.id);
             let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
             let auto_dismiss = plugin
@@ -4738,7 +4883,11 @@ impl App {
         let git_ops = Arc::clone(&self.state.git_ops);
         let task_id_clone = task.id.clone();
         let project_path_clone = project_path.to_path_buf();
-        let cleanup_script = self.state.config.cleanup_script.clone();
+        let cleanup_script = if self.state.flags.no_init_scripts {
+            None
+        } else {
+            self.state.config.cleanup_script.clone()
+        };
         std::thread::spawn(move || {
             cleanup_task_resources(
                 &task_id_clone,
@@ -4813,8 +4962,14 @@ impl App {
             .clone()
             .unwrap_or_else(|| self.state.config.base_branch.clone());
         let worktree_dir = self.state.config.worktree_dir.clone();
+        let branch_prefix = self.state.config.branch_prefix.clone();
         let copy_files = self.state.config.copy_files.clone();
-        let init_script = self.state.config.init_script.clone();
+        let init_script = if self.state.flags.no_init_scripts {
+            None
+        } else {
+            self.state.config.init_script.clone()
+        };
+        let skip_init_scripts = self.state.flags.no_init_scripts;
 
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
@@ -4845,6 +5000,7 @@ impl App {
                 "",
                 &base_branch,
                 &worktree_dir,
+                &branch_prefix,
                 copy_files,
                 init_script,
                 &plugin,
@@ -4854,6 +5010,7 @@ impl App {
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
                 &[],
+                skip_init_scripts,
             );
 
             match result {
@@ -4890,6 +5047,7 @@ impl App {
                         &agent_name,
                         &task_content,
                         task_cycle,
+                        &task_id,
                     );
                     let prompt_trigger = resolve_prompt_trigger(&plugin, research_phase);
 
@@ -4915,6 +5073,7 @@ impl App {
                             &task_content,
                             &agent_name,
                             &auto_dismiss,
+                            false,
                         );
                     }
                 }
@@ -5016,11 +5175,15 @@ impl App {
             &running_agent,
             &task_content,
             task.cycle,
+            &task.id,
         );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
         let auto_dismiss = plugin
             .as_ref()
             .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+        let clear_context_on_advance = plugin
+            .as_ref()
+            .map_or(false, |p| p.clear_context_on_advance);
 
         // If a live session already exists (e.g. from a prior research/planning phase),
         // reuse it instead of creating a duplicate tmux window.
@@ -5062,8 +5225,14 @@ impl App {
             .clone()
             .unwrap_or_else(|| self.state.config.base_branch.clone());
         let worktree_dir = self.state.config.worktree_dir.clone();
+        let branch_prefix = self.state.config.branch_prefix.clone();
         let copy_files = self.state.config.copy_files.clone();
-        let init_script = self.state.config.init_script.clone();
+        let init_script = if self.state.flags.no_init_scripts {
+            None
+        } else {
+            self.state.config.init_script.clone()
+        };
+        let skip_init_scripts = self.state.flags.no_init_scripts;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
         let agent_ops = self.state.agent_registry.get(&running_agent);
@@ -5086,6 +5255,7 @@ impl App {
                 &prompt,
                 &base_branch,
                 &worktree_dir,
+                &branch_prefix,
                 copy_files,
                 init_script,
                 &plugin,
@@ -5095,6 +5265,7 @@ impl App {
                 git_ops.as_ref(),
                 agent_ops.as_ref(),
                 &[],
+                skip_init_scripts,
             );
 
             match result {
@@ -5120,6 +5291,7 @@ impl App {
                             &task_content,
                             &running_agent_clone,
                             &auto_dismiss,
+                            clear_context_on_advance,
                         );
                     }
                 }
@@ -5217,6 +5389,7 @@ impl App {
                     &planning_agent,
                     &task_content,
                     task.cycle,
+                    &task.id,
                 );
                 let prompt =
                     resolve_prompt(&plugin, "planning", &task_content, &task.id, task.cycle);
@@ -5261,6 +5434,7 @@ impl App {
                             &task_content_clone,
                             &planning_agent_clone,
                             &auto_dismiss,
+                            false,
                         );
                     });
                 }
@@ -5326,25 +5500,36 @@ impl App {
 
     /// Poll the transition_requests table for unprocessed requests and execute them.
     fn process_transition_requests(&mut self) -> Result<()> {
-        let Some(db) = &self.state.db else {
-            return Ok(());
+        // `self.state.db` is re-borrowed per use site to avoid holding it across `&mut self`.
+        let pending = match self.state.db.as_ref() {
+            Some(db) => db.get_pending_transition_requests()?,
+            None => return Ok(()),
         };
-        let pending = db.get_pending_transition_requests()?;
         if pending.is_empty() {
             return Ok(());
         }
+        let instance_id = self.state.instance_id.clone();
 
         for req in pending {
+            let claimed = self
+                .state
+                .db
+                .as_ref()
+                .map(|db| db.claim_transition_request(&req.id, &instance_id))
+                .and_then(Result::ok)
+                .unwrap_or(false);
+            if !claimed {
+                continue;
+            }
+
             let result = self.execute_transition_request(&req);
             if let Some(db) = &self.state.db {
-                match &result {
-                    Ok(()) => {
-                        let _ = db.mark_transition_processed(&req.id, None);
-                    }
+                let _ = match &result {
+                    Ok(()) => db.mark_transition_processed(&req.id, None),
                     Err(e) => {
-                        let _ = db.mark_transition_processed(&req.id, Some(&e.to_string()));
+                        db.mark_transition_processed(&req.id, Some(&e.to_string()))
                     }
-                }
+                };
             }
             self.refresh_tasks()?;
         }
@@ -5358,6 +5543,12 @@ impl App {
     }
 
     fn execute_transition_request(&mut self, req: &TransitionRequest) -> Result<()> {
+        tracing::info!(
+            task_id = %req.task_id,
+            action = %req.action,
+            "Processing transition request"
+        );
+
         let Some(db) = &self.state.db else {
             anyhow::bail!("No project database");
         };
@@ -5520,7 +5711,7 @@ impl App {
             let plugin = self.load_task_plugin(task);
             let task_content = task.content_text();
             let skill_cmd =
-                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle);
+                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle, &task.id);
             let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
             let auto_dismiss = plugin
@@ -5570,38 +5761,66 @@ impl App {
         let orch_target = format!("{}:{}", tmux_project_name, window_name);
 
         // If orchestrator is running, open the popup to view it
-        if let Some(ref orch_target) = self.state.orchestrator_session {
-            if self
-                .state
-                .tmux_ops
-                .window_exists(orch_target)
-                .unwrap_or(false)
-            {
-                let mut popup = ShellPopup::new("Orchestrator".to_string(), orch_target.clone());
-                if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
-                    let pane_width = SHELL_POPUP_CONTENT_WIDTH;
-                    let popup_height =
-                        (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
-                    let pane_height = popup_height.saturating_sub(4);
-                    let _ = self
-                        .state
-                        .tmux_ops
-                        .resize_window(orch_target, pane_width, pane_height);
-                    popup.last_pane_size = Some((pane_width, pane_height));
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                }
-                popup.cached_content =
-                    capture_tmux_pane_with_history(orch_target, 500, self.state.tmux_ops.as_ref());
-                self.state.shell_popup = Some(popup);
-                return Ok(());
-            } else {
-                // Window gone, clear the session
-                self.state.orchestrator_session = None;
+        if is_orchestrator_live(self.state.tmux_ops.as_ref(), &orch_target) {
+            let first_time =
+                self.state.orchestrator_session.as_deref() != Some(&orch_target);
+            self.state.orchestrator_session = Some(orch_target.clone());
+
+            if first_time {
+                // Cross-instance reattach: verify ready, replay phase events (deduped).
                 self.state
                     .orchestrator_ready
                     .store(false, Ordering::Release);
+                if let Some(ref db) = self.state.db {
+                    run_orchestrator_catchup(
+                        db,
+                        &self.state.board.tasks,
+                        self.state.project_path.as_deref(),
+                    );
+                }
+                let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                let ready_flag = Arc::clone(&self.state.orchestrator_ready);
+                let target = orch_target.clone();
+                std::thread::spawn(move || {
+                    if wait_for_agent_ready(&tmux_ops, &target).is_some() {
+                        ready_flag.store(true, Ordering::Release);
+                    }
+                });
             }
+
+            let mut popup = ShellPopup::new("Orchestrator".to_string(), orch_target.clone());
+            if let Ok((_term_width, term_height)) = crossterm::terminal::size() {
+                let pane_width = SHELL_POPUP_CONTENT_WIDTH;
+                let popup_height =
+                    (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
+                let pane_height = popup_height.saturating_sub(4);
+                let _ = self
+                    .state
+                    .tmux_ops
+                    .resize_window(&orch_target, pane_width, pane_height);
+                popup.last_pane_size = Some((pane_width, pane_height));
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            popup.cached_content =
+                capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
+            self.state.shell_popup = Some(popup);
+            return Ok(());
         }
+
+        if !kill_windows_by_name(self.state.tmux_ops.as_ref(), &orch_target) {
+            self.state.warning_message = Some((
+                format!(
+                    "Could not clear lingering `{}` window; try `tmux -L agtx kill-window -t {}`",
+                    orch_target, orch_target,
+                ),
+                Instant::now(),
+            ));
+            return Ok(());
+        }
+        self.state.orchestrator_session = None;
+        self.state
+            .orchestrator_ready
+            .store(false, Ordering::Release);
 
         // Spawn new orchestrator
         let default_agent = self.state.config.default_agent.clone();
@@ -5635,6 +5854,7 @@ impl App {
             window_name,
             &project_path_str,
             Some(agent_cmd),
+            false,
         )?;
 
         self.state.orchestrator_session = Some(orch_target.clone());
@@ -5666,6 +5886,10 @@ impl App {
             skills::ORCHESTRATE_SKILL,
             &default_agent,
         );
+
+        if let Some(ref db) = self.state.db {
+            run_orchestrator_catchup(db, &self.state.board.tasks, self.state.project_path.as_deref());
+        }
 
         // Send the /agtx:orchestrate command once the agent is ready
         let skill_cmd = skills::transform_plugin_command("/agtx:orchestrate", &default_agent)
@@ -5750,8 +5974,22 @@ impl App {
     /// Suspend the TUI and attach directly to a tmux window for full interaction.
     /// Restores the TUI when the user detaches (Ctrl+b d).
     fn attach_to_tmux_fullscreen(&mut self, window_name: &str) -> Result<()> {
+        // window_name is the full session:window target (e.g. "docugap:task-75189cbb-test")
+        // Check if the tmux window still exists before attempting to attach.
+        if !self
+            .state
+            .tmux_ops
+            .window_exists(window_name)
+            .unwrap_or(true)
+        {
+            self.state.warning_message = Some((
+                "Session window no longer exists".to_string(),
+                std::time::Instant::now(),
+            ));
+            return Ok(());
+        }
+
         let session = &self.state.tmux_project_name;
-        let window_target = format!("{}:{}", session, window_name);
 
         // Check if we're already inside the agtx tmux server — if so, just
         // switch windows instead of nesting with attach.
@@ -5761,14 +5999,14 @@ impl App {
 
         if inside_agtx {
             // Already inside agtx tmux — just switch to the task window.
-            // Use session:window target to work across multiple project sessions.
+            // window_name is already session:window format, use it directly.
             let _ = std::process::Command::new("tmux")
                 .args([
                     "-L", tmux::AGENT_SERVER,
-                    "select-window", "-t", &window_target,
+                    "select-window", "-t", window_name,
                     ";", "resize-window", "-A",
                 ])
-                .status();
+                .output();
         } else {
             // Leave alternate screen and disable raw mode
             match self.terminal.backend_mut() {
@@ -5888,12 +6126,9 @@ impl App {
         }
 
         // Check window still exists
-        if !self
-            .state
-            .tmux_ops
-            .window_exists(&orch_target)
-            .unwrap_or(false)
-        {
+        if !is_orchestrator_live(self.state.tmux_ops.as_ref(), &orch_target) {
+            self.state.orchestrator_session = None;
+            self.state.orchestrator_ready.store(false, Ordering::Release);
             return;
         }
 
@@ -6108,6 +6343,18 @@ impl App {
                 let content_hash = if phase_status == PhaseStatus::Working && !window_gone {
                     session_name.as_ref().and_then(|sn| {
                         tmux_ops.capture_pane(sn).ok().map(|content| {
+                            // Auto-dismiss Codex MCP tool approval prompt ("Always allow")
+                            // so agents can call agtx MCP tools without manual confirmation.
+                            if agent == "codex"
+                                && content.contains("Allow the")
+                                && content.contains("MCP server to run tool")
+                                && content.contains("Always allow")
+                            {
+                                let _ = tmux_ops.send_keys_literal(sn, "3");
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                                let _ = tmux_ops.send_keys_literal(sn, "Enter");
+                            }
+
                             use std::hash::{Hash, Hasher};
                             let mut hasher = std::collections::hash_map::DefaultHasher::new();
                             content.hash(&mut hasher);
@@ -6247,6 +6494,7 @@ impl App {
                                             "",
                                             &agent_name,
                                             &[],
+                                            false,
                                         );
                                     }
                                     Ok(false) | Err(_) => {}
@@ -6365,6 +6613,15 @@ impl App {
         self.state.merge_conflict_checked.clear();
         self.state.stuck_task_notified.clear();
         self.state.stuck_task_idle_since.clear();
+
+        // Reload config for the new project so per-phase agent overrides are respected
+        let global_config = GlobalConfig::load().unwrap_or_default();
+        let project_config = ProjectConfig::load(&project_path).unwrap_or_default();
+        self.state.config = MergedConfig::merge(&global_config, &project_config);
+        self.state.cached_plugin = Some(load_plugin_if_configured(
+            &self.state.config,
+            Some(&project_path),
+        ));
 
         // Reload tasks for new project
         self.refresh_tasks()?;
@@ -6491,7 +6748,7 @@ fn recover_task_session(
 
     let resume_cmd = agent_ops.build_resume_command();
 
-    tmux_ops.create_window(session, window, worktree_path, Some(resume_cmd))?;
+    tmux_ops.create_window(session, window, worktree_path, Some(resume_cmd), true)?;
 
     Ok(target.clone())
 }
@@ -6547,6 +6804,12 @@ fn run_cleanup_script_for_worktree(cleanup_script: Option<&str>, worktree_path: 
         return;
     }
 
+    tracing::info!(
+        script = script,
+        worktree = %worktree_path.display(),
+        "Executing cleanup_script"
+    );
+
     match git::run_worktree_script(script, worktree_path, &[]) {
         Err(e) => eprintln!("cleanup_script failed to run: {}", e),
         Ok(output) => {
@@ -6577,7 +6840,7 @@ fn cleanup_task_for_done(
             let slug = task
                 .branch_name
                 .as_deref()
-                .and_then(|b| b.strip_prefix("task/"))
+                .and_then(|b| b.rsplit_once('/').map(|(_, s)| s))
                 .unwrap_or(&task.id);
             let archive_dir = project_path.join(".agtx").join("archive").join(slug);
             if let Ok(()) = std::fs::create_dir_all(&archive_dir) {
@@ -6625,7 +6888,7 @@ fn cleanup_task_resources(
         if artifacts_dir.exists() {
             let slug = branch_name
                 .as_deref()
-                .and_then(|b| b.strip_prefix("task/"))
+                .and_then(|b| b.rsplit_once('/').map(|(_, s)| s))
                 .unwrap_or(task_id);
             let archive_dir = project_path.join(".agtx").join("archive").join(slug);
             if let Ok(()) = std::fs::create_dir_all(&archive_dir) {
@@ -6665,6 +6928,7 @@ fn setup_task_worktree(
     prompt: &str,
     base_branch: &str,
     worktree_dir: &str,
+    branch_prefix: &str,
     copy_files: Option<String>,
     init_script: Option<String>,
     plugin: &Option<WorkflowPlugin>,
@@ -6674,6 +6938,7 @@ fn setup_task_worktree(
     git_ops: &dyn GitOperations,
     agent_ops: &dyn AgentOperations,
     referenced_tasks: &[ReferencedTaskInfo],
+    skip_init_scripts: bool,
 ) -> Result<String> {
     let unique_slug = generate_task_slug(&task.id, &task.title);
     let window_name = format!("task-{}", unique_slug);
@@ -6681,7 +6946,7 @@ fn setup_task_worktree(
 
     // Create git worktree from the configured base branch
     let worktree_path_str =
-        match git_ops.create_worktree(project_path, &unique_slug, base_branch, worktree_dir) {
+        match git_ops.create_worktree(project_path, &unique_slug, base_branch, worktree_dir, branch_prefix) {
             Ok(path) => path,
             Err(e) => {
                 eprintln!("Failed to create worktree: {}", e);
@@ -6771,28 +7036,36 @@ fn setup_task_worktree(
 
     // Run plugin init_script (in addition to project init_script)
     // Supports {agent} placeholder for agent-specific initialization
-    if let Some(ref p) = plugin {
-        if let Some(ref script) = p.init_script {
-            let script = script.replace("{agent}", agent_name);
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&script)
-                .current_dir(&worktree_path_str)
-                .output();
-            match output {
-                Ok(o) if !o.status.success() => {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    anyhow::bail!(
-                        "Plugin init_script failed (exit {}): {}\n{}",
-                        o.status.code().unwrap_or(-1),
-                        script,
-                        stderr.trim()
-                    );
+    if !skip_init_scripts {
+        if let Some(ref p) = plugin {
+            if let Some(ref script) = p.init_script {
+                let script = script.replace("{agent}", agent_name);
+                tracing::info!(
+                    script = %script,
+                    agent = agent_name,
+                    worktree = %worktree_path_str,
+                    "Executing plugin init_script"
+                );
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&script)
+                    .current_dir(&worktree_path_str)
+                    .output();
+                match output {
+                    Ok(o) if !o.status.success() => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        anyhow::bail!(
+                            "Plugin init_script failed (exit {}): {}\n{}",
+                            o.status.code().unwrap_or(-1),
+                            script,
+                            stderr.trim()
+                        );
+                    }
+                    Err(e) => {
+                        anyhow::bail!("Plugin init_script failed to run: {}\n{}", script, e);
+                    }
+                    _ => {}
                 }
-                Err(e) => {
-                    anyhow::bail!("Plugin init_script failed to run: {}\n{}", script, e);
-                }
-                _ => {}
             }
         }
     }
@@ -6800,7 +7073,7 @@ fn setup_task_worktree(
     // Build the interactive command. For agents with skill/command support,
     // start with no prompt — the skill command and task content are sent via send_keys.
     let has_skill_support =
-        resolve_skill_command(plugin, "planning", agent_name, "", task.cycle).is_some();
+        resolve_skill_command(plugin, "planning", agent_name, "", task.cycle, &task.id).is_some();
     let agent_cmd = if has_skill_support {
         agent_ops.build_interactive_command("")
     } else {
@@ -6810,16 +7083,24 @@ fn setup_task_worktree(
     // Ensure project tmux session exists
     ensure_project_tmux_session(tmux_project_name, project_path, tmux_ops);
 
+    tracing::info!(
+        task_id = %task.id,
+        agent = agent_name,
+        worktree = %worktree_path_str,
+        "Agent session spawned"
+    );
+
     tmux_ops.create_window(
         tmux_project_name,
         &window_name,
         &worktree_path_str,
         Some(agent_cmd),
+        true,
     )?;
 
     task.session_name = Some(target.clone());
     task.worktree_path = Some(worktree_path_str);
-    task.branch_name = Some(format!("task/{}", unique_slug));
+    task.branch_name = Some(format!("{}/{}", branch_prefix, unique_slug));
 
     Ok(target)
 }
@@ -7260,16 +7541,100 @@ fn parse_sgr(seq: &str, mut style: Style) -> Style {
     style
 }
 
-/// Map a byte offset in `text` to the (column, row) of the terminal cell it
-/// renders on. Column uses Unicode display width so wide chars (CJK, emoji)
-/// take two cells — a plain byte/char count would misplace the cursor.
-fn cursor_display_pos(text: &str, cursor_byte: usize) -> (usize, usize) {
-    let end = cursor_byte.min(text.len());
-    let before = &text[..end];
-    let row = before.bytes().filter(|b| *b == b'\n').count();
-    let last_line = before.rsplit('\n').next().unwrap_or("");
-    let col = ratatui::text::Span::raw(last_line).width();
+/// Display width of a single character, matching what the renderer draws.
+fn char_display_width(ch: char) -> usize {
+    ratatui::text::Span::raw(ch.to_string()).width()
+}
+
+/// Map a byte offset in `text` to the (col, row) of the terminal cell it
+/// will render on, using the same char-by-char wrap rule as `wrap_spans`.
+///
+/// - `prefix_width` is the display width preceding `text` on the first visual
+///   row (e.g. the `"  Prompt: "` label). It is consumed only on row 0; after
+///   any wrap or `'\n'`, the next visual row starts at column 0.
+/// - `wrap_width` is the inner width of the block (border-subtracted). A
+///   width of 0 short-circuits to (prefix_width, 0).
+/// - `'\n'` in `text` is treated as a hard line break.
+///
+/// This function and `wrap_spans` MUST stay in lock-step: any change to the
+/// wrap rule has to land in both, otherwise the cursor drifts off what was
+/// actually drawn. Both use lazy wrap (wrap only when the next char would
+/// overflow), so a cursor at end-of-row sits at col=wrap_width on that row
+/// — which is still inside the inner area (wrap_width = area.width - 2).
+fn wrapped_cursor_pos(
+    text: &str,
+    cursor_byte: usize,
+    prefix_width: usize,
+    wrap_width: usize,
+) -> (usize, usize) {
+    let cursor_byte = cursor_byte.min(text.len());
+    let mut col = prefix_width;
+    let mut row = 0usize;
+    if wrap_width == 0 {
+        return (col, row);
+    }
+    let mut byte = 0usize;
+    for ch in text.chars() {
+        if byte >= cursor_byte {
+            break;
+        }
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            let w = char_display_width(ch);
+            if col + w > wrap_width {
+                row += 1;
+                col = 0;
+            }
+            col += w;
+        }
+        byte += ch.len_utf8();
+    }
     (col, row)
+}
+
+/// Pre-wrap a sequence of styled spans into visual `Line`s by display width.
+///
+/// Char-by-char lazy wrap (no word-boundary detection). This makes our layout
+/// authoritative: each produced `Line` has display width ≤ `wrap_width`, so
+/// `Paragraph::wrap(Wrap { trim: false })` leaves it untouched and the cursor
+/// position computed by `wrapped_cursor_pos` lines up exactly with what was
+/// drawn — no two-source-of-truth between renderer and cursor.
+///
+/// Span styles are preserved across wrap points by splitting the span text
+/// at the wrap boundary and re-emitting both halves with the same style.
+/// `'\n'` inside span content is NOT handled here — callers split on `'\n'`
+/// before calling so each invocation wraps a single logical line.
+fn wrap_spans(spans: Vec<Span<'static>>, wrap_width: usize) -> Vec<Line<'static>> {
+    if wrap_width == 0 || spans.is_empty() {
+        return vec![Line::from(spans)];
+    }
+    let mut visual: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut col = 0usize;
+    for span in spans {
+        let style = span.style;
+        let mut chunk = String::new();
+        for ch in span.content.chars() {
+            let w = char_display_width(ch);
+            if col + w > wrap_width {
+                if !chunk.is_empty() {
+                    visual
+                        .last_mut()
+                        .unwrap()
+                        .push(Span::styled(std::mem::take(&mut chunk), style));
+                }
+                visual.push(Vec::new());
+                col = 0;
+            }
+            chunk.push(ch);
+            col += w;
+        }
+        if !chunk.is_empty() {
+            visual.last_mut().unwrap().push(Span::styled(chunk, style));
+        }
+    }
+    visual.into_iter().map(Line::from).collect()
 }
 
 /// Snap `pos` back to the nearest UTF-8 char boundary at or before it.
@@ -7527,6 +7892,7 @@ fn resolve_skill_command(
     agent_name: &str,
     task_content: &str,
     cycle: i32,
+    task_id: &str,
 ) -> Option<String> {
     let p = plugin.as_ref()?;
 
@@ -7565,6 +7931,7 @@ fn resolve_skill_command(
             cmd.replace("{task}", &task_oneline)
         };
     let expanded = expanded.replace("{phase}", &cycle.to_string());
+    let expanded = expanded.replace("{task_id}", task_id);
     skills::transform_plugin_command(&expanded, agent_name)
 }
 
@@ -7623,6 +7990,10 @@ fn spawn_send_to_agent(
             switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_agent, &new_cmd);
             let _ = wait_for_agent_ready(&tmux_ops, &target);
         }
+        let clear_context = plugin
+            .as_ref()
+            .map(|p| p.clear_context_on_advance)
+            .unwrap_or(false);
         send_skill_and_prompt(
             &tmux_ops,
             &target,
@@ -7632,6 +8003,7 @@ fn spawn_send_to_agent(
             &task_content,
             &target_agent,
             &auto_dismiss,
+            clear_context,
         );
     });
 }
@@ -7649,14 +8021,133 @@ fn send_skill_and_prompt(
     task_content: &str,
     agent_name: &str,
     auto_dismiss: &[crate::config::AutoDismiss],
+    clear_context: bool,
 ) {
-    // Gemini, Codex & OpenCode: always combine skill+prompt into a single message.
+    // Opt-in context clear on phase advance. Only Claude Code has a known
+    // clear command; other agents are tbd per issue #46 and fall through
+    // to normal send unchanged.
+    if clear_context && agent_name == "claude" {
+        let _ = tmux_ops.send_keys(target, "/clear");
+        // Wait for Claude to clear its buffer and return to idle prompt.
+        // Pattern mirrors the stability-poll loops used elsewhere in this
+        // function: poll until pane content stabilises (no changes for ~1s),
+        // capped at ~5s total.
+        let mut last_content = String::new();
+        let mut stable_ticks = 0u32;
+        for _ in 0..25 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if let Ok(content) = tmux_ops.capture_pane(target) {
+                if content != last_content {
+                    last_content = content;
+                    stable_ticks = 0;
+                } else {
+                    stable_ticks += 1;
+                    if stable_ticks >= 5 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // OpenCode command picker handles args differently: when a command has arguments
+    // (e.g. `/agtx-plan abc123`), typing the full string and pressing Enter causes the
+    // picker to confirm/insert only the command name — stripping the args. Commands
+    // without args (e.g. `/agtx-review`) work fine with a single Enter confirm + submit.
+    //
+    // Fix: send just the command name, wait for picker, Enter to confirm (inserts cmd),
+    // then send the args (picker dismissed, input now has just the command), then Enter.
+    if agent_name == "opencode" {
+        // Build the full message: skill command (if any) + prompt (if any)
+        let full_text = if let Some(cmd) = skill_cmd {
+            if !prompt.is_empty() {
+                format!("{}\n\n{}", cmd, prompt)
+            } else {
+                cmd.clone()
+            }
+        } else if !prompt.is_empty() {
+            prompt.to_string()
+        } else {
+            let oneline = task_content
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            oneline
+        };
+
+        if !full_text.is_empty() {
+            // Check if the first token looks like a slash command (starts with /)
+            let first_line = full_text.lines().next().unwrap_or(&full_text);
+            if let Some(space_pos) = first_line.find(' ') {
+                let cmd_name = &first_line[..space_pos];
+                let cmd_args = &first_line[space_pos..]; // includes leading space
+                let rest = &full_text[first_line.len()..]; // rest of the message after first line
+
+                if cmd_name.starts_with('/') {
+                    // Send just the command name to trigger the picker
+                    let _ = tmux_ops.send_keys_literal(target, cmd_name);
+                    // Wait for picker to appear (command name visible in pane)
+                    for _ in 0..20 {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        if let Ok(content) = tmux_ops.capture_pane(target) {
+                            if content.contains(cmd_name) {
+                                break;
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    // Enter confirms/inserts the command from picker
+                    let _ = tmux_ops.send_keys_literal(target, "Enter");
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    // Now send the args + any remaining prompt text
+                    let remaining = format!("{}{}", cmd_args, rest);
+                    let _ = tmux_ops.send_keys_literal(target, &remaining);
+                    // Wait for args to appear in pane
+                    let check = cmd_args.trim();
+                    if !check.is_empty() {
+                        for _ in 0..20 {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            if let Ok(content) = tmux_ops.capture_pane(target) {
+                                if content.contains(check) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let _ = tmux_ops.send_keys_literal(target, "Enter");
+                    return;
+                }
+            }
+
+            // No args (or no slash command): simple send + wait for visibility + Enter
+            let _ = tmux_ops.send_keys_literal(target, &full_text);
+            let check_str = full_text.lines().next().unwrap_or(&full_text);
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = tmux_ops.capture_pane(target) {
+                    if content.contains(check_str) {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            // Enter to confirm picker (if any), then second Enter to submit
+            let _ = tmux_ops.send_keys_literal(target, "Enter");
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let _ = tmux_ops.send_keys_literal(target, "Enter");
+        }
+        return;
+    }
+
+    // Gemini, Codex & cursor: always combine skill+prompt into a single message.
     // Gemini: sending separately causes it to execute the skill and queue the
     //   prompt, which gets lost or arrives too late.
     // Codex: skill mentions ($skill-name) are inline references that must be
     //   part of a message — sending just "$skill" standalone does nothing.
-    // OpenCode: same Ink TUI behavior as Gemini/Codex, needs combined send + double Enter.
-    if matches!(agent_name, "gemini" | "codex" | "cursor" | "opencode") {
+    if matches!(agent_name, "gemini" | "codex" | "cursor") {
         let text_to_send = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
                 Some(format!("{}\n\n{}", cmd, prompt))
@@ -7695,11 +8186,9 @@ fn send_skill_and_prompt(
             std::thread::sleep(std::time::Duration::from_millis(200));
             let _ = tmux_ops.send_keys_literal(target, "Enter");
 
-            // Codex and OpenCode show a command picker popup when a skill is typed.
+            // Codex shows a command picker popup when a skill is typed.
             // The first Enter confirms/closes the picker; a second Enter is needed
             // to actually submit the message.
-            // - Codex: wait for "Press enter to insert" to disappear
-            // - OpenCode: wait a short delay (picker closes immediately on Enter)
             if agent_name == "codex" {
                 for _ in 0..20 {
                     // up to 4s
@@ -7711,9 +8200,6 @@ fn send_skill_and_prompt(
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
-            } else if agent_name == "opencode" {
-                std::thread::sleep(std::time::Duration::from_millis(400));
                 let _ = tmux_ops.send_keys_literal(target, "Enter");
             }
         }
@@ -7734,6 +8220,26 @@ fn send_skill_and_prompt(
         // Skill + prompt, no trigger: send separately, wait for agent to finish processing
         (Some(cmd), None) => {
             let _ = tmux_ops.send_keys(target, cmd);
+
+            // Verify the command was received: check that pane content changes within
+            // ~3s (agent picked it up). If nothing changed, the agent wasn't ready yet —
+            // wait 1s and resend once.
+            let baseline = tmux_ops.capture_pane(target).unwrap_or_default();
+            let mut received = false;
+            for _ in 0..15 {
+                // up to 3s
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = tmux_ops.capture_pane(target) {
+                    if content != baseline {
+                        received = true;
+                        break;
+                    }
+                }
+            }
+            if !received {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let _ = tmux_ops.send_keys(target, cmd);
+            }
             if !prompt.is_empty() {
                 // Wait for agent to process the skill command and become idle again.
                 // Requires at least 1 content change (agent started processing) before
@@ -7826,6 +8332,12 @@ fn wait_for_prompt_trigger(
             if stable_ticks >= 4 {
                 for rule in auto_dismiss {
                     if rule.detect.iter().all(|p| content.contains(p.as_str())) {
+                        tracing::info!(
+                            target = target,
+                            patterns = ?rule.detect,
+                            response = %rule.response,
+                            "Auto-dismiss rule triggered"
+                        );
                         for key in rule.response.split('\n') {
                             let _ = tmux_ops.send_keys_literal(target, key);
                             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -8002,7 +8514,8 @@ fn glob_path_exists(pattern: &str) -> bool {
 /// Uses the phase-specific agent if configured, otherwise falls back to default_agent.
 fn needs_agent_switch(config: &MergedConfig, task: &Task, phase: &str) -> (String, bool) {
     let target = config.agent_for_phase(phase);
-    let switch = task.agent != target;
+    // Empty task.agent means agent not yet assigned (SetupResult pending) — no switch needed
+    let switch = !task.agent.is_empty() && task.agent != target;
     (target.to_string(), switch)
 }
 
@@ -8053,6 +8566,89 @@ fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
     }
 }
 
+/// Orchestrator is live iff its tmux window exists (no pane-command peeking).
+fn is_orchestrator_live(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
+    tmux_ops.window_exists(target).unwrap_or(false)
+}
+
+/// Startup reattach: returns the target if a window survives, replaying catch-up.
+fn detect_existing_orchestrator(
+    experimental: bool,
+    tmux_ops: &dyn TmuxOperations,
+    tmux_project_name: &str,
+    db: Option<&Database>,
+    tasks: &[Task],
+    project_path: Option<&Path>,
+) -> Option<String> {
+    if !experimental {
+        return None;
+    }
+    let target = format!("{}:orchestrator", tmux_project_name);
+    if !tmux_ops.window_exists(&target).unwrap_or(false) {
+        return None;
+    }
+    if let Some(db) = db {
+        run_orchestrator_catchup(db, tasks, project_path);
+    }
+    Some(target)
+}
+
+/// Kill all windows matching `target` (tmux allows duplicates); false if the 16-iter cap is hit.
+fn kill_windows_by_name(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
+    for _ in 0..16 {
+        if !tmux_ops.window_exists(target).unwrap_or(false) {
+            return true;
+        }
+        let _ = tmux_ops.kill_window(target);
+    }
+    !tmux_ops.window_exists(target).unwrap_or(false)
+}
+
+/// Replay "completed phase" notifications for tasks whose artifact is on disk.
+fn run_orchestrator_catchup(
+    db: &Database,
+    tasks: &[Task],
+    project_path: Option<&Path>,
+) {
+    let existing: HashSet<String> = db
+        .peek_notifications()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|n| n.message)
+        .collect();
+
+    for task in tasks {
+        if !matches!(task.status, TaskStatus::Planning | TaskStatus::Running) {
+            continue;
+        }
+        let plugin = match &task.plugin {
+            Some(name) => WorkflowPlugin::load(name, project_path).ok(),
+            None => skills::load_bundled_plugin("agtx"),
+        };
+        let Some(ref wt) = task.worktree_path else {
+            continue;
+        };
+        if !phase_artifact_exists(wt, task.status, &plugin, task.cycle) {
+            continue;
+        }
+        let short_id = if task.id.len() >= 8 {
+            &task.id[..8]
+        } else {
+            &task.id
+        };
+        let message = format!(
+            "Task \"{}\" ({}) completed phase: {}",
+            task.title,
+            short_id,
+            task.status.as_str()
+        );
+        if existing.contains(&message) {
+            continue;
+        }
+        let _ = db.create_notification(&crate::db::Notification::new(message));
+    }
+}
+
 /// Check if an agent is actively running in the pane.
 /// Uses both `pane_current_command` (works for Claude, Codex, Copilot) and
 /// pane content indicators (works for Gemini which runs inside bash).
@@ -8087,21 +8683,20 @@ fn ensure_window_or_recover(
     agent_ops: &dyn AgentOperations,
     worktree_path: Option<&str>,
 ) {
-    if tmux_ops.window_exists(target).unwrap_or(true) {
-        return;
+    if !tmux_ops.window_exists(target).unwrap_or(true) {
+        let Some(wt_path) = worktree_path else { return };
+        if !Path::new(wt_path).exists() {
+            return;
+        }
+        let Some((session, window)) = target.split_once(':') else {
+            return;
+        };
+        if !tmux_ops.has_session(session) {
+            let _ = tmux_ops.create_session(session, wt_path);
+        }
+        let resume_cmd = agent_ops.build_resume_command();
+        let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd), true);
     }
-    let Some(wt_path) = worktree_path else { return };
-    if !Path::new(wt_path).exists() {
-        return;
-    }
-    let Some((session, window)) = target.split_once(':') else {
-        return;
-    };
-    if !tmux_ops.has_session(session) {
-        let _ = tmux_ops.create_session(session, wt_path);
-    }
-    let resume_cmd = agent_ops.build_resume_command();
-    let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd));
 }
 
 /// Gracefully switch the agent running in a tmux window.
@@ -8218,7 +8813,15 @@ fn switch_agent_in_tmux(
     std::thread::sleep(std::time::Duration::from_millis(2000));
 
     // 5. Start the new agent
-    let _ = tmux_ops.send_keys(target, new_agent_cmd);
+    // Wrap with env -u to clear Claude Code's nesting-detection vars — the
+    // persistent shell inherited them at window creation time, so they must
+    // be stripped explicitly here (unlike create_window which uses env -u
+    // on the initial command only).
+    let cmd = format!(
+        "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT {}",
+        new_agent_cmd
+    );
+    let _ = tmux_ops.send_keys(target, &cmd);
 
     // 6. Wait for the new agent process to actually start (pane_current_command != shell).
     //    Without this, wait_for_agent_ready may see stale ">" from old pane content
@@ -8274,6 +8877,20 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
                 break;
             }
 
+            // Handle Gemini trust dialog — auto-trust the folder so MCP servers
+            // and skills are loaded. After answering, Gemini restarts; reset
+            // stabilization counters so we wait for the new instance to be ready.
+            if content.contains("Do you trust the files in this folder?") {
+                let _ = tmux_ops.send_keys_literal(target, "1");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _ = tmux_ops.send_keys_literal(target, "Enter");
+                // Reset stabilization — Gemini will restart and we must wait again
+                last_content = String::new();
+                stable_ticks = 0;
+                change_count = 0;
+                continue;
+            }
+
             // Check 2: known ready indicator in pane content
             if AGENT_ACTIVE_INDICATORS.iter().any(|s| content.contains(s)) {
                 break;
@@ -8316,6 +8933,11 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
             }
         }
     }
+
+    // Fixed 2s grace period after stability is detected. There is a small window
+    // where the agent's prompt indicator is visible but the input buffer is not
+    // yet accepting keystrokes (e.g. Claude finishing async tool registration).
+    std::thread::sleep(std::time::Duration::from_secs(2));
 
     Some(target.to_string())
 }
@@ -8405,6 +9027,101 @@ fn write_skills_to_worktree(
             let skill_dir = skills_dir.join(skill_name);
             let _ = std::fs::create_dir_all(&skill_dir);
             let _ = std::fs::write(skill_dir.join("SKILL.md"), skill_content);
+        }
+    }
+
+    // Write project-scoped MCP server config for each configured agent.
+    // Use the project root path (not the worktree path) so the MCP server opens
+    // the correct project DB where tasks are stored.
+    let agtx_bin = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("agtx"))
+        .to_string_lossy()
+        .to_string();
+    let project_path_str = project_path.to_string_lossy().to_string();
+    for agent_name in agent_names {
+        match *agent_name {
+            "claude" => {
+                let cfg = serde_json::json!({
+                    "mcpServers": {
+                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
+                    }
+                });
+                let _ = std::fs::write(
+                    Path::new(worktree_path).join(".mcp.json"),
+                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                );
+            }
+            "codex" => {
+                let toml = format!(
+                    "[mcp_servers.agtx]\ncommand = \"{}\"\nargs = [\"mcp-serve\", \"{}\"]\n",
+                    agtx_bin, project_path_str
+                );
+                let dir = Path::new(worktree_path).join(".codex");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(dir.join("config.toml"), toml);
+
+                // Codex only loads project-local .codex/config.toml for trusted paths.
+                // Add a trust entry for this worktree to ~/.codex/config.toml.
+                if let Ok(home) = std::env::var("HOME") {
+                    let global_config_path = Path::new(&home).join(".codex").join("config.toml");
+                    let trust_entry = format!(
+                        "\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                        worktree_path
+                    );
+                    let existing = std::fs::read_to_string(&global_config_path).unwrap_or_default();
+                    if !existing.contains(worktree_path) {
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&global_config_path)
+                            .and_then(|mut f| {
+                                use std::io::Write;
+                                f.write_all(trust_entry.as_bytes())
+                            });
+                    }
+                }
+            }
+            "gemini" => {
+                let cfg = serde_json::json!({
+                    "mcpServers": {
+                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str], "trust": true }
+                    }
+                });
+                let dir = Path::new(worktree_path).join(".gemini");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(
+                    dir.join("settings.json"),
+                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                );
+            }
+            "cursor" => {
+                let cfg = serde_json::json!({
+                    "mcpServers": {
+                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
+                    }
+                });
+                let dir = Path::new(worktree_path).join(".cursor");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(
+                    dir.join("mcp.json"),
+                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                );
+            }
+            "opencode" => {
+                let cfg = serde_json::json!({
+                    "mcp": {
+                        "agtx": {
+                            "type": "local",
+                            "command": [&agtx_bin, "mcp-serve", &project_path_str]
+                        }
+                    }
+                });
+                let _ = std::fs::write(
+                    Path::new(worktree_path).join("opencode.json"),
+                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                );
+            }
+            _ => {}
         }
     }
 

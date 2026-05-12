@@ -9,20 +9,23 @@ You are in the **planning phase** of an agtx-managed task.
 
 ## Input
 
-- **Task description** — provided inline with this command (when entering directly from Backlog)
-- **`.agtx/research.md`** — prior analysis from research phase (when research was completed first)
+The argument to this command is a task ID. Fetch the task description using the agtx MCP tool:
+```
+mcp__agtx__get_task(task_id: "<the id passed to this command>")
+```
+Use the `description` field as the task to work on. Also check for `.agtx/research.md` if a research phase was completed first.
 
 ## Instructions
 
-1. If `.agtx/research.md` exists, read it for prior analysis
-2. Read and understand the task description
+1. Fetch the task description via `get_task`
+2. If `.agtx/research.md` exists, read it for prior analysis
 3. Explore the codebase to understand relevant files, patterns, and architecture
 4. Identify all files that need to be created or modified
 5. Create a detailed implementation plan
 
 ## Output
 
-Write your plan to `.agtx/plan.md` with these sections:
+Write your plan to `.agtx/plan.md` in the **current working directory** (do NOT navigate up — write directly to `.agtx/plan.md` relative to where you are now) with these sections:
 
 ## Analysis
 What you found in the codebase — relevant files, patterns, dependencies.
@@ -35,7 +38,7 @@ What could go wrong — edge cases, breaking changes, areas needing extra care.
 
 ## CRITICAL: Stop After Writing
 
-After writing `.agtx/plan.md`:
+After writing `.agtx/plan.md` (in the current working directory):
 - Do NOT start implementing
 - Do NOT modify any source files
 - Say: "Plan written to `.agtx/plan.md`. Waiting for approval."

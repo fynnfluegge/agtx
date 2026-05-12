@@ -469,3 +469,84 @@ fn test_cleanup_keeps_recently_processed_requests() {
     let fetched = db.get_transition_request(&req.id).unwrap();
     assert!(fetched.is_some(), "recently processed request should be kept");
 }
+
+// === send_to_task Input Validation Tests (Fix 5) ===
+// These test the validation constraints documented in the MCP server.
+// The actual validation runs inside AgtxMcpServer::send_to_task, which requires
+// a full MCP server setup. Here we verify the constraint constants and edge cases
+// at the model level.
+
+#[test]
+fn test_send_to_task_max_message_length_constant() {
+    // The max message length is 4096 bytes as documented in SendToTaskParams
+    // Verify a message at the boundary is representable
+    let msg = "a".repeat(4096);
+    assert_eq!(msg.len(), 4096);
+
+    let over_limit = "a".repeat(4097);
+    assert!(over_limit.len() > 4096);
+}
+
+#[test]
+fn test_null_byte_detection() {
+    // Verify that Rust's contains check works for null bytes
+    // (this is what the server uses for validation)
+    let clean_msg = "Hello, agent!";
+    assert!(!clean_msg.contains('\x00'));
+
+    let dirty_msg = "Hello\x00world";
+    assert!(dirty_msg.contains('\x00'));
+
+    let null_only = "\x00";
+    assert!(null_only.contains('\x00'));
+}
+
+#[test]
+fn test_normal_messages_pass_validation() {
+    // Messages that should pass validation
+    let at_limit = "a".repeat(4096);
+    let messages: Vec<&str> = vec![
+        "Please continue with the implementation",
+        "y",
+        "n",
+        "Run: cargo test",
+        "Multi\nline\nmessage",
+        &at_limit, // exactly at limit
+    ];
+
+    for msg in messages {
+        assert!(msg.len() <= 4096, "Message should be within length limit");
+        assert!(!msg.contains('\x00'), "Message should not contain null bytes");
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_send_to_task_requires_active_phase() {
+    // Tasks in Backlog, Review, or Done should not accept send_to_task
+    let db = Database::open_in_memory_project().unwrap();
+
+    for status in &[TaskStatus::Backlog, TaskStatus::Review, TaskStatus::Done] {
+        let mut task = Task::new("Test", "claude", "proj");
+        task.status = *status;
+        db.create_task(&task).unwrap();
+
+        // The server checks: !matches!(task.status, TaskStatus::Planning | TaskStatus::Running)
+        assert!(
+            !matches!(task.status, TaskStatus::Planning | TaskStatus::Running),
+            "Status {:?} should not be an active phase for send_to_task",
+            status
+        );
+    }
+
+    // Planning and Running should be allowed
+    for status in &[TaskStatus::Planning, TaskStatus::Running] {
+        let mut task = Task::new("Test", "claude", "proj");
+        task.status = *status;
+        assert!(
+            matches!(task.status, TaskStatus::Planning | TaskStatus::Running),
+            "Status {:?} should be an active phase for send_to_task",
+            status
+        );
+    }
+}

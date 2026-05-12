@@ -2,11 +2,11 @@
 
 [//]: <img src="https://github.com/user-attachments/assets/54ac039b-085e-490b-aacc-36c8e244e313" width="428" />
 
-# agtx
+# 🏄🏼‍♂️ agtx
 
 <div align="left">
     
-> **An AI agent that manages other coding agents in a terminal kanban board** - Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates to multiple coding agents running in parallel. Come back to changes ready to merge.
+> **The blackboard for coding agents** - Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates to multiple coding agents running in parallel. Come back to changes ready to merge.
 >
 > **Let different AI coding agents collaborate** autonomously on the same task with automatic session switching and context awareness - e.g. **Gemini** → research | **Claude** → implement | **Codex** → review
 >
@@ -19,6 +19,8 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
+<a href="https://trendshift.io/repositories/23889" target="_blank"><img src="https://trendshift.io/api/badge/repositories/23889" alt="fynnfluegge%2Fagtx | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
@@ -27,7 +29,8 @@
   <a href="#mcp-server">MCP Server</a> •
   <a href="#plugins">Plugins</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
-  <a href="#configuration">Configuration</a>
+  <a href="#configuration">Configuration</a> •
+  <a href="#benchmark">Benchmark</a>
 </p>
 
 ---
@@ -330,17 +333,20 @@ running = "codex"
 
 Plug any spec-driven framework into the task lifecycle. Define commands, prompts, and artifacts — agtx handles phase gating, artifact polling, worktree sync, agent switching, and autonomous execution.
 
-Press `P` to switch plugins. Ships with 7 built-in:
+Press `P` to switch plugins. Ships with 10 built-in:
 
 | Plugin | Description |
 |--------|-------------|
 | **void** | Plain agent session - no prompting or skills, task description prefilled in input |
 | **agtx** (default) | Built-in workflow with skills and prompts for each phase |
+| **agtx-terse** | Token-efficient workflow - same workflow with compressed output and minimal tokens |
 | **gsd** | [Get Shit Done](https://github.com/fynnfluegge/get-shit-done-cc) - structured spec-driven development with interactive planning |
 | **spec-kit** | [Spec-Driven Development](https://github.com/github/spec-kit) by GitHub - specifications become executable artifacts |
 | **openspec** | [OpenSpec](https://github.com/Fission-AI/OpenSpec) - lightweight AI-guided specification framework |
 | **bmad** | [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) - AI-driven agile development with structured phases |
 | **superpowers** | [Superpowers](https://github.com/obra/superpowers) - brainstorming, plans, TDD, subagent-driven development |
+| **oh-my-claudecode** | [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode) - multi-agent orchestration with 37 skills and 22 specialized agents |
+| **agent-skills** | [Agent Skills](https://github.com/addyosmani/agent-skills) - production-grade engineering skills covering the full spec-to-ship lifecycle |
 
 ### Agent Compatibility
 
@@ -358,12 +364,17 @@ Commands are written once in canonical format and automatically translated per a
 | **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
 | **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
 
 <details>
 <summary><b>Creating a Plugin</b></summary>
+
+> [!TIP]
+> If you have the agtx repo open in Claude Code, run `/add-plugin <github-url>` to automatically generate a bundled `plugin.toml` from any spec-driven framework repo — including wiring up `src/skills.rs` and the README tables.
 
 Place your plugin at `.agtx/plugins/<name>/plugin.toml` in your project root (or `~/.config/agtx/plugins/<name>/plugin.toml` for global use). It will appear in the plugin selector automatically.
 
@@ -562,6 +573,28 @@ tmux -L agtx attach
 - **Worktrees**: `.agtx/worktrees/` in each project
 - **Tmux**: Dedicated server `agtx` with per-project sessions
 
+## Docker Sandbox
+
+Run agtx in an isolated Docker container so agents can only touch the project you pass in — no access to the rest of your home directory, credentials are read-only, and any files the agent creates in the project are owned by your host user.
+
+```bash
+# Run agtx on a project
+./docker/sandbox.sh path/to/your-project
+
+# Or from inside the project directory
+./docker/sandbox.sh
+```
+
+The sandbox:
+- Mounts only the target project as writable; everything else on the host is inaccessible
+- Copies `~/.claude` credentials read-only at startup so they are never written back to the host
+- Runs as a non-root user whose UID/GID matches your host user (files created inside the container appear correctly owned on the host)
+- Stores agtx state in named Docker volumes (persists across runs, isolated from your host's agtx data)
+- Pre-accepts the bypass permissions prompt, which is appropriate in an isolated container
+
+> [!NOTE]
+> Requires [Docker Engine](https://docs.docker.com/engine/install/) (Linux) or [Docker Desktop](https://docs.docker.com/desktop/) (macOS/Windows). The image is built automatically on first run and cached for subsequent runs.
+
 ## MCP Server
 
 The agtx MCP server (`agtx mcp-serve`) exposes the board to any coding agent session via the [Model Context Protocol](https://modelcontextprotocol.io). Used by the orchestrator agent and the brainstorm & sweep skills.
@@ -635,6 +668,12 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 5. If a task has been idle for 1+ minute without a phase artifact, the orchestrator is notified — it reads the pane with `read_pane_content`, then either nudges the agent with `send_to_task` or calls `move_task` with `escalate_to_user` to flag it for your attention
 6. Escalated tasks show a `⚠` badge on the kanban board; opening the task popup shows the reason and dismisses the flag
 7. MCP registration is cleaned up when the orchestrator is stopped
+
+## Benchmarks
+
+agtx includes a [SWE-bench Lite](https://www.swebench.com) benchmark runner that uses agtx itself as the agent orchestration layer — driving coding agent workflows against 300 real GitHub bug-fix tasks via the MCP server.
+
+See **[benchmarks/README.md](benchmarks/README.md)** for setup, usage, bundled configs, and evaluation instructions.
 
 ## Contributing
 

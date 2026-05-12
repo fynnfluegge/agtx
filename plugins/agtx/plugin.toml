@@ -1,5 +1,6 @@
 name = "agtx"
 description = "Built-in workflow with skills and prompts"
+clear_context_on_advance = true
 
 [artifacts]
 research = ".agtx/research.md"
@@ -8,7 +9,7 @@ running = ".agtx/execute.md"
 review = ".agtx/review.md"
 
 [commands]
-research = "/agtx:research {task}"
-planning = "/agtx:plan {task}"
-running = "/agtx:execute {task}"
+research = "/agtx:research {task_id}"
+planning = "/agtx:plan {task_id}"
+running = "/agtx:execute {task_id}"
 review = "/agtx:review"

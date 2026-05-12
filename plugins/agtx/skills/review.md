@@ -9,7 +9,7 @@ You are in the **review phase** of an agtx-managed task.
 
 ## Instructions
 
-1. Review all changes made during execution (use git diff)
+1. Review all changes made during execution: run `git diff HEAD` (staged+unstaged) and `git log --oneline $(git merge-base HEAD origin/HEAD)..HEAD` to see only your commits. Do NOT diff against `main` or `origin/main` — those may include unrelated upstream history.
 2. Check for:
    - Correctness and edge cases
    - Error handling
@@ -20,7 +20,7 @@ You are in the **review phase** of an agtx-managed task.
 
 ## Output
 
-Write your review to `.agtx/review.md` with these sections:
+Write your review to `.agtx/review.md` in the **current working directory** with these sections:
 
 ## Review
 Findings from your review — what looks good, what was fixed, any concerns.
@@ -30,6 +30,6 @@ Either `READY` (good to merge) or `NEEDS_WORK` (with explanation of remaining is
 
 ## CRITICAL: Stop After Writing
 
-After writing `.agtx/review.md`:
+After writing `.agtx/review.md` (in the current working directory):
 - Say: "Review written to `.agtx/review.md`."
 - Wait for further instructions

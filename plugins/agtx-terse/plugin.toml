@@ -1,0 +1,15 @@
+name = "agtx-terse"
+description = "Token-efficient workflow with compressed output and minimal token usage."
+clear_context_on_advance = true
+
+[artifacts]
+research = ".agtx/research.md"
+planning = ".agtx/plan.md"
+running = ".agtx/execute.md"
+review = ".agtx/review.md"
+
+[commands]
+research = "/agtx:research {task_id}"
+planning = "/agtx:plan {task_id}"
+running = "/agtx:execute {task_id}"
+review = "/agtx:review"

@@ -1,0 +1,40 @@
+name = "oh-my-claudecode"
+description = "oh-my-claudecode - Multi-agent orchestration with 37 skills and 22 specialized agents"
+# Install: /plugin marketplace add https://github.com/Yeachan-Heo/oh-my-claudecode
+# then: /plugin install oh-my-claudecode && /setup
+init_script = "mkdir -p .omc/plans .omc/specs .omc/state .omc/handoffs"
+supported_agents = ["claude"]
+
+# .omc directory holds plans, specs, state, and handoffs produced by oh-my-claudecode
+copy_dirs = [".omc"]
+
+# Artifact files that signal phase completion.
+[artifacts]
+research = ".omc/specs/deep-interview-*.md"
+planning = ".omc/plans/plan-*.md"
+# autopilot generates .omc/prd.json as part of its pipeline
+running = ".omc/prd.json"
+
+# oh-my-claudecode slash commands in canonical /namespace:skill format.
+# deep-interview = Socratic requirements clarification (interactive).
+# ralplan = iterative consensus planning (Planner + Architect + Critic).
+# autopilot = full autonomous pipeline: expansion → planning → execution → QA → validation.
+[commands]
+research = "/oh-my-claudecode:deep-interview"
+planning = "/oh-my-claudecode:ralplan"
+running = "/oh-my-claudecode:autopilot"
+
+# Prompts sent after commands.
+# research and planning accept {task} → can enter directly from Backlog.
+# running_with_research_or_planning is empty — prior phases provide context.
+[prompts]
+research = "{task}"
+planning = "{task}"
+running = "{task}"
+running_with_research_or_planning = ""
+
+# Copy .omc artifacts back to project root after each phase completes
+# so other tasks can reference specs/plans from the main worktree.
+[copy_back]
+research = [".omc/specs"]
+planning = [".omc/plans"]

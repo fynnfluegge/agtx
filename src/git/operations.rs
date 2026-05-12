@@ -16,6 +16,7 @@ pub trait GitOperations: Send + Sync {
         task_slug: &str,
         base_branch: &str,
         worktree_dir: &str,
+        branch_prefix: &str,
     ) -> Result<String>;
 
     /// Remove a worktree
@@ -84,9 +85,15 @@ impl GitOperations for RealGitOps {
         task_slug: &str,
         base_branch: &str,
         worktree_dir: &str,
+        branch_prefix: &str,
     ) -> Result<String> {
-        let path =
-            super::create_worktree_from_base(project_path, task_slug, base_branch, worktree_dir)?;
+        let path = super::create_worktree_with_prefix(
+            project_path,
+            task_slug,
+            base_branch,
+            worktree_dir,
+            branch_prefix,
+        )?;
         Ok(path.to_string_lossy().to_string())
     }
 

@@ -29,16 +29,46 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
 
+        // Migration: if the new-hash DB doesn't exist, check for an old-hash DB and rename it
+        if !db_path.exists() {
+            let old_hash = Self::hash_path_legacy(&path_str);
+            let old_db_path = config_dir
+                .config_dir()
+                .join("projects")
+                .join(format!("{}.db", old_hash));
+            if old_db_path.exists() {
+                let _ = std::fs::rename(&old_db_path, &db_path);
+            }
+        }
+
         let conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open database at {:?}", db_path))?;
+
+        // Harden file permissions: owner-only read/write
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
+        }
 
         let db = Self { conn };
         db.init_project_schema()?;
         Ok(db)
     }
 
-    /// Create a stable hash from a path string for database filename
+    /// Create a stable hash from a path string for database filename.
+    /// Uses SHA-256 (truncated to 16 hex chars) for cross-version stability.
     fn hash_path(path: &str) -> String {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(path.as_bytes());
+        let result = hasher.finalize();
+        // Take first 8 bytes (16 hex chars) — same length as the old DefaultHasher output
+        format!("{:016x}", u64::from_be_bytes(result[..8].try_into().unwrap()))
+    }
+
+    /// Legacy hash function (DefaultHasher). Used only for migration from pre-SHA256 databases.
+    fn hash_path_legacy(path: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -61,6 +91,13 @@ impl Database {
         let conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open global database at {:?}", db_path))?;
 
+        // Harden file permissions: owner-only read/write
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
+        }
+
         let db = Self { conn };
         db.init_global_schema()?;
         Ok(db)
@@ -70,6 +107,16 @@ impl Database {
     #[cfg(feature = "test-mocks")]
     pub fn open_in_memory_project() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        let db = Self { conn };
+        db.init_project_schema()?;
+        Ok(db)
+    }
+
+    /// Open a project DB at an arbitrary file path (for concurrency tests — in-memory is per-connection).
+    #[cfg(feature = "test-mocks")]
+    pub fn open_project_at_path(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path)
+            .with_context(|| format!("Failed to open database at {:?}", path))?;
         let db = Self { conn };
         db.init_project_schema()?;
         Ok(db)
@@ -85,6 +132,11 @@ impl Database {
     }
 
     fn init_project_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;",
+        )?;
+
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS tasks (
@@ -161,10 +213,20 @@ impl Database {
             .conn
             .execute("ALTER TABLE transition_requests ADD COLUMN reason TEXT", []);
 
+        let _ = self.conn.execute(
+            "ALTER TABLE transition_requests ADD COLUMN claimed_by TEXT",
+            [],
+        );
+
         Ok(())
     }
 
     fn init_global_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;",
+        )?;
+
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS projects (
@@ -495,7 +557,9 @@ impl Database {
 
     pub fn get_pending_transition_requests(&self) -> Result<Vec<TransitionRequest>> {
         let mut stmt = self.conn.prepare(
-            "SELECT * FROM transition_requests WHERE processed_at IS NULL ORDER BY requested_at ASC",
+            "SELECT * FROM transition_requests
+             WHERE processed_at IS NULL AND claimed_by IS NULL
+             ORDER BY requested_at ASC",
         )?;
 
         let requests = stmt
@@ -514,10 +578,23 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically claim a pending request. Returns true iff this caller won.
+    pub fn claim_transition_request(&self, id: &str, claimant: &str) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE transition_requests
+             SET claimed_by = ?1
+             WHERE id = ?2 AND claimed_by IS NULL AND processed_at IS NULL",
+            params![claimant, id],
+        )?;
+        Ok(rows == 1)
+    }
+
     pub fn cleanup_old_transition_requests(&self) -> Result<()> {
         let cutoff = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
         self.conn.execute(
-            "DELETE FROM transition_requests WHERE processed_at IS NOT NULL AND processed_at < ?1",
+            "DELETE FROM transition_requests
+             WHERE (processed_at IS NOT NULL AND processed_at < ?1)
+                OR (processed_at IS NULL AND claimed_by IS NOT NULL AND requested_at < ?1)",
             params![cutoff],
         )?;
         Ok(())
@@ -529,6 +606,16 @@ impl Database {
         self.conn.execute(
             "UPDATE transition_requests SET processed_at = ?1 WHERE id = ?2",
             params![processed_at, id],
+        )?;
+        Ok(())
+    }
+
+    /// Directly set requested_at to an arbitrary timestamp (for testing cleanup logic only).
+    #[cfg(feature = "test-mocks")]
+    pub fn backdate_transition_requested_at(&self, id: &str, requested_at: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE transition_requests SET requested_at = ?1 WHERE id = ?2",
+            params![requested_at, id],
         )?;
         Ok(())
     }
@@ -587,13 +674,13 @@ impl Database {
         Ok(notifs)
     }
 
-    /// Fetch and delete all pending notifications (atomic consume).
+    /// Atomic fetch-and-delete via `DELETE ... RETURNING`.
     pub fn consume_notifications(&self) -> Result<Vec<Notification>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT * FROM notifications ORDER BY created_at ASC")?;
+            .prepare("DELETE FROM notifications RETURNING id, message, created_at")?;
 
-        let notifs: Vec<Notification> = stmt
+        let mut notifs: Vec<Notification> = stmt
             .query_map([], |row| {
                 Ok(Notification {
                     id: row.get("id")?,
@@ -608,8 +695,8 @@ impl Database {
             .filter_map(|r| r.ok())
             .collect();
 
-        self.conn.execute("DELETE FROM notifications", [])?;
-
+        // `RETURNING` doesn't guarantee any particular row order — sort in Rust.
+        notifs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         Ok(notifs)
     }
 }

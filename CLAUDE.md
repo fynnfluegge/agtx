@@ -70,6 +70,9 @@ plugins/               # Bundled plugin configs (embedded at compile time)
 ├── agtx/
 │   ├── plugin.toml    # Default workflow with skills and prompts
 │   └── skills/orchestrate.md # Orchestrator agent skill (experimental)
+├── agtx-terse/
+│   ├── plugin.toml    # Token-efficient variant of agtx workflow
+│   └── skills/        # Terse skill overrides with brevity directive
 ├── gsd/plugin.toml    # Get Shit Done workflow
 ├── spec-kit/plugin.toml # GitHub spec-kit workflow
 ├── openspec/plugin.toml # OpenSpec specification framework

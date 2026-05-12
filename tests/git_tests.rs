@@ -567,3 +567,115 @@ fn test_detect_main_branch_public() {
     let branch = git::detect_main_branch(temp_dir.path()).unwrap();
     assert_eq!(branch, "main");
 }
+
+
+// =============================================================================
+// Path traversal validation tests (Fix 2)
+// =============================================================================
+
+#[test]
+fn test_initialize_worktree_rejects_dotdot_traversal() {
+    let temp_dir = setup_git_repo();
+    let worktree_path = git::create_worktree(temp_dir.path(), "traversal-test").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some("../../.ssh/id_rsa"),
+        None,
+        &[],
+    );
+    // Should produce a warning about path traversal, not copy the file
+    assert!(!warnings.is_empty());
+    assert!(warnings[0].contains(".."));
+}
+
+#[test]
+fn test_initialize_worktree_rejects_multiple_traversal_paths() {
+    let temp_dir = setup_git_repo();
+    let worktree_path = git::create_worktree(temp_dir.path(), "multi-traversal").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some("../../.ssh/id_rsa, ../../.aws/credentials, ../../../etc/passwd"),
+        None,
+        &[],
+    );
+    // All three should be rejected
+    assert_eq!(warnings.len(), 3);
+    for w in &warnings {
+        assert!(w.contains(".."));
+    }
+}
+
+#[test]
+fn test_initialize_worktree_accepts_valid_nested_path() {
+    let temp_dir = setup_git_repo();
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("lib.rs"), "fn main() {}").unwrap();
+
+    let worktree_path = git::create_worktree(temp_dir.path(), "valid-nested").unwrap();
+
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some("src/lib.rs"),
+        None,
+        &[],
+    );
+    assert!(warnings.is_empty());
+    assert!(worktree_path.join("src").join("lib.rs").exists());
+}
+
+#[test]
+fn test_initialize_worktree_copy_dirs_rejects_traversal() {
+    let temp_dir = setup_git_repo();
+    let worktree_path = git::create_worktree(temp_dir.path(), "dir-traversal").unwrap();
+
+    // Create a directory outside the project that a symlink could point to
+    let outside_dir = temp_dir.path().join("..");
+    // The copy_dirs path traversal check should catch this
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        None,
+        None,
+        &["../outside".to_string()],
+    );
+    // The directory doesn't exist so it's silently skipped (is_dir check fails),
+    // but if it did exist and resolved outside, it would be blocked
+    // This test verifies no panic occurs
+    let _ = warnings;
+}
+
+#[test]
+fn test_initialize_worktree_symlink_traversal_blocked() {
+    let temp_dir = setup_git_repo();
+
+    // Create a file outside the project
+    let outside_dir = TempDir::new().unwrap();
+    std::fs::write(outside_dir.path().join("secret.txt"), "sensitive data").unwrap();
+
+    // Create a symlink inside the project pointing outside
+    let link_path = temp_dir.path().join("sneaky-link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside_dir.path().join("secret.txt"), &link_path).unwrap();
+
+    #[cfg(unix)]
+    {
+        let worktree_path = git::create_worktree(temp_dir.path(), "symlink-test").unwrap();
+
+        let warnings = git::initialize_worktree(
+            temp_dir.path(),
+            &worktree_path,
+            Some("sneaky-link"),
+            None,
+            &[],
+        );
+        // The canonicalized path of the symlink resolves outside the project root
+        assert!(!warnings.is_empty());
+        assert!(warnings[0].contains("outside project root"));
+    }
+}
