@@ -626,6 +626,27 @@ class TaskRunner:
         "Then stop and wait."
     )
 
+    NOTE = (
+        "Note: the repo may not be fully installable in this environment. "
+        "Do not attempt to build, install, or run tests. "
+        "Do not run any git commands (no fetch, pull, merge, or commit). "
+        "Read the source code, understand the bug, and fix it by editing the relevant files directly."
+    )
+
+    @staticmethod
+    def _strip_code(problem_statement: str) -> str:
+        """Remove fenced code blocks and inline code, keep prose."""
+        # Remove fenced code blocks (``` ... ```)
+        text = re.sub(r"```.*?```", "", problem_statement, flags=re.DOTALL)
+        # Collapse runs of blank lines left behind
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _build_description(self, problem_statement: str) -> str:
+        if self.hard:
+            return self._strip_code(problem_statement) + "\n\n---\n" + self.NOTE
+        return problem_statement + "\n\n---\n" + self.NOTE
+
     def __init__(
         self,
         instance: dict,
@@ -638,6 +659,7 @@ class TaskRunner:
         phase_timeout: int,
         verbose: bool = False,
         smoke_test: bool = False,
+        hard: bool = False,
     ):
         self.instance = instance
         self.instance_id = instance["instance_id"]
@@ -650,6 +672,7 @@ class TaskRunner:
         self.phase_timeout = phase_timeout
         self.verbose = verbose
         self.smoke_test = smoke_test
+        self.hard = hard
         self.mcp: McpClient | None = None
 
     def _poll_transition(self, request_id: str, timeout: int = 120) -> None:
@@ -737,14 +760,7 @@ class TaskRunner:
             if self.smoke_test:
                 description = self.SMOKE_TEST_DESCRIPTION
             else:
-                description = (
-                    problem
-                    + "\n\n---\n"
-                    + "Note: the repo may not be fully installable in this environment. "
-                    + "Do not attempt to build, install, or run tests. "
-                    + "Do not run any git commands (no fetch, pull, merge, or commit). "
-                    + "Read the source code, understand the bug, and fix it by editing the relevant files directly."
-                )
+                description = self._build_description(problem)
             task_resp = self.mcp.call(
                 "create_task",
                 title=self.instance_id,
@@ -915,6 +931,7 @@ class BenchmarkOrchestrator:
         concurrency: int,
         verbose: bool = False,
         smoke_test: bool = False,
+        hard: bool = False,
     ):
         self.instances = instances
         self.agtx_bin = agtx_bin
@@ -929,6 +946,7 @@ class BenchmarkOrchestrator:
         self.concurrency = concurrency
         self.verbose = verbose
         self.smoke_test = smoke_test
+        self.hard = hard
 
     def _run_one(self, instance: dict, progress: tqdm) -> None:
         instance_id = instance["instance_id"]
@@ -984,6 +1002,7 @@ class BenchmarkOrchestrator:
             phase_timeout=self.phase_timeout,
             verbose=self.verbose,
             smoke_test=self.smoke_test,
+            hard=self.hard,
         )
         result = runner.run()
         kill_tmux_session(slug, repo_path)
@@ -1128,6 +1147,13 @@ other agtx project settings. Example:
         help="Replace task description with a trivial prompt (create artifact files and stop). "
              "Use to verify the full pipeline works without spending tokens on real coding work.",
     )
+    parser.add_argument(
+        "--hard",
+        action="store_true",
+        dest="hard",
+        help="Strip code blocks and stack traces from the problem statement, keeping only the prose. "
+             "The agent must find and fix the bug from first principles.",
+    )
     args = parser.parse_args()
 
     # Load and validate config
@@ -1184,6 +1210,7 @@ other agtx project settings. Example:
         concurrency=args.concurrency,
         verbose=args.verbose,
         smoke_test=args.smoke_test,
+        hard=args.hard,
     )
     orchestrator.run()
 

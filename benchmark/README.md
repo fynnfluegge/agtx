@@ -132,6 +132,14 @@ uv run --project benchmarks/swebench \
   --output-dir swebench_output/agtx_claude_20260427_120000
 ```
 
+**Hard mode** (prose only — no code blocks or stack traces):
+```bash
+uv run --project benchmarks/swebench \
+  python benchmarks/swebench/benchmark.py \
+  --config benchmarks/swebench/configs/claude-agtx.toml \
+  --hard
+```
+
 Alternatively, activate the venv directly for a shorter prompt:
 ```bash
 source benchmarks/swebench/.venv/bin/activate
@@ -154,6 +162,7 @@ deactivate
 | `--model-name STRING` | `agtx-{plugin}-{agent}` | Label in predictions.jsonl |
 | `--split STRING` | `test` | HuggingFace dataset split |
 | `--verbose` / `-v` | off | Print step-by-step progress to stderr (good for debugging) |
+| `--hard` | off | Strip fenced code blocks and stack traces from the problem statement, keeping prose and inline code. The agent must find and fix the bug from first principles. |
 
 ---
 
