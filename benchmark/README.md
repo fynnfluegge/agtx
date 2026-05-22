@@ -6,14 +6,19 @@ Runs AI coding agent workflows against [SWE-bench Lite](https://github.com/princ
 (300 real GitHub bug-fix tasks). Uses agtx as the agent runner, drives it via its MCP server,
 collects git diff patches, and outputs SWE-bench-compatible results.
 
+> **All commands below assume you are in the `benchmark/` directory.**
+> ```bash
+> cd benchmark
+> ```
+
 ### Prerequisites
 
-**agtx** (built from source):
+**agtx** (built from repo root):
 ```bash
 cargo build --release
 ```
 
-**uv** (Python package manager — used both to run the script and to install each benchmark repo):
+**uv** (Python package manager):
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
@@ -44,17 +49,17 @@ At least one coding agent CLI must be installed and authenticated:
 
 **1. Initialize the Python environment:**
 ```bash
-cd benchmarks/swebench
+cd swebench
 uv sync
-cd ../..
+cd ..
 ```
 
-This creates a `.venv` inside `benchmarks/swebench/` and installs all dependencies.
+This creates a `.venv` inside `swebench/` and installs all dependencies.
 Only needed once (or after updating `pyproject.toml`).
 
 **2. Create a config file** for your benchmark run.
 
-Config files live in `benchmarks/swebench/configs/`. Each file is a standard agtx
+Config files live in `swebench/configs/`. Each file is a standard agtx
 `ProjectConfig` TOML that gets written to `.agtx/config.toml` in every cloned repo.
 It controls which agent and plugin are used.
 
@@ -84,67 +89,63 @@ review   = "codex"
 
 Available plugins: `void`, `agtx`, `agtx-terse`, `gsd`, `spec-kit`, `bmad`, `openspec`, `superpowers`
 
-Pre-built configs for common single-agent and multi-agent combinations are in [`benchmarks/swebench/configs/`](swebench/configs/).
+Pre-built configs for common single-agent and multi-agent combinations are in [`swebench/configs/`](swebench/configs/).
 
 ---
 
 ### Running
 
-All commands are run from the repo root. `uv run` picks up the venv in
-`benchmarks/swebench/.venv` via the `--project` flag.
-
-**Single task (smoke test):**
+**Single task:**
 ```bash
-uv run --project benchmarks/swebench \
-  python benchmarks/swebench/benchmark.py \
-  --config benchmarks/swebench/configs/claude-void.toml \
-  --instances 1 --verbose
+uv run --project swebench \
+  python swebench/benchmark.py \
+  --config swebench/configs/claude-void.toml \
+  --instances 1 --verbose \
+  --agtx ../target/release/agtx
 ```
 
 **Specific instance IDs:**
 ```bash
-uv run --project benchmarks/swebench \
-  python benchmarks/swebench/benchmark.py \
-  --config benchmarks/swebench/configs/claude-void.toml \
-  --instance-ids sympy__sympy-20590 django__django-11099
+uv run --project swebench \
+  python swebench/benchmark.py \
+  --config swebench/configs/claude-void.toml \
+  --instance-ids sympy__sympy-20590 django__django-11099 \
+  --agtx ../target/release/agtx
 ```
 
 **Full 300-task run:**
 ```bash
-uv run --project benchmarks/swebench \
-  python benchmarks/swebench/benchmark.py \
-  --config benchmarks/swebench/configs/claude-agtx.toml
+uv run --project swebench \
+  python swebench/benchmark.py \
+  --config swebench/configs/claude-agtx.toml \
+  --agtx ../target/release/agtx
 ```
 
 **Parallel tasks:**
 ```bash
-uv run --project benchmarks/swebench \
-  python benchmarks/swebench/benchmark.py \
-  --config benchmarks/swebench/configs/claude-agtx.toml \
-  --concurrency 4
+uv run --project swebench \
+  python swebench/benchmark.py \
+  --config swebench/configs/claude-agtx.toml \
+  --concurrency 4 \
+  --agtx ../target/release/agtx
 ```
 
 **Resume an interrupted run** (pass the same `--output-dir`):
 ```bash
-uv run --project benchmarks/swebench \
-  python benchmarks/swebench/benchmark.py \
-  --config benchmarks/swebench/configs/claude-agtx.toml \
-  --output-dir swebench_output/agtx_claude_20260427_120000
+uv run --project swebench \
+  python swebench/benchmark.py \
+  --config swebench/configs/claude-agtx.toml \
+  --output-dir swebench_output/agtx_claude_20260427_120000 \
+  --agtx ../target/release/agtx
 ```
 
 **Hard mode** (prose only — no code blocks or stack traces):
 ```bash
-uv run --project benchmarks/swebench \
-  python benchmarks/swebench/benchmark.py \
-  --config benchmarks/swebench/configs/claude-agtx.toml \
-  --hard
-```
-
-Alternatively, activate the venv directly for a shorter prompt:
-```bash
-source benchmarks/swebench/.venv/bin/activate
-python benchmarks/swebench/benchmark.py --config benchmarks/swebench/configs/claude-agtx.toml
-deactivate
+uv run --project swebench \
+  python swebench/benchmark.py \
+  --config swebench/configs/claude-agtx.toml \
+  --hard \
+  --agtx ../target/release/agtx
 ```
 
 #### All options
@@ -157,7 +158,7 @@ deactivate
 | `--concurrency N` | 1 | Parallel tasks |
 | `--output-dir PATH` | `./swebench_output/{plugin}_{agent}_{ts}/` | Output directory |
 | `--workdir PATH` | `/tmp/swebench_repos` | Repo clone directory |
-| `--agtx PATH` | `./target/release/agtx` | agtx binary |
+| `--agtx PATH` | `./target/release/agtx` | agtx binary (use `../target/release/agtx` from `benchmark/`) |
 | `--phase-timeout SECS` | 1200 | Per-phase max seconds (20 min) |
 | `--model-name STRING` | `agtx-{plugin}-{agent}` | Label in predictions.jsonl |
 | `--split STRING` | `test` | HuggingFace dataset split |
@@ -205,17 +206,17 @@ cleaned up with the included script.
 
 **Clean all instances:**
 ```bash
-./benchmarks/swebench/cleanup.sh
+./swebench/cleanup.sh
 ```
 
 **Clean a specific instance:**
 ```bash
-./benchmarks/swebench/cleanup.sh astropy__astropy-12907
+./swebench/cleanup.sh astropy__astropy-12907
 ```
 
 **Clean multiple specific instances:**
 ```bash
-./benchmarks/swebench/cleanup.sh astropy__astropy-12907 sympy__sympy-20590
+./swebench/cleanup.sh astropy__astropy-12907 sympy__sympy-20590
 ```
 
 The script removes `.agtx/` dirs, tmux sessions, and central SQLite project DBs.
@@ -223,26 +224,51 @@ Repo clones under `/tmp/swebench_repos/` are preserved so the next run skips re-
 
 Override the repo clone directory with `SWEBENCH_WORKDIR`:
 ```bash
-SWEBENCH_WORKDIR=/my/custom/path ./benchmarks/swebench/cleanup.sh
+SWEBENCH_WORKDIR=/my/custom/path ./swebench/cleanup.sh
 ```
 
 ---
 
 ### Evaluation
 
-After the run, evaluate patches against the SWE-bench test harness
-(requires [SWE-bench](https://github.com/princeton-nlp/SWE-bench) installed):
+After the run, the benchmark prints exact commands to copy-paste. Evaluate patches against the
+SWE-bench test harness (requires [SWE-bench](https://github.com/princeton-nlp/SWE-bench) installed
+and Docker running):
 
 ```bash
 python -m swebench.harness.run_evaluation \
   --dataset_name princeton-nlp/SWE-bench_Lite \
   --predictions_path swebench_output/agtx_claude_20260427_120000/predictions.jsonl \
-  --run_id agtx-claude-1
+  --run_id agtx-claude-1746345600
 ```
 
 The harness runs tests in Docker containers — each task gets a fresh repo checkout
-and the patch is applied and tested in isolation. The benchmark script's output
-directory is not used during evaluation.
+and the patch is applied and tested in isolation.
+
+### Report
+
+After evaluation, print a summary table with resolved status, duration, cost, and token usage:
+
+```bash
+python swebench/report.py \
+  --results swebench_output/agtx_claude_20260427_120000/results.json \
+  --logs logs/run_evaluation/agtx-claude-1746345600/
+```
+
+Example output:
+```
+┌───────────────────────┬─────────────┬──────────┬───────┬────────┐
+│ Instance              │ Status      │ Duration │ Cost  │ Tokens │
+├───────────────────────┼─────────────┼──────────┼───────┼────────┤
+│ astropy/astropy-12907 │ ✅ resolved │ 4m 57s   │ $0.95 │ 1.9M   │
+├───────────────────────┼─────────────┼──────────┼───────┼────────┤
+│ astropy/astropy-14182 │ ❌ failed   │ 5m 57s   │ $1.66 │ 5.3M   │
+└───────────────────────┴─────────────┴──────────┴───────┴────────┘
+
+1/2 resolved  ·  10m 54s total  ·  $2.60 total  ·  7.3M tokens
+```
+
+The exact commands (with correct paths and run_id) are printed at the end of every benchmark run.
 
 ---
 

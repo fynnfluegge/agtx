@@ -241,19 +241,32 @@ def setup_repo(instance: dict, workdir: str, config_path: Path, verbose: bool = 
         head_ok = head_result.returncode == 0 and head_result.stdout.strip() == base_commit
         no_task_branches = branch_result.returncode != 0 or not branch_result.stdout.strip()
 
-        if head_ok and no_task_branches:
-            if verbose:
-                print(f"  [setup] Using cached repo at {repo_path}", file=sys.stderr)
-            _write_agtx_config(repo_path, config_path, base_commit)
-            return repo_path
-        else:
+        if not head_ok:
+            # Wrong commit — need a clean clone
             if verbose:
                 print(
-                    f"  [setup] Contaminated clone (head_ok={head_ok}, "
-                    f"task_branches={not no_task_branches}), removing {repo_path}",
+                    f"  [setup] Stale clone (wrong commit), removing {repo_path}",
                     file=sys.stderr,
                 )
             subprocess.run(["rm", "-rf", str(repo_path)], check=True)
+        else:
+            if not no_task_branches:
+                # Just delete leftover task branches, no need to re-clone
+                for branch in branch_result.stdout.strip().splitlines():
+                    branch = branch.strip()
+                    if branch:
+                        subprocess.run(
+                            ["git", "branch", "-D", branch],
+                            cwd=repo_path,
+                            capture_output=True,
+                        )
+                if verbose:
+                    print(f"  [setup] Cleaned stale task branches, reusing {repo_path}", file=sys.stderr)
+            else:
+                if verbose:
+                    print(f"  [setup] Using cached repo at {repo_path}", file=sys.stderr)
+            _write_agtx_config(repo_path, config_path, base_commit)
+            return repo_path
 
     if verbose:
         print(f"  [setup] Cloning {repo_url} → {repo_path}", file=sys.stderr)
@@ -627,10 +640,12 @@ class TaskRunner:
     )
 
     NOTE = (
-        "Note: the repo may not be fully installable in this environment. "
-        "Do not attempt to build, install, or run tests. "
-        "Do not run any git commands (no fetch, pull, merge, or commit). "
-        "Read the source code, understand the bug, and fix it by editing the relevant files directly."
+        "IMPORTANT CONSTRAINTS — these apply to all phases including review:\n"
+        "- NEVER install packages, dependencies, or build the project.\n"
+        "- NEVER run tests under any circumstances.\n"
+        "- Do not run any git commands (no fetch, pull, merge, or commit).\n"
+        "- The repo may not be installable in this environment — do not attempt it.\n"
+        "- Read the source code, understand the bug, and fix it by editing the relevant files directly."
     )
 
     @staticmethod
@@ -1115,7 +1130,7 @@ other agtx project settings. Example:
     parser.add_argument(
         "--agtx",
         default="./target/release/agtx",
-        help="Path to agtx binary (default: ./target/release/agtx)",
+        help="Path to agtx binary (default: ../target/release/agtx relative to benchmark/)",
     )
     parser.add_argument(
         "--phase-timeout",
@@ -1216,11 +1231,16 @@ other agtx project settings. Example:
 
     print(f"\nPredictions: {orchestrator.store.predictions_path}")
     print(f"Results:     {orchestrator.store.results_path}")
+    run_id = f"{plugin}-{agent}-{int(time.time())}"
     print("\nTo evaluate:")
     print(f"  python -m swebench.harness.run_evaluation \\")
     print(f"    --dataset_name princeton-nlp/SWE-bench_Lite \\")
     print(f"    --predictions_path {orchestrator.store.predictions_path} \\")
-    print(f"    --run_id {plugin}-{agent}-$(date +%s)")
+    print(f"    --run_id {run_id}")
+    print("\nTo report (after evaluation):")
+    print(f"  python swebench/report.py \\")
+    print(f"    --results {orchestrator.store.results_path} \\")
+    print(f"    --logs logs/run_evaluation/{run_id}/")
 
 
 if __name__ == "__main__":
