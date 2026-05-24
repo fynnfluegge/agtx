@@ -5827,11 +5827,13 @@ impl App {
         let agent = self.state.agent_registry.get(&default_agent);
         let project_path_str = project_path.to_string_lossy().to_string();
 
-        // Build MCP registration JSON for the agtx server
-        let agtx_bin = std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from("agtx"))
-            .to_string_lossy()
-            .to_string();
+        // Build MCP registration JSON for the agtx server.
+        // Use argv[0] rather than current_exe(): on NixOS the Nix wrapper preserves
+        // argv[0] via `exec -a "$0"`, so argv[0] is the wrapper path that has the
+        // correct PATH setup. current_exe() would return the raw .agtx-wrapped ELF.
+        let agtx_bin = std::env::args()
+            .next()
+            .unwrap_or_else(|| "agtx".to_string());
         let mcp_json = serde_json::json!({
             "type": "stdio",
             "command": agtx_bin,
@@ -9033,10 +9035,11 @@ fn write_skills_to_worktree(
     // Write project-scoped MCP server config for each configured agent.
     // Use the project root path (not the worktree path) so the MCP server opens
     // the correct project DB where tasks are stored.
-    let agtx_bin = std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("agtx"))
-        .to_string_lossy()
-        .to_string();
+    // Use argv[0] for the same reason as toggle_orchestrator: on NixOS argv[0]
+    // is the wrapper path rather than the raw ELF returned by current_exe().
+    let agtx_bin = std::env::args()
+        .next()
+        .unwrap_or_else(|| "agtx".to_string());
     let project_path_str = project_path.to_string_lossy().to_string();
     for agent_name in agent_names {
         match *agent_name {
