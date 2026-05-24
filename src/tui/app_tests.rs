@@ -8850,11 +8850,18 @@ fn test_switch_agent_codex_sends_ctrl_c_not_exit() {
         .returning(|_| Ok(String::new()));
     mock_tmux
         .expect_send_keys()
-        .withf(|_, cmd: &str| cmd == "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT codex --full-auto")
+        .withf(|_, cmd: &str| {
+            cmd == "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT codex --dangerously-bypass-approvals-and-sandbox"
+        })
         .times(1)
         .returning(|_, _| Ok(()));
 
-    switch_agent_in_tmux(&mock_tmux, "proj:task", "codex", "codex --full-auto");
+    switch_agent_in_tmux(
+        &mock_tmux,
+        "proj:task",
+        "codex",
+        "codex --dangerously-bypass-approvals-and-sandbox",
+    );
 }
 
 #[test]

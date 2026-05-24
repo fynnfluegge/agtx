@@ -16,6 +16,7 @@ Thumbs.db
 
 # Local agtx data (per-project)
 .agtx/
+.codex/
 
 # Logs
 *.log

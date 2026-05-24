@@ -57,7 +57,10 @@ impl AgentOperations for CodingAgent {
         // Build the command based on agent type
         let (cmd, args) = match self.agent.name.as_str() {
             "claude" => ("claude", vec!["--print", prompt]),
-            "codex" => ("codex", vec!["exec", "--full-auto", prompt]),
+            "codex" => (
+                "codex",
+                vec!["exec", "--dangerously-bypass-approvals-and-sandbox", prompt],
+            ),
             "copilot" => ("copilot", vec!["-p", prompt]),
             "gemini" => ("gemini", vec!["-p", prompt]),
             "cursor" => ("agent", vec!["--print", "--yolo", prompt]),
