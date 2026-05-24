@@ -80,18 +80,17 @@ impl TmuxOperations for RealTmuxOps {
             // Unset Claude Code's nesting-detection env vars so that agents
             // launched in task panes are not blocked by the "launched inside
             // another Claude Code session" check.
+            // Pass shell_cmd as a separate argv element to env/sh so it is NOT
+            // re-parsed by an outer shell.  The previous approach of embedding
+            // shell_cmd inside sh -c '...' caused double shell-parsing that
+            // stripped double-quotes from JSON arguments (e.g. in mcp add-json).
             if keep_shell_on_exit {
-                let wrapped = format!(
-                    "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT sh -c '{}'; exec $SHELL",
-                    shell_cmd
-                );
-                cmd.args(["sh", "-c", &wrapped]);
+                let wrapped = format!("{}; exec $SHELL", shell_cmd);
+                cmd.args(["env", "-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT",
+                          "sh", "-c", &wrapped]);
             } else {
-                let wrapped = format!(
-                    "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT sh -c '{}'",
-                    shell_cmd
-                );
-                cmd.args(["sh", "-c", &wrapped]);
+                cmd.args(["env", "-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT",
+                          "sh", "-c", shell_cmd]);
             }
         }
 
