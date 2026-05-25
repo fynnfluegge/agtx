@@ -1,3 +1,5 @@
+pub mod cli;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -430,6 +432,10 @@ pub struct WorkflowPlugin {
     pub name: String,
     pub description: Option<String>,
     pub init_script: Option<String>,
+    /// Per-agent init scripts. Keys are agent names (e.g. "claude", "codex").
+    /// When present, the agent-specific script takes precedence over `init_script`.
+    #[serde(default)]
+    pub init_scripts: std::collections::HashMap<String, String>,
     /// List of supported agent names (e.g. ["claude", "codex", "gemini", "opencode"]).
     /// If empty or omitted, all agents are assumed supported.
     #[serde(default)]

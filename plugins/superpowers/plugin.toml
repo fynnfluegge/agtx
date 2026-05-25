@@ -1,10 +1,27 @@
 name = "superpowers"
 description = "Superpowers by @obra - brainstorming, plans, TDD, subagent-driven development"
-supported_agents = ["claude"]
-init_script = "claude plugin install superpowers@claude-plugins-official --scope local 2>/dev/null || true"
+supported_agents = ["claude", "codex"]
+
+[init_scripts]
+claude = "claude plugin install superpowers@claude-plugins-official --scope local"
+codex = '''
+CACHE_BASE="$HOME/.claude/plugins/cache/superpowers-marketplace/superpowers"
+LATEST_VER=$(ls "$CACHE_BASE" | sort -V | tail -1)
+SKILLS_SRC="$CACHE_BASE/$LATEST_VER/skills"
+for skill_dir in "$SKILLS_SRC"/*/; do
+  skill_name=$(basename "$skill_dir")
+  mkdir -p ".codex/skills/superpowers-$skill_name"
+  cp "$skill_dir/SKILL.md" ".codex/skills/superpowers-$skill_name/SKILL.md"
+done
+'''
 
 [artifacts]
 planning = "docs/superpowers/plans/*.md"
+
+[commands]
+planning = "/superpowers:brainstorming"
+running = "/superpowers:executing-plans"
+review = "/superpowers:requesting-code-review"
 
 [prompts]
 planning = "You are already in an isolated git worktree managed by agtx. Do NOT create additional worktrees or branches. Work directly in this directory.\n\nUse the brainstorming skill to explore and design this task. When the design is approved, use the writing-plans skill to produce an implementation plan.\n\nTask: {task}"

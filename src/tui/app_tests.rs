@@ -2175,6 +2175,7 @@ fn test_resolve_skill_command_with_plugin() {
         name: "gsd".to_string(),
         description: None,
         init_script: None,
+        init_scripts: Default::default(),
         supported_agents: vec![],
         artifacts: PluginArtifacts::default(),
         commands: PluginCommands {
@@ -2244,6 +2245,7 @@ fn test_plugin_supports_agent() {
         name: "test".to_string(),
         description: None,
         init_script: None,
+        init_scripts: Default::default(),
         supported_agents: vec![],
         artifacts: Default::default(),
         commands: Default::default(),
@@ -2265,6 +2267,7 @@ fn test_plugin_supports_agent() {
         name: "gsd".to_string(),
         description: None,
         init_script: None,
+        init_scripts: Default::default(),
         supported_agents: vec![
             "claude".into(),
             "codex".into(),
@@ -2336,6 +2339,7 @@ fn test_phase_artifact_exists_with_glob() {
         name: "spec-kit".to_string(),
         description: None,
         init_script: None,
+        init_scripts: Default::default(),
         supported_agents: vec![],
         artifacts: PluginArtifacts {
             preresearch: vec![],
@@ -2661,6 +2665,7 @@ fn test_resolve_prompt_trigger_with_gsd() {
         name: "gsd".to_string(),
         description: None,
         init_script: None,
+        init_scripts: Default::default(),
         supported_agents: vec![],
         artifacts: Default::default(),
         commands: Default::default(),
@@ -2700,6 +2705,7 @@ fn test_resolve_prompt_trigger_empty_string_filtered() {
         name: "test".to_string(),
         description: None,
         init_script: None,
+        init_scripts: Default::default(),
         supported_agents: vec![],
         artifacts: Default::default(),
         commands: Default::default(),

@@ -443,6 +443,38 @@ fn test_plugin_dir_returns_none_for_invalid_name() {
 }
 
 #[test]
+fn test_workflow_plugin_init_scripts_deserialization() {
+    let toml = r#"
+name = "myplugin"
+
+[init_scripts]
+claude = "claude plugin install foo --scope local"
+codex = "cp ~/.cache/skills/* .codex/skills/"
+"#;
+    let plugin: WorkflowPlugin = toml::from_str(toml).unwrap();
+    assert_eq!(
+        plugin.init_scripts.get("claude").map(|s| s.as_str()),
+        Some("claude plugin install foo --scope local")
+    );
+    assert_eq!(
+        plugin.init_scripts.get("codex").map(|s| s.as_str()),
+        Some("cp ~/.cache/skills/* .codex/skills/")
+    );
+    assert!(plugin.init_scripts.get("gemini").is_none());
+}
+
+#[test]
+fn test_workflow_plugin_init_scripts_empty_when_absent() {
+    let toml = r#"
+name = "myplugin"
+init_script = "echo hello"
+"#;
+    let plugin: WorkflowPlugin = toml::from_str(toml).unwrap();
+    assert!(plugin.init_scripts.is_empty());
+    assert_eq!(plugin.init_script, Some("echo hello".to_string()));
+}
+
+#[test]
 fn test_plugin_load_rejects_invalid_name() {
     let result = WorkflowPlugin::load("../etc/passwd", None);
     assert!(result.is_err());
