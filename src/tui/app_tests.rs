@@ -2475,6 +2475,36 @@ fn test_phase_artifact_exists_with_glob() {
 }
 
 #[test]
+fn test_superpowers_planning_artifact_exists_only_when_plan_file_present() {
+    let plugin = Some(
+        skills::load_bundled_plugin("superpowers").expect("superpowers plugin should load"),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    // No inherited/created plan file yet -> not ready.
+    assert!(!phase_artifact_exists(
+        &wt,
+        TaskStatus::Planning,
+        &plugin,
+        1
+    ));
+
+    // Planning artifact path configured by superpowers plugin.
+    let plans_dir = dir.path().join("docs").join("superpowers").join("plans");
+    std::fs::create_dir_all(&plans_dir).unwrap();
+    std::fs::write(plans_dir.join("new-plan.md"), "# plan").unwrap();
+
+    // Plan file now exists in this worktree -> ready.
+    assert!(phase_artifact_exists(
+        &wt,
+        TaskStatus::Planning,
+        &plugin,
+        1
+    ));
+}
+
+#[test]
 fn test_bundled_plugins_are_valid_toml() {
     use crate::config::WorkflowPlugin;
     // Each bundled plugin.toml must parse as a valid WorkflowPlugin
