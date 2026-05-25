@@ -6086,6 +6086,27 @@ fn test_apply_session_refresh_multiple_tasks() {
     assert_eq!(app.state.phase_status_cache["t3"].0, PhaseStatus::Idle);
 }
 
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_superpowers_planning_not_ready_without_plan_artifact() {
+    let mut app = make_test_app();
+    let result = SessionRefreshResult {
+        statuses: vec![SessionTaskStatus {
+            task_id: "t1".to_string(),
+            phase_status: PhaseStatus::Working,
+            content_hash: None,
+            status: TaskStatus::Planning,
+            worktree_path: None,
+            session_name: None,
+            agent: "codex".to_string(),
+            was_ready: false,
+        }],
+    };
+    app.apply_session_refresh(result);
+    let (phase, _) = app.state.phase_status_cache["t1"];
+    assert_eq!(phase, PhaseStatus::Working);
+}
+
 // =============================================================================
 // Tests for popup confirmation handlers
 // =============================================================================
