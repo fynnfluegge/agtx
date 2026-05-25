@@ -4598,7 +4598,9 @@ impl App {
         let init_script = if self.state.flags.no_init_scripts {
             None
         } else {
-            self.state.config.init_script.clone()
+            plugin.as_ref()
+                .and_then(|p| p.init_scripts.get(&planning_agent).cloned())
+                .or_else(|| self.state.config.init_script.clone())
         };
         let skip_init_scripts = self.state.flags.no_init_scripts;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
