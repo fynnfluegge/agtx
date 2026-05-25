@@ -47,6 +47,12 @@ async fn main() -> Result<()> {
         .collect();
 
     let mode = match positional_args.first().copied() {
+        Some("config") => {
+            // Pass all raw args after "config" (including -- flags) to the config CLI
+            let config_pos = args.iter().position(|a| a == "config").unwrap_or(1);
+            let remaining: Vec<&str> = args.iter().skip(config_pos + 1).map(|s| s.as_str()).collect();
+            return agtx::config::cli::run(&remaining);
+        }
         Some("mcp-serve") => {
             let project_path = positional_args
                 .get(1)

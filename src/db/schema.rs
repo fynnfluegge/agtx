@@ -522,6 +522,28 @@ impl Database {
         Ok(projects)
     }
 
+    pub fn delete_project(&self, project_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM running_agents WHERE project_id = ?1",
+            params![project_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM projects WHERE id = ?1",
+            params![project_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn project_db_path(project_path: &str) -> Result<std::path::PathBuf> {
+        let config_dir = directories::ProjectDirs::from("", "", "agtx")
+            .context("Could not determine config directory")?;
+        let hash = Self::hash_path(project_path);
+        Ok(config_dir
+            .config_dir()
+            .join("projects")
+            .join(format!("{}.db", hash)))
+    }
+
     // === Transition Request Operations (MCP command queue) ===
 
     pub fn create_transition_request(&self, req: &TransitionRequest) -> Result<()> {
