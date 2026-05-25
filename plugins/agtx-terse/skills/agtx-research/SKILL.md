@@ -24,7 +24,7 @@ Use the `description` field as the task to work on.
 
 ## Output
 
-Write your findings to `.agtx/research.md`. Include:
+Write your findings to `.agtx/research.md` in the **current working directory** (do NOT navigate up — write directly to `.agtx/research.md` relative to where you are now). Include:
 
 ## Relevant Files
 Key files and their roles — what exists, what needs changing.
