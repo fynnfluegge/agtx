@@ -1,7 +1,11 @@
 {
-  "agtx": {
-    "type": "stdio",
-    "command": "agtx",
-    "args": ["mcp-serve"]
+  "mcpServers": {
+    "agtx": {
+      "args": [
+        "mcp-serve",
+        "/home/fullmetal/projects/agtx"
+      ],
+      "command": "/etc/profiles/per-user/fullmetal/bin/agtx"
+    }
   }
 }
