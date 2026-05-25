@@ -104,7 +104,41 @@ impl AgentOperations for CodingAgent {
                 mcp_json,
                 self.build_interactive_command("")
             ),
-            // To add a new orchestrator agent, add a match arm here.
+            "codex" => format!(
+                "codex mcp remove agtx --scope local 2>/dev/null || true; \
+                 codex mcp add-json agtx '{}' --scope local && {}; \
+                 codex mcp remove agtx --scope local",
+                mcp_json,
+                self.build_interactive_command("")
+            ),
+            "copilot" => format!(
+                "copilot mcp remove agtx --scope local 2>/dev/null || true; \
+                 copilot mcp add-json agtx '{}' --scope local && {}; \
+                 copilot mcp remove agtx --scope local",
+                mcp_json,
+                self.build_interactive_command("")
+            ),
+            "gemini" => format!(
+                "gemini mcp remove agtx --scope local 2>/dev/null || true; \
+                 gemini mcp add-json agtx '{}' --scope local && {}; \
+                 gemini mcp remove agtx --scope local",
+                mcp_json,
+                self.build_interactive_command("")
+            ),
+            "opencode" => format!(
+                "opencode mcp remove agtx --scope local 2>/dev/null || true; \
+                 opencode mcp add-json agtx '{}' --scope local && {}; \
+                 opencode mcp remove agtx --scope local",
+                mcp_json,
+                self.build_interactive_command("")
+            ),
+            "cursor" => format!(
+                "agent mcp remove agtx --scope local 2>/dev/null || true; \
+                 agent mcp add-json agtx '{}' --scope local && {}; \
+                 agent mcp remove agtx --scope local",
+                mcp_json,
+                self.build_interactive_command("")
+            ),
             _ => self.build_interactive_command(""),
         }
     }
@@ -161,5 +195,105 @@ impl AgentRegistry for RealAgentRegistry {
                 .cloned()
                 .expect("Default agent must exist in registry")
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::Agent;
+
+    #[test]
+    fn test_build_orchestrator_command_codex_includes_mcp_lifecycle() {
+        let agent = Agent::new(
+            "codex",
+            "codex",
+            "OpenAI's Codex CLI",
+            "Codex <noreply@openai.com>",
+        );
+        let ops = CodingAgent::new(agent);
+        let cmd = ops.build_orchestrator_command("{\\\"type\\\":\\\"stdio\\\"}", "agtx");
+
+        assert!(cmd.contains("mcp"));
+        assert!(cmd.contains("remove") && cmd.contains("agtx"));
+        assert!(cmd.contains("add") || cmd.contains("add-json"));
+        assert!(cmd.contains("codex --dangerously-bypass-approvals-and-sandbox"));
+    }
+
+    #[test]
+    fn test_build_orchestrator_command_gemini_includes_mcp_lifecycle() {
+        let agent = Agent::new(
+            "gemini",
+            "gemini",
+            "Google Gemini CLI",
+            "Gemini <noreply@google.com>",
+        );
+        let ops = CodingAgent::new(agent);
+        let cmd = ops.build_orchestrator_command("{\\\"type\\\":\\\"stdio\\\"}", "agtx");
+
+        assert!(cmd.contains("mcp"));
+        assert!(cmd.contains("remove") && cmd.contains("agtx"));
+        assert!(cmd.contains("add") || cmd.contains("add-json"));
+        assert!(cmd.contains("gemini --approval-mode yolo"));
+    }
+
+    #[test]
+    fn test_build_orchestrator_command_opencode_includes_mcp_lifecycle() {
+        let agent = Agent::new(
+            "opencode",
+            "opencode",
+            "AI-powered coding assistant",
+            "OpenCode <noreply@opencode.ai>",
+        );
+        let ops = CodingAgent::new(agent);
+        let cmd = ops.build_orchestrator_command("{\\\"type\\\":\\\"stdio\\\"}", "agtx");
+
+        assert!(cmd.contains("mcp"));
+        assert!(cmd.contains("remove") && cmd.contains("agtx"));
+        assert!(cmd.contains("add") || cmd.contains("add-json"));
+        assert!(cmd.contains("opencode"));
+    }
+
+    #[test]
+    fn test_build_orchestrator_command_cursor_includes_mcp_lifecycle() {
+        let agent = Agent::new(
+            "cursor",
+            "agent",
+            "Cursor Agent CLI",
+            "Cursor Agent <noreply@cursor.com>",
+        );
+        let ops = CodingAgent::new(agent);
+        let cmd = ops.build_orchestrator_command("{\\\"type\\\":\\\"stdio\\\"}", "agtx");
+
+        assert!(cmd.contains("mcp"));
+        assert!(cmd.contains("remove") && cmd.contains("agtx"));
+        assert!(cmd.contains("add") || cmd.contains("add-json"));
+        assert!(cmd.contains("agent --yolo"));
+    }
+
+    #[test]
+    fn test_build_orchestrator_command_copilot_includes_mcp_lifecycle() {
+        let agent = Agent::new(
+            "copilot",
+            "copilot",
+            "GitHub Copilot CLI",
+            "GitHub Copilot <noreply@github.com>",
+        );
+        let ops = CodingAgent::new(agent);
+        let cmd = ops.build_orchestrator_command("{\\\"type\\\":\\\"stdio\\\"}", "agtx");
+
+        assert!(cmd.contains("mcp"));
+        assert!(cmd.contains("remove") && cmd.contains("agtx"));
+        assert!(cmd.contains("add") || cmd.contains("add-json"));
+        assert!(cmd.contains("copilot --allow-all-tools"));
+    }
+
+    #[test]
+    fn test_build_orchestrator_command_unknown_agent_falls_back_to_interactive() {
+        let agent = Agent::new("custom", "custom-agent", "Custom", "Custom <noreply@example.com>");
+        let ops = CodingAgent::new(agent);
+        let cmd = ops.build_orchestrator_command("{}", "agtx");
+
+        assert_eq!(cmd, "custom-agent");
     }
 }

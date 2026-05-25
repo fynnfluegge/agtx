@@ -7304,6 +7304,54 @@ fn test_toggle_orchestrator_spawns_new_session() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
+fn test_toggle_orchestrator_spawns_new_session_for_non_claude_default_agent() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+    mock_tmux.expect_create_session().returning(|_, _| Ok(()));
+    mock_tmux
+        .expect_create_window()
+        .withf(
+            |_session, window_name, _dir, cmd: &Option<String>, keep_shell_on_exit: &bool| {
+                window_name == "orchestrator"
+                    && !keep_shell_on_exit
+                    && cmd.as_deref() == Some("codex-orchestrator-cmd")
+            },
+        )
+        .returning(|_, _, _, _, _| Ok(()));
+    mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
+    mock_tmux
+        .expect_capture_pane_with_history()
+        .returning(|_, _| vec![]);
+    mock_tmux.expect_get_cursor_info().returning(|_| None);
+
+    let mut mock_registry = MockAgentRegistry::new();
+    mock_registry.expect_get().withf(|name| name == "codex").returning(|_| {
+        let mut ops = MockAgentOperations::new();
+        ops.expect_build_orchestrator_command()
+            .returning(|_, _| "codex-orchestrator-cmd".to_string());
+        Arc::new(ops)
+    });
+
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(mock_registry),
+    )
+    .unwrap();
+    app.state.config.default_agent = "codex".to_string();
+
+    app.toggle_orchestrator().unwrap();
+
+    assert!(app.state.orchestrator_session.is_some());
+    assert!(app.state.warning_message.is_none());
+    assert!(app.state.shell_popup.is_some());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
 fn test_toggle_orchestrator_opens_popup_when_already_running() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
