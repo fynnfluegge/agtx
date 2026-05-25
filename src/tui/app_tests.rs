@@ -1838,6 +1838,70 @@ fn test_setup_task_worktree_passes_init_config() {
     assert!(result.is_ok());
 }
 
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_setup_task_worktree_runs_agent_specific_plugin_init_alongside_project_init() {
+    use crate::db::Task;
+    use tempfile::TempDir;
+
+    let worktree = TempDir::new().unwrap();
+    let worktree_path = worktree.path().to_path_buf();
+    let marker_path = worktree.path().join("plugin-init-ran");
+
+    let mut mock_tmux = MockTmuxOperations::new();
+    let mut mock_git = MockGitOperations::new();
+    let mut mock_agent = MockAgentOperations::new();
+
+    mock_git
+        .expect_create_worktree()
+        .returning(move |_, _, _, _, _| Ok(worktree_path.to_string_lossy().to_string()));
+    mock_git
+        .expect_initialize_worktree()
+        .withf(|_, _, _, init_script, _| init_script.as_deref() == Some("./project-init.sh"))
+        .returning(|_, _, _, _, _| vec![]);
+    mock_agent
+        .expect_build_interactive_command()
+        .returning(|prompt| format!("codex '{}'", prompt));
+    mock_tmux.expect_has_session().returning(|_| true);
+    mock_tmux
+        .expect_create_window()
+        .returning(|_, _, _, _, _| Ok(()));
+
+    let plugin: WorkflowPlugin = toml::from_str(
+        r#"
+name = "superpowers"
+
+[init_scripts]
+codex = "printf plugin > plugin-init-ran"
+"#,
+    )
+    .unwrap();
+    let mut task = Task::new("Codex plugin setup", "codex", "project-1");
+
+    let result = setup_task_worktree(
+        &mut task,
+        Path::new("/project"),
+        "my-project",
+        "implement feature",
+        "main",
+        ".agtx/worktrees",
+        "task",
+        None,
+        Some("./project-init.sh".to_string()),
+        &Some(plugin),
+        "codex",
+        &["codex".to_string()],
+        &mock_tmux,
+        &mock_git,
+        &mock_agent,
+        &[],
+        false,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(std::fs::read_to_string(marker_path).unwrap(), "plugin");
+}
+
 // ── Agent-Native Skill Discovery Tests ──────────────────────────────────────
 
 #[test]
@@ -2106,6 +2170,22 @@ fn test_agtx_plugin_has_commands() {
         Some("/agtx:execute {task_id}")
     );
     assert_eq!(plugin.commands.review.as_deref(), Some("/agtx:review"));
+}
+
+#[test]
+fn test_superpowers_plugin_supports_codex_commands_and_init_script() {
+    let plugin =
+        skills::load_bundled_plugin("superpowers").expect("superpowers plugin should load");
+    assert!(plugin.supports_agent("codex"));
+    assert!(plugin.init_scripts.contains_key("codex"));
+    assert_eq!(
+        resolve_skill_command(&Some(plugin.clone()), "planning", "codex", "", 1, ""),
+        Some("$superpowers-brainstorming".to_string())
+    );
+    assert_eq!(
+        resolve_skill_command(&Some(plugin), "running", "codex", "", 1, ""),
+        Some("$superpowers-executing-plans".to_string())
+    );
 }
 
 #[test]

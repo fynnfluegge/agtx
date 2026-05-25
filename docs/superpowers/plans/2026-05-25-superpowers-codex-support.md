@@ -4,7 +4,9 @@
 
 **Goal:** Enable the `superpowers` workflow plugin for Codex CLI tasks by adding per-agent init_scripts support to agtx and updating the superpowers plugin.toml.
 
-**Architecture:** Add `init_scripts: HashMap<String, String>` to `WorkflowPlugin` so plugins can specify agent-specific setup scripts. Update the three worktree setup sites in `app.rs` to prefer the agent-specific script over the generic fallback. Update `plugins/superpowers/plugin.toml` to deploy Superpowers skills to Codex-native paths and send explicit phase commands.
+**Architecture:** Add `init_scripts: HashMap<String, String>` to `WorkflowPlugin` so plugins can specify agent-specific setup scripts. At the existing plugin-init execution point in `setup_task_worktree`, prefer the agent-specific plugin script over the legacy plugin `init_script` fallback, while continuing to run any project `init_script` independently. Update `plugins/superpowers/plugin.toml` to deploy Superpowers skills to Codex-native paths and send explicit phase commands.
+
+**Implementation correction:** The original Tasks 2-4 below selected an agent-specific plugin script in the project-init argument passed to `initialize_worktree`. That would replace a configured project init script instead of running both existing setup layers. Those instructions are superseded: retain project init selection at the three call sites and perform per-agent selection inside the plugin-init block in `setup_task_worktree`.
 
 **Tech Stack:** Rust, TOML (serde), Ratatui TUI, SQLite
 
@@ -15,9 +17,10 @@
 | File | Change |
 |---|---|
 | `src/config/mod.rs` | Add `init_scripts` field to `WorkflowPlugin` struct |
-| `src/tui/app.rs` | Update init_script selection at 3 worktree setup sites (~lines 4598, 4967, 5230) |
+| `src/tui/app.rs` | Select agent-specific plugin setup in `setup_task_worktree`, preserving project setup |
 | `plugins/superpowers/plugin.toml` | Update supported_agents, replace init_script with [init_scripts], add [commands] |
 | `tests/config_tests.rs` | Add deserialization test for [init_scripts] |
+| `src/tui/app_tests.rs` | Add regression coverage for project + agent-specific plugin initialization |
 
 ---
 

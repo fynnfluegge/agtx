@@ -17,6 +17,7 @@ Thumbs.db
 # Local agtx data (per-project)
 .agtx/
 .codex/
+/.claude/commands/
 
 # Logs
 *.log

@@ -4598,9 +4598,7 @@ impl App {
         let init_script = if self.state.flags.no_init_scripts {
             None
         } else {
-            plugin.as_ref()
-                .and_then(|p| p.init_scripts.get(&planning_agent).cloned())
-                .or_else(|| self.state.config.init_script.clone())
+            self.state.config.init_script.clone()
         };
         let skip_init_scripts = self.state.flags.no_init_scripts;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -4969,9 +4967,7 @@ impl App {
         let init_script = if self.state.flags.no_init_scripts {
             None
         } else {
-            plugin.as_ref()
-                .and_then(|p| p.init_scripts.get(&agent_name).cloned())
-                .or_else(|| self.state.config.init_script.clone())
+            self.state.config.init_script.clone()
         };
         let skip_init_scripts = self.state.flags.no_init_scripts;
 
@@ -5234,9 +5230,7 @@ impl App {
         let init_script = if self.state.flags.no_init_scripts {
             None
         } else {
-            plugin.as_ref()
-                .and_then(|p| p.init_scripts.get(&running_agent).cloned())
-                .or_else(|| self.state.config.init_script.clone())
+            self.state.config.init_script.clone()
         };
         let skip_init_scripts = self.state.flags.no_init_scripts;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
@@ -7042,11 +7036,15 @@ fn setup_task_worktree(
         }
     }
 
-    // Run plugin init_script (in addition to project init_script)
-    // Supports {agent} placeholder for agent-specific initialization
+    // Run plugin init script independently from the project init script.
+    // Agent-specific plugin setup takes precedence over the legacy generic script.
     if !skip_init_scripts {
         if let Some(ref p) = plugin {
-            if let Some(ref script) = p.init_script {
+            let script = p
+                .init_scripts
+                .get(agent_name)
+                .or(p.init_script.as_ref());
+            if let Some(script) = script {
                 let script = script.replace("{agent}", agent_name);
                 tracing::info!(
                     script = %script,

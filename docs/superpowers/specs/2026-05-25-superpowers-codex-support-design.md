@@ -19,37 +19,20 @@ Enable the `superpowers` workflow plugin for Codex CLI tasks in agtx.
 
 Add `init_scripts: HashMap<String, String>` to the `WorkflowPlugin` struct. This is a TOML inline table `[init_scripts]` where keys are agent names and values are shell commands.
 
-**Resolution order when selecting the init script for a worktree:**
-1. `plugin.init_scripts[agent_name]` — agent-specific script (takes precedence)
-2. `config.init_script` — existing project-level or plugin-level generic fallback
+**Resolution order for plugin initialization:**
+1. `plugin.init_scripts[agent_name]` - agent-specific plugin script
+2. `plugin.init_script` - legacy generic plugin fallback
 
-If neither is present, no init script runs (existing behavior).
+Project `config.init_script` remains a separate setup step and still runs when configured.
+This preserves the existing behavior where a project init script and a plugin init script
+can both run for the same worktree.
 
 ### 2. Worktree setup changes in app.rs
 
-In all three places where `init_script` is selected before spawning a worktree (initial creation, re-planning, resume), replace:
-
-```rust
-let init_script = if self.state.flags.no_init_scripts {
-    None
-} else {
-    self.state.config.init_script.clone()
-};
-```
-
-With:
-
-```rust
-let init_script = if self.state.flags.no_init_scripts {
-    None
-} else {
-    plugin.as_ref()
-        .and_then(|p| p.init_scripts.get(agent_name).cloned())
-        .or_else(|| self.state.config.init_script.clone())
-};
-```
-
-The `agent_name` is already available at these call sites from the task's agent configuration.
+Retain the existing project `init_script` selection at the worktree creation call sites.
+In `setup_task_worktree`, where plugin initialization is already run after project
+initialization, select the plugin script from `init_scripts[agent_name]` and fall back
+to the legacy `init_script` field. The `agent_name` is already available there.
 
 ### 3. superpowers/plugin.toml changes
 
@@ -95,7 +78,7 @@ Commands are sent before the task prompt at each phase transition, giving both a
 | File | Change |
 |---|---|
 | `src/config/mod.rs` | Add `init_scripts: HashMap<String, String>` to `WorkflowPlugin` |
-| `src/tui/app.rs` | Update init_script selection at 3 worktree setup sites |
+| `src/tui/app.rs` | Resolve agent-specific scripts at the existing plugin init execution point |
 | `plugins/superpowers/plugin.toml` | supported_agents, init_scripts table, commands table |
 
 ## Testing
@@ -105,3 +88,4 @@ Commands are sent before the task prompt at each phase transition, giving both a
 - Claude path: create a superpowers task with Claude agent → `claude plugin install` runs, skill files appear in `.claude/commands/superpowers/`, commands section sends `/superpowers:brainstorming` at planning phase
 - Codex path: create a superpowers task with Codex agent → skill files copied from cache to `.codex/skills/superpowers-*/`, `$superpowers-brainstorming` sent at planning phase
 - Error surfacing: if cache is missing for Codex, worktree setup fails visibly (not silently)
+- Compatibility: a project init script still runs alongside the selected plugin init script
