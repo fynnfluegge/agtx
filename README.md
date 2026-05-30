@@ -25,7 +25,7 @@
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
   <a href="#usage">Usage</a> •
-  <a href="#brainstorm--sweep-skills">Brainstorm & Sweep Skills</a> •
+  <a href="#brainstorm--sweep-skills">Skills</a> •
   <a href="#mcp-server">MCP Server</a> •
   <a href="#plugins">Plugins</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
@@ -669,11 +669,11 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 6. Escalated tasks show a `⚠` badge on the kanban board; opening the task popup shows the reason and dismisses the flag
 7. MCP registration is cleaned up when the orchestrator is stopped
 
-## Benchmarks
+## Benchmark
 
 agtx includes a [SWE-bench Lite](https://www.swebench.com) benchmark runner that uses agtx itself as the agent orchestration layer — driving coding agent workflows against 300 real GitHub bug-fix tasks via the MCP server.
 
-See **[benchmarks/README.md](benchmarks/README.md)** for setup, usage, bundled configs, and evaluation instructions.
+See **[benchmark/README.md](benchmark/README.md)** for setup, usage, bundled configs, and evaluation instructions.
 
 ## Contributing
 
