@@ -22,12 +22,26 @@ struct InitialState {
 
 fn render_shell(title: &str, state: &InitialState) -> Html<String> {
     let state_json = serde_json::to_string(state).unwrap_or_else(|_| "null".to_string());
-    let safe_title = title.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    Html(INDEX_HTML.replace("__TITLE__", &safe_title).replace("__STATE__", &state_json))
+    let safe_title = title
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    Html(
+        INDEX_HTML
+            .replace("__TITLE__", &safe_title)
+            .replace("__STATE__", &state_json),
+    )
 }
 
 pub async fn index() -> Html<String> {
-    render_shell("agtx", &InitialState { project_id: None, task_id: None, artifact: None })
+    render_shell(
+        "agtx",
+        &InitialState {
+            project_id: None,
+            task_id: None,
+            artifact: None,
+        },
+    )
 }
 
 pub async fn list_projects() -> Result<Json<Vec<ProjectResponse>>, StatusCode> {
@@ -62,8 +76,14 @@ pub async fn list_projects() -> Result<Json<Vec<ProjectResponse>>, StatusCode> {
         Ok(responses)
     })
     .await
-    .map_err(|e| { eprintln!("web: spawn error: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?
-    .map_err(|e| { eprintln!("web: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
+    .map_err(|e| {
+        eprintln!("web: spawn error: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .map_err(|e| {
+        eprintln!("web: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(result))
 }
@@ -103,8 +123,14 @@ pub async fn project_tasks(
         })
     })
     .await
-    .map_err(|e| { eprintln!("web: spawn error: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?
-    .map_err(|e| { eprintln!("web: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
+    .map_err(|e| {
+        eprintln!("web: spawn error: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .map_err(|e| {
+        eprintln!("web: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(result))
 }
@@ -139,8 +165,14 @@ pub async fn task_detail(
         })
     })
     .await
-    .map_err(|e| { eprintln!("web: spawn error: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?
-    .map_err(|e| { eprintln!("web: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
+    .map_err(|e| {
+        eprintln!("web: spawn error: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .map_err(|e| {
+        eprintln!("web: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(result))
 }
@@ -163,8 +195,14 @@ pub async fn get_artifact(
         }
     })
     .await
-    .map_err(|e| { eprintln!("web: spawn error: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?
-    .map_err(|e| { eprintln!("web: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
+    .map_err(|e| {
+        eprintln!("web: spawn error: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .map_err(|e| {
+        eprintln!("web: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     match result {
         Some(html) => Ok(Html(html)),
@@ -226,7 +264,11 @@ fn resolve_artifacts(
                 .join("archive")
                 .join(&slug)
                 .join(basename);
-            let archive = if archive.exists() { Some(archive) } else { None };
+            let archive = if archive.exists() {
+                Some(archive)
+            } else {
+                None
+            };
 
             let found = active.or(archive);
             let info = ArtifactInfo {
@@ -252,7 +294,11 @@ pub async fn page_project(Path(pid): Path<String>) -> Html<String> {
 
     render_shell(
         &format!("{name} — agtx"),
-        &InitialState { project_id: Some(pid), task_id: None, artifact: None },
+        &InitialState {
+            project_id: Some(pid),
+            task_id: None,
+            artifact: None,
+        },
     )
 }
 
@@ -275,7 +321,11 @@ pub async fn page_task(Path((pid, tid)): Path<(String, String)>) -> Html<String>
     let (proj_name, task_title) = names;
     render_shell(
         &format!("{task_title} — {proj_name} — agtx"),
-        &InitialState { project_id: Some(pid), task_id: Some(tid), artifact: None },
+        &InitialState {
+            project_id: Some(pid),
+            task_id: Some(tid),
+            artifact: None,
+        },
     )
 }
 
@@ -305,7 +355,11 @@ pub async fn page_artifact(
     let (proj_name, task_title) = names;
     render_shell(
         &format!("{art_label} — {task_title} — {proj_name} — agtx"),
-        &InitialState { project_id: Some(pid), task_id: Some(tid), artifact: Some(artifact) },
+        &InitialState {
+            project_id: Some(pid),
+            task_id: Some(tid),
+            artifact: Some(artifact),
+        },
     )
 }
 
@@ -322,5 +376,70 @@ fn task_to_summary(task: &Task) -> TaskSummary {
         plugin: task.plugin.clone(),
         created_at: task.created_at.to_rfc3339(),
         updated_at: task.updated_at.to_rfc3339(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_artifacts, task_slug};
+    use crate::db::Task;
+
+    #[test]
+    fn task_slug_uses_sanitized_branch_suffix() {
+        let mut task = Task::new("Traversal", "codex", "project");
+        task.branch_name = Some("task/../../evil_slug-1".to_string());
+
+        assert_eq!(task_slug(&task), "evil_slug-1");
+    }
+
+    #[test]
+    fn task_slug_falls_back_to_task_id() {
+        let task = Task::new("No Branch", "codex", "project");
+
+        assert_eq!(task_slug(&task), task.id);
+    }
+
+    #[test]
+    fn resolve_artifacts_prefers_active_worktree_and_falls_back_to_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path().join("project");
+        let worktree_path = dir.path().join("worktree");
+
+        std::fs::create_dir_all(worktree_path.join(".agtx")).unwrap();
+        std::fs::write(worktree_path.join(".agtx").join("plan.md"), "# Plan").unwrap();
+
+        let archive_path = project_path.join(".agtx").join("archive").join("my-task");
+        std::fs::create_dir_all(&archive_path).unwrap();
+        std::fs::write(archive_path.join("review.md"), "# Review").unwrap();
+
+        let mut task = Task::new("Artifacts", "codex", "project");
+        task.branch_name = Some("task/my-task".to_string());
+        task.worktree_path = Some(worktree_path.to_string_lossy().to_string());
+
+        let artifacts = resolve_artifacts(&task, &project_path);
+
+        let plan = artifacts
+            .iter()
+            .find(|(info, _)| info.name == "plan")
+            .unwrap();
+        assert!(plan.0.available);
+        assert_eq!(
+            plan.1.as_ref().unwrap(),
+            &worktree_path.join(".agtx").join("plan.md")
+        );
+
+        let review = artifacts
+            .iter()
+            .find(|(info, _)| info.name == "review")
+            .unwrap();
+        assert!(review.0.available);
+        assert_eq!(review.1.as_ref().unwrap(), &archive_path.join("review.md"));
+
+        let research = artifacts
+            .iter()
+            .find(|(info, _)| info.name == "research")
+            .unwrap();
+        assert!(!research.0.available);
+        assert!(research.1.is_none());
     }
 }

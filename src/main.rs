@@ -48,12 +48,8 @@ async fn main() -> Result<()> {
 
     let mode = match positional_args.first().copied() {
         Some("web-serve") => {
-            let port: u16 = args
-                .windows(2)
-                .find(|w| w[0] == "--port")
-                .and_then(|w| w[1].parse().ok())
-                .or_else(|| std::env::var("PORT").ok().and_then(|v| v.parse().ok()))
-                .unwrap_or(3000);
+            let env_port = std::env::var("PORT").ok();
+            let port = agtx::web::server::parse_web_port(&args, env_port.as_deref());
             return agtx::web::serve(port).await;
         }
         Some("mcp-serve") => {

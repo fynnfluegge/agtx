@@ -53,6 +53,7 @@ test-mocks = ["dep:mockall"]
 [dev-dependencies]
 tempfile = "3"
 mockall = "0.13"
+tower = { version = "0.5", features = ["util"] }
 
 [dependencies.mockall]
 version = "0.13"
