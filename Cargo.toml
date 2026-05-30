@@ -40,7 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 
 # MCP server
-rmcp = { version = "0.16", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
 
 [features]
 default = []

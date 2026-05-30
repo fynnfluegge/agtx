@@ -1261,11 +1261,8 @@ impl ServerHandler for AgtxMcpServer {
                  task fields, move_task to transition tasks between phases, get_transition_status to \
                  check if a transition completed, and delete_task to remove backlog tasks.",
         };
-        ServerInfo {
-            instructions: Some(instructions.into()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(instructions)
     }
 }
 
