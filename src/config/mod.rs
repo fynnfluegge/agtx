@@ -581,27 +581,36 @@ impl WorkflowPlugin {
         Ok(())
     }
 
+    /// Directory holding global (user-level) plugins: `~/.config/agtx/plugins`.
+    pub fn global_plugins_dir() -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("agtx")
+                .join("plugins"),
+        )
+    }
+
+    /// Directory holding a project's local plugins: `{project}/.agtx/plugins`.
+    pub fn project_plugins_dir(project_path: &Path) -> PathBuf {
+        project_path.join(".agtx").join("plugins")
+    }
+
     /// Load a plugin by name, checking project-local then global directories
     pub fn load(name: &str, project_path: Option<&Path>) -> Result<Self> {
         Self::validate_plugin_name(name)?;
         // 1. Check project-local
         if let Some(pp) = project_path {
-            let local_path = pp
-                .join(".agtx")
-                .join("plugins")
-                .join(name)
-                .join("plugin.toml");
+            let local_path = Self::project_plugins_dir(pp).join(name).join("plugin.toml");
             if local_path.exists() {
                 let content = std::fs::read_to_string(&local_path)?;
                 return toml::from_str(&content).context("Failed to parse plugin.toml");
             }
         }
         // 2. Check global
-        let home = std::env::var("HOME").context("Could not determine home directory")?;
-        let global_path = PathBuf::from(home)
-            .join(".config")
-            .join("agtx")
-            .join("plugins")
+        let global_path = Self::global_plugins_dir()
+            .context("Could not determine home directory")?
             .join(name)
             .join("plugin.toml");
         if global_path.exists() {
@@ -618,17 +627,12 @@ impl WorkflowPlugin {
         }
         // Same lookup order: project-local first, then global
         if let Some(pp) = project_path {
-            let local = pp.join(".agtx").join("plugins").join(name);
+            let local = Self::project_plugins_dir(pp).join(name);
             if local.join("plugin.toml").exists() {
                 return Some(local);
             }
         }
-        let home = std::env::var("HOME").ok()?;
-        let global = PathBuf::from(home)
-            .join(".config")
-            .join("agtx")
-            .join("plugins")
-            .join(name);
+        let global = Self::global_plugins_dir()?.join(name);
         if global.join("plugin.toml").exists() {
             return Some(global);
         }

@@ -126,6 +126,8 @@ Phase gating is derived from the config: if a phase's command or prompt contains
 
 Plugin resolution: project-local `.agtx/plugins/{name}/` → global `~/.config/agtx/plugins/{name}/` → bundled. `load_task_plugin` falls back to bundled plugins when disk load fails, so tasks always resolve their plugin correctly even if the on-disk copy is missing.
 
+Plugin discovery for pickers: `discover_custom_plugins` (in `src/skills.rs`) scans the global then project-local plugins directories and surfaces on-disk plugins alongside `BUNDLED_PLUGINS` in both the board selector (`P`) and the task creation wizard. Project-local plugins shadow global ones by name; names colliding with a bundled plugin are skipped (the bundled entry already represents them, and `load` resolves the on-disk copy). Both pickers filter discovered plugins by `supported_agents` against the default agent.
+
 Each task stores its plugin name explicitly in the database at creation time (e.g. `Some("agtx")`, `Some("gsd")`). Switching the project plugin only affects new tasks.
 
 ### Skill System

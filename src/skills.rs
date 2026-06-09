@@ -28,6 +28,78 @@ pub fn load_bundled_plugin(name: &str) -> Option<crate::config::WorkflowPlugin> 
         .and_then(|(_, _, content)| toml::from_str(content).ok())
 }
 
+/// A custom (on-disk) workflow plugin discovered in a plugins directory.
+pub struct CustomPlugin {
+    pub name: String,
+    pub description: String,
+    pub plugin: crate::config::WorkflowPlugin,
+}
+
+/// Discover custom plugins on disk that are not shipped as bundled plugins.
+///
+/// Scans the global plugins directory (`~/.config/agtx/plugins/`) then the
+/// project-local one (`{project}/.agtx/plugins/`). A project-local plugin
+/// shadows a global one of the same name, matching [`crate::config::WorkflowPlugin::load`].
+/// Names matching a bundled plugin are skipped: the bundled entry already
+/// represents them in pickers, and `load` resolves the on-disk copy transparently.
+pub fn discover_custom_plugins(project_path: Option<&std::path::Path>) -> Vec<CustomPlugin> {
+    use crate::config::WorkflowPlugin;
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(dir) = WorkflowPlugin::global_plugins_dir() {
+        dirs.push(dir);
+    }
+    if let Some(pp) = project_path {
+        dirs.push(WorkflowPlugin::project_plugins_dir(pp));
+    }
+    discover_custom_plugins_in(&dirs)
+}
+
+/// Discover custom plugins across the given plugins directories, in order of
+/// increasing precedence (later directories shadow earlier ones by name).
+fn discover_custom_plugins_in(dirs: &[std::path::PathBuf]) -> Vec<CustomPlugin> {
+    use std::collections::BTreeMap;
+    let mut found: BTreeMap<String, CustomPlugin> = BTreeMap::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if BUNDLED_PLUGINS.iter().any(|(n, _, _)| *n == name) {
+                continue;
+            }
+            if crate::config::WorkflowPlugin::validate_plugin_name(name).is_err() {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(path.join("plugin.toml")) else {
+                continue;
+            };
+            let Ok(plugin) = toml::from_str::<crate::config::WorkflowPlugin>(&content) else {
+                continue;
+            };
+            let description = plugin
+                .description
+                .clone()
+                .unwrap_or_else(|| "Custom workflow plugin".to_string());
+            found.insert(
+                name.to_string(),
+                CustomPlugin {
+                    name: name.to_string(),
+                    description,
+                    plugin,
+                },
+            );
+        }
+    }
+    found.into_values().collect()
+}
+
 /// Agent-native command/skill directory paths.
 /// Returns (base_dir_relative_to_worktree, namespace_subdir) or None if agent has no native discovery.
 /// Returns (base_dir_relative_to_worktree, namespace_subdir) or None if agent has no native discovery.
@@ -405,4 +477,103 @@ pub fn scan_agent_skills(
 
     results.sort_by(|a, b| a.0.cmp(&b.0));
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn write_plugin(dir: &std::path::Path, name: &str, body: &str) {
+        let plugin_dir = dir.join(name);
+        fs::create_dir_all(&plugin_dir).unwrap();
+        let content = format!("name = \"{}\"\n{}", name, body);
+        fs::write(plugin_dir.join("plugin.toml"), content).unwrap();
+    }
+
+    #[test]
+    fn discovers_custom_plugin_with_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(tmp.path(), "my-flow", "description = \"My custom flow\"\n");
+
+        let found = discover_custom_plugins_in(&[tmp.path().to_path_buf()]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "my-flow");
+        assert_eq!(found[0].description, "My custom flow");
+    }
+
+    #[test]
+    fn falls_back_to_default_description_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(tmp.path(), "no-desc", "");
+
+        let found = discover_custom_plugins_in(&[tmp.path().to_path_buf()]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].description, "Custom workflow plugin");
+    }
+
+    #[test]
+    fn skips_names_colliding_with_bundled_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(tmp.path(), "gsd", "description = \"shadow\"\n");
+        write_plugin(tmp.path(), "mine", "description = \"mine\"\n");
+
+        let found = discover_custom_plugins_in(&[tmp.path().to_path_buf()]);
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["mine"]);
+    }
+
+    #[test]
+    fn ignores_dirs_without_plugin_toml_and_invalid_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("empty-dir")).unwrap();
+        fs::write(tmp.path().join("loose-file.toml"), "x").unwrap();
+        write_plugin(tmp.path(), "valid", "description = \"ok\"\n");
+
+        let found = discover_custom_plugins_in(&[tmp.path().to_path_buf()]);
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["valid"]);
+    }
+
+    #[test]
+    fn project_local_shadows_global_by_name() {
+        let global = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        write_plugin(global.path(), "shared", "description = \"global\"\n");
+        write_plugin(local.path(), "shared", "description = \"local\"\n");
+
+        let dirs: Vec<PathBuf> = vec![global.path().to_path_buf(), local.path().to_path_buf()];
+        let found = discover_custom_plugins_in(&dirs);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].description, "local");
+    }
+
+    #[test]
+    fn skips_bundled_name_in_global_keeps_local_custom() {
+        let global = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        write_plugin(global.path(), "gsd", "description = \"shadow\"\n");
+        write_plugin(local.path(), "mine", "description = \"mine\"\n");
+
+        let dirs: Vec<PathBuf> = vec![global.path().to_path_buf(), local.path().to_path_buf()];
+        let found = discover_custom_plugins_in(&dirs);
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["mine"]);
+    }
+
+    #[test]
+    fn discovered_plugin_carries_supported_agents_for_wizard_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(
+            tmp.path(),
+            "claude-only",
+            "description = \"c\"\nsupported_agents = [\"claude\"]\n",
+        );
+
+        let found = discover_custom_plugins_in(&[tmp.path().to_path_buf()]);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].plugin.supports_agent("claude"));
+        assert!(!found[0].plugin.supports_agent("codex"));
+    }
 }

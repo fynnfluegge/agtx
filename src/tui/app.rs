@@ -2789,6 +2789,18 @@ impl App {
                 active: current == *name,
             });
         }
+        let agent_name = &self.state.config.default_agent;
+        for custom in skills::discover_custom_plugins(self.state.project_path.as_deref()) {
+            if !custom.plugin.supports_agent(agent_name) {
+                continue;
+            }
+            options.push(PluginOption {
+                name: custom.name.clone(),
+                label: custom.name.clone(),
+                description: custom.description,
+                active: current == custom.name,
+            });
+        }
         let selected = options.iter().position(|o| o.active).unwrap_or(0);
         self.state.plugin_select_popup = Some(PluginSelectPopup { selected, options });
     }
@@ -4261,6 +4273,17 @@ impl App {
                 label: name.to_string(),
                 description: desc.to_string(),
                 active: current == *name,
+            });
+        }
+        for custom in skills::discover_custom_plugins(self.state.project_path.as_deref()) {
+            if !custom.plugin.supports_agent(selected_agent_name) {
+                continue;
+            }
+            options.push(PluginOption {
+                name: custom.name.clone(),
+                label: custom.name.clone(),
+                description: custom.description,
+                active: current == custom.name,
             });
         }
         let selected = options.iter().position(|o| o.active).unwrap_or(0);
