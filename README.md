@@ -26,6 +26,7 @@
   <a href="#features">Features</a> •
   <a href="#usage">Usage</a> •
   <a href="#brainstorm--sweep-skills">Skills</a> •
+  <a href="#web-dashboard">Web</a> •
   <a href="#mcp-server">MCP Server</a> •
   <a href="#plugins">Plugins</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
@@ -89,6 +90,9 @@ agtx -g
 
 # Orchestrator mode — let an AI manage the board for you
 agtx --experimental
+
+# Web dashboard — read-only board in your browser (http://127.0.0.1:3000)
+agtx web-serve
 ```
 
 > [!NOTE]
@@ -594,6 +598,41 @@ The sandbox:
 
 > [!NOTE]
 > Requires [Docker Engine](https://docs.docker.com/engine/install/) (Linux) or [Docker Desktop](https://docs.docker.com/desktop/) (macOS/Windows). The image is built automatically on first run and cached for subsequent runs.
+
+## Web Dashboard
+
+Browse the board in your browser. `agtx web-serve` starts a lightweight, **read-only** web view of every project agtx knows about — useful for glancing at progress from a second screen, a phone on your network, or anywhere a terminal isn't handy.
+
+```bash
+# Start the web server (defaults to http://127.0.0.1:3000)
+agtx web-serve
+
+# Pick a port — via flag…
+agtx web-serve --port 8080
+
+# …or via environment variable (the --port flag takes precedence)
+PORT=8080 agtx web-serve
+```
+
+Then open the printed URL (e.g. `http://127.0.0.1:3000`) in any browser.
+
+**What you get:**
+- **All projects** — every project that has been opened in agtx at least once, with per-column task counts
+- **Kanban view** — each project's Backlog / Planning / Running / Review / Done columns and their tasks
+- **Task detail** — title, description, status, agent, plugin, branch, PR link, and timestamps
+- **Phase artifacts** — the `research`, `plan`, `execute`, and `review` markdown files for a task, rendered as HTML (read live from the worktree, falling back to the `.agtx/archive/` copy once a task is cleaned up)
+
+Pages are deep-linkable, so you can bookmark or share a specific view:
+
+| Path | Shows |
+|------|-------|
+| `/` | Project list |
+| `/project/{project_id}` | A project's kanban board |
+| `/project/{project_id}/task/{task_id}` | Task detail |
+| `/project/{project_id}/task/{task_id}/{artifact}` | A rendered phase artifact (`research`, `plan`, `execute`, `review`) |
+
+> [!NOTE]
+> The server binds to `127.0.0.1` (localhost only) and never mutates state — it's a viewer, not a controller. It reads the same databases as the TUI, so a project must have been opened in agtx at least once to appear. To reach it from another device, put it behind your own reverse proxy or SSH tunnel.
 
 ## MCP Server
 
