@@ -1,5 +1,6 @@
 use agtx::{
     db::{Database, Project, Task, TaskStatus},
+    web::handlers::AppState,
     web::server::router,
 };
 use axum::{
@@ -10,42 +11,19 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-struct ConfigEnv {
-    _dir: TempDir,
-    previous: Option<String>,
-}
-
-impl ConfigEnv {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let previous = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", dir.path());
-        Self {
-            _dir: dir,
-            previous,
-        }
-    }
-}
-
-impl Drop for ConfigEnv {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-    }
-}
-
 struct Fixture {
-    _config: ConfigEnv,
     _dir: TempDir,
+    state: AppState,
     project: Project,
     backlog_task: Task,
 }
 
 fn setup_fixture() -> Fixture {
-    let config = ConfigEnv::new();
+    // Isolate the global/project databases under a temp config dir, injected
+    // into the web layer via AppState — no env vars, no real config touched.
     let dir = tempfile::tempdir().unwrap();
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
     let project_path = dir.path().join("project");
     let worktree_path = dir.path().join("worktree");
 
@@ -58,10 +36,10 @@ fn setup_fixture() -> Fixture {
     .unwrap();
 
     let project = Project::new("Web Project", project_path.to_string_lossy().to_string());
-    let global_db = Database::open_global().unwrap();
+    let global_db = Database::open_global_in(&config_dir).unwrap();
     global_db.upsert_project(&project).unwrap();
 
-    let project_db = Database::open_project(&project_path).unwrap();
+    let project_db = Database::open_project_in(&config_dir, &project_path).unwrap();
 
     let mut backlog_task = Task::new("Web Task", "codex", &project.id);
     backlog_task.description = Some("Task details".to_string());
@@ -74,15 +52,15 @@ fn setup_fixture() -> Fixture {
     project_db.create_task(&running_task).unwrap();
 
     Fixture {
-        _config: config,
         _dir: dir,
+        state: AppState::new(config_dir),
         project,
         backlog_task,
     }
 }
 
-async fn get(uri: &str) -> (StatusCode, String) {
-    let response = router()
+async fn get(state: &AppState, uri: &str) -> (StatusCode, String) {
+    let response = router(state.clone())
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -91,8 +69,8 @@ async fn get(uri: &str) -> (StatusCode, String) {
     (status, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
-async fn get_json(uri: &str) -> (StatusCode, Value) {
-    let (status, body) = get(uri).await;
+async fn get_json(state: &AppState, uri: &str) -> (StatusCode, Value) {
+    let (status, body) = get(state, uri).await;
     let json = serde_json::from_str(&body).unwrap_or_else(|_| panic!("invalid JSON: {body}"));
     (status, json)
 }
@@ -101,7 +79,7 @@ async fn get_json(uri: &str) -> (StatusCode, Value) {
 async fn web_routes_return_project_task_artifact_and_page_data() {
     let fixture = setup_fixture();
 
-    let (status, projects) = get_json("/api/projects").await;
+    let (status, projects) = get_json(&fixture.state, "/api/projects").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(projects.as_array().unwrap().len(), 1);
     assert_eq!(projects[0]["id"], fixture.project.id);
@@ -112,7 +90,7 @@ async fn web_routes_return_project_task_artifact_and_page_data() {
     assert_eq!(projects[0]["task_counts"]["done"], json!(0));
 
     let tasks_uri = format!("/api/projects/{}/tasks", fixture.project.id);
-    let (status, board) = get_json(&tasks_uri).await;
+    let (status, board) = get_json(&fixture.state, &tasks_uri).await;
     assert_eq!(status, StatusCode::OK);
     let statuses: Vec<&str> = board["columns"]
         .as_array()
@@ -130,7 +108,7 @@ async fn web_routes_return_project_task_artifact_and_page_data() {
         "/api/projects/{}/tasks/{}",
         fixture.project.id, fixture.backlog_task.id
     );
-    let (status, task) = get_json(&task_uri).await;
+    let (status, task) = get_json(&fixture.state, &task_uri).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(task["title"], "Web Task");
     assert!(task["pr_url"].is_null());
@@ -139,24 +117,24 @@ async fn web_routes_return_project_task_artifact_and_page_data() {
     assert_eq!(task["artifacts"][1]["available"], true);
 
     let artifact_uri = format!("{task_uri}/artifacts/plan");
-    let (status, artifact_html) = get(&artifact_uri).await;
+    let (status, artifact_html) = get(&fixture.state, &artifact_uri).await;
     assert_eq!(status, StatusCode::OK);
     assert!(artifact_html.contains("<h1>Plan</h1>"));
     assert!(artifact_html.contains("<strong>covered</strong>"));
 
     let missing_artifact_uri = format!("{task_uri}/artifacts/research");
-    let (status, _) = get(&missing_artifact_uri).await;
+    let (status, _) = get(&fixture.state, &missing_artifact_uri).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let missing_task_uri = format!("/api/projects/{}/tasks/missing", fixture.project.id);
-    let (status, _) = get(&missing_task_uri).await;
+    let (status, _) = get(&fixture.state, &missing_task_uri).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 
     let page_uri = format!(
         "/project/{}/task/{}/plan",
         fixture.project.id, fixture.backlog_task.id
     );
-    let (status, page) = get(&page_uri).await;
+    let (status, page) = get(&fixture.state, &page_uri).await;
     assert_eq!(status, StatusCode::OK);
     assert!(page.contains("Web Task"));
     assert!(page.contains(&format!("\"project_id\":\"{}\"", fixture.project.id)));

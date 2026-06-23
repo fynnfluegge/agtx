@@ -283,6 +283,14 @@ impl GlobalConfig {
             .context("Could not determine data directory")?;
         Ok(dirs.data_dir().to_path_buf())
     }
+
+    /// Get the path to the global config directory (where `index.db` and
+    /// per-project databases live).
+    pub fn config_dir() -> Result<PathBuf> {
+        let dirs = directories::ProjectDirs::from("", "", "agtx")
+            .context("Could not determine config directory")?;
+        Ok(dirs.config_dir().to_path_buf())
+    }
 }
 
 impl ProjectConfig {

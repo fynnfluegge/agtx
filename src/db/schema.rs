@@ -10,17 +10,22 @@ pub struct Database {
 }
 
 impl Database {
-    /// Open or create a project database (stored centrally in config dir)
+    /// Open or create a project database (stored centrally in the platform
+    /// config dir).
     pub fn open_project(project_path: &Path) -> Result<Self> {
-        let config_dir = directories::ProjectDirs::from("", "", "agtx")
-            .context("Could not determine config directory")?;
+        let config_dir = crate::config::GlobalConfig::config_dir()?;
+        Self::open_project_in(&config_dir, project_path)
+    }
 
+    /// Open or create a project database under an explicit config directory.
+    /// The default location is resolved by [`Database::open_project`]; this
+    /// variant lets callers (e.g. the web server, tests) inject the root.
+    pub fn open_project_in(config_dir: &Path, project_path: &Path) -> Result<Self> {
         // Create a stable ID from the project path using a hash
         let path_str = project_path.to_string_lossy();
         let path_hash = Self::hash_path(&path_str);
 
         let db_path = config_dir
-            .config_dir()
             .join("projects")
             .join(format!("{}.db", path_hash));
 
@@ -33,7 +38,6 @@ impl Database {
         if !db_path.exists() {
             let old_hash = Self::hash_path_legacy(&path_str);
             let old_db_path = config_dir
-                .config_dir()
                 .join("projects")
                 .join(format!("{}.db", old_hash));
             if old_db_path.exists() {
@@ -77,11 +81,17 @@ impl Database {
         format!("{:016x}", hasher.finish())
     }
 
-    /// Open or create the global index database
+    /// Open or create the global index database (in the platform config dir).
     pub fn open_global() -> Result<Self> {
-        let config_dir = directories::ProjectDirs::from("", "", "agtx")
-            .context("Could not determine config directory")?;
-        let db_path = config_dir.config_dir().join("index.db");
+        let config_dir = crate::config::GlobalConfig::config_dir()?;
+        Self::open_global_in(&config_dir)
+    }
+
+    /// Open or create the global index database under an explicit config
+    /// directory. The default location is resolved by [`Database::open_global`];
+    /// this variant lets callers (e.g. the web server, tests) inject the root.
+    pub fn open_global_in(config_dir: &Path) -> Result<Self> {
+        let db_path = config_dir.join("index.db");
 
         // Ensure config directory exists
         if let Some(parent) = db_path.parent() {

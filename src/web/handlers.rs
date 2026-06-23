@@ -1,10 +1,11 @@
 use anyhow::Context;
 use axum::{
-    extract::Path,
+    extract::{Path, State},
     http::StatusCode,
     response::{Html, Json},
 };
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::db::{Database, Task, TaskStatus};
 use crate::web::models::{
@@ -12,6 +13,22 @@ use crate::web::models::{
 };
 
 static INDEX_HTML: &str = include_str!("index.html");
+
+/// Shared web server state. Carries the config directory root so the global and
+/// per-project databases can be resolved from an injected location (production
+/// uses the platform config dir; tests point it at a temp dir).
+#[derive(Clone)]
+pub struct AppState {
+    config_dir: Arc<PathBuf>,
+}
+
+impl AppState {
+    pub fn new(config_dir: PathBuf) -> Self {
+        Self {
+            config_dir: Arc::new(config_dir),
+        }
+    }
+}
 
 #[derive(serde::Serialize)]
 struct InitialState {
@@ -44,9 +61,12 @@ pub async fn index() -> Html<String> {
     )
 }
 
-pub async fn list_projects() -> Result<Json<Vec<ProjectResponse>>, StatusCode> {
-    let result = tokio::task::spawn_blocking(|| -> anyhow::Result<Vec<ProjectResponse>> {
-        let global_db = Database::open_global()?;
+pub async fn list_projects(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ProjectResponse>>, StatusCode> {
+    let config_dir = state.config_dir.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<ProjectResponse>> {
+        let global_db = Database::open_global_in(&config_dir)?;
         let projects = global_db.get_all_projects()?;
 
         let mut responses = Vec::new();
@@ -56,7 +76,7 @@ pub async fn list_projects() -> Result<Json<Vec<ProjectResponse>>, StatusCode> {
             for status in TaskStatus::columns() {
                 task_counts.insert(status.as_str().to_string(), 0usize);
             }
-            if let Ok(project_db) = Database::open_project(&project_path) {
+            if let Ok(project_db) = Database::open_project_in(&config_dir, &project_path) {
                 if let Ok(tasks) = project_db.get_all_tasks() {
                     for task in &tasks {
                         *task_counts
@@ -89,16 +109,18 @@ pub async fn list_projects() -> Result<Json<Vec<ProjectResponse>>, StatusCode> {
 }
 
 pub async fn project_tasks(
+    State(state): State<AppState>,
     Path(project_id): Path<String>,
 ) -> Result<Json<KanbanResponse>, StatusCode> {
+    let config_dir = state.config_dir.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<KanbanResponse> {
-        let global_db = Database::open_global()?;
+        let global_db = Database::open_global_in(&config_dir)?;
         let project = global_db
             .get_project_by_id(&project_id)?
             .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
         let project_path = PathBuf::from(&project.path);
 
-        let project_db = Database::open_project(&project_path)?;
+        let project_db = Database::open_project_in(&config_dir, &project_path)?;
         let tasks = project_db.get_all_tasks()?;
 
         let columns = TaskStatus::columns()
@@ -136,10 +158,12 @@ pub async fn project_tasks(
 }
 
 pub async fn task_detail(
+    State(state): State<AppState>,
     Path((project_id, task_id)): Path<(String, String)>,
 ) -> Result<Json<TaskDetailResponse>, StatusCode> {
+    let config_dir = state.config_dir.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<TaskDetailResponse> {
-        let (task, project_path) = fetch_task(&project_id, &task_id)?;
+        let (task, project_path) = fetch_task(&config_dir, &project_id, &task_id)?;
         let artifacts = resolve_artifacts(&task, &project_path)
             .into_iter()
             .map(|(info, _)| info)
@@ -178,10 +202,12 @@ pub async fn task_detail(
 }
 
 pub async fn get_artifact(
+    State(state): State<AppState>,
     Path((project_id, task_id, name)): Path<(String, String, String)>,
 ) -> Result<Html<String>, StatusCode> {
+    let config_dir = state.config_dir.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
-        let (task, project_path) = fetch_task(&project_id, &task_id)?;
+        let (task, project_path) = fetch_task(&config_dir, &project_id, &task_id)?;
         let artifacts = resolve_artifacts(&task, &project_path);
 
         let found = artifacts.into_iter().find(|(info, _)| info.name == name);
@@ -212,13 +238,17 @@ pub async fn get_artifact(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-fn fetch_task(project_id: &str, task_id: &str) -> anyhow::Result<(Task, PathBuf)> {
-    let global_db = Database::open_global()?;
+fn fetch_task(
+    config_dir: &std::path::Path,
+    project_id: &str,
+    task_id: &str,
+) -> anyhow::Result<(Task, PathBuf)> {
+    let global_db = Database::open_global_in(config_dir)?;
     let project = global_db
         .get_project_by_id(project_id)?
         .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
     let project_path = PathBuf::from(&project.path);
-    let project_db = Database::open_project(&project_path)?;
+    let project_db = Database::open_project_in(config_dir, &project_path)?;
     let task = project_db
         .get_task(task_id)?
         .ok_or_else(|| anyhow::anyhow!("Task not found"))?;
@@ -281,10 +311,11 @@ fn resolve_artifacts(
         .collect()
 }
 
-pub async fn page_project(Path(pid): Path<String>) -> Html<String> {
+pub async fn page_project(State(state): State<AppState>, Path(pid): Path<String>) -> Html<String> {
     let pid2 = pid.clone();
+    let config_dir = state.config_dir.clone();
     let name = tokio::task::spawn_blocking(move || -> Option<String> {
-        let db = Database::open_global().ok()?;
+        let db = Database::open_global_in(&config_dir).ok()?;
         db.get_project_by_id(&pid2).ok()?.map(|p| p.name)
     })
     .await
@@ -302,14 +333,18 @@ pub async fn page_project(Path(pid): Path<String>) -> Html<String> {
     )
 }
 
-pub async fn page_task(Path((pid, tid)): Path<(String, String)>) -> Html<String> {
+pub async fn page_task(
+    State(state): State<AppState>,
+    Path((pid, tid)): Path<(String, String)>,
+) -> Html<String> {
     let pid2 = pid.clone();
     let tid2 = tid.clone();
+    let config_dir = state.config_dir.clone();
     let names = tokio::task::spawn_blocking(move || -> Option<(String, String)> {
-        let db = Database::open_global().ok()?;
+        let db = Database::open_global_in(&config_dir).ok()?;
         let project = db.get_project_by_id(&pid2).ok()??;
         let project_path = PathBuf::from(&project.path);
-        let pdb = Database::open_project(&project_path).ok()?;
+        let pdb = Database::open_project_in(&config_dir, &project_path).ok()?;
         let task = pdb.get_task(&tid2).ok()??;
         Some((project.name, task.title))
     })
@@ -330,15 +365,17 @@ pub async fn page_task(Path((pid, tid)): Path<(String, String)>) -> Html<String>
 }
 
 pub async fn page_artifact(
+    State(state): State<AppState>,
     Path((pid, tid, artifact)): Path<(String, String, String)>,
 ) -> Html<String> {
     let pid2 = pid.clone();
     let tid2 = tid.clone();
+    let config_dir = state.config_dir.clone();
     let names = tokio::task::spawn_blocking(move || -> Option<(String, String)> {
-        let db = Database::open_global().ok()?;
+        let db = Database::open_global_in(&config_dir).ok()?;
         let project = db.get_project_by_id(&pid2).ok()??;
         let project_path = PathBuf::from(&project.path);
-        let pdb = Database::open_project(&project_path).ok()?;
+        let pdb = Database::open_project_in(&config_dir, &project_path).ok()?;
         let task = pdb.get_task(&tid2).ok()??;
         Some((project.name, task.title))
     })
