@@ -4601,6 +4601,7 @@ impl App {
             self.state.config.init_script.clone()
         };
         let skip_init_scripts = self.state.flags.no_init_scripts;
+        let skip_worktree = self.state.config.skip_worktree;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
         let agent_ops = self.state.agent_registry.get(&planning_agent);
@@ -4662,6 +4663,7 @@ impl App {
                 agent_ops.as_ref(),
                 &referenced_tasks,
                 skip_init_scripts,
+                skip_worktree,
             );
 
             match result {
@@ -4970,6 +4972,7 @@ impl App {
             self.state.config.init_script.clone()
         };
         let skip_init_scripts = self.state.flags.no_init_scripts;
+        let skip_worktree = self.state.config.skip_worktree;
 
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
@@ -5011,6 +5014,7 @@ impl App {
                 agent_ops.as_ref(),
                 &[],
                 skip_init_scripts,
+                skip_worktree,
             );
 
             match result {
@@ -5233,6 +5237,7 @@ impl App {
             self.state.config.init_script.clone()
         };
         let skip_init_scripts = self.state.flags.no_init_scripts;
+        let skip_worktree = self.state.config.skip_worktree;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
         let agent_ops = self.state.agent_registry.get(&running_agent);
@@ -5266,6 +5271,7 @@ impl App {
                 agent_ops.as_ref(),
                 &[],
                 skip_init_scripts,
+                skip_worktree,
             );
 
             match result {
@@ -6939,13 +6945,18 @@ fn setup_task_worktree(
     agent_ops: &dyn AgentOperations,
     referenced_tasks: &[ReferencedTaskInfo],
     skip_init_scripts: bool,
+    skip_worktree: bool,
 ) -> Result<String> {
     let unique_slug = generate_task_slug(&task.id, &task.title);
     let window_name = format!("task-{}", unique_slug);
     let target = format!("{}:{}", tmux_project_name, window_name);
 
-    // Create git worktree from the configured base branch
-    let worktree_path_str =
+    // When skip_worktree is set, use the project root directly instead of creating a git worktree.
+    // Useful for isolated environments (e.g. Docker) where the repo is already the working copy.
+    let worktree_path_str = if skip_worktree {
+        project_path.to_string_lossy().to_string()
+    } else {
+        // Create git worktree from the configured base branch
         match git_ops.create_worktree(project_path, &unique_slug, base_branch, worktree_dir, branch_prefix) {
             Ok(path) => path,
             Err(e) => {
@@ -6956,7 +6967,8 @@ fn setup_task_worktree(
                     .to_string_lossy()
                     .to_string()
             }
-        };
+        }
+    };
 
     // Initialize worktree: copy files and run init script
     // Merge plugin-level copy_files with project-level copy_files
@@ -9049,6 +9061,15 @@ fn write_skills_to_worktree(
                 let _ = std::fs::write(
                     Path::new(worktree_path).join(".mcp.json"),
                     serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                );
+                // Pre-trust the agtx MCP server so Claude doesn't show an interactive
+                // trust dialog when the agent window opens for the first time.
+                let settings = serde_json::json!({ "enableAllProjectMcpServers": true });
+                let claude_dir = Path::new(worktree_path).join(".claude");
+                let _ = std::fs::create_dir_all(&claude_dir);
+                let _ = std::fs::write(
+                    claude_dir.join("settings.local.json"),
+                    serde_json::to_string_pretty(&settings).unwrap_or_default(),
                 );
             }
             "codex" => {

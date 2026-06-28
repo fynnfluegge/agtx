@@ -237,6 +237,10 @@ pub struct ProjectConfig {
 
     /// Override branch prefix for this project (e.g. "user/name")
     pub branch_prefix: Option<String>,
+
+    /// Skip git worktree creation — agent works directly in the project root.
+    /// Useful when the repo is already an isolated environment (e.g. Docker container).
+    pub skip_worktree: Option<bool>,
 }
 
 impl GlobalConfig {
@@ -352,6 +356,7 @@ pub struct MergedConfig {
     pub default_agent: String,
     pub phase_agents: PhaseAgentsConfig,
     pub worktree_enabled: bool,
+    pub skip_worktree: bool,
     pub auto_cleanup: bool,
     pub base_branch: String,
     pub worktree_dir: String,
@@ -381,6 +386,7 @@ impl MergedConfig {
                 review: project_agents.review.or(global.agents.review.clone()),
             },
             worktree_enabled: global.worktree.enabled,
+            skip_worktree: project.skip_worktree.unwrap_or(!global.worktree.enabled),
             auto_cleanup: global.worktree.auto_cleanup,
             base_branch: project
                 .base_branch

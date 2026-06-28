@@ -1,6 +1,7 @@
 default_agent = "claude"
 workflow_plugin = "agtx-terse"
 worktree_dir = ".agtx/worktrees"
+skip_worktree = true
 
 [agents]
 planning = "claude"

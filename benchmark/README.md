@@ -11,6 +11,52 @@ collects git diff patches, and outputs SWE-bench-compatible results.
 > cd benchmark
 > ```
 
+### Sandbox Mode (Docker)
+
+In sandbox mode (`--sandbox`), each task runs inside its official SWE-bench Docker image.
+The repo is pre-installed in a working conda environment (`testbed`) so agents can run
+`pytest` and all dependencies without any setup.
+
+**When to use:** Always recommended. Agents fail on the host because SWE-bench repos require
+specific Python versions and C extensions that aren't available outside the containers.
+
+**One-time setup:**
+```bash
+cd swebench
+
+# Build the tools image (tmux + Node.js + Claude Code)
+python prebake_images.py --verbose
+
+# Build the Linux agtx binary (Ubuntu 22.04 / glibc 2.35)
+bash build_linux_binary.sh
+```
+
+**Run in sandbox mode:**
+```bash
+python swebench/benchmark.py \
+  --config swebench/configs/claude-agtx.toml \
+  --instance-ids astropy__astropy-12907 \
+  --sandbox --verbose \
+  --agtx target/agtx-linux-x86_64
+```
+
+**Attach to a running container** to watch the agent:
+```bash
+docker exec -it swebench-astropy-astropy-12907 tmux -L agtx attach -t testbed
+# Ctrl+b 0 → agtx board   Ctrl+b 1 → agent session   Ctrl+b d → detach
+```
+
+**Cleanup** if the benchmark crashes:
+```bash
+docker rm -f swebench-astropy-astropy-12907
+docker volume rm agtx-swebench-tools  # only if tools need refreshing
+```
+
+See [`DOCKER_IMPL.md`](DOCKER_IMPL.md) for full architecture details, config keys
+(`sandbox_init`, `sandbox_copy_dirs`), and troubleshooting.
+
+---
+
 ### Prerequisites
 
 **agtx** (built from repo root):
@@ -156,9 +202,10 @@ uv run --project swebench \
 | `--instances N` | all 300 | Run first N tasks |
 | `--instance-ids ID...` | — | Run specific instance IDs |
 | `--concurrency N` | 1 | Parallel tasks |
+| `--sandbox` | off | Run each task inside its SWE-bench Docker image (recommended) |
 | `--output-dir PATH` | `./swebench_output/{plugin}_{agent}_{ts}/` | Output directory |
-| `--workdir PATH` | `/tmp/swebench_repos` | Repo clone directory |
-| `--agtx PATH` | `./target/release/agtx` | agtx binary (use `../target/release/agtx` from `benchmark/`) |
+| `--workdir PATH` | `/tmp/swebench_repos` | Repo clone directory (non-sandbox only) |
+| `--agtx PATH` | `./target/release/agtx` | agtx binary — use `target/agtx-linux-x86_64` for sandbox mode |
 | `--phase-timeout SECS` | 1200 | Per-phase max seconds (20 min) |
 | `--model-name STRING` | `agtx-{plugin}-{agent}` | Label in predictions.jsonl |
 | `--split STRING` | `test` | HuggingFace dataset split |
@@ -276,9 +323,11 @@ The exact commands (with correct paths and run_id) are printed at the end of eve
 
 ```
 benchmark.py
-  ├── Clones each repo at base_commit → /tmp/swebench_repos/{instance_id}/
-  ├── Writes .agtx/config.toml (your config file) into each clone
-  ├── Starts agtx TUI per task in detached tmux (tmux -L swebench)
+  ├── [sandbox] Pulls SWE-bench Docker image, starts container with tools volume mounted
+  ├── [sandbox] Copies credentials, wires tools (tmux/node/claude via symlinks), runs sandbox_init
+  ├── [non-sandbox] Clones each repo at base_commit → /tmp/swebench_repos/{instance_id}/
+  ├── Writes .agtx/config.toml (your config file) into each repo/container
+  ├── Starts agtx TUI per task in detached tmux (tmux -L agtx, inside container in sandbox mode)
   ├── Spawns agtx mcp-serve as subprocess (JSON-RPC 2.0 over stdio)
   ├── Drives task via MCP:
   │     create_task → move_forward (Planning)
