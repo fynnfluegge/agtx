@@ -114,6 +114,7 @@ fn test_merged_config_project_overrides() {
         cleanup_script: Some("scripts/cleanup.sh".to_string()),
         branch_prefix: None,
         workflow_plugin: None,
+        skip_worktree: None,
     };
 
     let merged = MergedConfig::merge(&global, &project);
