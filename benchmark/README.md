@@ -52,9 +52,6 @@ docker rm -f swebench-astropy-astropy-12907
 docker volume rm agtx-swebench-tools  # only if tools need refreshing
 ```
 
-See [`DOCKER_IMPL.md`](DOCKER_IMPL.md) for full architecture details, config keys
-(`sandbox_init`, `sandbox_copy_dirs`), and troubleshooting.
-
 ---
 
 ### Prerequisites
