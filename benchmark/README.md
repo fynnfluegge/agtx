@@ -31,13 +31,24 @@ python prebake_images.py --verbose
 bash build_linux_binary.sh
 ```
 
-**Run in sandbox mode:**
+The tools image is the base for the shared Docker named volume `agtx-swebench-tools`.
+On the **first benchmark run**, this volume is created automatically and populated from the
+tools image — tmux, Node.js, Claude Code, and their shared libraries are copied in once and
+then mounted read-only into every instance container. Subsequent runs skip this step.
+
+To force a refresh (e.g. after updating Claude Code):
+```bash
+docker volume rm agtx-swebench-tools
+python prebake_images.py --force --verbose
+```
+
+**Run in sandbox mode** (Linux binary required — agents run inside Ubuntu 22.04 containers):
 ```bash
 python swebench/benchmark.py \
   --config swebench/configs/claude-agtx.toml \
   --instance-ids astropy__astropy-12907 \
   --sandbox --verbose \
-  --agtx target/agtx-linux-x86_64
+  --agtx ../target/agtx-linux-x86_64
 ```
 
 **Attach to a running container** to watch the agent:
@@ -55,6 +66,13 @@ docker volume rm agtx-swebench-tools  # only if tools need refreshing
 ---
 
 ### Prerequisites
+
+**Docker** (required for sandbox mode):
+```bash
+# macOS — install Docker Desktop from https://docs.docker.com/desktop/mac/install/
+# Ubuntu/Debian
+apt install docker.io
+```
 
 **agtx** (built from repo root):
 ```bash
@@ -119,6 +137,14 @@ workflow_plugin = "agtx"
 worktree_dir = ".agtx/worktrees"
 ```
 
+Sandbox-optimised (agent works directly in `/testbed`, no worktree) — `configs/claude-agtx.toml` with `skip_worktree`:
+```toml
+default_agent = "claude"
+workflow_plugin = "agtx"
+worktree_dir = ".agtx/worktrees"
+skip_worktree = true   # recommended for sandbox: agent works in /testbed directly
+```
+
 Mixed agents (different agent per phase) — `configs/gemini-claude-codex-agtx.toml`:
 ```toml
 default_agent = "claude"
@@ -133,6 +159,31 @@ review   = "codex"
 Available plugins: `void`, `agtx`, `agtx-terse`, `gsd`, `spec-kit`, `bmad`, `openspec`, `superpowers`
 
 Pre-built configs for common single-agent and multi-agent combinations are in [`swebench/configs/`](swebench/configs/).
+
+#### Sandbox-specific config keys
+
+These keys are only used in sandbox mode (`--sandbox`) and are ignored otherwise:
+
+| Key | Description |
+|-----|-------------|
+| `skip_worktree = true` | Agent works directly in `/testbed` instead of a git worktree. Recommended for sandbox runs. |
+| `sandbox_init = [...]` | List of shell commands run inside the container (as `/home/bench`) after tools are wired but before the TUI starts. Use for installing per-config tooling (e.g. rtk, caveman). |
+
+Example with `sandbox_init`:
+```toml
+default_agent = "claude"
+workflow_plugin = "agtx"
+skip_worktree = true
+
+sandbox_init = [
+    # Install rtk token-compression hook
+    "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh",
+    "export PATH=$HOME/.local/bin:$PATH && rtk init -g",
+]
+```
+
+`sandbox_init` commands run with `HOME=/home/bench` and have `PATH` including `/home/bench/.local/bin`.
+Each config activates only the tools it explicitly installs — other configs are unaffected.
 
 ---
 
@@ -200,9 +251,9 @@ uv run --project swebench \
 | `--instance-ids ID...` | — | Run specific instance IDs |
 | `--concurrency N` | 1 | Parallel tasks |
 | `--sandbox` | off | Run each task inside its SWE-bench Docker image (recommended) |
-| `--output-dir PATH` | `./swebench_output/{plugin}_{agent}_{ts}/` | Output directory |
+| `--output-dir PATH` | `./swebench_output/{config-name}_{ts}/` | Output directory |
 | `--workdir PATH` | `/tmp/swebench_repos` | Repo clone directory (non-sandbox only) |
-| `--agtx PATH` | `./target/release/agtx` | agtx binary — use `target/agtx-linux-x86_64` for sandbox mode |
+| `--agtx PATH` | `./target/release/agtx` | agtx binary — must be a Linux x86_64 binary for sandbox mode (use `../target/agtx-linux-x86_64`) |
 | `--phase-timeout SECS` | 1200 | Per-phase max seconds (20 min) |
 | `--model-name STRING` | `agtx-{plugin}-{agent}` | Label in predictions.jsonl |
 | `--split STRING` | `test` | HuggingFace dataset split |
@@ -213,7 +264,7 @@ uv run --project swebench \
 
 ### Output
 
-Results are written to `./swebench_output/{plugin}_{agent}_{timestamp}/`:
+Results are written to `./swebench_output/{config-name}_{timestamp}/`:
 
 **`predictions.jsonl`** — SWE-bench format, one line per task:
 ```json
@@ -245,6 +296,8 @@ cat swebench_output/*/results.json | \
 
 ### Cleanup
 
+#### Non-sandbox cleanup
+
 After an interrupted or completed run, stale state (worktrees, tmux sessions, SQLite DBs) can be
 cleaned up with the included script.
 
@@ -269,6 +322,25 @@ Repo clones under `/tmp/swebench_repos/` are preserved so the next run skips re-
 Override the repo clone directory with `SWEBENCH_WORKDIR`:
 ```bash
 SWEBENCH_WORKDIR=/my/custom/path ./swebench/cleanup.sh
+```
+
+#### Sandbox cleanup
+
+Containers are stopped and removed automatically when a run completes or fails. If the process
+is killed mid-run, containers may be left running:
+
+```bash
+# Stop and remove a specific container
+docker rm -f swebench-astropy-astropy-12907
+
+# Stop and remove all swebench containers
+docker ps -a --filter name=swebench- -q | xargs docker rm -f
+```
+
+The tools volume is persistent across runs. Remove it only if you want to repopulate it
+(e.g. after rebuilding the tools image):
+```bash
+docker volume rm agtx-swebench-tools
 ```
 
 ---

@@ -37,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -904,9 +905,63 @@ def tokscale_diff(before: dict, after: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Results store
-# ---------------------------------------------------------------------------
+def tokscale_from_container(container_id: str, agent: str) -> dict:
+    """
+    Read token/cost usage from a sandbox container by copying /home/bench/.claude
+    to a temp dir and running tokscale --home against it.
+    Returns the standard cost_data dict {cost_usd, cost_tokens}, or nulls on failure.
+    """
+    tokscale = _find_tokscale()
+    if not tokscale:
+        return {"cost_usd": None, "cost_tokens": None}
+
+    flag = _TOKSCALE_FLAG.get(agent)
+    if not flag:
+        return {"cost_usd": None, "cost_tokens": None}
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Copy /home/bench/.claude out of the container
+            result = subprocess.run(
+                ["docker", "cp", f"{container_id}:/home/bench/.claude", tmpdir],
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                return {"cost_usd": None, "cost_tokens": None}
+
+            # tokscale --home expects the home dir (parent of .claude)
+            result = subprocess.run(
+                [tokscale, "--home", tmpdir, "--json", flag],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return {"cost_usd": None, "cost_tokens": None}
+
+            data = json.loads(result.stdout)
+            entries = data.get("entries", [])
+
+            inp = out = cr = cw = reasoning = 0
+            cost = 0.0
+            for entry in entries:
+                inp       += entry.get("input", 0)
+                out       += entry.get("output", 0)
+                cr        += entry.get("cacheRead", 0)
+                cw        += entry.get("cacheWrite", 0)
+                reasoning += entry.get("reasoning", 0)
+                cost      += entry.get("cost", 0.0)
+
+            total = inp + out + cr + cw + reasoning
+            return {
+                "cost_usd":    round(cost, 6) if cost > 0 else None,
+                "cost_tokens": total if total > 0 else None,
+            }
+    except Exception:
+        return {"cost_usd": None, "cost_tokens": None}
+
+
+
 
 class ResultsStore:
     """Thread-safe, resumable persistence for benchmark results."""
@@ -1229,8 +1284,8 @@ class TaskRunner:
             planning_task = self._wait_for_worktree(task_id, timeout=180)
             worktree_path = planning_task.get("worktree_path", "")
 
-            # Snapshot tokscale before agent starts working
-            cost_before = _tokscale_snapshot(self.running_agent)
+            # Snapshot tokscale before agent starts working (non-sandbox only)
+            cost_before = _tokscale_snapshot(self.running_agent) if not self.container_id else None
 
             # Wait for planning phase artifact (.agtx/plan.md for agtx/agtx-terse plugins)
             planning_artifact = PLUGIN_PLANNING_ARTIFACTS.get(self.plugin)
@@ -1268,8 +1323,13 @@ class TaskRunner:
                     print(f"  [{self.instance_id}] Waiting for running phase (pane stability)...", file=sys.stderr)
                 self._wait_for_pane_stable(task_id, self.phase_timeout)
 
-            # Snapshot again and diff to get this task's usage
-            cost_data = tokscale_diff(cost_before, _tokscale_snapshot(self.running_agent))
+            # Collect token/cost usage:
+            # - sandbox: read directly from container's /home/bench/.claude via tokscale --home
+            # - non-sandbox: diff host tokscale snapshots taken before/after running phase
+            if self.container_id:
+                cost_data = tokscale_from_container(self.container_id, self.running_agent)
+            else:
+                cost_data = tokscale_diff(cost_before, _tokscale_snapshot(self.running_agent))
 
             if self.verbose:
                 print(f"  [{self.instance_id}] Running done, moving to Review...", file=sys.stderr)
@@ -1459,6 +1519,8 @@ class BenchmarkOrchestrator:
 
             if self.verbose:
                 print(f"[{instance_id}] Starting TUI inside container...", file=sys.stderr)
+                print(f"  [docker] To watch the agent:", file=sys.stderr)
+                print(f"    docker exec -it swebench-{slug} tmux -L agtx attach -t {slug}:1", file=sys.stderr)
             try:
                 start_tui_in_container(slug, container_id, verbose=self.verbose)
                 # start_tui_in_container already waits for TUI startup internally
@@ -1737,7 +1799,8 @@ other agtx project settings. Example:
 
     if args.output_dir is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path(f"./swebench_output/{plugin}_{agent}_{ts}").resolve()
+        config_stem = config_path.stem  # e.g. "claude-rtk-caveman-ponytail-agtx"
+        output_dir = Path(f"./swebench_output/{config_stem}_{ts}").resolve()
     else:
         output_dir = Path(args.output_dir).resolve()
 
