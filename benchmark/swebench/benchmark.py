@@ -1041,6 +1041,7 @@ PLUGIN_PLANNING_ARTIFACTS: dict[str, str | None] = {
     "spec-kit":         None,
     "bmad":             None,
     "openspec":         None,
+    "agent-skills":     None,
     "superpowers":      "docs/superpowers/plans/*.md",
     "oh-my-claudecode": None,
     "void":             None,
@@ -1055,6 +1056,7 @@ PLUGIN_RUNNING_ARTIFACTS: dict[str, str | None] = {
     "spec-kit":         None,
     "bmad":             "_bmad-output/implementation-artifacts/*.md",
     "openspec":         None,
+    "agent-skills":     None,
     "superpowers":      None,
     "oh-my-claudecode": None,
     "void":             None,
@@ -1069,6 +1071,7 @@ PLUGIN_REVIEW_ARTIFACTS: dict[str, str | None] = {
     "spec-kit":         None,
     "bmad":             None,
     "openspec":         None,
+    "agent-skills":     None,
     "superpowers":      None,
     "oh-my-claudecode": None,
     "void":             None,
@@ -1294,8 +1297,14 @@ class TaskRunner:
                         prompt_warned = True
                     stable_count = 0  # Reset — not actually done
                 elif stable_count >= 2:
-                    # Fallback: pane has been static for 20s and no Claude finish marker
-                    return
+                    # Pane stable but no Claude finish marker — something unexpected.
+                    # Warn and keep waiting; do NOT advance (requires human intervention).
+                    if not prompt_warned:
+                        slug = self.instance_id.replace("__", "-").replace("_", "-")
+                        print(f"\n[{self.instance_id}] ⚠ Pane stable but no finish marker detected — agent may be stuck.", file=sys.stderr)
+                        print(f"  Attach to inspect: docker exec -it swebench-{slug} tmux -L agtx attach -t testbed:1", file=sys.stderr)
+                        prompt_warned = True
+                    stable_count = 0  # Keep polling, don't advance
             else:
                 stable_count = 0
                 prompt_warned = False
