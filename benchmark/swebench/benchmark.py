@@ -1041,7 +1041,7 @@ PLUGIN_PLANNING_ARTIFACTS: dict[str, str | None] = {
     "spec-kit":         None,
     "bmad":             None,
     "openspec":         None,
-    "superpowers":      None,
+    "superpowers":      "docs/superpowers/plans/*.md",
     "oh-my-claudecode": None,
     "void":             None,
 }
@@ -1054,7 +1054,7 @@ PLUGIN_RUNNING_ARTIFACTS: dict[str, str | None] = {
     "gsd":              ".planning/phases/*/{phase}-SUMMARY.md",
     "spec-kit":         None,
     "bmad":             "_bmad-output/implementation-artifacts/*.md",
-    "openspec":         "openspec/changes/*/tasks.md",
+    "openspec":         None,
     "superpowers":      None,
     "oh-my-claudecode": None,
     "void":             None,
@@ -1229,24 +1229,76 @@ class TaskRunner:
             time.sleep(5)
         return False
 
+    # Patterns that indicate a shell command run by the agent is waiting for input,
+    # blocking Claude from finishing. Only used in the stability fallback path.
+    _INTERACTIVE_PROMPT_PATTERNS = [
+        r"\[y/N\]",
+        r"\[Y/n\]",
+        r"\[y/n\]",
+        r"\[Y/N\]",
+        r"Press Enter to continue",
+        r"Press any key",
+    ]
+
+    def _check_interactive_prompt(self, content: str) -> str | None:
+        """Return the matching line if pane content looks like an interactive prompt, else None."""
+        for line in content.splitlines()[-20:]:
+            for pattern in self._INTERACTIVE_PROMPT_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    return line.strip()
+        return None
+
+    # Claude always prints one of these lines when it finishes a response.
+    # Detecting this (plus the ❯ prompt) is more reliable than pure pane stability.
+    _CLAUDE_FINISHED_RE = re.compile(r"✻\s+[A-Z][a-z]+ for \d+s")
+
+    def _is_claude_idle(self, content: str) -> bool:
+        """Return True when Claude has finished its last response and shows the ❯ prompt."""
+        lines = content.splitlines()
+        has_finish_marker = any(self._CLAUDE_FINISHED_RE.search(l) for l in lines)
+        has_prompt = any(l.strip() == "❯" or l.strip().startswith("❯ ") for l in lines[-10:])
+        return has_finish_marker and has_prompt
+
     def _wait_for_pane_stable(self, task_id: str, timeout: int) -> None:
-        """Wait for pane content to be stable for 2 consecutive 30s checks (no artifact available)."""
+        """Wait until Claude has finished its last response (no artifact available).
+
+        Primary signal: Claude prints '✻ Cooked/Worked/Crunched for Xs' + ❯ prompt.
+        Fallback: pane content identical for 2 consecutive 10s checks.
+
+        If an interactive prompt is detected while stable, prints a warning so the user
+        can attach to the session and answer it.
+        """
         prev_content: str | None = None
         stable_count = 0
+        prompt_warned = False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            time.sleep(30)
+            time.sleep(5)
             try:
                 result = self.mcp.call("read_pane_content", task_id=task_id, lines=80)
                 content = result.get("content", "")
             except McpError:
                 content = ""
+            # Primary: Claude idle signal
+            if self._is_claude_idle(content):
+                return
+            # Interactive prompt check (even when not yet stable)
             if content == prev_content:
                 stable_count += 1
-                if stable_count >= 2:
+                prompt_line = self._check_interactive_prompt(content)
+                if prompt_line:
+                    if not prompt_warned:
+                        print(f"\n[{self.instance_id}] ⚠ Agent is waiting for input: \"{prompt_line}\"", file=sys.stderr)
+                        slug = self.instance_id.replace("__", "-").replace("_", "-")
+                        print(f"  Attach to answer: docker exec -it swebench-{slug} tmux -L agtx attach -t testbed:1", file=sys.stderr)
+                        prompt_warned = True
+                    stable_count = 0  # Reset — not actually done
+                elif stable_count >= 2:
+                    # Fallback: pane has been static for 20s and no Claude finish marker
                     return
             else:
                 stable_count = 0
+                prompt_warned = False
                 prev_content = content
 
     def run(self) -> dict:
@@ -1520,7 +1572,7 @@ class BenchmarkOrchestrator:
             if self.verbose:
                 print(f"[{instance_id}] Starting TUI inside container...", file=sys.stderr)
                 print(f"  [docker] To watch the agent:", file=sys.stderr)
-                print(f"    docker exec -it swebench-{slug} tmux -L agtx attach -t {slug}:1", file=sys.stderr)
+                print(f"    docker exec -it swebench-{slug} tmux -L agtx attach -t testbed:1", file=sys.stderr)
             try:
                 start_tui_in_container(slug, container_id, verbose=self.verbose)
                 # start_tui_in_container already waits for TUI startup internally
@@ -1795,7 +1847,7 @@ other agtx project settings. Example:
         print("Build with: cargo build --release", file=sys.stderr)
         sys.exit(1)
 
-    model_name = args.model_name or f"agtx-{plugin}-{agent}"
+    model_name = args.model_name or config_path.stem
 
     if args.output_dir is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1842,7 +1894,7 @@ other agtx project settings. Example:
 
     print(f"\nPredictions: {orchestrator.store.predictions_path}")
     print(f"Results:     {orchestrator.store.results_path}")
-    run_id = f"{plugin}-{agent}-{int(time.time())}"
+    run_id = f"{config_path.stem}-{int(time.time())}"
     print("\nTo evaluate:")
     print(f"  python -m swebench.harness.run_evaluation \\")
     print(f"    --dataset_name princeton-nlp/SWE-bench_Lite \\")

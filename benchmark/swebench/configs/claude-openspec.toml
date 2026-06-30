@@ -1,0 +1,16 @@
+default_agent = "claude"
+workflow_plugin = "openspec"
+worktree_dir = ".agtx/worktrees"
+skip_worktree = true
+
+sandbox_init = [
+    # Install openspec CLI
+    "npm install -g @fission-ai/openspec@latest 2>&1 || true",
+    # Initialize openspec in testbed with claude tools (non-interactive)
+    "cd /testbed && openspec init --tools claude 2>&1 || true",
+]
+
+[agents]
+planning = "claude"
+running  = "claude"
+review   = "claude"

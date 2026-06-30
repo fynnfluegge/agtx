@@ -6,15 +6,14 @@ copy_dirs = ["openspec"]
 
 [artifacts]
 planning = "openspec/changes/*/proposal.md"
-running = "openspec/changes/*/tasks.md"
 
 [commands]
 planning = "/opsx:propose {task}"
 running = "/opsx:apply"
-review = "/opsx:verify"
 
 [prompts]
 # propose takes {task} inline in the command — no separate prompt needed
+review = "Review the implementation: run the relevant tests, verify the fix is correct and complete, and confirm no regressions. Report results."
 
 [copy_back]
 planning = ["openspec"]

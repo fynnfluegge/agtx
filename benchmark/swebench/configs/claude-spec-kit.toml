@@ -1,0 +1,18 @@
+default_agent = "claude"
+workflow_plugin = "spec-kit"
+worktree_dir = ".agtx/worktrees"
+skip_worktree = true
+
+sandbox_init = [
+    # Install uv (needed for spec-kit)
+    "curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null",
+    # Install specify-cli
+    "/home/bench/.local/bin/uv tool install specify-cli --from git+https://github.com/github/spec-kit.git@v0.12.0 2>&1 || true",
+    # Initialize spec-kit in testbed with claude integration (deploys /speckit.* commands)
+    "cd /testbed && /home/bench/.local/bin/specify init . --here --force --integration claude 2>&1 || true",
+]
+
+[agents]
+planning = "claude"
+running  = "claude"
+review   = "claude"
