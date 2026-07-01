@@ -1297,12 +1297,13 @@ class TaskRunner:
                         prompt_warned = True
                     stable_count = 0  # Reset — not actually done
                 elif stable_count >= 2:
-                    # Pane stable but no Claude finish marker — something unexpected.
-                    # Warn and keep waiting; do NOT advance (requires human intervention).
+                    # Pane stable but no Claude finish marker — needs attention.
+                    # Possible causes: agent error, waiting for user approval (e.g. superpowers brainstorm),
+                    # or genuinely stuck. Warn once and keep polling; do NOT advance.
                     if not prompt_warned:
                         slug = self.instance_id.replace("__", "-").replace("_", "-")
-                        print(f"\n[{self.instance_id}] ⚠ Pane stable but no finish marker detected — agent may be stuck.", file=sys.stderr)
-                        print(f"  Attach to inspect: docker exec -it swebench-{slug} tmux -L agtx attach -t testbed:1", file=sys.stderr)
+                        print(f"\n[{self.instance_id}] ⚠ Pane stable but no finish marker — agent may be stuck, hit an error, or requires manual approval.", file=sys.stderr)
+                        print(f"  Attach to inspect or interact: docker exec -it swebench-{slug} tmux -L agtx attach -t testbed:1", file=sys.stderr)
                         prompt_warned = True
                     stable_count = 0  # Keep polling, don't advance
             else:
@@ -1905,12 +1906,12 @@ other agtx project settings. Example:
     print(f"Results:     {orchestrator.store.results_path}")
     run_id = f"{config_path.stem}-{int(time.time())}"
     print("\nTo evaluate:")
-    print(f"  python -m swebench.harness.run_evaluation \\")
+    print(f"  uv run python -m swebench.harness.run_evaluation \\")
     print(f"    --dataset_name princeton-nlp/SWE-bench_Lite \\")
     print(f"    --predictions_path {orchestrator.store.predictions_path} \\")
     print(f"    --run_id {run_id}")
     print("\nTo report (after evaluation):")
-    print(f"  python swebench/report.py \\")
+    print(f"  uv run python swebench/report.py \\")
     print(f"    --results {orchestrator.store.results_path} \\")
     print(f"    --logs logs/run_evaluation/{run_id}/")
 

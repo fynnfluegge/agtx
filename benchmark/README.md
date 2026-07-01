@@ -53,7 +53,7 @@ python swebench/benchmark.py \
 
 **Attach to a running container** to watch the agent:
 ```bash
-docker exec -it swebench-astropy-astropy-12907 tmux -L agtx attach -t testbed
+docker exec -it swebench-astropy-astropy-12907 tmux -L agtx attach -t testbed:1
 # Ctrl+b 0 → agtx board   Ctrl+b 1 → agent session   Ctrl+b d → detach
 ```
 
@@ -115,7 +115,8 @@ uv sync
 cd ..
 ```
 
-This creates a `.venv` inside `swebench/` and installs all dependencies.
+This creates a `.venv` inside `swebench/` and installs all dependencies (including `swebench`,
+so evaluation can run via `uv run` without a separate swebench install).
 Only needed once (or after updating `pyproject.toml`).
 
 **2. Create a config file** for your benchmark run.
@@ -156,7 +157,7 @@ running  = "claude"
 review   = "codex"
 ```
 
-Available plugins: `void`, `agtx`, `agtx-terse`, `gsd`, `spec-kit`, `bmad`, `openspec`, `superpowers`
+Available plugins: `void`, `agtx`, `agtx-terse`, `gsd`, `spec-kit`, `bmad`, `openspec`, `superpowers`, `agent-skills`
 
 Pre-built configs for common single-agent and multi-agent combinations are in [`swebench/configs/`](swebench/configs/).
 
@@ -188,6 +189,10 @@ Each config activates only the tools it explicitly installs — other configs ar
 ---
 
 ### Running
+
+> **Note:** The examples below use `--agtx ../target/release/agtx` (the host binary). For sandbox
+> mode (`--sandbox`), the Linux x86_64 binary is required — use `--agtx ../target/agtx-linux-x86_64`
+> instead (built via `bash swebench/build_linux_binary.sh`).
 
 **Single task:**
 ```bash
@@ -255,7 +260,7 @@ uv run --project swebench \
 | `--workdir PATH` | `/tmp/swebench_repos` | Repo clone directory (non-sandbox only) |
 | `--agtx PATH` | `./target/release/agtx` | agtx binary — must be a Linux x86_64 binary for sandbox mode (use `../target/agtx-linux-x86_64`) |
 | `--phase-timeout SECS` | 1200 | Per-phase max seconds (20 min) |
-| `--model-name STRING` | `agtx-{plugin}-{agent}` | Label in predictions.jsonl |
+| `--model-name STRING` | `{config-stem}` (e.g. `claude-agtx`) | Label in predictions.jsonl |
 | `--split STRING` | `test` | HuggingFace dataset split |
 | `--verbose` / `-v` | off | Print step-by-step progress to stderr (good for debugging) |
 | `--hard` | off | Strip fenced code blocks and stack traces from the problem statement, keeping prose and inline code. The agent must find and fix the bug from first principles. |
@@ -348,14 +353,13 @@ docker volume rm agtx-swebench-tools
 ### Evaluation
 
 After the run, the benchmark prints exact commands to copy-paste. Evaluate patches against the
-SWE-bench test harness (requires [SWE-bench](https://github.com/princeton-nlp/SWE-bench) installed
-and Docker running):
+SWE-bench test harness (requires Docker running):
 
 ```bash
-python -m swebench.harness.run_evaluation \
+uv run python -m swebench.harness.run_evaluation \
   --dataset_name princeton-nlp/SWE-bench_Lite \
-  --predictions_path swebench_output/agtx_claude_20260427_120000/predictions.jsonl \
-  --run_id agtx-claude-1746345600
+  --predictions_path swebench_output/claude-agtx_20260427_120000/predictions.jsonl \
+  --run_id claude-agtx-1746345600
 ```
 
 The harness runs tests in Docker containers — each task gets a fresh repo checkout
@@ -366,9 +370,9 @@ and the patch is applied and tested in isolation.
 After evaluation, print a summary table with resolved status, duration, cost, and token usage:
 
 ```bash
-python swebench/report.py \
-  --results swebench_output/agtx_claude_20260427_120000/results.json \
-  --logs logs/run_evaluation/agtx-claude-1746345600/
+uv run python swebench/report.py \
+  --results swebench_output/claude-agtx_20260427_120000/results.json \
+  --logs logs/run_evaluation/claude-agtx-1746345600/
 ```
 
 Example output:
@@ -411,5 +415,9 @@ Phase completion detection (per phase, in priority order):
 1. **Artifact file** — if the plugin defines an artifact for that phase (e.g. `.agtx/plan.md`,
    `.agtx/execute.md`, `.agtx/review.md` for the `agtx`/`agtx-terse` plugins), polls for its
    existence every 5 seconds
-2. **Pane stability** — fallback for plugins without artifacts (e.g. `void`): two
-   consecutive unchanged pane reads at 30-second intervals (≥60s stable)
+2. **Claude finish marker** — detects `✻ [Word] for Xs` followed by a `❯` prompt in the pane;
+   confirmed within 5 seconds of the marker appearing
+3. **Pane stability** — fallback for plugins without artifacts when no finish marker is seen: pane
+   content identical for 2 consecutive 5-second checks (10s stable). If stability is reached
+   without a finish marker, a warning is emitted — the agent may be stuck, errored, or waiting
+   for manual approval
