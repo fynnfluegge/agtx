@@ -41,7 +41,7 @@ All runs use Claude Sonnet as the agent, sandbox mode (`--sandbox`).
 
 | Instance | Date | Duration | Tokens | Cost | Result | Notes |
 |----------|------|----------|--------|------|--------|-------|
-| `astropy__astropy-12907` | 2026-06-30 | 15m 46s | 5,400K | $2.64 | ✅ | Correct fix + test case added; resolved in 1/2 runs (nondeterministic test key name) |
+| `astropy__astropy-12907` | 2026-06-30 | 15m 46s | 5,400K | $2.64 | ✅ | Correct fix + test case added; |
 
 ## `claude-spec-kit`
 
