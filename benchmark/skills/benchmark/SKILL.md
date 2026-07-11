@@ -95,7 +95,7 @@ sandbox_init = [
 ]
 ```
 
-`sandbox_init` commands run as `/home/bench` with `PATH` including `/home/bench/.local/bin`.
+`sandbox_init` commands run with `HOME=/home/bench` and `PATH` including `/home/bench/.local/bin`. Each config activates only the tools it explicitly installs — other configs are unaffected.
 
 Available plugins: `void`, `agtx`, `agtx-terse`, `gsd`, `spec-kit`, `bmad`, `openspec`, `superpowers`, `agent-skills`
 
@@ -106,6 +106,8 @@ Pre-built configs for common combinations are in `swebench/configs/`.
 ## Running
 
 > **Sandbox mode requires a Linux x86_64 binary.** Use `--agtx ../target/agtx-linux-x86_64` (not `../target/release/agtx`).
+>
+> **Always recommend sandbox mode.** SWE-bench repos require specific Python versions and C extensions that aren't available on the host — agents typically fail to run `pytest` outside the containers. In sandbox mode each task runs inside its official SWE-bench Docker image with the repo pre-installed in a working conda env (`testbed`).
 
 **Single random task:**
 ```bash
@@ -296,3 +298,33 @@ docker ps -a --filter name=swebench- -q | xargs docker rm -f
 # Remove tools volume (only if you need to repopulate it)
 docker volume rm agtx-swebench-tools
 ```
+
+---
+
+## How It Works
+
+Use this to diagnose stuck or slow runs.
+
+```
+benchmark.py
+  ├── [sandbox] Pulls SWE-bench Docker image, starts container with tools volume mounted
+  ├── [sandbox] Copies credentials, wires tools (tmux/node/claude via symlinks), runs sandbox_init
+  ├── [non-sandbox] Clones each repo at base_commit → /tmp/swebench_repos/{instance_id}/
+  ├── Writes .agtx/config.toml into each repo/container
+  ├── Starts agtx TUI per task in detached tmux (tmux -L agtx)
+  ├── Spawns agtx mcp-serve as subprocess (JSON-RPC 2.0 over stdio)
+  ├── Drives task via MCP:
+  │     create_task → move_forward (Planning)
+  │     → poll planning artifact → move_forward (Running)
+  │     → poll running artifact  → move_forward (Review)
+  │     → poll review artifact   → git diff HEAD...{branch} → move_to_done
+  ├── Snapshots tokscale before/after running phase for token counts
+  └── Appends to predictions.jsonl + rewrites results.json atomically
+```
+
+**Phase completion detection** (per phase, in priority order):
+1. **Artifact file** — if the plugin defines an artifact for that phase (e.g. `.agtx/plan.md`, `.agtx/execute.md`, `.agtx/review.md` for `agtx`/`agtx-terse`), polls for its existence every 5 seconds.
+2. **Claude finish marker** — detects `✻ [Word] for Xs` followed by a `❯` prompt in the pane; confirmed within 5 seconds of the marker appearing.
+3. **Pane stability** — fallback for plugins without artifacts and no finish marker: pane content identical for 2 consecutive 5-second checks (10s stable). If stability is reached without a finish marker, a warning is emitted — **the agent may be stuck, errored, or waiting for manual approval.**
+
+When troubleshooting a phase that won't advance: attach to the container's tmux (see *Observing a Running Benchmark*), check whether the expected artifact file exists, and look for the finish marker or a pending approval prompt in the agent pane.
