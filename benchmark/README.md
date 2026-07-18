@@ -299,6 +299,111 @@ cat swebench_output/*/results.json | \
 
 ---
 
+### Capturing the agent's session transcript
+
+The `predictions.jsonl` / `results.json` only capture the **git diff and metrics** — not what the
+agent actually said or did. To inspect the full turn-by-turn conversation (tool calls, reasoning,
+and — importantly — whether an injected skill/plugin actually influenced behavior), read the Claude
+Code **session transcript**.
+
+**Where Claude Code writes transcripts.** For every session, Claude Code appends a JSONL file:
+
+```
+~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
+```
+
+`<encoded-cwd>` is the working directory with every `/` and `.` replaced by `-`. Each line is one
+event (`type` = `user` / `assistant` / …) carrying the full message content, tool uses, and a `cwd`
+field. On the host you can find your own sessions there; the same layout exists **inside the
+container** for the agent Claude Code runs.
+
+**In sandbox mode the transcript lives inside the container and is destroyed when the container
+stops.** The agent runs as user `bench` with `HOME=/home/bench`, working in `/testbed` (when
+`skip_worktree = true`) or in its worktree under `/testbed/.agtx/worktrees/…`. So the transcript is at:
+
+```
+# skip_worktree = true  (agent works in /testbed)
+/home/bench/.claude/projects/-testbed/<session-id>.jsonl
+```
+
+Containers are removed automatically at the end of each task, so you **must copy the transcript out
+while the container is still alive**. A single `docker cp` "before the run finishes" is unreliable —
+the container often stops before you catch it. Instead, run a **polling loop that re-copies every few
+seconds** in a separate shell (start it right after launching the benchmark):
+
+```bash
+C=swebench-astropy-astropy-12907
+DEST=/tmp/transcript_capture
+
+# Poll while the container is alive, re-copying the projects tree each pass.
+for i in $(seq 1 180); do
+  docker ps --filter name=$C -q | grep -q . || { echo "container gone"; break; }
+  docker cp $C:/home/bench/.claude/projects "$DEST" 2>/dev/null
+  sleep 5
+done
+
+# List what landed
+find "$DEST" -name '*.jsonl'
+```
+
+> **`skip_worktree = true` → one session per phase.** Each agtx phase (Planning / Running / Review)
+> is a **separate** Claude Code session, so you get one `<session-id>.jsonl` per phase, not one file
+> for the whole task. `void` runs as a single session.
+
+#### Analysing the transcript (do NOT use a naive grep)
+
+⚠️ **A raw `grep` across the JSONL gives false positives.** SessionStart-hook plugins (focus,
+ponytail, caveman) inject their entire `SKILL.md` into the transcript as an `attachment` event — and
+that injected text *documents* the very tags you're grepping for. So
+`grep -c 'context-commit' *.jsonl` counts the **injected instructions**, not what the model actually
+emitted. In one run a raw grep reported 34 CSP-tag hits while the model emitted **zero** — all 34
+were inside the injected skill.
+
+To measure real behavior you must parse the JSONL, keep only `type == "assistant"` events, and count
+tags in their `text` content blocks:
+
+```bash
+python3 - "$DEST"/**/-testbed/*.jsonl << 'PY'
+import json, sys
+TAGS = ["context-commit","context-scope","context-checkpoint","context-transient","context-revoke"]
+for path in sys.argv[1:]:
+    injected = emitted = turns = 0
+    counts = {}
+    for line in open(path):
+        try: d = json.loads(line)
+        except Exception: continue
+        raw = json.dumps(d)
+        # SessionStart-injected SKILL.md lands as an attachment — exclude it
+        if d.get("type") == "attachment" and "Always-on context discipline" in raw:
+            injected += 1
+        if d.get("type") != "assistant":
+            continue
+        turns += 1
+        content = d.get("message", {}).get("content", [])
+        text = "".join(c.get("text","") for c in content
+                        if isinstance(c, dict) and c.get("type") == "text") \
+               if isinstance(content, list) else (content if isinstance(content, str) else "")
+        for t in TAGS:
+            n = text.count("<" + t)
+            if n: counts[t] = counts.get(t, 0) + n
+    print(f"{path}")
+    print(f"  SKILL.md injected (attachment): {injected}")
+    print(f"  assistant turns: {turns}")
+    print(f"  tags EMITTED BY MODEL: {counts or 'NONE'}")
+PY
+```
+
+> **Note:** the CSP tags are HTML-style (`<context-commit>`) so the Claude Code TUI **hides them in
+> the rendered pane** — `tmux capture-pane` will never show them. You must read the JSONL to see
+> whether the model actually emitted them.
+
+> **`void` quirk:** with the `void` plugin the phase prompt is *pasted* into the input box but not
+> always submitted (no artifact/finish-marker to drive it), which shows as "Pane stable but no finish
+> marker". If a run stalls there, submit it manually:
+> `docker exec $C tmux -L agtx send-keys -t testbed:1 Enter`.
+
+---
+
 ### Cleanup
 
 #### Non-sandbox cleanup

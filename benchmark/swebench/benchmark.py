@@ -1714,9 +1714,9 @@ class BenchmarkOrchestrator:
 # Dataset loader
 # ---------------------------------------------------------------------------
 
-def load_swebench(split: str = "test") -> list[dict]:
-    print(f"Loading SWE-bench Lite ({split} split)...")
-    dataset = load_dataset("princeton-nlp/SWE-bench_Lite", split=split)
+def load_swebench(split: str = "test", dataset_name: str = "princeton-nlp/SWE-bench_Lite") -> list[dict]:
+    print(f"Loading {dataset_name} ({split} split)...")
+    dataset = load_dataset(dataset_name, split=split)
     return list(dataset)
 
 
@@ -1799,6 +1799,13 @@ other agtx project settings. Example:
         help="HuggingFace dataset split (default: test)",
     )
     parser.add_argument(
+        "--dataset",
+        default="princeton-nlp/SWE-bench_Lite",
+        dest="dataset",
+        help="HuggingFace dataset name (default: princeton-nlp/SWE-bench_Lite). "
+             "Use princeton-nlp/SWE-bench_Verified for multi-file/long-exploration tasks.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Print step-by-step progress to stderr",
@@ -1871,7 +1878,7 @@ other agtx project settings. Example:
     if args.smoke_test and args.instance_ids is None and args.instances is None:
         instances = [{"instance_id": "smoke-test", "repo": "", "base_commit": "HEAD", "problem_statement": ""}]
     else:
-        instances = load_swebench(args.split)
+        instances = load_swebench(args.split, args.dataset)
         if args.instance_ids:
             id_set = set(args.instance_ids)
             instances = [i for i in instances if i["instance_id"] in id_set]
@@ -1907,7 +1914,7 @@ other agtx project settings. Example:
     run_id = f"{config_path.stem}-{int(time.time())}"
     print("\nTo evaluate:")
     print(f"  uv run python -m swebench.harness.run_evaluation \\")
-    print(f"    --dataset_name princeton-nlp/SWE-bench_Lite \\")
+    print(f"    --dataset_name {args.dataset} \\")
     print(f"    --predictions_path {orchestrator.store.predictions_path} \\")
     print(f"    --run_id {run_id}")
     print("\nTo report (after evaluation):")

@@ -233,6 +233,62 @@ cat swebench_output/*/results.json | \
 
 ---
 
+## Capturing the Agent Session Transcript
+
+`predictions.jsonl` / `results.json` capture only the git diff and metrics — NOT what the agent said or did. To verify *behavior* (e.g. whether an injected skill/plugin actually changed the agent's output), read the Claude Code session transcript.
+
+**Where Claude Code writes it:** `~/.claude/projects/{encoded-cwd}/{session-id}.jsonl`, where `{encoded-cwd}` is the working directory with every `/` and `.` replaced by `-`. Each line is one event (`type` = `user`/`assistant`/…) with full message content, tool uses, and a `cwd` field.
+
+**In sandbox mode the transcript lives inside the container** (agent runs as `bench`, `HOME=/home/bench`, cwd `/testbed` when `skip_worktree = true`) and is **destroyed when the container stops**:
+```
+/home/bench/.claude/projects/-testbed/{session-id}.jsonl
+```
+
+Containers are removed at task end, and a single `docker cp` "before the run finishes" is unreliable — the container often stops first. Run a **polling loop that re-copies every few seconds** while the container is alive (start it right after launching the benchmark):
+```bash
+C=swebench-astropy-astropy-12907
+DEST=/tmp/transcript_capture
+for i in $(seq 1 180); do
+  docker ps --filter name=$C -q | grep -q . || { echo "container gone"; break; }
+  docker cp $C:/home/bench/.claude/projects "$DEST" 2>/dev/null
+  sleep 5
+done
+find "$DEST" -name '*.jsonl'
+```
+
+With `skip_worktree = true`, each agtx phase (Planning / Running / Review) is a **separate** Claude Code session → one `.jsonl` per phase. `void` runs as a single session.
+
+**Analysing the transcript — do NOT use a naive grep.** SessionStart-hook plugins (focus, ponytail, caveman) inject their whole `SKILL.md` into the transcript as an `attachment` event, and that injected text *documents* the very tags you'd grep for. So `grep -c 'context-commit' *.jsonl` counts the **injected instructions**, not model output. In one run a raw grep reported 34 CSP-tag hits while the model emitted **zero** — all 34 were inside the injected skill. Parse the JSONL, keep only `type == "assistant"` events, exclude the injected `attachment`, and count tags in the `text` blocks:
+```bash
+python3 - "$DEST"/**/-testbed/*.jsonl << 'PY'
+import json, sys
+TAGS = ["context-commit","context-scope","context-checkpoint","context-transient","context-revoke"]
+for path in sys.argv[1:]:
+    injected = turns = 0; counts = {}
+    for line in open(path):
+        try: d = json.loads(line)
+        except Exception: continue
+        if d.get("type") == "attachment" and "Always-on context discipline" in json.dumps(d):
+            injected += 1
+        if d.get("type") != "assistant": continue
+        turns += 1
+        content = d.get("message", {}).get("content", [])
+        text = "".join(c.get("text","") for c in content
+                        if isinstance(c, dict) and c.get("type") == "text") \
+               if isinstance(content, list) else (content if isinstance(content, str) else "")
+        for t in TAGS:
+            n = text.count("<" + t)
+            if n: counts[t] = counts.get(t, 0) + n
+    print(f"{path}\n  injected SKILL.md: {injected}  assistant turns: {turns}  tags EMITTED BY MODEL: {counts or 'NONE'}")
+PY
+```
+
+**Gotchas:**
+- CSP tags are HTML-style (`<context-commit>`) → the Claude Code TUI **hides them in the rendered pane**; `tmux capture-pane` never shows them. Read the JSONL.
+- **`void` quirk:** the phase prompt is *pasted* but not always submitted (no artifact/finish-marker), showing as "Pane stable but no finish marker". Submit manually: `docker exec $C tmux -L agtx send-keys -t testbed:1 Enter`.
+
+---
+
 ## Evaluation
 
 After the run, copy-paste the printed commands or run manually:
