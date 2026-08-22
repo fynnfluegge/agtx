@@ -3951,6 +3951,88 @@ fn test_write_skills_to_worktree_grok_skills() {
 }
 
 #[test]
+fn test_write_skills_to_worktree_mcp_antigravity() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"]);
+
+    let cfg = dir.path().join(".agents/mcp_config.json");
+    assert!(
+        cfg.exists(),
+        ".agents/mcp_config.json should be written for antigravity"
+    );
+    let content = std::fs::read_to_string(&cfg).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+    assert_eq!(v["mcpServers"]["agtx"]["args"][0], "mcp-serve");
+}
+
+#[test]
+fn test_write_skills_to_worktree_mcp_antigravity_preserves_existing_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let agents_dir = dir.path().join(".agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("mcp_config.json"),
+        r#"{"mcpServers":{"other":{"command":"other"}},"somethingElse":true}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"]);
+
+    let content = std::fs::read_to_string(agents_dir.join("mcp_config.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        v["mcpServers"]["other"]["command"], "other",
+        "a project's own .agents/mcp_config.json must not be clobbered: {content}"
+    );
+    assert_eq!(
+        v["somethingElse"], true,
+        "top-level sibling keys must survive: {content}"
+    );
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+}
+
+#[test]
+fn test_write_skills_to_worktree_mcp_antigravity_replaces_malformed_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let agents_dir = dir.path().join(".agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(agents_dir.join("mcp_config.json"), "not json at all").unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"]);
+
+    let content = std::fs::read_to_string(agents_dir.join("mcp_config.json")).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&content).expect("a malformed file must be replaced with valid JSON");
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+}
+
+#[test]
+fn test_write_skills_to_worktree_antigravity_skills() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"]);
+
+    let skill = dir.path().join(".agents/skills/agtx-plan/SKILL.md");
+    assert!(
+        skill.exists(),
+        "antigravity skills go to .agents/skills/<name>/SKILL.md"
+    );
+    let content = std::fs::read_to_string(&skill).unwrap();
+    assert!(
+        content.starts_with("---"),
+        "frontmatter must be kept for antigravity"
+    );
+    // Canonical copy is always written too
+    assert!(dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists());
+}
+
+#[test]
 fn test_write_skills_to_worktree_mcp_codex() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();

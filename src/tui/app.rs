@@ -2686,6 +2686,7 @@ impl App {
                 "opencode" => Style::default().fg(Color::White).bg(Color::Rgb(80, 80, 80)), // white on grey
                 "codex" => Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 20)), // white on black
                 "grok" => Style::default().fg(Color::Rgb(20, 20, 20)).bg(Color::White), // black on white
+                "antigravity" => Style::default().fg(Color::Rgb(120, 190, 255)), // light blue
                 _ => Style::default().fg(Color::White),
             };
             let agent_label = Paragraph::new(format!(" {} ", task.agent))
@@ -8715,12 +8716,16 @@ fn send_skill_and_prompt(
         return;
     }
 
-    // Gemini, Codex & cursor: always combine skill+prompt into a single message.
+    // Gemini, Codex, cursor & antigravity: always combine skill+prompt into a
+    // single message.
     // Gemini: sending separately causes it to execute the skill and queue the
     //   prompt, which gets lost or arrives too late.
     // Codex: skill mentions ($skill-name) are inline references that must be
     //   part of a message — sending just "$skill" standalone does nothing.
-    if matches!(agent_name, "gemini" | "codex" | "cursor") {
+    // Antigravity: descends from the Gemini CLI lineage (settings live under
+    //   ~/.gemini/), so it is treated as Ink-class and gets the same
+    //   wait-for-echo send. Not yet confirmed against a live session.
+    if matches!(agent_name, "gemini" | "codex" | "cursor" | "antigravity") {
         let text_to_send = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
                 Some(format!("{}\n\n{}", cmd, prompt))
@@ -9113,7 +9118,8 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 /// Note: on systems where agents are installed via asdf/nvm, all agents run as `node`
 /// and Check 1 never fires — AGENT_ACTIVE_INDICATORS is the only reliable signal there.
 const AGENT_COMMANDS: &[&str] = &[
-    "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "python3", "python",
+    "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy", "python3",
+    "python",
 ];
 
 /// Strings in pane content that indicate an agent TUI is active and ready.
@@ -9130,6 +9136,10 @@ const AGENT_ACTIVE_INDICATORS: &[&str] = &[
     "OpenAI Codex",      // Codex
     "Grok Build",        // Grok — splash/footer
     "Shift+Tab:mode",    // Grok — session footer once a turn has run
+    // Antigravity — product name in the splash/footer. UNVERIFIED against a live
+    // `agy` session; confirm the literal (and whether it is needed at all, if the
+    // pane reports `agy` as its command) before relying on it.
+    "Antigravity",
 ];
 
 /// Check if the pane is running a shell (i.e. the agent has exited).
@@ -9718,6 +9728,31 @@ fn write_skills_to_worktree(
                     let _ = std::fs::write(&path, merged);
                 }
             }
+            "antigravity" => {
+                // Antigravity reads workspace MCP servers from .agents/mcp_config.json
+                // (JSON, `mcpServers`). `.agents/` is vendor-neutral and may already be
+                // tracked in the repo, so merge the agtx entry into any existing file
+                // instead of clobbering the project's own servers.
+                let dir = Path::new(worktree_path).join(".agents");
+                let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join("mcp_config.json");
+                let mut root = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .filter(|v| v.is_object())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if !root["mcpServers"].is_object() {
+                    root["mcpServers"] = serde_json::json!({});
+                }
+                root["mcpServers"]["agtx"] = serde_json::json!({
+                    "command": &agtx_bin,
+                    "args": ["mcp-serve", &project_path_str]
+                });
+                let _ = std::fs::write(
+                    &path,
+                    serde_json::to_string_pretty(&root).unwrap_or_default(),
+                );
+            }
             "opencode" => {
                 let cfg = serde_json::json!({
                     "mcp": {
@@ -9760,8 +9795,8 @@ fn write_skills_to_worktree(
                         let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
                         let _ = std::fs::write(native_dir.join(&filename), toml_content);
                     }
-                    "codex" | "cursor" | "grok" => {
-                        // Codex/Cursor/Grok use SKILL.md in skill-name/ subdirectories
+                    "codex" | "cursor" | "grok" | "antigravity" => {
+                        // Codex/Cursor/Grok/Antigravity use SKILL.md in skill-name/ subdirectories
                         let skill_subdir = native_dir.join(skill_dir_name);
                         let _ = std::fs::create_dir_all(&skill_subdir);
                         let _ = std::fs::write(skill_subdir.join("SKILL.md"), &content);
@@ -9815,7 +9850,7 @@ fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, agent_name: 
                 let filename = skills::skill_dir_to_filename(skill_name, agent_name);
                 let _ = std::fs::write(native_dir.join(&filename), toml_content);
             }
-            "codex" | "cursor" | "grok" => {
+            "codex" | "cursor" | "grok" | "antigravity" => {
                 let skill_subdir = native_dir.join(skill_name);
                 let _ = std::fs::create_dir_all(&skill_subdir);
                 let _ = std::fs::write(skill_subdir.join("SKILL.md"), content);

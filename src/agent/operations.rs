@@ -62,6 +62,7 @@ impl AgentOperations for CodingAgent {
             "gemini" => ("gemini", vec!["-p", prompt]),
             "cursor" => ("agent", vec!["--print", "--yolo", prompt]),
             "grok" => ("grok", vec!["-p", prompt]),
+            "antigravity" => ("agy", vec!["-p", prompt]),
             _ => (self.agent.command.as_str(), vec![prompt]),
         };
 
