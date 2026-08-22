@@ -4013,17 +4013,13 @@ fn test_write_skills_to_worktree_pi_rewrites_mcp_tool_names() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_is_pane_at_shell_matches_pi_exactly() {
-    // `pi` is matched by equality, not substring, so pip/pipx/pipenv panes are
-    // still reported as "at shell" rather than as a live agent.
+fn test_is_pane_at_shell_detects_pi() {
+    // On Linux pi's `process.title = "pi"` makes tmux report `pi`.
     for (cmd, expect_at_shell) in [
         ("pi", false),
-        ("pip", true),
-        ("pipx", true),
-        ("pipenv", true),
         ("zsh", true),
-        // npm-installed pi runs as node, which is deliberately not an agent
-        // command — AGENT_ACTIVE_INDICATORS covers that case instead.
+        // On macOS the same pi process reports `node`, which is deliberately not
+        // an agent command — AGENT_ACTIVE_INDICATORS covers that case instead.
         ("node", true),
     ] {
         let mut mock_tmux = MockTmuxOperations::new();

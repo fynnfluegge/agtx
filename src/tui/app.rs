@@ -9116,16 +9116,20 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 /// can fire for them rather than Check 1 firing too early.
 /// Note: on systems where agents are installed via asdf/nvm, all agents run as `node`
 /// and Check 1 never fires — AGENT_ACTIVE_INDICATORS is the only reliable signal there.
+/// Matching is by substring, which is deliberately loose — `agent` matches any
+/// command containing it, and `pi` also matches `pip`/`pipx`/`pipenv`. The cost of
+/// a false positive is bounded: a pane is only mistaken for a live agent if someone
+/// manually runs such a command in it *after* the agent exited, and the affected
+/// wait loops fall back to Ctrl+C on timeout. Nothing agtx itself starts runs in the
+/// pane (init_script uses `run_worktree_script`, agents spawn tools as piped children).
+///
+/// `pi` only matches on Linux — macOS reports its Node entrypoint (`node`) instead,
+/// where `AGENT_ACTIVE_INDICATORS` covers it. Check a new agent's name with
+/// `tmux display -p '#{pane_current_command}'`, not `ps`; for pi the two disagree.
+/// See docs/planning/pi-agent-support.md for why.
 const AGENT_COMMANDS: &[&str] = &[
-    "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "python3", "python",
+    "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "pi", "python3", "python",
 ];
-
-/// Agent binary names matched against `pane_current_command` by exact equality
-/// rather than substring. `pi` is only two characters, so a `contains` test would
-/// also match `pip`, `pipx` and `pipenv` and report unrelated panes as live agents.
-/// Only pi's `install.sh` build reports this name; the npm package runs as `node`
-/// and is detected via `AGENT_ACTIVE_INDICATORS` instead.
-const AGENT_COMMANDS_EXACT: &[&str] = &["pi"];
 
 /// Strings in pane content that indicate an agent TUI is active and ready.
 /// Used by `is_agent_active` to detect agents like Gemini, Cursor and Grok that
@@ -9152,9 +9156,7 @@ const AGENT_ACTIVE_INDICATORS: &[&str] = &[
 /// rather than an agent process.
 fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
     if let Some(cmd) = tmux_ops.pane_current_command(target) {
-        let is_agent = AGENT_COMMANDS.iter().any(|a| cmd.contains(a))
-            || AGENT_COMMANDS_EXACT.iter().any(|a| cmd.trim() == *a);
-        !is_agent
+        !AGENT_COMMANDS.iter().any(|a| cmd.contains(a))
     } else {
         false
     }

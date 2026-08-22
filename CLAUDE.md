@@ -553,7 +553,7 @@ Adding grok touched every one of these — use `git log -p` for that change as a
 7. Add a `scan_agent_skills()` branch so the agent's existing skills show up in the `/` skill picker
 
 **`src/tui/app.rs`**
-8. Add the binary to `AGENT_COMMANDS` (pane process detection). `AGENT_COMMANDS` is matched by substring, so a short name that is a prefix of unrelated binaries (pi/pip/pipx) belongs in `AGENT_COMMANDS_EXACT` instead
+8. Add the binary to `AGENT_COMMANDS` (pane process detection) — only if the pane actually reports that name; check with `tmux display -p '#{pane_current_command}'`, not `ps`, since the two can disagree. Node agents usually report `node` and must rely on `AGENT_ACTIVE_INDICATORS` instead, unless they set `process.title` (which tmux picks up on Linux but not macOS). Matching is by substring and deliberately loose — false positives only matter if someone manually runs a colliding command in a pane after the agent exited
 9. Add an activity indicator to `AGENT_ACTIVE_INDICATORS` if the agent is an Ink/Node TUI (runs inside bash)
 10. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
 11. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok" | "pi"` for SKILL.md subdirectories)
