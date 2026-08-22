@@ -1,0 +1,9 @@
+default_agent = "grok"
+workflow_plugin = "agtx"
+worktree_dir = ".agtx/worktrees"
+skip_worktree = true
+
+[agents]
+planning = "grok"
+running  = "grok"
+review   = "grok"

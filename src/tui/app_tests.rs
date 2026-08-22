@@ -3900,6 +3900,57 @@ fn test_write_skills_to_worktree_mcp_cursor() {
 }
 
 #[test]
+fn test_write_skills_to_worktree_mcp_grok() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"]);
+
+    let cfg = dir.path().join(".grok/config.toml");
+    assert!(cfg.exists(), ".grok/config.toml should be written for grok");
+    let content = std::fs::read_to_string(&cfg).unwrap();
+    assert!(content.contains("[mcp_servers.agtx]"));
+    assert!(content.contains("mcp-serve"));
+}
+
+#[test]
+fn test_write_skills_to_worktree_mcp_grok_preserves_existing_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let grok_dir = dir.path().join(".grok");
+    std::fs::create_dir_all(&grok_dir).unwrap();
+    std::fs::write(
+        grok_dir.join("config.toml"),
+        "[mcp_servers.other]\ncommand = \"other\"\n",
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"]);
+
+    let content = std::fs::read_to_string(grok_dir.join("config.toml")).unwrap();
+    assert!(
+        content.contains("[mcp_servers.other]"),
+        "a project's own .grok/config.toml must not be clobbered: {content}"
+    );
+    assert!(content.contains("[mcp_servers.agtx]"));
+}
+
+#[test]
+fn test_write_skills_to_worktree_grok_skills() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"]);
+
+    let skill = dir.path().join(".grok/skills/agtx-plan/SKILL.md");
+    assert!(skill.exists(), "grok skills go to .grok/skills/<name>/SKILL.md");
+    let content = std::fs::read_to_string(&skill).unwrap();
+    assert!(content.starts_with("---"), "frontmatter must be kept for grok");
+    // Canonical copy is always written too
+    assert!(dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists());
+}
+
+#[test]
 fn test_write_skills_to_worktree_mcp_codex() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();

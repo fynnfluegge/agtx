@@ -35,6 +35,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -592,7 +593,7 @@ def setup_container(
     extra_dirs: list[tuple[Path, str]] | None = None,
     sandbox_init: list[str] | None = None,
 ) -> None:
-    """Write agtx config into the container and install tmux + Node + Claude Code.
+    """Write agtx config into the container and install tmux + Node + Claude Code + Grok.
 
     If tools_container_id is provided, binaries are copied from the shared tools
     container instead of being installed from the network (~3-5 min saved).
@@ -643,6 +644,23 @@ def setup_container(
             ["docker", "cp", str(claude_json), f"{container_id}:/home/bench/.claude.json"],
             check=True, capture_output=not verbose,
         )
+
+    # Copy Grok credentials as snapshots so `grok` can authenticate inside the
+    # container without a browser login. Only the small auth/config files are copied —
+    # ~/.grok/sessions/ and friends are skipped. No-op unless the host has ~/.grok.
+    grok_home = home / ".grok"
+    if grok_home.exists():
+        subprocess.run(
+            ["docker", "exec", container_id, "/bin/bash", "-c", "mkdir -p /home/bench/.grok"],
+            check=True, capture_output=not verbose,
+        )
+        for name in ("auth.json", "config.toml"):
+            item = grok_home / name
+            if item.exists():
+                subprocess.run(
+                    ["docker", "cp", str(item), f"{container_id}:/home/bench/.grok/{name}"],
+                    check=True, capture_output=not verbose,
+                )
 
     # Copy extra directories into the container (e.g. third-party plugin skill dirs).
     for src, dst in (extra_dirs or []):
@@ -736,6 +754,9 @@ def setup_container(
              " && ln -sf /tools/node_modules/@anthropic-ai /usr/lib/node_modules/@anthropic-ai"
              " && ln -sf /tools/node_modules/npm /usr/lib/node_modules/npm"
              " && test -f /tools/node_modules/.bin/caveman && ln -sf /tools/node_modules/.bin/caveman /usr/bin/caveman || true"
+             " && test -e /tools/node_modules/@xai-official/grok/bin/grok"
+             " && ln -sf /tools/node_modules/@xai-official/grok/bin/grok /usr/bin/grok"
+             " && ln -sf /tools/node_modules/@xai-official /usr/lib/node_modules/@xai-official || true"
              " && mkdir -p /usr/lib/x86_64-linux-gnu"
              " && ln -sf /tools/lib/x86_64-linux-gnu/libutempter.so.0 /usr/lib/x86_64-linux-gnu/libutempter.so.0"
              " && ln -sf /tools/lib/x86_64-linux-gnu/libutempter.so.1.2.1 /usr/lib/x86_64-linux-gnu/libutempter.so.1.2.1"
@@ -744,14 +765,14 @@ def setup_container(
         )
     else:
         if verbose:
-            print(f"  [docker] Installing tmux, Node.js 22, Claude Code...", file=sys.stderr)
+            print(f"  [docker] Installing tmux, Node.js 22, Claude Code, Grok...", file=sys.stderr)
         subprocess.run(
             ["docker", "exec", container_id,
              "/bin/bash", "-c",
              "apt-get update -qq && apt-get install -y -qq tmux curl ca-certificates "
              "&& curl -fsSL https://deb.nodesource.com/setup_22.x | bash - "
              "&& apt-get install -y -qq nodejs "
-             "&& npm install -g @anthropic-ai/claude-code"],
+             "&& npm install -g @anthropic-ai/claude-code @xai-official/grok"],
             check=True,
             capture_output=not verbose,
         )
@@ -786,6 +807,13 @@ def start_tui_in_container(slug: str, container_id: str, verbose: bool = False) 
         f"CONDA_PREFIX=/opt/miniconda3/envs/testbed "
         f"PATH={testbed_bin}:/opt/miniconda3/bin:/home/bench/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     )
+    # Pass through API keys that agents read from the environment (only when set
+    # on the host). Grok uses XAI_API_KEY when ~/.grok/auth.json is absent.
+    passthrough_env = {
+        k: v for k in ("XAI_API_KEY",) if (v := os.environ.get(k))
+    }
+    for key, val in passthrough_env.items():
+        env_prefix += f" {key}={shlex.quote(val)}"
     subprocess.run(
         ["docker", "exec", "-d", container_id,
          "tmux", "new-session", "-d", "-s", slug,
@@ -802,7 +830,7 @@ def start_tui_in_container(slug: str, container_id: str, verbose: bool = False) 
         ("CONDA_DEFAULT_ENV", "testbed"),
         ("CONDA_PREFIX", "/opt/miniconda3/envs/testbed"),
         ("PATH", f"{testbed_bin}:/opt/miniconda3/bin:/home/bench/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
-    ]:
+    ] + list(passthrough_env.items()):
         subprocess.run(
             ["docker", "exec", container_id,
              "tmux", "-L", "agtx", "set-environment", "-g", key, val],

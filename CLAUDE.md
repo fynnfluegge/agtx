@@ -1,6 +1,6 @@
 # AGTX - Terminal Kanban for Coding Agents
 
-A terminal-native kanban board for managing multiple coding agent sessions (Claude Code, Codex, Gemini, Copilot, OpenCode) with isolated git worktrees.
+A terminal-native kanban board for managing multiple coding agent sessions (Claude Code, Codex, Gemini, Copilot, OpenCode, Cursor, Grok) with isolated git worktrees.
 
 ## Quick Start
 
@@ -16,7 +16,18 @@ cargo build --release
 
 # Enable experimental features (orchestrator agent)
 ./target/release/agtx --experimental
+
+# Never run init_script / cleanup_script from project or plugin config
+./target/release/agtx --no-init-scripts
+
+# Trust the current project's config (enables its scripts and copy_files)
+./target/release/agtx trust
+
+# Run the MCP server (global mode, or project-scoped with a path)
+./target/release/agtx mcp-serve [path]
 ```
+
+Logs are written as JSON to `~/.config/agtx/logs/agtx.log` (daily rotation, `RUST_LOG` respected).
 
 ## Architecture
 
@@ -30,17 +41,20 @@ src/
 │   ├── app.rs        # Main App struct, event loop, rendering (largest file)
 │   ├── app_tests.rs  # Unit tests for app.rs (included via #[path])
 │   ├── board.rs      # BoardState - kanban column/row navigation
+│   ├── dep_graph.rs  # Pure dependency-graph model (topological levels, unblocked nodes)
 │   ├── input.rs      # InputMode enum for UI states
 │   └── shell_popup.rs # Shell popup state, rendering, content trimming
 ├── db/
 │   ├── mod.rs        # Re-exports
 │   ├── schema.rs     # Database struct, SQLite operations
-│   └── models.rs     # Task, Project, TaskStatus, Notification enums
+│   └── models.rs     # Task, Project, TaskStatus, PhaseStatus, TransitionRequest,
+│                     # Notification, RunningAgent, AgentStatus
 ├── tmux/
 │   ├── mod.rs        # Tmux server "agtx", session management
 │   └── operations.rs # TmuxOperations trait (mockable for testing)
 ├── git/
-│   ├── mod.rs        # is_git_repo helper
+│   ├── mod.rs        # is_git_repo, repo_root, current_branch, diff_stat/diff_full,
+│                     # merge_branch, check_merge_conflicts, delete_branch
 │   ├── worktree.rs   # Git worktree create/remove/list
 │   ├── operations.rs # GitOperations trait (mockable for testing)
 │   └── provider.rs   # GitProviderOperations trait (GitHub PR ops)
@@ -51,7 +65,8 @@ src/
 │   ├── mod.rs        # Re-exports
 │   └── server.rs     # MCP server (JSON-RPC over stdio) — global and project-scoped modes
 └── config/
-    └── mod.rs        # GlobalConfig, ProjectConfig, ThemeConfig, WorkflowPlugin
+    └── mod.rs        # GlobalConfig, ProjectConfig, MergedConfig, PhaseAgentsConfig,
+                      # WorktreeConfig, ThemeConfig, WorkflowPlugin, TrustStore
 
 skills/                # Plugin skill files — auto-discovered as /agtx:* (Claude) or @agtx:* (Codex)
 ├── sweep/SKILL.md     # Sweep skill — push any conversation to the board (/agtx:sweep)
@@ -69,7 +84,10 @@ skills/                # Plugin skill files — auto-discovered as /agtx:* (Clau
 plugins/               # Bundled plugin configs (embedded at compile time)
 ├── agtx/
 │   ├── plugin.toml    # Default workflow with skills and prompts
-│   └── skills/orchestrate.md # Orchestrator agent skill (experimental)
+│   └── skills/        # Builtin skills embedded via include_str! in src/skills.rs:
+│       ├── research.md, plan.md, execute.md, review.md
+│       ├── orchestrate.md      # Orchestrator agent skill (experimental)
+│       └── merge-conflicts.md  # Auto merge-conflict resolution skill
 ├── agtx-terse/
 │   ├── plugin.toml    # Token-efficient variant of agtx workflow
 │   └── skills/        # Terse skill overrides with brevity directive
@@ -78,10 +96,12 @@ plugins/               # Bundled plugin configs (embedded at compile time)
 ├── openspec/plugin.toml # OpenSpec specification framework
 ├── bmad/plugin.toml   # BMAD Method - AI-driven agile development
 ├── superpowers/plugin.toml # Superpowers - brainstorming, plans, TDD, subagent-driven dev
+├── oh-my-claudecode/plugin.toml # oh-my-claudecode - multi-agent orchestration
+├── agent-skills/plugin.toml # Agent Skills - spec-to-ship engineering skills
 └── void/plugin.toml   # Plain agent session, no prompting
 
 tests/
-├── db_tests.rs        # Database and model tests
+├── db_tests.rs        # Database, model, and dependency-graph tests
 ├── config_tests.rs    # Configuration tests
 ├── board_tests.rs     # Board navigation tests
 ├── git_tests.rs       # Git worktree tests
@@ -89,6 +109,9 @@ tests/
 ├── mcp_tests.rs       # MCP server tests
 ├── mock_infrastructure_tests.rs # Mock infrastructure tests
 └── shell_popup_tests.rs         # Shell popup logic tests
+
+benchmark/             # SWE-bench harness
+docker/                # Container images for sandboxed runs
 ```
 
 ## Key Concepts
@@ -102,11 +125,13 @@ Backlog → Planning → Running → Review → Done
          planning              (resume)   branch)
 ```
 
-- **Backlog**: Task ideas, not started
+- **Backlog**: Task ideas, not started. Also hosts the optional **Research** phase (`R`) — the research session runs in place, so a Backlog task can already have a worktree and tmux window. There is no separate `Research` status: `TaskStatus` is `Backlog | Planning | Running | Review | Done`, and Backlog's display name is `backlog/research`.
 - **Planning**: Creates git worktree at `{worktree_dir}/{slug}` (default `.agtx/worktrees/{slug}`, configurable via `worktree_dir`), copies configured files, runs init script, deploys skills, starts agent in planning mode
 - **Running**: Agent is implementing (sends execute command/prompt)
 - **Review**: Optionally create PR. Tmux window stays open. Can resume to address feedback
-- **Done**: Cleanup worktree + tmux window (branch kept locally)
+- **Done**: Cleanup worktree + tmux window (branch kept locally). Runs the project `cleanup_script` before removal
+
+Backlog tasks can also skip straight to Running (`M`), and Running can be sent back to Planning (`r`).
 
 ### Workflow Plugins
 Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin.toml`) that defines:
@@ -118,7 +143,8 @@ Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin
 - **copy_dirs**: Extra directories to copy from project root into worktrees
 - **copy_files**: Individual files to copy from project root into worktrees (merged with project-level `copy_files`)
 - **copy_back**: Files/dirs to copy from worktree back to project root when a phase completes
-- **cyclic**: When true, enables Review → Planning transition with incrementing phase counter
+- **cyclic**: When true, enables Review → Planning transition with incrementing phase counter (`p` on the board)
+- **clear_context_on_advance**: When true, send an agent-specific clear-context command before the phase skill/prompt on transitions (only Claude Code's `/clear` is honored today)
 - **supported_agents**: Agent whitelist (empty = all supported)
 - **auto_dismiss**: Rules to auto-dismiss interactive prompts before sending the task prompt
 
@@ -136,16 +162,39 @@ Skills are markdown files with YAML frontmatter deployed to agent-native discove
 - Gemini: `.gemini/commands/agtx/plan.toml` (converted to TOML format)
 - Codex: `.codex/skills/agtx-plan/SKILL.md`
 - Cursor: `.cursor/skills/agtx-plan/SKILL.md`
+- Grok: `.grok/skills/agtx-plan/SKILL.md`
 - OpenCode: `.opencode/command/agtx-plan.md` (frontmatter stripped)
 - Copilot: `.github/agents/agtx/plan.md`
 
 Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
 
+`write_skills_to_worktree()` also drops a **per-agent MCP config** into the worktree so the task's agent can reach the project-scoped MCP server (`agtx mcp-serve <project>`). Both the filename and the format vary:
+
+| Agent | File | Format |
+|-------|------|--------|
+| claude | `.mcp.json` | JSON, `mcpServers` |
+| codex | `.codex/config.toml` | TOML, `[mcp_servers.agtx]` |
+| gemini | `.gemini/settings.json` | JSON, `mcpServers` + `trust: true` |
+| cursor | `.cursor/mcp.json` | JSON, `mcpServers` |
+| grok | `.grok/config.toml` | TOML, `[mcp_servers.agtx]` |
+| opencode | opencode config | JSON, `mcp` |
+
+Two agents need an extra trust side-effect to avoid an interactive dialog on first open: Claude gets `.claude/settings.local.json` with `enableAllProjectMcpServers: true`, and Codex gets a `[projects."<worktree>"] trust_level = "trusted"` entry appended to the user's global `~/.codex/config.toml`.
+
 Commands are written once in canonical format (`/ns:command`) and auto-translated:
 - Claude/Gemini: `/ns:command` (unchanged)
-- OpenCode/Cursor: `/ns-command` (colon → hyphen)
+- OpenCode/Cursor/Grok: `/ns-command` (colon → hyphen, slash kept)
 - Codex: `$ns-command` (slash → dollar, colon → hyphen)
 - Copilot: no interactive skill invocation (prompt only, no commands sent)
+
+### Sending Skills & Prompts to Agents
+`send_skill_and_prompt()` has **three** send paths, because agent TUIs disagree about how a slash command plus arguments must arrive. Getting this wrong is the usual cause of "the agent started but never got the task":
+
+1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter
+2. **gemini / codex / cursor** — always combine skill + prompt into a *single* message via `send_keys_literal`, then poll the pane until the text renders before pressing Enter (Ink TUIs drop keys sent too early). Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. Codex additionally needs a second Enter to dismiss its command picker
+3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
+
+`clear_context_on_advance` is applied before all three, and only for Claude (`/clear`, then poll until the pane stabilises).
 
 ### Session Persistence
 - Tmux window stays open when moving Running → Review
@@ -153,9 +202,15 @@ Commands are written once in canonical format (`/ns:command`) and auto-translate
 - No special resume logic needed - the session just stays alive in tmux
 
 ### Database Storage
-All databases stored centrally (not in project directories):
+All databases stored centrally (not in project directories), in the platform data dir (`GlobalConfig::data_dir`, via the `directories` crate):
 - macOS: `~/Library/Application Support/agtx/`
-- Linux: `~/.config/agtx/`
+- Linux: `~/.local/share/agtx/`
+
+Config paths are split across two roots — watch out when adding new files:
+- `GlobalConfig::config_path()` / `WorkflowPlugin::global_plugins_dir()` build from `$HOME` directly, so `config.toml`, `plugins/`, and `logs/` are always at `$HOME/.config/agtx/` on **every** platform
+- `TrustStore::path()` uses `directories`' `config_dir()`, so `trusted_projects.toml` lands in `~/Library/Application Support/agtx/` on macOS and `~/.config/agtx/` on Linux
+
+On first run, a `config.toml` at the old `directories`-derived location is migrated to `$HOME/.config/agtx/` automatically.
 
 Structure:
 - `index.db` - Global project index
@@ -196,7 +251,7 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
 ```
 ┌─────────────┐     MCP (stdio)     ┌──────────────┐     SQLite     ┌─────┐
 │ Orchestrator │ ←──────────────────→ │  MCP Server  │ ←────────────→ │ DB  │
-│ (Claude Code)│                     │ (agtx serve) │               └──┬──┘
+│ (Claude Code)│                     │(agtx mcp-serve)│             └──┬──┘
 └──────┬───────┘                     └──────────────┘                  │
        │  send_keys (push-when-idle)                                   │
 ┌──────┴───────┐                                                       │
@@ -206,13 +261,18 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
 
 - **Orchestrator → TUI**: `transition_requests` DB table (commands like "move task X forward")
 - **TUI → Orchestrator**: `notifications` DB table, pushed via `send_keys` when orchestrator is idle
-- MCP registered per-session via `claude mcp add-json --scope local`, cleaned up on exit
+- MCP registered per-session via `claude mcp add-json --scope local`, cleaned up on exit. It registers as **`agtx-orchestrator`**, not `agtx`, so it can't collide with an `agtx` server defined in another scope (the Claude Code plugin, `~/.claude.json`, or the repo's `.mcp.json`) — a same-named server with a different endpoint makes Claude Code report a config conflict and refuse to connect. A stale registration is removed first so `add-json` can't fail with "already exists" and short-circuit the `&&`
+- Only Claude implements `build_orchestrator_command()`; every other agent falls through to a plain interactive session with no MCP wiring
 - Orchestrator only manages Planning and Running phases; the user triages Backlog/Research manually and handles merging in Review/Done
 - Orchestrator is a coordinator, not a reviewer — it moves tasks forward immediately when phases complete, without inspecting output
 - Only "completed phase" notifications are sent (no "entered phase" notifications)
 - On startup, if an orchestrator tmux session already exists, it is detected and reconnected; catch-up notifications are created for tasks that completed phases while the TUI was down (deduplicated via `peek_notifications`)
 
-**MCP tools**: `list_tasks`, `get_task` (includes `allowed_actions`), `move_task`, `get_transition_status`, `check_conflicts`, `get_notifications`
+**MCP tools**:
+- Discovery: `list_projects` (global mode only)
+- Read: `list_tasks`, `get_task` (includes `allowed_actions`), `get_transition_status`, `check_conflicts`, `get_notifications`, `read_pane_content`
+- Write: `move_task` (queues a transition request; actions `research`, `move_forward`, `move_to_planning`, `move_to_running`, `move_to_review`, `move_to_done`, `resume`, `escalate_to_user`), `send_to_task` (Planning/Running only, 4096-byte cap)
+- CRUD (Backlog only for update/delete): `create_task`, `create_tasks_batch` (max 50, index-based `depends_on` wiring), `update_task`, `delete_task`
 
 ### MCP Server Modes
 
@@ -228,10 +288,49 @@ In global mode all CRUD tools (`list_tasks`, `create_task`, etc.) require a `pro
 `ServerMode` enum in `src/mcp/server.rs`. Path resolution via `resolve_project_path(project_id)` helper.
 
 ### General Configuration
-Configurable via `~/.config/agtx/config.toml`:
+Global config lives at `~/.config/agtx/config.toml` (`GlobalConfig`):
 ```toml
+default_agent = "claude"
 fullscreen_on_enter = false  # When true, Enter on a task attaches to tmux directly instead of opening the in-TUI popup
+
+[agents]                     # Per-phase agent overrides (PhaseAgentsConfig)
+research = "claude"
+planning = "claude"
+running = "codex"
+review = "claude"
+
+[worktree]                   # WorktreeConfig
+enabled = true
+auto_cleanup = true
+base_branch = ""             # empty = auto-detect main/master
+worktree_dir = ".agtx/worktrees"
+branch_prefix = "task"       # "task" → task/{slug}
 ```
+
+### Project Configuration
+Per-project overrides live in `{project}/.agtx/config.toml` (`ProjectConfig`) and are merged over the global config via `MergedConfig::merge`:
+
+| Field | Purpose |
+|-------|---------|
+| `default_agent`, `agents` | Agent / per-phase agent overrides |
+| `base_branch` | Branch worktrees are cut from |
+| `github_url` | Repo URL for PR operations |
+| `worktree_dir` | Where worktrees are created |
+| `copy_files` | Comma-separated files copied from project root into worktrees |
+| `init_script` | Shell command run in the worktree after creation |
+| `cleanup_script` | Shell command run in the worktree before removal |
+| `workflow_plugin` | Active plugin for new tasks |
+| `branch_prefix` | Branch name prefix |
+| `skip_worktree` | Work directly in the project root (e.g. already-isolated Docker repos) |
+
+### Project Trust
+Project config can execute shell commands (`init_script`, `cleanup_script`) and copy files, so those three fields are stripped from an untrusted project's config at startup (`App::new`), with a warning banner.
+
+- Trust is a **canonical path → SHA-256 of `.agtx/config.toml`** map in `TrustStore` (`trusted_projects.toml`, see path note above). Editing the project config invalidates trust and re-prompts
+- A project with no `.agtx/config.toml` is trusted by default (nothing to distrust)
+- An untrusted project also forces `flags.no_init_scripts = true`, which additionally suppresses **plugin** `init_script`s
+- Approve via the in-TUI trust confirmation popup (any key) or `agtx trust` in the project directory
+- `--no-init-scripts` suppresses `init_script` and `cleanup_script` execution regardless of trust
 
 ### Theme Configuration
 Colors configurable via `~/.config/agtx/config.toml`:
@@ -260,29 +359,56 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `x` | Delete task (with confirmation) |
 | `Ctrl+f` | Fullscreen attach to task's tmux session |
 | `d` | Show git diff for task |
+| `D` | Open dependency-graph overlay |
 | `m` | Move task forward (advance workflow) |
-| `r` | Resume task (Review → Running) |
+| `M` | Move Backlog task straight to Running |
+| `R` | Start research for a Backlog task (in place, no column change) |
+| `r` | Resume: Review → Running, or Running → Planning |
+| `p` | Cyclic plugins only: Review → Planning (next phase) |
 | `/` | Search tasks (jumps to and opens task) |
 | `P` | Select workflow plugin |
 | `O` | Toggle orchestrator agent (experimental) |
-| `e` | Toggle project sidebar |
+| `e` | Toggle project sidebar (`h`/`Left` from the Backlog column focuses it) |
 | `q` | Quit |
+
+### Dashboard Mode (`agtx -g`, or launched outside a git repo)
+| Key | Action |
+|-----|--------|
+| `p` | Open the indexed-project list |
+| `n` | Adopt the current directory as a project (must be a git repo) and open it |
+| `j/k` or arrows | Navigate the project list |
+| `Enter` | Open the selected project |
+| `Esc` | Close the project list |
+| `q` | Quit |
+
+### Dependency Graph Overlay (`D`)
+| Key | Action |
+|-----|--------|
+| `h/j/k/l` or arrows | Move between nodes / levels |
+| `Space` | Toggle mark on an unblocked node |
+| `a` | Mark all unblocked nodes |
+| `c` | Clear marks |
+| `Enter` | Batch-move marked (or selected) unblocked tasks forward |
+| `Esc` or `q` | Close |
 
 ### Task Popup (tmux view)
 | Key | Action |
 |-----|--------|
 | `Ctrl+j/k` or `Ctrl+n/p` | Scroll up/down |
-| `Ctrl+d/u` | Page down/up |
+| `Ctrl+d/u` or `PageDown/PageUp` | Page down/up |
 | `Ctrl+g` | Jump to bottom |
 | `Ctrl+f` | Fullscreen attach to tmux session |
-| `Ctrl+q` or `Esc` | Close popup |
-| Other keys | Forwarded to tmux/agent |
+| `Ctrl+q` | Close popup |
+| Other keys | Forwarded to tmux/agent (including `Esc`) |
+
+When an escalation note is present, the first keypress only dismisses the banner and is not forwarded.
 
 ### PR Creation Popup
 | Key | Action |
 |-----|--------|
 | `Tab` | Switch between title/description |
-| `Ctrl+s` | Create PR and move to Review |
+| `Enter` | In title: move to description. In description: newline |
+| `Ctrl+s` | Create PR and move to Review (ignored while the description is still generating) |
 | `Esc` | Cancel |
 
 ### Task Creation Wizard
@@ -335,19 +461,22 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 - Loading spinners shown during async operations
 
 ### Phase Status Polling
-- `maybe_spawn_session_refresh()` spawns a background thread with 2-second cache TTL per task
+- `maybe_spawn_session_refresh()` spawns a background thread with 2-second cache TTL per task, covering Planning/Running/Review tasks plus Backlog tasks with an active research session
 - Overlap guard: only one refresh thread runs at a time (`session_refresh_rx.is_some()`)
 - Thread does all expensive work: plugin TOML loading, artifact file checks, `tmux capture-pane`, copy-back side effects
 - `apply_session_refresh()` applies results on main thread (non-blocking `try_recv`)
 - Idle detection (Working → Idle) handled on main thread using `pane_content_hashes` timestamps
-- Four states: Working (spinner), Idle (pause icon, 15s no output), Ready (checkmark), Exited (no window)
+- Four states (`PhaseStatus` in `src/db/models.rs`): Working (spinner), Idle (pause icon, 15s no output), Ready (checkmark), Exited (no window)
 - Phase artifact paths come from the task's plugin or agtx defaults
 - Plugin instances cached per task in `HashMap<Option<String>, Option<WorkflowPlugin>>` to avoid repeated disk reads
 
-### Task References
+### Task References & Dependencies
 - In description input, type `!` (at start of line or after space) to search existing tasks
 - Selecting a task inserts `![task-title]` and tracks the reference ID
 - Referenced task IDs stored as comma-separated string in `task.referenced_tasks`
+- References double as **dependencies**: `Database::deps_satisfied` returns true only when every referenced task is in Review or Done. Starting research or moving a Backlog task forward is blocked until then (a warning is shown instead)
+- `src/tui/dep_graph.rs` builds a topologically-leveled `DepGraph` from `referenced_tasks` — level 0 = no in-graph deps, and a node is `unblocked` when it is in Backlog with satisfied deps. The `D` overlay renders it and can batch-move unblocked tasks. The module is free of ratatui/DB types (the caller passes a `deps_satisfied` closure), so it is unit-testable in isolation
+- MCP `create_tasks_batch` wires the same dependencies via 0-based `depends_on` indices
 - At worktree setup, referenced tasks' artifacts are copied to `.agtx/references/`:
   - Git diffs (`{slug}.diff`) from `git diff main..{branch}`
   - Worktree files (`.agtx/skills/`, `.planning/`) if the referenced worktree still exists
@@ -363,7 +492,8 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 
 ### Agent Integration
 - Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
-- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`--approval-mode yolo`), Copilot (`--allow-all-tools`)
+- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`), Copilot (`--allow-all-tools`), Cursor (`agent --yolo`), Grok (`--yolo --trust`, where `--trust` also ungates the repo-local `.grok/config.toml` MCP server and suppresses the directory-trust dialog)
+- `build_resume_command()` is the recovery variant used after a tmux/server restart — mostly `--continue`, but Gemini uses `--resume` and Codex uses `codex resume --last`
 - Skills deployed to agent-native paths via `write_skills_to_worktree()` in app.rs
 - Commands resolved per-task via `resolve_skill_command()` (plugin command + agent transform)
 - Prompts resolved per-task via `resolve_prompt()` (pure template substitution, agent-agnostic)
@@ -382,7 +512,7 @@ cargo test --features test-mocks
 ```
 
 Dependencies require:
-- Rust 1.70+
+- A recent stable Rust (CI builds on `stable`; no MSRV is pinned in `Cargo.toml`)
 - SQLite (bundled via rusqlite)
 - tmux (runtime dependency)
 - git (runtime dependency)
@@ -402,13 +532,32 @@ Dependencies require:
 3. Use `hex_to_color(&state.config.theme.color_*)` in app.rs
 
 ### Adding a new agent
-1. Add to `known_agents()` in `src/agent/mod.rs`
-2. Add `build_interactive_command()` match arm in `src/agent/mod.rs`
-3. Add agent-native skill dir in `agent_native_skill_dir()` in `src/skills.rs`
-4. Add plugin command transform in `transform_plugin_command()` in `src/skills.rs`
-5. Add exit command handling in `switch_agent_in_tmux()` in `src/tui/app.rs` (graceful exit cmd or Ctrl+C)
-6. Add activity indicator string to `AGENT_ACTIVE_INDICATORS` in `src/tui/app.rs` if the agent is an Ink/Node TUI (runs inside bash)
-7. If Ink/Node TUI: add to combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
+Adding grok touched every one of these — use `git log -p` for that change as a worked example. Required:
+
+**`src/agent/mod.rs`**
+1. Add to `known_agents()` (name, binary, description, git co-author)
+2. Add a `build_interactive_command()` match arm (with and without a prompt)
+3. Add a `build_resume_command()` match arm (usually `--continue`)
+
+**`src/agent/operations.rs`**
+4. Add a `generate_text()` match arm — the headless/print invocation used for PR descriptions
+
+**`src/skills.rs`**
+5. Add the agent-native skill dir to `agent_native_skill_dir()`
+6. Add the plugin command transform to `transform_plugin_command()`
+7. Add a `scan_agent_skills()` branch so the agent's existing skills show up in the `/` skill picker
+
+**`src/tui/app.rs`**
+8. Add the binary to `AGENT_COMMANDS` (pane process detection)
+9. Add an activity indicator to `AGENT_ACTIVE_INDICATORS` if the agent is an Ink/Node TUI (runs inside bash)
+10. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
+11. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok"` for SKILL.md subdirectories)
+12. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`)
+13. Add an agent label color in the task-card footer `match task.agent.as_str()`
+14. If Ink/Node TUI: add to the combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
+
+**Plugins**
+15. Add the agent to `supported_agents` in any `plugins/*/plugin.toml` that whitelists agents
 
 ### Adding a keyboard shortcut
 1. Find the appropriate `handle_*_key` function in `src/tui/app.rs`
@@ -441,9 +590,13 @@ Detected automatically via `known_agents()` in order of preference:
 3. **copilot** - GitHub Copilot CLI
 4. **gemini** - Google Gemini CLI
 5. **opencode** - AI-powered coding assistant
+6. **cursor** - Cursor Agent CLI (binary is `agent`)
+7. **grok** - xAI's Grok Build CLI
 
 ## Future Enhancements
 - Reopen Done tasks (recreate worktree from preserved branch)
 - Orchestrator: support non-Claude agents as orchestrator
 - Orchestrator: task deletion notifications
-- Orchestrator: multi-project support (see `docs/planning/multi-project-orchestrator.md`)
+- Orchestrator: multi-project support
+
+Design notes for in-flight work live in `docs/planning/` (untracked).

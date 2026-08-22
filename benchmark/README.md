@@ -24,7 +24,7 @@ specific Python versions and C extensions that aren't available outside the cont
 ```bash
 cd swebench
 
-# Build the tools image (tmux + Node.js + Claude Code)
+# Build the tools image (tmux + Node.js + Claude Code + Grok)
 python prebake_images.py --verbose
 
 # Build the Linux agtx binary (Ubuntu 22.04 / glibc 2.35)
@@ -33,14 +33,18 @@ bash build_linux_binary.sh
 
 The tools image is the base for the shared Docker named volume `agtx-swebench-tools`.
 On the **first benchmark run**, this volume is created automatically and populated from the
-tools image — tmux, Node.js, Claude Code, and their shared libraries are copied in once and
+tools image — tmux, Node.js, Claude Code, Grok, and their shared libraries are copied in once and
 then mounted read-only into every instance container. Subsequent runs skip this step.
 
-To force a refresh (e.g. after updating Claude Code):
+To force a refresh (e.g. after updating Claude Code or Grok):
 ```bash
 docker volume rm agtx-swebench-tools
 python prebake_images.py --force --verbose
 ```
+
+**Agent credentials** are copied into each container as snapshots (host files are never modified):
+Claude reads `~/.claude/` + `~/.claude.json`, Grok reads `~/.grok/auth.json` + `~/.grok/config.toml`
+(or `XAI_API_KEY` from the host environment, passed through to the container's tmux env).
 
 **Run in sandbox mode** (Linux binary required — agents run inside Ubuntu 22.04 containers):
 ```bash
@@ -88,7 +92,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```bash
 npm install -g tokscale
 ```
-If not installed, `cost_usd` and token fields will be `null` in results.
+If not installed, `cost_usd` and token fields will be `null` in results. tokscale filters by agent
+for Claude, Codex, Gemini, Copilot and OpenCode; for agents it has no filter for (Cursor, Grok) the
+fields are `null` in sandbox runs and unfiltered — summed across all agents — in host-mode runs.
 
 **tmux** (required — agtx runs agent sessions inside tmux):
 ```bash
@@ -103,6 +109,7 @@ At least one coding agent CLI must be installed and authenticated:
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — `npm install -g @anthropic-ai/claude-code`
 - [Gemini CLI](https://github.com/google-gemini/gemini-cli) — `npm install -g @google/gemini-cli`
 - [Codex CLI](https://github.com/openai/codex) — `npm install -g @openai/codex`
+- [Grok Build](https://docs.x.ai/build/overview) — `npm install -g @xai-official/grok`, then `grok login`
 
 ---
 
@@ -158,6 +165,12 @@ review   = "codex"
 ```
 
 Available plugins: `void`, `agtx`, `agtx-terse`, `gsd`, `spec-kit`, `bmad`, `openspec`, `superpowers`, `agent-skills`
+
+> [!WARNING]
+> `void` is for interactive use, not benchmark runs. With no phase command or prompt, agtx prefills
+> the task in the agent's input box and waits for a human to press Enter, so an automated run stalls
+> with "Pane stable but no finish marker". Use a plugin with artifacts (`agtx`, `agtx-terse`, …)
+> for benchmarks.
 
 Pre-built configs for common single-agent and multi-agent combinations are in [`swebench/configs/`](swebench/configs/).
 
@@ -397,9 +410,9 @@ PY
 > the rendered pane** — `tmux capture-pane` will never show them. You must read the JSONL to see
 > whether the model actually emitted them.
 
-> **`void` quirk:** with the `void` plugin the phase prompt is *pasted* into the input box but not
-> always submitted (no artifact/finish-marker to drive it), which shows as "Pane stable but no finish
-> marker". If a run stalls there, submit it manually:
+> **`void` quirk:** with the `void` plugin the phase prompt is *pasted* into the input box and never
+> submitted — agtx prefills it and waits for a human Enter — which shows as "Pane stable but no
+> finish marker". To unstick a run you are capturing from:
 > `docker exec $C tmux -L agtx send-keys -t testbed:1 Enter`.
 
 ---
