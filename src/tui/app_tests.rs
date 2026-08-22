@@ -3951,6 +3951,103 @@ fn test_write_skills_to_worktree_grok_skills() {
 }
 
 #[test]
+fn test_write_skills_to_worktree_mcp_pi() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"]);
+
+    let cfg = dir.path().join(".pi/mcp.json");
+    assert!(cfg.exists(), ".pi/mcp.json should be written for pi");
+    let content = std::fs::read_to_string(&cfg).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+    assert_eq!(v["mcpServers"]["agtx"]["transport"], "stdio");
+    // "lazy" (the extension's default) would wait for a manual /mcp:start agtx,
+    // which never comes in an unattended session.
+    assert_eq!(
+        v["mcpServers"]["agtx"]["lifecycle"], "eager",
+        "pi MCP server must start eagerly: {content}"
+    );
+}
+
+#[test]
+fn test_write_skills_to_worktree_pi_skills() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"]);
+
+    let skill = dir.path().join(".pi/skills/agtx-plan/SKILL.md");
+    assert!(skill.exists(), "pi skills go to .pi/skills/<name>/SKILL.md");
+    let content = std::fs::read_to_string(&skill).unwrap();
+    assert!(content.starts_with("---"), "frontmatter must be kept for pi");
+    // Canonical copy is always written too
+    assert!(dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists());
+}
+
+#[test]
+fn test_write_skills_to_worktree_pi_rewrites_mcp_tool_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"]);
+
+    // pi-mcp-extension registers tools as <prefix>_<server>_<tool>, so Claude's
+    // mcp__agtx__get_task must become mcp_agtx_get_task.
+    let content =
+        std::fs::read_to_string(dir.path().join(".pi/skills/agtx-plan/SKILL.md")).unwrap();
+    assert!(
+        !content.contains("mcp__agtx__"),
+        "Claude-style tool names must be rewritten for pi: {content}"
+    );
+    assert!(
+        content.contains("mcp_agtx_get_task"),
+        "expected pi-style tool name in deployed skill: {content}"
+    );
+    // The canonical copy keeps the original naming.
+    let canonical =
+        std::fs::read_to_string(dir.path().join(".agtx/skills/agtx-plan/SKILL.md")).unwrap();
+    assert!(canonical.contains("mcp__agtx__get_task"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_matches_pi_exactly() {
+    // `pi` is matched by equality, not substring, so pip/pipx/pipenv panes are
+    // still reported as "at shell" rather than as a live agent.
+    for (cmd, expect_at_shell) in [
+        ("pi", false),
+        ("pip", true),
+        ("pipx", true),
+        ("pipenv", true),
+        ("zsh", true),
+        // npm-installed pi runs as node, which is deliberately not an agent
+        // command — AGENT_ACTIVE_INDICATORS covers that case instead.
+        ("node", true),
+    ] {
+        let mut mock_tmux = MockTmuxOperations::new();
+        mock_tmux
+            .expect_pane_current_command()
+            .returning(move |_| Some(cmd.to_string()));
+        assert_eq!(
+            is_pane_at_shell(&mock_tmux, "w"),
+            expect_at_shell,
+            "pane_current_command = {cmd:?}"
+        );
+    }
+}
+
+#[test]
+fn test_transform_skill_for_pi_leaves_other_content_alone() {
+    let input = "---\nname: agtx-plan\n---\nCall mcp__agtx__get_task(id) then mcp__other__thing()";
+    let out = transform_skill_for_pi(input);
+    assert!(out.contains("mcp_agtx_get_task(id)"));
+    // Only the agtx server is remapped; unrelated tool references are untouched.
+    assert!(out.contains("mcp__other__thing()"));
+}
+
+#[test]
 fn test_write_skills_to_worktree_mcp_codex() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();

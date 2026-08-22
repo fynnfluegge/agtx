@@ -1,6 +1,6 @@
 # AGTX - Terminal Kanban for Coding Agents
 
-A terminal-native kanban board for managing multiple coding agent sessions (Claude Code, Codex, Gemini, Copilot, OpenCode, Cursor, Grok) with isolated git worktrees.
+A terminal-native kanban board for managing multiple coding agent sessions (Claude Code, Codex, Gemini, Copilot, OpenCode, Cursor, Grok, pi) with isolated git worktrees.
 
 ## Quick Start
 
@@ -163,6 +163,7 @@ Skills are markdown files with YAML frontmatter deployed to agent-native discove
 - Codex: `.codex/skills/agtx-plan/SKILL.md`
 - Cursor: `.cursor/skills/agtx-plan/SKILL.md`
 - Grok: `.grok/skills/agtx-plan/SKILL.md`
+- pi: `.pi/skills/agtx-plan/SKILL.md`
 - OpenCode: `.opencode/command/agtx-plan.md` (frontmatter stripped)
 - Copilot: `.github/agents/agtx/plan.md`
 
@@ -178,20 +179,24 @@ Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
 | cursor | `.cursor/mcp.json` | JSON, `mcpServers` |
 | grok | `.grok/config.toml` | TOML, `[mcp_servers.agtx]` |
 | opencode | opencode config | JSON, `mcp` |
+| pi | `.pi/mcp.json` | JSON, `mcpServers` + `lifecycle: "eager"` |
 
 Two agents need an extra trust side-effect to avoid an interactive dialog on first open: Claude gets `.claude/settings.local.json` with `enableAllProjectMcpServers: true`, and Codex gets a `[projects."<worktree>"] trust_level = "trusted"` entry appended to the user's global `~/.codex/config.toml`.
+
+pi is the exception to the table: it has **no built-in MCP support**. `.pi/mcp.json` is read by the third-party [`pi-mcp-extension`](https://github.com/irahardianto/pi-mcp-extension) package, which the user must install once with `pi install npm:pi-mcp-extension` (pi extensions run as TypeScript inside the agent process). agtx writes the file unconditionally — it is simply inert until the extension is present, so pi tasks work without MCP in the meantime. Two details are load-bearing: `lifecycle: "eager"` (the extension defaults to `"lazy"`, which waits for a manual `/mcp:start agtx` that never comes unattended), and the tool naming — the extension registers `<toolPrefix>_<server>_<tool>`, so skills deployed for pi get `mcp__agtx__*` rewritten to `mcp_agtx_*` by `transform_skill_for_pi()`.
 
 Commands are written once in canonical format (`/ns:command`) and auto-translated:
 - Claude/Gemini: `/ns:command` (unchanged)
 - OpenCode/Cursor/Grok: `/ns-command` (colon → hyphen, slash kept)
 - Codex: `$ns-command` (slash → dollar, colon → hyphen)
+- pi: `/skill:ns-command` (colon → hyphen, then prefixed with `/skill:`)
 - Copilot: no interactive skill invocation (prompt only, no commands sent)
 
 ### Sending Skills & Prompts to Agents
 `send_skill_and_prompt()` has **three** send paths, because agent TUIs disagree about how a slash command plus arguments must arrive. Getting this wrong is the usual cause of "the agent started but never got the task":
 
 1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter
-2. **gemini / codex / cursor** — always combine skill + prompt into a *single* message via `send_keys_literal`, then poll the pane until the text renders before pressing Enter (Ink TUIs drop keys sent too early). Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. Codex additionally needs a second Enter to dismiss its command picker
+2. **gemini / codex / cursor / pi** — always combine skill + prompt into a *single* message via `send_keys_literal`, then poll the pane until the text renders before pressing Enter (Ink TUIs drop keys sent too early). Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. Codex additionally needs a second Enter to dismiss its command picker; pi needs only one, but silently drops a combined text+Enter `send_keys`, leaving the text unsent in its editor
 3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
 
 `clear_context_on_advance` is applied before all three, and only for Claude (`/clear`, then poll until the pane stabilises).
@@ -492,7 +497,7 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 
 ### Agent Integration
 - Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
-- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`), Copilot (`--allow-all-tools`), Cursor (`agent --yolo`), Grok (`--yolo --trust`, where `--trust` also ungates the repo-local `.grok/config.toml` MCP server and suppresses the directory-trust dialog)
+- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`), Copilot (`--allow-all-tools`), Cursor (`agent --yolo`), Grok (`--yolo --trust`, where `--trust` also ungates the repo-local `.grok/config.toml` MCP server and suppresses the directory-trust dialog), pi (`--approve` — pi ships no permission prompts at all, so this only suppresses the project-trust selector that would otherwise block startup in a fresh worktree)
 - `build_resume_command()` is the recovery variant used after a tmux/server restart — mostly `--continue`, but Gemini uses `--resume` and Codex uses `codex resume --last`
 - Skills deployed to agent-native paths via `write_skills_to_worktree()` in app.rs
 - Commands resolved per-task via `resolve_skill_command()` (plugin command + agent transform)
@@ -548,11 +553,11 @@ Adding grok touched every one of these — use `git log -p` for that change as a
 7. Add a `scan_agent_skills()` branch so the agent's existing skills show up in the `/` skill picker
 
 **`src/tui/app.rs`**
-8. Add the binary to `AGENT_COMMANDS` (pane process detection)
+8. Add the binary to `AGENT_COMMANDS` (pane process detection). `AGENT_COMMANDS` is matched by substring, so a short name that is a prefix of unrelated binaries (pi/pip/pipx) belongs in `AGENT_COMMANDS_EXACT` instead
 9. Add an activity indicator to `AGENT_ACTIVE_INDICATORS` if the agent is an Ink/Node TUI (runs inside bash)
 10. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
-11. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok"` for SKILL.md subdirectories)
-12. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`)
+11. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok" | "pi"` for SKILL.md subdirectories)
+12. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`). If the agent names MCP tools differently from Claude's `mcp__server__tool`, also add a skill-content rewrite (see `transform_skill_for_pi()`)
 13. Add an agent label color in the task-card footer `match task.agent.as_str()`
 14. If Ink/Node TUI: add to the combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
 
@@ -592,6 +597,7 @@ Detected automatically via `known_agents()` in order of preference:
 5. **opencode** - AI-powered coding assistant
 6. **cursor** - Cursor Agent CLI (binary is `agent`)
 7. **grok** - xAI's Grok Build CLI
+8. **pi** - earendil-works pi coding harness
 
 ## Future Enhancements
 - Reopen Done tasks (recreate worktree from preserved branch)

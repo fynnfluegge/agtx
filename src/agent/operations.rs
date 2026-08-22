@@ -62,6 +62,9 @@ impl AgentOperations for CodingAgent {
             "gemini" => ("gemini", vec!["-p", prompt]),
             "cursor" => ("agent", vec!["--print", "--yolo", prompt]),
             "grok" => ("grok", vec!["-p", prompt]),
+            // --no-approve ignores project-local resources, so a throwaway text
+            // generation does not boot the agtx MCP server from .pi/mcp.json.
+            "pi" => ("pi", vec!["--no-approve", "-p", prompt]),
             _ => (self.agent.command.as_str(), vec![prompt]),
         };
 

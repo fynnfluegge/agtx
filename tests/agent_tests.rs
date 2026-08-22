@@ -60,7 +60,7 @@ fn test_known_agents_includes_cursor() {
 fn test_known_agents_includes_all_expected() {
     let agents = known_agents();
     let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
-    for expected in &["claude", "codex", "copilot", "gemini", "opencode", "cursor", "grok"] {
+    for expected in &["claude", "codex", "copilot", "gemini", "opencode", "cursor", "grok", "pi"] {
         assert!(names.contains(expected), "missing agent: {}", expected);
     }
 }
@@ -296,5 +296,74 @@ fn test_grok_transform_plugin_command() {
     assert_eq!(
         transform_plugin_command("/gsd:plan-phase 1", "grok"),
         Some("/gsd-plan-phase 1".to_string())
+    );
+}
+
+// =============================================================================
+// Tests for pi (earendil-works pi coding agent) integration
+// =============================================================================
+
+#[test]
+fn test_known_agents_includes_pi() {
+    let agents = known_agents();
+    let pi = agents.iter().find(|a| a.name == "pi");
+    assert!(pi.is_some(), "pi should be in known_agents");
+    let pi = pi.unwrap();
+    assert_eq!(pi.command, "pi");
+    assert_eq!(pi.co_author, "Pi <noreply@earendil.works>");
+}
+
+#[test]
+fn test_build_interactive_command_pi_no_prompt() {
+    let agents = known_agents();
+    let pi = agents.iter().find(|a| a.name == "pi").unwrap();
+    // pi has no permission prompts; --approve only suppresses the project-trust
+    // selector that would otherwise block startup in a fresh worktree.
+    assert_eq!(pi.build_interactive_command(""), "pi --approve");
+}
+
+#[test]
+fn test_build_interactive_command_pi_with_prompt() {
+    let agents = known_agents();
+    let pi = agents.iter().find(|a| a.name == "pi").unwrap();
+    assert_eq!(
+        pi.build_interactive_command("do something"),
+        "pi --approve 'do something'"
+    );
+}
+
+#[test]
+fn test_build_interactive_command_pi_escapes_single_quotes() {
+    let agents = known_agents();
+    let pi = agents.iter().find(|a| a.name == "pi").unwrap();
+    let cmd = pi.build_interactive_command("it's a test");
+    assert!(cmd.starts_with("pi --approve "), "should use pi --approve: {cmd}");
+    assert!(cmd.contains("'\"'\"'"), "single quote must be escaped: {cmd}");
+}
+
+#[test]
+fn test_build_resume_command_pi() {
+    let agents = known_agents();
+    let pi = agents.iter().find(|a| a.name == "pi").unwrap();
+    assert_eq!(pi.build_resume_command(), "pi --approve --continue");
+}
+
+#[test]
+fn test_pi_has_native_skill_dir() {
+    let dir = agent_native_skill_dir("pi");
+    assert_eq!(dir, Some((".pi/skills", "")));
+}
+
+#[test]
+fn test_pi_transform_plugin_command() {
+    // pi registers skills as /skill:<frontmatter-name>, so the whole canonical
+    // command becomes the skill name.
+    assert_eq!(
+        transform_plugin_command("/agtx:plan", "pi"),
+        Some("/skill:agtx-plan".to_string())
+    );
+    assert_eq!(
+        transform_plugin_command("/gsd:plan-phase 1", "pi"),
+        Some("/skill:gsd-plan-phase 1".to_string())
     );
 }

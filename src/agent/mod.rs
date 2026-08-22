@@ -44,6 +44,9 @@ impl Agent {
             "opencode" => "opencode --continue".to_string(),
             "cursor" => "agent --yolo --continue".to_string(),
             "grok" => "grok --yolo --trust --continue".to_string(),
+            // pi has no permission prompts by design; --approve suppresses the
+            // project-trust prompt that would otherwise block startup in a worktree.
+            "pi" => "pi --approve --continue".to_string(),
             _ => self.build_interactive_command(""),
         }
     }
@@ -61,6 +64,7 @@ impl Agent {
                 "opencode" => "opencode".to_string(),
                 "cursor" => "agent --yolo".to_string(),
                 "grok" => "grok --yolo --trust".to_string(),
+                "pi" => "pi --approve".to_string(),
                 _ => self.command.clone(),
             };
         }
@@ -74,6 +78,7 @@ impl Agent {
             "opencode" => format!("opencode -p '{}'", escaped_prompt),
             "cursor" => format!("agent --yolo '{}'", escaped_prompt),
             "grok" => format!("grok --yolo --trust '{}'", escaped_prompt),
+            "pi" => format!("pi --approve '{}'", escaped_prompt),
             _ => format!("{} '{}'", self.command, escaped_prompt),
         }
     }
@@ -123,6 +128,12 @@ pub fn known_agents() -> Vec<Agent> {
             "grok",
             "xAI's Grok Build CLI",
             "Grok <noreply@x.ai>",
+        ),
+        Agent::new(
+            "pi",
+            "pi",
+            "Pi coding harness by earendil-works",
+            "Pi <noreply@earendil.works>",
         ),
         // TODO: investigate CLI usage before enabling
         // Agent::new("aider", "aider", "AI pair programming in your terminal", "Aider <noreply@aider.chat>"),

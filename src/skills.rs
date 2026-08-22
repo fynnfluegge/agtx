@@ -112,6 +112,7 @@ pub fn agent_native_skill_dir(agent_name: &str) -> Option<(&'static str, &'stati
         "codex" => Some((".codex/skills", "")),
         "cursor" => Some((".cursor/skills", "")),
         "grok" => Some((".grok/skills", "")),
+        "pi" => Some((".pi/skills", "")),
         "copilot" => Some((".github/agents", "agtx")),
         _ => None,
     }
@@ -183,6 +184,15 @@ pub fn transform_plugin_command(canonical_cmd: &str, agent_name: &str) -> Option
         "cursor" | "grok" => {
             // /agtx:plan → /agtx-plan (slash kept, colon → hyphen)
             Some(canonical_cmd.replacen(':', "-", 1))
+        }
+        "pi" => {
+            // Skills register as /skill:<frontmatter-name>, so the whole canonical
+            // command becomes the skill name: /gsd:plan-phase 1 → /skill:gsd-plan-phase 1
+            let transformed = canonical_cmd.replacen(':', "-", 1);
+            Some(match transformed.strip_prefix('/') {
+                Some(rest) => format!("/skill:{}", rest),
+                None => transformed,
+            })
         }
         _ => None,
     }
@@ -432,8 +442,9 @@ pub fn scan_agent_skills(
                 }
             }
         }
-        "cursor" | "grok" => {
+        "cursor" | "grok" | "pi" => {
             // Skill subdirectories with SKILL.md, invoked as /skill-name
+            // (pi registers the same layout as /skill:<name>)
             let base_dir = match agent_native_skill_dir(agent_name) {
                 Some((dir, _)) => dir,
                 None => return results,
@@ -450,7 +461,11 @@ pub fn scan_agent_skills(
                 let dirname = dir_entry.file_name().to_string_lossy().to_string();
                 let skill_file = dir_entry.path().join("SKILL.md");
                 if skill_file.exists() {
-                    let command = format!("/{}", dirname);
+                    let command = if agent_name == "pi" {
+                        format!("/skill:{}", dirname)
+                    } else {
+                        format!("/{}", dirname)
+                    };
                     let description = extract_description_from_file(&skill_file)
                         .unwrap_or_else(|| dirname.replace('-', " "));
                     results.push((command, description));

@@ -2686,6 +2686,7 @@ impl App {
                 "opencode" => Style::default().fg(Color::White).bg(Color::Rgb(80, 80, 80)), // white on grey
                 "codex" => Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 20)), // white on black
                 "grok" => Style::default().fg(Color::Rgb(20, 20, 20)).bg(Color::White), // black on white
+                "pi" => Style::default().fg(Color::Rgb(120, 190, 255)), // light blue
                 _ => Style::default().fg(Color::White),
             };
             let agent_label = Paragraph::new(format!(" {} ", task.agent))
@@ -8715,12 +8716,15 @@ fn send_skill_and_prompt(
         return;
     }
 
-    // Gemini, Codex & cursor: always combine skill+prompt into a single message.
+    // Gemini, Codex, cursor & pi: always combine skill+prompt into a single message.
     // Gemini: sending separately causes it to execute the skill and queue the
     //   prompt, which gets lost or arrives too late.
     // Codex: skill mentions ($skill-name) are inline references that must be
     //   part of a message — sending just "$skill" standalone does nothing.
-    if matches!(agent_name, "gemini" | "codex" | "cursor") {
+    // pi: a combined text+Enter send_keys does not submit at all — the text is
+    //   left sitting in the editor. It needs the send → wait-for-echo → Enter
+    //   sequence below, but a single Enter (no Codex-style second one).
+    if matches!(agent_name, "gemini" | "codex" | "cursor" | "pi") {
         let text_to_send = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
                 Some(format!("{}\n\n{}", cmd, prompt))
@@ -9116,6 +9120,13 @@ const AGENT_COMMANDS: &[&str] = &[
     "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "python3", "python",
 ];
 
+/// Agent binary names matched against `pane_current_command` by exact equality
+/// rather than substring. `pi` is only two characters, so a `contains` test would
+/// also match `pip`, `pipx` and `pipenv` and report unrelated panes as live agents.
+/// Only pi's `install.sh` build reports this name; the npm package runs as `node`
+/// and is detected via `AGENT_ACTIVE_INDICATORS` instead.
+const AGENT_COMMANDS_EXACT: &[&str] = &["pi"];
+
 /// Strings in pane content that indicate an agent TUI is active and ready.
 /// Used by `is_agent_active` to detect agents like Gemini, Cursor and Grok that
 /// run inside bash/node and don't change `pane_current_command` to their own name.
@@ -9130,6 +9141,10 @@ const AGENT_ACTIVE_INDICATORS: &[&str] = &[
     "OpenAI Codex",      // Codex
     "Grok Build",        // Grok — splash/footer
     "Shift+Tab:mode",    // Grok — session footer once a turn has run
+    // pi has no static banner: its footer is the cwd plus a stats line, and the
+    // context-usage display (e.g. `0.0%/1.0M`) is the only unconditional part.
+    // Briefly reads `?/` instead right after a compaction, until the next response.
+    "%/",                // pi — footer context usage
 ];
 
 /// Check if the pane is running a shell (i.e. the agent has exited).
@@ -9137,7 +9152,9 @@ const AGENT_ACTIVE_INDICATORS: &[&str] = &[
 /// rather than an agent process.
 fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
     if let Some(cmd) = tmux_ops.pane_current_command(target) {
-        !AGENT_COMMANDS.iter().any(|a| cmd.contains(a))
+        let is_agent = AGENT_COMMANDS.iter().any(|a| cmd.contains(a))
+            || AGENT_COMMANDS_EXACT.iter().any(|a| cmd.trim() == *a);
+        !is_agent
     } else {
         false
     }
@@ -9282,7 +9299,7 @@ fn ensure_window_or_recover(
 ///
 /// Exit commands per agent:
 ///   - Claude, OpenCode: `/exit`
-///   - Gemini, Codex: `/quit`
+///   - Gemini, Grok, pi: `/quit`
 ///   - Fallback: Ctrl+C + Ctrl+D as last resort
 ///
 /// Detection uses `tmux display -p #{pane_current_command}` which reports
@@ -9300,14 +9317,16 @@ fn switch_agent_in_tmux(
         "gemini" => Some("/quit"),
         "cursor" => None,   // Ink/Node TUI — Ctrl+C is the only reliable exit
         "grok" => Some("/quit"),
+        "pi" => Some("/quit"),
         _ => Some("/exit"), // claude, opencode, and others
     };
 
     if let Some(cmd) = exit_cmd {
-        // For Gemini (Ink/Node TUI): send text first, wait for it to appear in pane,
-        // then send Enter — same pattern as send_skill_and_prompt. Without this delay,
-        // Enter fires before the Ink TUI has rendered the input, and /quit is lost.
-        if current_agent == "gemini" {
+        // For Gemini and pi (Ink-class TUIs): send text first, wait for it to appear
+        // in pane, then send Enter — same pattern as send_skill_and_prompt. Without
+        // this delay, Enter fires before the TUI has rendered the input, and /quit is
+        // lost. pi's own renderer drops a combined text+Enter send the same way.
+        if matches!(current_agent, "gemini" | "pi") {
             let _ = tmux_ops.send_keys_literal(target, cmd);
             for _ in 0..20 {
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -9347,7 +9366,7 @@ fn switch_agent_in_tmux(
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
         if let Some(cmd) = exit_cmd {
-            if current_agent == "gemini" {
+            if matches!(current_agent, "gemini" | "pi") {
                 let _ = tmux_ops.send_keys_literal(target, cmd);
                 for _ in 0..20 {
                     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -9732,6 +9751,28 @@ fn write_skills_to_worktree(
                     serde_json::to_string_pretty(&cfg).unwrap_or_default(),
                 );
             }
+            "pi" => {
+                // pi has no built-in MCP; this is read by the pi-mcp-extension package
+                // (`pi install npm:pi-mcp-extension`). Harmless when it isn't installed.
+                // `lifecycle: eager` is required — the default "lazy" waits for a manual
+                // `/mcp:start agtx`, which would never come in an unattended session.
+                let cfg = serde_json::json!({
+                    "mcpServers": {
+                        "agtx": {
+                            "command": agtx_bin,
+                            "args": ["mcp-serve", &project_path_str],
+                            "transport": "stdio",
+                            "lifecycle": "eager"
+                        }
+                    }
+                });
+                let dir = Path::new(worktree_path).join(".pi");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(
+                    dir.join("mcp.json"),
+                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                );
+            }
             _ => {}
         }
     }
@@ -9760,11 +9801,16 @@ fn write_skills_to_worktree(
                         let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
                         let _ = std::fs::write(native_dir.join(&filename), toml_content);
                     }
-                    "codex" | "cursor" | "grok" => {
-                        // Codex/Cursor/Grok use SKILL.md in skill-name/ subdirectories
+                    "codex" | "cursor" | "grok" | "pi" => {
+                        // Codex/Cursor/Grok/pi use SKILL.md in skill-name/ subdirectories
                         let skill_subdir = native_dir.join(skill_dir_name);
                         let _ = std::fs::create_dir_all(&skill_subdir);
-                        let _ = std::fs::write(skill_subdir.join("SKILL.md"), &content);
+                        let body = if *agent_name == "pi" {
+                            transform_skill_for_pi(&content)
+                        } else {
+                            content.clone()
+                        };
+                        let _ = std::fs::write(skill_subdir.join("SKILL.md"), &body);
                     }
                     "opencode" => {
                         // OpenCode uses flat .md command files: .opencode/command/agtx-research.md
@@ -9815,10 +9861,15 @@ fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, agent_name: 
                 let filename = skills::skill_dir_to_filename(skill_name, agent_name);
                 let _ = std::fs::write(native_dir.join(&filename), toml_content);
             }
-            "codex" | "cursor" | "grok" => {
+            "codex" | "cursor" | "grok" | "pi" => {
                 let skill_subdir = native_dir.join(skill_name);
                 let _ = std::fs::create_dir_all(&skill_subdir);
-                let _ = std::fs::write(skill_subdir.join("SKILL.md"), content);
+                let body = if agent_name == "pi" {
+                    transform_skill_for_pi(content)
+                } else {
+                    content.to_string()
+                };
+                let _ = std::fs::write(skill_subdir.join("SKILL.md"), &body);
             }
             "opencode" => {
                 let oc_content = transform_skill_for_opencode(content);
@@ -9855,6 +9906,15 @@ fn transform_skill_for_opencode(content: &str) -> String {
         skills::extract_description(content).unwrap_or_else(|| "agtx skill".to_string());
     let body = skills::strip_frontmatter(content);
     format!("---\ndescription: \"{}\"\n---\n{}", description, body)
+}
+
+/// Rewrite MCP tool references for pi.
+///
+/// Skills name agtx's MCP tools in Claude Code's convention (`mcp__agtx__get_task`).
+/// Under pi the bridge is the pi-mcp-extension package, which registers tools as
+/// `<toolPrefix>_<server>_<tool>` — so the same tool is `mcp_agtx_get_task`.
+fn transform_skill_for_pi(content: &str) -> String {
+    content.replace("mcp__agtx__", "mcp_agtx_")
 }
 
 /// Resolve skill content: check plugin override, then fall back to default

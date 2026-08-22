@@ -66,7 +66,7 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — or define your own with a single TOML file
 - **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI
-- **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode)  | [Cursor Agent](https://cursor.com/docs/cli/overview) | [Copilot](https://github.com/github/copilot-cli) | [Grok Build](https://docs.x.ai/build/overview)
+- **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode)  | [Cursor Agent](https://cursor.com/docs/cli/overview) | [Copilot](https://github.com/github/copilot-cli) | [Grok Build](https://docs.x.ai/build/overview) | [pi](https://github.com/earendil-works/pi)
 
 > [!NOTE]
 > Just need a plain coding agent session manager with **full human-in-the-loop control** and **no automatic spec-driven skill execution and orchestration** on advancing tasks?
@@ -262,6 +262,23 @@ mkdir -p ~/.grok/skills/agtx-sweep && cp skills/sweep/SKILL.md ~/.grok/skills/ag
 </details>
 
 <details>
+<summary><strong>pi</strong></summary>
+
+pi has no built-in MCP. Install the third-party [pi-mcp-extension](https://github.com/irahardianto/pi-mcp-extension) once, then register the server:
+
+```bash
+pi install npm:pi-mcp-extension
+mkdir -p ~/.pi/agent/skills/agtx-sweep && cp skills/sweep/SKILL.md ~/.pi/agent/skills/agtx-sweep/SKILL.md
+cat > ~/.pi/agent/mcp.json <<'EOF'
+{"mcpServers":{"agtx":{"command":"agtx","args":["mcp-serve"],"transport":"stdio","lifecycle":"eager"}}}
+EOF
+```
+
+The sweep skill refers to agtx's MCP tools as `mcp__agtx__*`; under pi they are registered as `mcp_agtx_*`.
+
+</details>
+
+<details>
 <summary><strong>Other</strong></summary>
 
 Register `agtx mcp-serve` as an MCP server, then copy `skills/sweep/SKILL.md` into your agent's context.
@@ -362,21 +379,21 @@ Press `P` to switch plugins. Ships with 10 built-in:
 
 Commands are written once in canonical format and automatically translated per agent:
 
-| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode | Cursor | Grok |
-|--------------------------|-----------------|-------|----------|--------|------|
-| `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` |
+| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode | Cursor | Grok | pi |
+|--------------------------|-----------------|-------|----------|--------|------|----|
+| `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/skill:agtx-plan` |
 
-|  | Claude | Codex | Gemini | OpenCode | Cursor | Copilot | Grok |
-|--|:------:|:-----:|:------:|:--------:|:------:|:-------:|:----:|
-| **agtx** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ |
-| **gsd** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| **spec-kit** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ |
-| **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ |
-| **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ |
-| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
-| **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+|  | Claude | Codex | Gemini | OpenCode | Cursor | Copilot | Grok | pi |
+|--|:------:|:-----:|:------:|:--------:|:------:|:-------:|:----:|:--:|
+| **agtx** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
+| **gsd** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ |
+| **spec-kit** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
+| **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
 
@@ -449,6 +466,7 @@ review = ".my-plugin/{phase}/review.md"
 #   OpenCode:      /my-plugin-plan (colon -> hyphen)
 #   Codex:         $my-plugin-plan (slash -> dollar, colon -> hyphen)
 #   Cursor/Grok:   /my-plugin-plan (colon -> hyphen)
+#   pi:            /skill:my-plugin-plan (colon -> hyphen, /skill: prefix)
 # Omitted phases fall back to agent-native agtx skill invocation
 # (e.g. /agtx:plan for Claude, $agtx-plan for Codex).
 # Set to "" to skip sending a command for that phase.
