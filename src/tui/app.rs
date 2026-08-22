@@ -2685,6 +2685,7 @@ impl App {
                 "gemini" => Style::default().fg(Color::Rgb(234, 130, 180)), // pink
                 "opencode" => Style::default().fg(Color::White).bg(Color::Rgb(80, 80, 80)), // white on grey
                 "codex" => Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 20)), // white on black
+                "grok" => Style::default().fg(Color::Rgb(20, 20, 20)).bg(Color::White), // black on white
                 _ => Style::default().fg(Color::White),
             };
             let agent_label = Paragraph::new(format!(" {} ", task.agent))
@@ -9112,12 +9113,14 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 /// Note: on systems where agents are installed via asdf/nvm, all agents run as `node`
 /// and Check 1 never fires — AGENT_ACTIVE_INDICATORS is the only reliable signal there.
 const AGENT_COMMANDS: &[&str] = &[
-    "claude", "codex", "gemini", "copilot", "opencode", "agent", "python3", "python",
+    "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "python3", "python",
 ];
 
-/// Strings in pane content that indicate a Node/Ink agent TUI is active and ready.
-/// Used by `is_agent_active` to detect agents like Gemini and Cursor that run
-/// inside bash/node and don't change `pane_current_command` to their own name.
+/// Strings in pane content that indicate an agent TUI is active and ready.
+/// Used by `is_agent_active` to detect agents like Gemini, Cursor and Grok that
+/// run inside bash/node and don't change `pane_current_command` to their own name.
+/// (Grok is a native binary, but the npm package launches it through a wrapper,
+/// so the pane still reports `bash`.)
 /// Also used by `wait_for_agent_ready` (Check 2) to detect readiness for these agents.
 const AGENT_ACTIVE_INDICATORS: &[&str] = &[
     "Claude Code",       // Claude
@@ -9125,6 +9128,8 @@ const AGENT_ACTIVE_INDICATORS: &[&str] = &[
     "Ask anything",      // OpenCode
     "Cursor Agent",      // Cursor
     "OpenAI Codex",      // Codex
+    "Grok Build",        // Grok — splash/footer
+    "Shift+Tab:mode",    // Grok — session footer once a turn has run
 ];
 
 /// Check if the pane is running a shell (i.e. the agent has exited).
@@ -9294,6 +9299,7 @@ fn switch_agent_in_tmux(
         "codex" => None, // Codex has no exit command — Ctrl+C is the only way
         "gemini" => Some("/quit"),
         "cursor" => None,   // Ink/Node TUI — Ctrl+C is the only reliable exit
+        "grok" => Some("/quit"),
         _ => Some("/exit"), // claude, opencode, and others
     };
 
@@ -9688,6 +9694,30 @@ fn write_skills_to_worktree(
                     serde_json::to_string_pretty(&cfg).unwrap_or_default(),
                 );
             }
+            "grok" => {
+                // Grok reads project-scoped MCP servers from .grok/config.toml (TOML, not JSON),
+                // walking from the worktree up to the git root.
+                let esc = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
+                let cfg = format!(
+                    "[mcp_servers.agtx]\ncommand = \"{}\"\nargs = [\"mcp-serve\", \"{}\"]\n",
+                    esc(&agtx_bin),
+                    esc(&project_path_str)
+                );
+                let dir = Path::new(worktree_path).join(".grok");
+                let _ = std::fs::create_dir_all(&dir);
+                // A repo may already ship a .grok/config.toml — append the agtx table
+                // instead of clobbering the project's own settings.
+                let path = dir.join("config.toml");
+                let existing = std::fs::read_to_string(&path).unwrap_or_default();
+                if !existing.contains("[mcp_servers.agtx]") {
+                    let merged = if existing.trim().is_empty() {
+                        cfg
+                    } else {
+                        format!("{}\n\n{}", existing.trim_end(), cfg)
+                    };
+                    let _ = std::fs::write(&path, merged);
+                }
+            }
             "opencode" => {
                 let cfg = serde_json::json!({
                     "mcp": {
@@ -9730,8 +9760,8 @@ fn write_skills_to_worktree(
                         let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
                         let _ = std::fs::write(native_dir.join(&filename), toml_content);
                     }
-                    "codex" | "cursor" => {
-                        // Codex/Cursor use SKILL.md in skill-name/ subdirectories
+                    "codex" | "cursor" | "grok" => {
+                        // Codex/Cursor/Grok use SKILL.md in skill-name/ subdirectories
                         let skill_subdir = native_dir.join(skill_dir_name);
                         let _ = std::fs::create_dir_all(&skill_subdir);
                         let _ = std::fs::write(skill_subdir.join("SKILL.md"), &content);
@@ -9785,7 +9815,7 @@ fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, agent_name: 
                 let filename = skills::skill_dir_to_filename(skill_name, agent_name);
                 let _ = std::fs::write(native_dir.join(&filename), toml_content);
             }
-            "codex" | "cursor" => {
+            "codex" | "cursor" | "grok" => {
                 let skill_subdir = native_dir.join(skill_name);
                 let _ = std::fs::create_dir_all(&skill_subdir);
                 let _ = std::fs::write(skill_subdir.join("SKILL.md"), content);

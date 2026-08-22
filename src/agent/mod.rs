@@ -43,6 +43,7 @@ impl Agent {
             "gemini" => "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo --resume".to_string(),
             "opencode" => "opencode --continue".to_string(),
             "cursor" => "agent --yolo --continue".to_string(),
+            "grok" => "grok --yolo --trust --continue".to_string(),
             _ => self.build_interactive_command(""),
         }
     }
@@ -59,6 +60,7 @@ impl Agent {
                 "gemini" => "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo".to_string(),
                 "opencode" => "opencode".to_string(),
                 "cursor" => "agent --yolo".to_string(),
+                "grok" => "grok --yolo --trust".to_string(),
                 _ => self.command.clone(),
             };
         }
@@ -71,6 +73,7 @@ impl Agent {
             "gemini" => format!("GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo -i '{}'", escaped_prompt),
             "opencode" => format!("opencode -p '{}'", escaped_prompt),
             "cursor" => format!("agent --yolo '{}'", escaped_prompt),
+            "grok" => format!("grok --yolo --trust '{}'", escaped_prompt),
             _ => format!("{} '{}'", self.command, escaped_prompt),
         }
     }
@@ -114,6 +117,12 @@ pub fn known_agents() -> Vec<Agent> {
             "agent",
             "Cursor Agent CLI",
             "Cursor Agent <noreply@cursor.com>",
+        ),
+        Agent::new(
+            "grok",
+            "grok",
+            "xAI's Grok Build CLI",
+            "Grok <noreply@x.ai>",
         ),
         // TODO: investigate CLI usage before enabling
         // Agent::new("aider", "aider", "AI pair programming in your terminal", "Aider <noreply@aider.chat>"),

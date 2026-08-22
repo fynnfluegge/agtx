@@ -111,6 +111,7 @@ pub fn agent_native_skill_dir(agent_name: &str) -> Option<(&'static str, &'stati
         "opencode" => Some((".opencode/command", "")),
         "codex" => Some((".codex/skills", "")),
         "cursor" => Some((".cursor/skills", "")),
+        "grok" => Some((".grok/skills", "")),
         "copilot" => Some((".github/agents", "agtx")),
         _ => None,
     }
@@ -161,6 +162,7 @@ pub fn skill_dir_to_filename(skill_dir_name: &str, agent_name: &str) -> String {
 /// - Claude/Gemini: unchanged (`/gsd:plan-phase 1`)
 /// - OpenCode: colon → hyphen (`/gsd-plan-phase 1`)
 /// - Codex: slash → dollar + colon → hyphen (`$gsd-plan-phase 1`)
+/// - Cursor/Grok: colon → hyphen, slash kept (`/gsd-plan-phase 1`)
 /// - Unsupported agents: None (will fall back to file-path reference)
 pub fn transform_plugin_command(canonical_cmd: &str, agent_name: &str) -> Option<String> {
     match agent_name {
@@ -178,7 +180,7 @@ pub fn transform_plugin_command(canonical_cmd: &str, agent_name: &str) -> Option
                 Some(transformed)
             }
         }
-        "cursor" => {
+        "cursor" | "grok" => {
             // /agtx:plan → /agtx-plan (slash kept, colon → hyphen)
             Some(canonical_cmd.replacen(':', "-", 1))
         }
@@ -430,9 +432,13 @@ pub fn scan_agent_skills(
                 }
             }
         }
-        "cursor" => {
+        "cursor" | "grok" => {
             // Skill subdirectories with SKILL.md, invoked as /skill-name
-            let base = project_path.join(".cursor/skills");
+            let base_dir = match agent_native_skill_dir(agent_name) {
+                Some((dir, _)) => dir,
+                None => return results,
+            };
+            let base = project_path.join(base_dir);
             let entries = match std::fs::read_dir(&base) {
                 Ok(e) => e,
                 Err(_) => return results,

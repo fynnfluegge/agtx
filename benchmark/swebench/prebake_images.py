@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build the shared agtx/swebench-tools:latest image with tmux, Node.js, and Claude Code.
+Build the shared agtx/swebench-tools:latest image with tmux, Node.js, Claude Code, and Grok.
 
 This single image is used by all benchmark sandbox runs — the benchmark runner copies
 the installed binaries from a running tools container into each SWE-bench instance
@@ -10,7 +10,7 @@ The tools image is based on Ubuntu 22.04 (matching SWE-bench images) and contain
 the agent tooling layer. SWE-bench instance images are used as-is from Docker Hub.
 
 Usage:
-    # Build the tools image (run once, or after updating Claude Code)
+    # Build the tools image (run once, or after updating Claude Code / Grok)
     python prebake_images.py
 
     # Force rebuild even if image already exists
@@ -35,7 +35,7 @@ RUN apt-get update -qq \\
     && apt-get install -y -qq tmux curl ca-certificates \\
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\
     && apt-get install -y -qq nodejs \\
-    && npm install -g @anthropic-ai/claude-code \\
+    && npm install -g @anthropic-ai/claude-code @xai-official/grok \\
     && apt-get clean \\
     && rm -rf /var/lib/apt/lists/*
 """

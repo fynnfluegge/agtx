@@ -60,7 +60,7 @@ fn test_known_agents_includes_cursor() {
 fn test_known_agents_includes_all_expected() {
     let agents = known_agents();
     let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
-    for expected in &["claude", "codex", "copilot", "gemini", "opencode", "cursor"] {
+    for expected in &["claude", "codex", "copilot", "gemini", "opencode", "cursor", "grok"] {
         assert!(names.contains(expected), "missing agent: {}", expected);
     }
 }
@@ -145,6 +145,10 @@ fn test_build_resume_command_all_agents() {
     assert_eq!(
         by_name("cursor").build_resume_command(),
         "agent --yolo --continue"
+    );
+    assert_eq!(
+        by_name("grok").build_resume_command(),
+        "grok --yolo --trust --continue"
     );
 }
 
@@ -233,4 +237,64 @@ fn test_codex_transform_plugin_command_unchanged() {
 fn test_copilot_has_no_transform() {
     // Copilot: no interactive command transform
     assert_eq!(transform_plugin_command("/agtx:plan", "copilot"), None);
+}
+
+// =============================================================================
+// Tests for grok (xAI Grok Build) integration
+// =============================================================================
+
+#[test]
+fn test_known_agents_includes_grok() {
+    let agents = known_agents();
+    let grok = agents.iter().find(|a| a.name == "grok");
+    assert!(grok.is_some(), "grok should be in known_agents");
+    let grok = grok.unwrap();
+    assert_eq!(grok.command, "grok");
+    assert_eq!(grok.co_author, "Grok <noreply@x.ai>");
+}
+
+#[test]
+fn test_build_interactive_command_grok_no_prompt() {
+    let agents = known_agents();
+    let grok = agents.iter().find(|a| a.name == "grok").unwrap();
+    assert_eq!(grok.build_interactive_command(""), "grok --yolo --trust");
+}
+
+#[test]
+fn test_build_interactive_command_grok_with_prompt() {
+    let agents = known_agents();
+    let grok = agents.iter().find(|a| a.name == "grok").unwrap();
+    assert_eq!(
+        grok.build_interactive_command("do something"),
+        "grok --yolo --trust 'do something'"
+    );
+}
+
+#[test]
+fn test_build_interactive_command_grok_escapes_single_quotes() {
+    let agents = known_agents();
+    let grok = agents.iter().find(|a| a.name == "grok").unwrap();
+    let cmd = grok.build_interactive_command("it's a test");
+    assert!(cmd.starts_with("grok --yolo --trust "), "should use grok --yolo --trust: {cmd}");
+    // The quote must be escaped for the outer sh -c wrapper, not left bare.
+    assert!(cmd.contains("'\"'\"'"), "single quote must be escaped: {cmd}");
+}
+
+#[test]
+fn test_grok_has_native_skill_dir() {
+    let dir = agent_native_skill_dir("grok");
+    assert_eq!(dir, Some((".grok/skills", "")));
+}
+
+#[test]
+fn test_grok_transform_plugin_command() {
+    // Grok: colon → hyphen, slash kept (same as Cursor)
+    assert_eq!(
+        transform_plugin_command("/agtx:plan", "grok"),
+        Some("/agtx-plan".to_string())
+    );
+    assert_eq!(
+        transform_plugin_command("/gsd:plan-phase 1", "grok"),
+        Some("/gsd-plan-phase 1".to_string())
+    );
 }
