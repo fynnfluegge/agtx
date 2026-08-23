@@ -80,8 +80,10 @@ impl Agent {
             "opencode" => format!("opencode -p '{}'", escaped_prompt),
             "cursor" => format!("agent --yolo '{}'", escaped_prompt),
             "grok" => format!("grok --yolo --trust '{}'", escaped_prompt),
+            // -i / --prompt-interactive runs the prompt and keeps the session open,
+            // the same shape as Gemini's -i.
             "antigravity" => format!(
-                "agy --dangerously-skip-permissions --mode accept-edits '{}'",
+                "agy --dangerously-skip-permissions --mode accept-edits -i '{}'",
                 escaped_prompt
             ),
             _ => format!("{} '{}'", self.command, escaped_prompt),

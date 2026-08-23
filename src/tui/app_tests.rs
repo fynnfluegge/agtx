@@ -3827,6 +3827,8 @@ fn test_write_skills_to_worktree_gemini_toml() {
 
 #[test]
 fn test_write_skills_to_worktree_codex() {
+    // The codex arm appends a trust entry to ~/.codex/config.toml — redirect it.
+    let (_home, _guard) = redirect_agent_home();
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
@@ -3950,6 +3952,26 @@ fn test_write_skills_to_worktree_grok_skills() {
     assert!(dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists());
 }
 
+/// Redirect agent-global trust writes into a per-process temp HOME, and
+/// serialize the tests that do so.
+///
+/// Without the redirect, every run of the suite appends a temp-dir trust entry
+/// to the real user's `~/.codex/config.toml` and
+/// `~/.gemini/antigravity-cli/settings.json`. The lock is needed because the
+/// redirect target is process-global: these writes are read-modify-write on one
+/// shared file, so concurrent tests would clobber each other's entries.
+///
+/// Hold the returned guard for the duration of the test.
+fn redirect_agent_home() -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
+    static AGENT_HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking test poisons the lock; the data is unit, so recover and carry on.
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = AGENT_HOME.get_or_init(|| tempfile::tempdir().unwrap());
+    std::env::set_var("AGTX_AGENT_HOME", dir.path());
+    (dir.path().to_path_buf(), guard)
+}
+
 #[test]
 fn test_write_skills_to_worktree_mcp_antigravity() {
     let dir = tempfile::tempdir().unwrap();
@@ -4034,6 +4056,7 @@ fn test_write_skills_to_worktree_antigravity_skills() {
 
 #[test]
 fn test_write_skills_to_worktree_mcp_codex() {
+    let (_home, _guard) = redirect_agent_home();
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 

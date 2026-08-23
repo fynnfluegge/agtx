@@ -9136,10 +9136,6 @@ const AGENT_ACTIVE_INDICATORS: &[&str] = &[
     "OpenAI Codex",      // Codex
     "Grok Build",        // Grok — splash/footer
     "Shift+Tab:mode",    // Grok — session footer once a turn has run
-    // Antigravity — product name in the splash/footer. UNVERIFIED against a live
-    // `agy` session; confirm the literal (and whether it is needed at all, if the
-    // pane reports `agy` as its command) before relying on it.
-    "Antigravity",
 ];
 
 /// Check if the pane is running a shell (i.e. the agent has exited).
@@ -9574,6 +9570,21 @@ fn load_plugin_if_configured(
         .or_else(|| skills::load_bundled_plugin("agtx"))
 }
 
+/// Home directory for agent-global config that agtx writes as a trust
+/// side-effect — today only Codex's `~/.codex/config.toml`.
+///
+/// `AGTX_AGENT_HOME` overrides `$HOME` so tests can exercise that write without
+/// appending temp-dir trust entries to the real user's config, which is
+/// otherwise exactly what running the suite does.
+fn agent_trust_home() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("AGTX_AGENT_HOME") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    std::env::var("HOME").ok().map(PathBuf::from)
+}
+
 /// Write skill files to a worktree's .agtx/skills/ directory and agent-native discovery paths.
 /// `agent_names` determines which native paths to use (e.g. `.claude/commands/agtx/` for Claude).
 /// When multiple agents are configured for different phases, skills are deployed for all of them.
@@ -9659,8 +9670,8 @@ fn write_skills_to_worktree(
 
                 // Codex only loads project-local .codex/config.toml for trusted paths.
                 // Add a trust entry for this worktree to ~/.codex/config.toml.
-                if let Ok(home) = std::env::var("HOME") {
-                    let global_config_path = Path::new(&home).join(".codex").join("config.toml");
+                if let Some(home) = agent_trust_home() {
+                    let global_config_path = home.join(".codex").join("config.toml");
                     let trust_entry = format!(
                         "\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
                         worktree_path
@@ -9752,6 +9763,7 @@ fn write_skills_to_worktree(
                     &path,
                     serde_json::to_string_pretty(&root).unwrap_or_default(),
                 );
+
             }
             "opencode" => {
                 let cfg = serde_json::json!({

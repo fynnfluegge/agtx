@@ -265,15 +265,14 @@ mkdir -p ~/.grok/skills/agtx-sweep && cp skills/sweep/SKILL.md ~/.grok/skills/ag
 <summary><strong>Antigravity</strong></summary>
 
 ```bash
+agy mcp add agtx agtx mcp-serve
 mkdir -p ~/.gemini/antigravity-cli/skills/agtx-sweep
 cp skills/sweep/SKILL.md ~/.gemini/antigravity-cli/skills/agtx-sweep/SKILL.md
 ```
 
-Then add the MCP server to `~/.gemini/config/mcp_config.json`:
+Run `agy` once and sign in first — a signed-out launch opens a blocking login selector, which would stall a task session.
 
-```json
-{ "mcpServers": { "agtx": { "command": "agtx", "args": ["mcp-serve"] } } }
-```
+Antigravity also asks to trust each new directory, and worktrees do not inherit trust from the project root. agtx leaves that decision to you, so a task's first launch opens with the trust prompt and its initial skill/prompt is consumed by it — approve the folder, then re-trigger the phase to send the task.
 
 </details>
 
@@ -394,7 +393,6 @@ Commands are written once in canonical format and automatically translated per a
 | **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
 | **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-> Antigravity support is newly added and has **not** yet been exercised against a live `agy` session — its column is derived from the CLI's documented behaviour. See `docs/planning/antigravity-agent-support.md` for what still needs confirming.
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
 

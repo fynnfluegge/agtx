@@ -345,7 +345,7 @@ fn test_build_interactive_command_antigravity_with_prompt() {
     let agy = agents.iter().find(|a| a.name == "antigravity").unwrap();
     assert_eq!(
         agy.build_interactive_command("do something"),
-        "agy --dangerously-skip-permissions --mode accept-edits 'do something'"
+        "agy --dangerously-skip-permissions --mode accept-edits -i 'do something'"
     );
 }
 
@@ -355,7 +355,7 @@ fn test_build_interactive_command_antigravity_escapes_single_quotes() {
     let agy = agents.iter().find(|a| a.name == "antigravity").unwrap();
     let cmd = agy.build_interactive_command("it's a test");
     assert!(
-        cmd.starts_with("agy --dangerously-skip-permissions --mode accept-edits "),
+        cmd.starts_with("agy --dangerously-skip-permissions --mode accept-edits -i "),
         "should use the agy flags: {cmd}"
     );
     assert!(cmd.contains("'\"'\"'"), "single quote must be escaped: {cmd}");
