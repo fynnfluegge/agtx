@@ -3724,7 +3724,7 @@ fn test_wait_for_agent_ready_detects_agent_process() {
     mock.expect_capture_pane().returning(|_| Ok(String::new()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win");
+    let result = wait_for_agent_ready(&tmux, "sess:win", "claude");
     assert_eq!(result, Some("sess:win".to_string()));
 }
 
@@ -3738,7 +3738,7 @@ fn test_wait_for_agent_ready_detects_ready_indicator() {
         .returning(|_| Ok("Welcome to Gemini\nType your message".to_string()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win");
+    let result = wait_for_agent_ready(&tmux, "sess:win", "gemini");
     assert_eq!(result, Some("sess:win".to_string()));
 }
 
@@ -3759,7 +3759,7 @@ fn test_wait_for_agent_ready_claude_bypass_accept() {
     });
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win");
+    let result = wait_for_agent_ready(&tmux, "sess:win", "claude");
     assert_eq!(result, Some("sess:win".to_string()));
     let calls = literal_calls.lock().unwrap();
     assert!(
@@ -4032,6 +4032,38 @@ fn test_is_pane_at_shell_detects_pi() {
             "pane_current_command = {cmd:?}"
         );
     }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agent_active_pi_indicator_is_scoped_to_pi() {
+    // pi's footer context display ("0.0%/1.0M") is the only unconditional part of
+    // its UI, but "%/" also occurs in ordinary output. It must count as an active
+    // agent only for a pi pane — otherwise an exited Claude session whose tail
+    // happens to contain e.g. "Coverage: 85%/90%" reads as still running.
+    for (agent, expect_active) in [("pi", true), ("claude", false), ("codex", false)] {
+        let mut mock = MockTmuxOperations::new();
+        mock.expect_pane_current_command()
+            .returning(|_| Some("bash".to_string()));
+        mock.expect_capture_pane()
+            .returning(|_| Ok("Coverage: 85%/90% of statements\n$ ".to_string()));
+        assert_eq!(
+            is_agent_active(&mock, "t", agent),
+            expect_active,
+            "agent = {agent:?}"
+        );
+    }
+}
+
+#[test]
+fn test_has_active_indicator_scoping() {
+    // Globally distinctive banners match whatever the pane's agent is...
+    assert!(has_active_indicator("Claude Code v2.1.72", "pi"));
+    assert!(has_active_indicator("Type your message", "claude"));
+    // ...while a scoped needle only matches its own agent.
+    assert!(has_active_indicator("0.0%/1.0M (auto)", "pi"));
+    assert!(!has_active_indicator("0.0%/1.0M (auto)", "claude"));
+    assert!(!has_active_indicator("$ ", "pi"));
 }
 
 #[test]
@@ -8511,7 +8543,7 @@ fn test_is_agent_active_true_when_agent_process_running() {
     mock_tmux
         .expect_pane_current_command()
         .returning(|_| Some("claude".to_string()));
-    assert!(is_agent_active(&mock_tmux, "proj:task"));
+    assert!(is_agent_active(&mock_tmux, "proj:task", "claude"));
 }
 
 #[test]
@@ -8525,7 +8557,7 @@ fn test_is_agent_active_true_when_gemini_indicator_in_pane() {
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("some output\nType your message\n".to_string()));
-    assert!(is_agent_active(&mock_tmux, "proj:task"));
+    assert!(is_agent_active(&mock_tmux, "proj:task", "gemini"));
 }
 
 #[test]
@@ -8538,7 +8570,7 @@ fn test_is_agent_active_false_when_at_shell_no_indicator() {
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("$ ".to_string()));
-    assert!(!is_agent_active(&mock_tmux, "proj:task"));
+    assert!(!is_agent_active(&mock_tmux, "proj:task", "claude"));
 }
 
 // --- collect_task_diff ---
@@ -9129,6 +9161,7 @@ fn test_wait_for_agent_ready_returns_when_process_detected() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        "claude",
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9148,6 +9181,7 @@ fn test_wait_for_agent_ready_returns_when_ready_indicator_in_pane() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        "claude",
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9179,6 +9213,7 @@ fn test_wait_for_agent_ready_handles_claude_bypass_prompt() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        "claude",
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9210,6 +9245,7 @@ fn test_wait_for_agent_ready_returns_when_content_stabilizes() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        "claude",
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9235,6 +9271,7 @@ fn test_wait_for_agent_ready_always_returns_some() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        "claude",
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9284,7 +9321,7 @@ fn test_is_agent_active_detects_claude_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("Claude Code v2.1.72\n> ".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", "claude"),
         "Claude Code indicator should trigger is_agent_active"
     );
 }
@@ -9298,7 +9335,7 @@ fn test_is_agent_active_detects_gemini_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nType your message".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", "gemini"),
         "Gemini indicator should trigger is_agent_active"
     );
 }
@@ -9312,7 +9349,7 @@ fn test_is_agent_active_detects_opencode_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nAsk anything".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", "opencode"),
         "OpenCode indicator should trigger is_agent_active"
     );
 }
@@ -9326,7 +9363,7 @@ fn test_is_agent_active_detects_cursor_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nCursor Agent\n> ".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", "cursor"),
         "Cursor indicator should trigger is_agent_active"
     );
 }
@@ -9340,7 +9377,7 @@ fn test_is_agent_active_detects_codex_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nOpenAI Codex".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", "codex"),
         "Codex indicator should trigger is_agent_active"
     );
 }
@@ -9354,7 +9391,7 @@ fn test_is_agent_active_returns_false_when_no_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("just some shell output".to_string()));
     assert!(
-        !is_agent_active(&mock, "t"),
+        !is_agent_active(&mock, "t", "claude"),
         "no indicator should return false"
     );
 }
@@ -9372,7 +9409,7 @@ fn test_wait_for_agent_ready_detects_claude_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Claude Code v2.1.72\nsome context".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", "claude");
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9384,7 +9421,7 @@ fn test_wait_for_agent_ready_detects_cursor_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Cursor Agent\n> ".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", "claude");
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9396,7 +9433,7 @@ fn test_wait_for_agent_ready_detects_opencode_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Ask anything\n> ".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", "claude");
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9408,7 +9445,7 @@ fn test_wait_for_agent_ready_detects_codex_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("OpenAI Codex\nsome output".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", "claude");
     assert_eq!(result, Some("proj:task".to_string()));
 }
 

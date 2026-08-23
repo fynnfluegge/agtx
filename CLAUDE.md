@@ -554,7 +554,7 @@ Adding grok touched every one of these — use `git log -p` for that change as a
 
 **`src/tui/app.rs`**
 8. Add the binary to `AGENT_COMMANDS` (pane process detection) — only if the pane actually reports that name; check with `tmux display -p '#{pane_current_command}'`, not `ps`, since the two can disagree. Node agents usually report `node` and must rely on `AGENT_ACTIVE_INDICATORS` instead, unless they set `process.title` (which tmux picks up on Linux but not macOS). Matching is by substring and deliberately loose — false positives only matter if someone manually runs a colliding command in a pane after the agent exited
-9. Add an activity indicator to `AGENT_ACTIVE_INDICATORS` if the agent is an Ink/Node TUI (runs inside bash)
+9. Add an activity indicator if the agent is an Ink/Node TUI (runs inside bash). A distinctive banner goes in `AGENT_ACTIVE_INDICATORS`, which is matched against every pane regardless of its agent; anything generic enough to occur in ordinary output goes in `AGENT_SCOPED_INDICATORS` as an `(agent, needle)` pair so it only matches that agent's panes
 10. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
 11. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok" | "pi"` for SKILL.md subdirectories)
 12. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`). If the agent names MCP tools differently from Claude's `mcp__server__tool`, also add a skill-content rewrite (see `transform_skill_for_pi()`)

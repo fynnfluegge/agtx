@@ -758,8 +758,9 @@ impl App {
             app.state.orchestrator_session = Some(orch_target.clone());
             let tmux_ops = Arc::clone(&app.state.tmux_ops);
             let ready_flag = Arc::clone(&app.state.orchestrator_ready);
+            let orch_agent = app.state.config.default_agent.clone();
             std::thread::spawn(move || {
-                if wait_for_agent_ready(&tmux_ops, &orch_target).is_some() {
+                if wait_for_agent_ready(&tmux_ops, &orch_target, &orch_agent).is_some() {
                     ready_flag.store(true, Ordering::Release);
                 }
             });
@@ -4773,7 +4774,7 @@ impl App {
         }
         let agent_running = task.session_name.as_ref().map_or(false, |target| {
             self.state.tmux_ops.window_exists(target).unwrap_or(false)
-                && is_agent_active(&*self.state.tmux_ops, target)
+                && is_agent_active(&*self.state.tmux_ops, target, &task.agent)
         });
         if agent_running {
             self.state.move_confirm_popup = Some(MoveConfirmPopup {
@@ -4970,7 +4971,7 @@ impl App {
                         plugin: plugin_name,
                         error: None,
                     });
-                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target, &planning_agent_clone) {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -5359,7 +5360,7 @@ impl App {
                     });
 
                     // Wait for agent ready and send skill+prompt
-                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target, &agent_name) {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -5806,7 +5807,7 @@ impl App {
                         error: None,
                     });
 
-                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target, &running_agent_clone) {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -5948,7 +5949,7 @@ impl App {
                                 &current_agent_clone,
                                 &new_cmd,
                             );
-                            let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
+                            let _ = wait_for_agent_ready(&tmux_ops, &session_clone, &planning_agent_clone);
                         }
                         send_skill_and_prompt(
                             &tmux_ops,
@@ -6306,8 +6307,9 @@ impl App {
                 let tmux_ops = Arc::clone(&self.state.tmux_ops);
                 let ready_flag = Arc::clone(&self.state.orchestrator_ready);
                 let target = orch_target.clone();
+                let orch_agent = self.state.config.default_agent.clone();
                 std::thread::spawn(move || {
-                    if wait_for_agent_ready(&tmux_ops, &target).is_some() {
+                    if wait_for_agent_ready(&tmux_ops, &target, &orch_agent).is_some() {
                         ready_flag.store(true, Ordering::Release);
                     }
                 });
@@ -6422,8 +6424,9 @@ impl App {
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let ready_flag = Arc::clone(&self.state.orchestrator_ready);
         let target = orch_target;
+        let orch_agent = default_agent.clone();
         std::thread::spawn(move || {
-            if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &target) {
+            if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &target, &orch_agent) {
                 let _ = tmux_ops.send_keys(&ready_target, &skill_cmd);
                 ready_flag.store(true, Ordering::Release);
             }
@@ -8562,7 +8565,7 @@ fn spawn_send_to_agent(
             let agent_ops = agent_registry.get(&target_agent);
             let new_cmd = agent_ops.build_interactive_command("");
             switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_agent, &new_cmd);
-            let _ = wait_for_agent_ready(&tmux_ops, &target);
+            let _ = wait_for_agent_ready(&tmux_ops, &target, &target_agent);
         }
         let clear_context = plugin
             .as_ref()
@@ -9145,11 +9148,26 @@ const AGENT_ACTIVE_INDICATORS: &[&str] = &[
     "OpenAI Codex",      // Codex
     "Grok Build",        // Grok — splash/footer
     "Shift+Tab:mode",    // Grok — session footer once a turn has run
-    // pi has no static banner: its footer is the cwd plus a stats line, and the
-    // context-usage display (e.g. `0.0%/1.0M`) is the only unconditional part.
-    // Briefly reads `?/` instead right after a compaction, until the next response.
-    "%/",                // pi — footer context usage
 ];
+
+/// Indicators too generic to match globally: they are only consulted when the
+/// pane's agent is known to be the paired one.
+///
+/// pi has no static banner — its footer is the cwd plus a stats line, and the
+/// context-usage display (e.g. `0.0%/1.0M`) is the only unconditional part. `"%/"`
+/// alone would also match ordinary output like `Coverage: 85%/90%`, so matching it
+/// against a Claude or Codex pane would report an exited agent as still running.
+/// (It briefly reads `?/` instead right after a compaction, until the next response.)
+const AGENT_SCOPED_INDICATORS: &[(&str, &str)] = &[("pi", "%/")];
+
+/// True if `text` carries an active-agent indicator — either a globally
+/// distinctive one, or one scoped to `agent`.
+fn has_active_indicator(text: &str, agent: &str) -> bool {
+    AGENT_ACTIVE_INDICATORS.iter().any(|s| text.contains(s))
+        || AGENT_SCOPED_INDICATORS
+            .iter()
+            .any(|(a, s)| *a == agent && text.contains(s))
+}
 
 /// Check if the pane is running a shell (i.e. the agent has exited).
 /// Returns true when `pane_current_command` reports a shell (bash, zsh, sh, fish)
@@ -9248,7 +9266,7 @@ fn run_orchestrator_catchup(
 /// Check if an agent is actively running in the pane.
 /// Uses both `pane_current_command` (works for Claude, Codex, Copilot) and
 /// pane content indicators (works for Gemini which runs inside bash).
-fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
+fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str, agent: &str) -> bool {
     // Check 1: agent process visible in pane_current_command
     if !is_pane_at_shell(tmux_ops, target) {
         return true;
@@ -9261,10 +9279,7 @@ fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
         let bottom = lines.len().saturating_sub(5);
         let tail = &lines[bottom..];
         let tail_text = tail.join("\n");
-        if AGENT_ACTIVE_INDICATORS
-            .iter()
-            .any(|s| tail_text.contains(s))
-        {
+        if has_active_indicator(&tail_text, agent) {
             return true;
         }
     }
@@ -9356,7 +9371,7 @@ fn switch_agent_in_tmux(
     for _ in 0..30 {
         // 3s
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if !is_agent_active(tmux_ops, target) {
+        if !is_agent_active(tmux_ops, target, current_agent) {
             found_shell = true;
             break;
         }
@@ -9389,7 +9404,7 @@ fn switch_agent_in_tmux(
         for _ in 0..50 {
             // 5s
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if !is_agent_active(tmux_ops, target) {
+            if !is_agent_active(tmux_ops, target, current_agent) {
                 found_shell = true;
                 break;
             }
@@ -9402,7 +9417,7 @@ fn switch_agent_in_tmux(
         for _ in 0..20 {
             // 2s
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if !is_agent_active(tmux_ops, target) {
+            if !is_agent_active(tmux_ops, target, current_agent) {
                 break;
             }
         }
@@ -9446,7 +9461,11 @@ fn switch_agent_in_tmux(
 /// 3s of no pane content changes = agent has finished loading its TUI.
 const CONTENT_STABLE_THRESHOLD: u32 = 3;
 
-fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Option<String> {
+fn wait_for_agent_ready(
+    tmux_ops: &Arc<dyn TmuxOperations>,
+    target: &str,
+    agent: &str,
+) -> Option<String> {
     // Step 1: detect the ready signal (up to 30s).
     // Three detection methods, whichever fires first:
     //   1. Agent process detected via pane_current_command (Claude, Codex, Copilot)
@@ -9491,7 +9510,7 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
             }
 
             // Check 2: known ready indicator in pane content
-            if AGENT_ACTIVE_INDICATORS.iter().any(|s| content.contains(s)) {
+            if has_active_indicator(&content, agent) {
                 break;
             }
 
