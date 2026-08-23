@@ -5,7 +5,6 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
-    transport::io::stdio,
     ServerHandler, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
@@ -1281,7 +1280,85 @@ pub async fn serve(project_path: Option<PathBuf>) -> anyhow::Result<()> {
     };
 
     let server = AgtxMcpServer::new(mode);
-    let service = server.serve(stdio()).await?;
+    let service = server.serve(filtered_stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Buffer size for the in-memory pipes bridging real stdio to rmcp.
+const PIPE_BUF: usize = 64 * 1024;
+
+/// stdio for rmcp, with pre-handshake requests answered instead of fatal.
+///
+/// rmcp aborts if the first message is not `initialize`, which Antigravity CLI
+/// triggers by probing with `server/discover` first. See `prehandshake` for the
+/// full story. Returns a (reader, writer) pair rmcp can serve on; two background
+/// tasks pump real stdin/stdout through it.
+fn filtered_stdio() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+    use crate::mcp::prehandshake::{HandshakeFilter, PreInitAction};
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::sync::Mutex;
+
+    // client → us → rmcp
+    let (mut to_rmcp, rmcp_reader) = tokio::io::duplex(PIPE_BUF);
+    // rmcp → us → client
+    let (rmcp_writer, mut from_rmcp) = tokio::io::duplex(PIPE_BUF);
+
+    // Both the filter (error replies) and rmcp (real responses) write to stdout.
+    let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+
+    // Pump 1: real stdin → filter → rmcp.
+    let filter_stdout = stdout.clone();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        let mut filter = HandshakeFilter::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            match filter.next(&line) {
+                PreInitAction::Forward => {
+                    if to_rmcp.write_all(line.as_bytes()).await.is_err()
+                        || to_rmcp.write_all(b"\n").await.is_err()
+                        || to_rmcp.flush().await.is_err()
+                    {
+                        break;
+                    }
+                }
+                PreInitAction::Reject(response) => {
+                    let mut out = filter_stdout.lock().await;
+                    if out.write_all(response.as_bytes()).await.is_err()
+                        || out.write_all(b"\n").await.is_err()
+                        || out.flush().await.is_err()
+                    {
+                        break;
+                    }
+                    tracing::debug!(
+                        "answered pre-handshake request with method-not-found: {}",
+                        line
+                    );
+                }
+                PreInitAction::Drop => {
+                    tracing::debug!("dropped pre-handshake notification: {}", line);
+                }
+            }
+        }
+        // EOF on stdin — closing our end shuts rmcp down cleanly.
+        drop(to_rmcp);
+    });
+
+    // Pump 2: rmcp → real stdout.
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let n = match tokio::io::AsyncReadExt::read(&mut from_rmcp, &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let mut out = stdout.lock().await;
+            if out.write_all(&buf[..n]).await.is_err() || out.flush().await.is_err() {
+                break;
+            }
+        }
+    });
+
+    (rmcp_reader, rmcp_writer)
 }
