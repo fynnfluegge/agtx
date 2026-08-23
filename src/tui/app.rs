@@ -9137,7 +9137,6 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 /// `pi` only matches on Linux — macOS reports its Node entrypoint (`node`) instead,
 /// where `AGENT_ACTIVE_INDICATORS` covers it. Check a new agent's name with
 /// `tmux display -p '#{pane_current_command}'`, not `ps`; for pi the two disagree.
-/// See docs/planning/pi-agent-support.md for why.
 const AGENT_COMMANDS: &[&str] = &[
     "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy", "pi", "python3",
     "python",
