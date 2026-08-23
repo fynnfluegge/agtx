@@ -2687,7 +2687,8 @@ impl App {
                 "opencode" => Style::default().fg(Color::White).bg(Color::Rgb(80, 80, 80)), // white on grey
                 "codex" => Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 20)), // white on black
                 "grok" => Style::default().fg(Color::Rgb(20, 20, 20)).bg(Color::White), // black on white
-                "pi" => Style::default().fg(Color::Rgb(120, 190, 255)), // light blue
+                "antigravity" => Style::default().fg(Color::Rgb(120, 190, 255)), // light blue
+                "pi" => Style::default().fg(Color::Rgb(180, 150, 250)), // violet
                 _ => Style::default().fg(Color::White),
             };
             let agent_label = Paragraph::new(format!(" {} ", task.agent))
@@ -8719,15 +8720,22 @@ fn send_skill_and_prompt(
         return;
     }
 
-    // Gemini, Codex, cursor & pi: always combine skill+prompt into a single message.
+    // Gemini, Codex, cursor, antigravity & pi: always combine skill+prompt into a
+    // single message.
     // Gemini: sending separately causes it to execute the skill and queue the
     //   prompt, which gets lost or arrives too late.
     // Codex: skill mentions ($skill-name) are inline references that must be
     //   part of a message — sending just "$skill" standalone does nothing.
+    // Antigravity: descends from the Gemini CLI lineage (settings live under
+    //   ~/.gemini/), so it is treated as Ink-class and gets the same
+    //   wait-for-echo send. Not yet confirmed against a live session.
     // pi: a combined text+Enter send_keys does not submit at all — the text is
     //   left sitting in the editor. It needs the send → wait-for-echo → Enter
     //   sequence below, but a single Enter (no Codex-style second one).
-    if matches!(agent_name, "gemini" | "codex" | "cursor" | "pi") {
+    if matches!(
+        agent_name,
+        "gemini" | "codex" | "cursor" | "antigravity" | "pi"
+    ) {
         let text_to_send = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
                 Some(format!("{}\n\n{}", cmd, prompt))
@@ -9131,7 +9139,8 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 /// `tmux display -p '#{pane_current_command}'`, not `ps`; for pi the two disagree.
 /// See docs/planning/pi-agent-support.md for why.
 const AGENT_COMMANDS: &[&str] = &[
-    "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "pi", "python3", "python",
+    "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy", "pi", "python3",
+    "python",
 ];
 
 /// Strings in pane content that indicate an agent TUI is active and ready.
@@ -9604,6 +9613,21 @@ fn load_plugin_if_configured(
         .or_else(|| skills::load_bundled_plugin("agtx"))
 }
 
+/// Home directory for agent-global config that agtx writes as a trust
+/// side-effect — today only Codex's `~/.codex/config.toml`.
+///
+/// `AGTX_AGENT_HOME` overrides `$HOME` so tests can exercise that write without
+/// appending temp-dir trust entries to the real user's config, which is
+/// otherwise exactly what running the suite does.
+fn agent_trust_home() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("AGTX_AGENT_HOME") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    std::env::var("HOME").ok().map(PathBuf::from)
+}
+
 /// Write skill files to a worktree's .agtx/skills/ directory and agent-native discovery paths.
 /// `agent_names` determines which native paths to use (e.g. `.claude/commands/agtx/` for Claude).
 /// When multiple agents are configured for different phases, skills are deployed for all of them.
@@ -9689,8 +9713,8 @@ fn write_skills_to_worktree(
 
                 // Codex only loads project-local .codex/config.toml for trusted paths.
                 // Add a trust entry for this worktree to ~/.codex/config.toml.
-                if let Ok(home) = std::env::var("HOME") {
-                    let global_config_path = Path::new(&home).join(".codex").join("config.toml");
+                if let Some(home) = agent_trust_home() {
+                    let global_config_path = home.join(".codex").join("config.toml");
                     let trust_entry = format!(
                         "\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
                         worktree_path
@@ -9758,6 +9782,32 @@ fn write_skills_to_worktree(
                     let _ = std::fs::write(&path, merged);
                 }
             }
+            "antigravity" => {
+                // Antigravity reads workspace MCP servers from .agents/mcp_config.json
+                // (JSON, `mcpServers`). `.agents/` is vendor-neutral and may already be
+                // tracked in the repo, so merge the agtx entry into any existing file
+                // instead of clobbering the project's own servers.
+                let dir = Path::new(worktree_path).join(".agents");
+                let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join("mcp_config.json");
+                let mut root = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .filter(|v| v.is_object())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if !root["mcpServers"].is_object() {
+                    root["mcpServers"] = serde_json::json!({});
+                }
+                root["mcpServers"]["agtx"] = serde_json::json!({
+                    "command": &agtx_bin,
+                    "args": ["mcp-serve", &project_path_str]
+                });
+                let _ = std::fs::write(
+                    &path,
+                    serde_json::to_string_pretty(&root).unwrap_or_default(),
+                );
+
+            }
             "opencode" => {
                 let cfg = serde_json::json!({
                     "mcp": {
@@ -9822,8 +9872,8 @@ fn write_skills_to_worktree(
                         let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
                         let _ = std::fs::write(native_dir.join(&filename), toml_content);
                     }
-                    "codex" | "cursor" | "grok" | "pi" => {
-                        // Codex/Cursor/Grok/pi use SKILL.md in skill-name/ subdirectories
+                    "codex" | "cursor" | "grok" | "antigravity" | "pi" => {
+                        // These agents use SKILL.md in skill-name/ subdirectories
                         let skill_subdir = native_dir.join(skill_dir_name);
                         let _ = std::fs::create_dir_all(&skill_subdir);
                         let body = if *agent_name == "pi" {
@@ -9882,7 +9932,7 @@ fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, agent_name: 
                 let filename = skills::skill_dir_to_filename(skill_name, agent_name);
                 let _ = std::fs::write(native_dir.join(&filename), toml_content);
             }
-            "codex" | "cursor" | "grok" | "pi" => {
+            "codex" | "cursor" | "grok" | "antigravity" | "pi" => {
                 let skill_subdir = native_dir.join(skill_name);
                 let _ = std::fs::create_dir_all(&skill_subdir);
                 let body = if agent_name == "pi" {

@@ -60,7 +60,17 @@ fn test_known_agents_includes_cursor() {
 fn test_known_agents_includes_all_expected() {
     let agents = known_agents();
     let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
-    for expected in &["claude", "codex", "copilot", "gemini", "opencode", "cursor", "grok", "pi"] {
+    for expected in &[
+        "claude",
+        "codex",
+        "copilot",
+        "gemini",
+        "opencode",
+        "cursor",
+        "grok",
+        "antigravity",
+        "pi",
+    ] {
         assert!(names.contains(expected), "missing agent: {}", expected);
     }
 }
@@ -149,6 +159,10 @@ fn test_build_resume_command_all_agents() {
     assert_eq!(
         by_name("grok").build_resume_command(),
         "grok --yolo --trust --continue"
+    );
+    assert_eq!(
+        by_name("antigravity").build_resume_command(),
+        "agy --dangerously-skip-permissions --mode accept-edits --continue"
     );
 }
 
@@ -298,8 +312,6 @@ fn test_grok_transform_plugin_command() {
         Some("/gsd-plan-phase 1".to_string())
     );
 }
-
-// =============================================================================
 // Tests for pi (earendil-works pi coding agent) integration
 // =============================================================================
 
@@ -367,3 +379,74 @@ fn test_pi_transform_plugin_command() {
         Some("/skill:gsd-plan-phase 1".to_string())
     );
 }
+
+// =============================================================================
+// Tests for antigravity (Google Antigravity CLI) integration
+// =============================================================================
+
+#[test]
+fn test_known_agents_includes_antigravity() {
+    let agents = known_agents();
+    let agy = agents.iter().find(|a| a.name == "antigravity");
+    assert!(agy.is_some(), "antigravity should be in known_agents");
+    let agy = agy.unwrap();
+    // Agent name and binary differ, like Cursor (`cursor` / `agent`).
+    assert_eq!(agy.command, "agy");
+    assert_eq!(agy.co_author, "Antigravity <noreply@google.com>");
+}
+
+#[test]
+fn test_build_interactive_command_antigravity_no_prompt() {
+    let agents = known_agents();
+    let agy = agents.iter().find(|a| a.name == "antigravity").unwrap();
+    // Both permission controls are needed: --mode governs the file-edit diff
+    // review, --dangerously-skip-permissions governs shell/MCP/URL approvals.
+    assert_eq!(
+        agy.build_interactive_command(""),
+        "agy --dangerously-skip-permissions --mode accept-edits"
+    );
+}
+
+#[test]
+fn test_build_interactive_command_antigravity_with_prompt() {
+    let agents = known_agents();
+    let agy = agents.iter().find(|a| a.name == "antigravity").unwrap();
+    assert_eq!(
+        agy.build_interactive_command("do something"),
+        "agy --dangerously-skip-permissions --mode accept-edits -i 'do something'"
+    );
+}
+
+#[test]
+fn test_build_interactive_command_antigravity_escapes_single_quotes() {
+    let agents = known_agents();
+    let agy = agents.iter().find(|a| a.name == "antigravity").unwrap();
+    let cmd = agy.build_interactive_command("it's a test");
+    assert!(
+        cmd.starts_with("agy --dangerously-skip-permissions --mode accept-edits -i "),
+        "should use the agy flags: {cmd}"
+    );
+    assert!(cmd.contains("'\"'\"'"), "single quote must be escaped: {cmd}");
+}
+
+#[test]
+fn test_antigravity_has_native_skill_dir() {
+    // Antigravity uses the vendor-neutral `.agents/` tree, not an agent dotdir.
+    let dir = agent_native_skill_dir("antigravity");
+    assert_eq!(dir, Some((".agents/skills", "")));
+}
+
+#[test]
+fn test_antigravity_transform_plugin_command() {
+    // Antigravity: colon → hyphen, slash kept (same as Cursor/Grok)
+    assert_eq!(
+        transform_plugin_command("/agtx:plan", "antigravity"),
+        Some("/agtx-plan".to_string())
+    );
+    assert_eq!(
+        transform_plugin_command("/gsd:plan-phase 1", "antigravity"),
+        Some("/gsd-plan-phase 1".to_string())
+    );
+}
+
+// ======================================================================

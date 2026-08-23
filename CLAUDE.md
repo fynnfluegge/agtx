@@ -1,6 +1,6 @@
 # AGTX - Terminal Kanban for Coding Agents
 
-A terminal-native kanban board for managing multiple coding agent sessions (Claude Code, Codex, Gemini, Copilot, OpenCode, Cursor, Grok, pi) with isolated git worktrees.
+A terminal-native kanban board for managing multiple coding agent sessions (Claude Code, Codex, Gemini, Copilot, OpenCode, Cursor, Grok, Antigravity, pi) with isolated git worktrees.
 
 ## Quick Start
 
@@ -163,6 +163,7 @@ Skills are markdown files with YAML frontmatter deployed to agent-native discove
 - Codex: `.codex/skills/agtx-plan/SKILL.md`
 - Cursor: `.cursor/skills/agtx-plan/SKILL.md`
 - Grok: `.grok/skills/agtx-plan/SKILL.md`
+- Antigravity: `.agents/skills/agtx-plan/SKILL.md` (vendor-neutral tree, not an agent dotdir)
 - pi: `.pi/skills/agtx-plan/SKILL.md`
 - OpenCode: `.opencode/command/agtx-plan.md` (frontmatter stripped)
 - Copilot: `.github/agents/agtx/plan.md`
@@ -178,16 +179,22 @@ Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
 | gemini | `.gemini/settings.json` | JSON, `mcpServers` + `trust: true` |
 | cursor | `.cursor/mcp.json` | JSON, `mcpServers` |
 | grok | `.grok/config.toml` | TOML, `[mcp_servers.agtx]` |
+| antigravity | `.agents/mcp_config.json` | JSON, `mcpServers` |
 | opencode | opencode config | JSON, `mcp` |
 | pi | `.pi/mcp.json` | JSON, `mcpServers` + `lifecycle: "eager"` |
 
-Two agents need an extra trust side-effect to avoid an interactive dialog on first open: Claude gets `.claude/settings.local.json` with `enableAllProjectMcpServers: true`, and Codex gets a `[projects."<worktree>"] trust_level = "trusted"` entry appended to the user's global `~/.codex/config.toml`.
+Two writers **merge** instead of overwriting, because their file may already be tracked in the repo: grok appends `[mcp_servers.agtx]` to any existing `.grok/config.toml`, and antigravity parses `.agents/mcp_config.json`, inserts `mcpServers.agtx`, and writes it back — preserving other servers and top-level sibling keys. (`.agents/` is vendor-neutral, so a project is more likely to ship one.)
+
+Two agents need an extra trust side-effect to avoid an interactive dialog on first open: Claude gets `.claude/settings.local.json` with `enableAllProjectMcpServers: true`, and Codex gets a `[projects."<worktree>"] trust_level = "trusted"` entry appended to the user's global `~/.codex/config.toml`. Both writes resolve the home directory through `agent_trust_home()`, which honours `AGTX_AGENT_HOME` so the test suite does not append temp-dir trust entries to the real user's config.
+
+### MCP pre-handshake filter
+`agtx mcp-serve` does not hand raw stdio to rmcp. Antigravity probes every stdio server with a custom `server/discover` request *before* `initialize`, and rmcp treats a non-`initialize` first message as fatal (`ExpectedInitializeRequest`) and exits — so the follow-up `initialize` hits a closed pipe. `src/mcp/prehandshake.rs` answers pre-handshake requests with JSON-RPC `-32601` and keeps the connection open; once `initialize` is forwarded it is a pass-through. Two background tasks pump real stdin/stdout through in-memory duplex pipes (`filtered_stdio()` in `src/mcp/server.rs`).
 
 pi is the exception to the table: it has **no built-in MCP support**. `.pi/mcp.json` is read by the third-party [`pi-mcp-extension`](https://github.com/irahardianto/pi-mcp-extension) package, which the user must install once with `pi install npm:pi-mcp-extension` (pi extensions run as TypeScript inside the agent process). agtx writes the file unconditionally — it is simply inert until the extension is present, so pi tasks work without MCP in the meantime. Two details are load-bearing: `lifecycle: "eager"` (the extension defaults to `"lazy"`, which waits for a manual `/mcp:start agtx` that never comes unattended), and the tool naming — the extension registers `<toolPrefix>_<server>_<tool>`, so skills deployed for pi get `mcp__agtx__*` rewritten to `mcp_agtx_*` by `transform_skill_for_pi()`.
 
 Commands are written once in canonical format (`/ns:command`) and auto-translated:
 - Claude/Gemini: `/ns:command` (unchanged)
-- OpenCode/Cursor/Grok: `/ns-command` (colon → hyphen, slash kept)
+- OpenCode/Cursor/Grok/Antigravity: `/ns-command` (colon → hyphen, slash kept)
 - Codex: `$ns-command` (slash → dollar, colon → hyphen)
 - pi: `/skill:ns-command` (colon → hyphen, then prefixed with `/skill:`)
 - Copilot: no interactive skill invocation (prompt only, no commands sent)
@@ -196,7 +203,7 @@ Commands are written once in canonical format (`/ns:command`) and auto-translate
 `send_skill_and_prompt()` has **three** send paths, because agent TUIs disagree about how a slash command plus arguments must arrive. Getting this wrong is the usual cause of "the agent started but never got the task":
 
 1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter
-2. **gemini / codex / cursor / pi** — always combine skill + prompt into a *single* message via `send_keys_literal`, then poll the pane until the text renders before pressing Enter (Ink TUIs drop keys sent too early). Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. Codex additionally needs a second Enter to dismiss its command picker; pi needs only one, but silently drops a combined text+Enter `send_keys`, leaving the text unsent in its editor
+2. **gemini / codex / cursor / antigravity / pi** — always combine skill + prompt into a *single* message via `send_keys_literal`, then poll the pane until the text renders before pressing Enter (Ink TUIs drop keys sent too early). Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. Codex additionally needs a second Enter to dismiss its command picker. Antigravity's slash-command picker closes as soon as arguments are typed, so the combined text submits on a single Enter (verified against agy 1.1.19) — no Codex-style second Enter. pi likewise needs only one Enter, but silently drops a combined text+Enter `send_keys`, leaving the text unsent in its editor
 3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
 
 `clear_context_on_advance` is applied before all three, and only for Claude (`/clear`, then poll until the pane stabilises).
@@ -497,7 +504,7 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 
 ### Agent Integration
 - Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
-- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`), Copilot (`--allow-all-tools`), Cursor (`agent --yolo`), Grok (`--yolo --trust`, where `--trust` also ungates the repo-local `.grok/config.toml` MCP server and suppresses the directory-trust dialog), pi (`--approve` — pi ships no permission prompts at all, so this only suppresses the project-trust selector that would otherwise block startup in a fresh worktree)
+- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`), Copilot (`--allow-all-tools`), Cursor (`agent --yolo`), Grok (`--yolo --trust`, where `--trust` also ungates the repo-local `.grok/config.toml` MCP server and suppresses the directory-trust dialog), Antigravity (`agy --dangerously-skip-permissions --mode accept-edits` — two orthogonal controls: the flag governs shell/MCP/URL approvals, `--mode` governs the file-edit diff review, and both are needed to run unattended), pi (`--approve` — pi ships no permission prompts at all, so this only suppresses the project-trust selector that would otherwise block startup in a fresh worktree)
 - `build_resume_command()` is the recovery variant used after a tmux/server restart — mostly `--continue`, but Gemini uses `--resume` and Codex uses `codex resume --last`
 - Skills deployed to agent-native paths via `write_skills_to_worktree()` in app.rs
 - Commands resolved per-task via `resolve_skill_command()` (plugin command + agent transform)
@@ -597,7 +604,8 @@ Detected automatically via `known_agents()` in order of preference:
 5. **opencode** - AI-powered coding assistant
 6. **cursor** - Cursor Agent CLI (binary is `agent`)
 7. **grok** - xAI's Grok Build CLI
-8. **pi** - earendil-works pi coding harness
+8. **antigravity** - Google's Antigravity CLI (binary is `agy`)
+9. **pi** - earendil-works pi coding harness
 
 ## Future Enhancements
 - Reopen Done tasks (recreate worktree from preserved branch)

@@ -112,6 +112,9 @@ pub fn agent_native_skill_dir(agent_name: &str) -> Option<(&'static str, &'stati
         "codex" => Some((".codex/skills", "")),
         "cursor" => Some((".cursor/skills", "")),
         "grok" => Some((".grok/skills", "")),
+        // Antigravity reads workspace skills from the vendor-neutral `.agents/` tree,
+        // not from an agent-specific dotdir.
+        "antigravity" => Some((".agents/skills", "")),
         "pi" => Some((".pi/skills", "")),
         "copilot" => Some((".github/agents", "agtx")),
         _ => None,
@@ -163,7 +166,7 @@ pub fn skill_dir_to_filename(skill_dir_name: &str, agent_name: &str) -> String {
 /// - Claude/Gemini: unchanged (`/gsd:plan-phase 1`)
 /// - OpenCode: colon → hyphen (`/gsd-plan-phase 1`)
 /// - Codex: slash → dollar + colon → hyphen (`$gsd-plan-phase 1`)
-/// - Cursor/Grok: colon → hyphen, slash kept (`/gsd-plan-phase 1`)
+/// - Cursor/Grok/Antigravity: colon → hyphen, slash kept (`/gsd-plan-phase 1`)
 /// - Unsupported agents: None (will fall back to file-path reference)
 pub fn transform_plugin_command(canonical_cmd: &str, agent_name: &str) -> Option<String> {
     match agent_name {
@@ -181,7 +184,7 @@ pub fn transform_plugin_command(canonical_cmd: &str, agent_name: &str) -> Option
                 Some(transformed)
             }
         }
-        "cursor" | "grok" => {
+        "cursor" | "grok" | "antigravity" => {
             // /agtx:plan → /agtx-plan (slash kept, colon → hyphen)
             Some(canonical_cmd.replacen(':', "-", 1))
         }
@@ -442,7 +445,7 @@ pub fn scan_agent_skills(
                 }
             }
         }
-        "cursor" | "grok" | "pi" => {
+        "cursor" | "grok" | "antigravity" | "pi" => {
             // Skill subdirectories with SKILL.md, invoked as /skill-name
             // (pi registers the same layout as /skill:<name>)
             let base_dir = match agent_native_skill_dir(agent_name) {
