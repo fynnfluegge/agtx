@@ -270,10 +270,6 @@ mkdir -p ~/.gemini/antigravity-cli/skills/agtx-sweep
 cp skills/sweep/SKILL.md ~/.gemini/antigravity-cli/skills/agtx-sweep/SKILL.md
 ```
 
-Run `agy` once and sign in first — a signed-out launch opens a blocking login selector, which would stall a task session.
-
-Antigravity also asks to trust each new directory, and worktrees do not inherit trust from the project root. agtx leaves that decision to you, so a task's first launch opens with the trust prompt and its initial skill/prompt is consumed by it — approve the folder, then re-trigger the phase to send the task.
-
 </details>
 
 <details>
