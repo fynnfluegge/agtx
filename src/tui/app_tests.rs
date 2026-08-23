@@ -4076,6 +4076,76 @@ fn test_write_skills_to_worktree_mcp_pi() {
 }
 
 #[test]
+fn test_write_skills_to_worktree_mcp_pi_preserves_existing_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let pi_dir = dir.path().join(".pi");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    // pi-mcp-extension layers project config over global, so a repo may well track
+    // its own .pi/mcp.json — including a top-level `settings` block.
+    std::fs::write(
+        pi_dir.join("mcp.json"),
+        r#"{"settings":{"toolPrefix":"mcp"},"mcpServers":{"other":{"command":"other"}}}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"]);
+
+    let content = std::fs::read_to_string(pi_dir.join("mcp.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        v["mcpServers"]["other"]["command"], "other",
+        "a project's own .pi/mcp.json servers must not be clobbered: {content}"
+    );
+    assert_eq!(
+        v["settings"]["toolPrefix"], "mcp",
+        "sibling keys must be preserved: {content}"
+    );
+    assert_eq!(v["mcpServers"]["agtx"]["lifecycle"], "eager");
+}
+
+#[test]
+fn test_write_skills_to_worktree_mcp_pi_overwrites_stale_agtx_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let pi_dir = dir.path().join(".pi");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    // A worktree reused across agtx versions may carry an outdated agtx entry —
+    // notably one written before `lifecycle` was set, which would never start.
+    std::fs::write(
+        pi_dir.join("mcp.json"),
+        r#"{"mcpServers":{"agtx":{"command":"/old/agtx","args":["mcp-serve","/old"]}}}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"]);
+
+    let content = std::fs::read_to_string(pi_dir.join("mcp.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        v["mcpServers"]["agtx"]["lifecycle"], "eager",
+        "a stale agtx entry must be refreshed, not left as-is: {content}"
+    );
+    assert_ne!(v["mcpServers"]["agtx"]["command"], "/old/agtx");
+}
+
+#[test]
+fn test_write_skills_to_worktree_mcp_pi_replaces_malformed_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let pi_dir = dir.path().join(".pi");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    std::fs::write(pi_dir.join("mcp.json"), "not json at all").unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"]);
+
+    let content = std::fs::read_to_string(pi_dir.join("mcp.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content)
+        .expect("unparseable config should be replaced with valid JSON");
+    assert_eq!(v["mcpServers"]["agtx"]["lifecycle"], "eager");
+}
+
+#[test]
 fn test_write_skills_to_worktree_pi_skills() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();

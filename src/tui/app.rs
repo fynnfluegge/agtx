@@ -9823,25 +9823,35 @@ fn write_skills_to_worktree(
                 );
             }
             "pi" => {
-                // pi has no built-in MCP; this is read by the pi-mcp-extension package
-                // (`pi install npm:pi-mcp-extension`). Harmless when it isn't installed.
+                // pi has no built-in MCP; .pi/mcp.json is read by the pi-mcp-extension
+                // package (`pi install npm:pi-mcp-extension`). Harmless when it isn't
+                // installed. The extension layers project config over global per-server,
+                // so a repo is likely to track its own .pi/mcp.json — merge the agtx
+                // entry in rather than clobbering it, and preserve sibling keys such as
+                // the extension's top-level `settings` block.
+                //
                 // `lifecycle: eager` is required — the default "lazy" waits for a manual
                 // `/mcp:start agtx`, which would never come in an unattended session.
-                let cfg = serde_json::json!({
-                    "mcpServers": {
-                        "agtx": {
-                            "command": agtx_bin,
-                            "args": ["mcp-serve", &project_path_str],
-                            "transport": "stdio",
-                            "lifecycle": "eager"
-                        }
-                    }
-                });
                 let dir = Path::new(worktree_path).join(".pi");
                 let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join("mcp.json");
+                let mut root = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .filter(|v| v.is_object())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if !root["mcpServers"].is_object() {
+                    root["mcpServers"] = serde_json::json!({});
+                }
+                root["mcpServers"]["agtx"] = serde_json::json!({
+                    "command": &agtx_bin,
+                    "args": ["mcp-serve", &project_path_str],
+                    "transport": "stdio",
+                    "lifecycle": "eager"
+                });
                 let _ = std::fs::write(
-                    dir.join("mcp.json"),
-                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                    &path,
+                    serde_json::to_string_pretty(&root).unwrap_or_default(),
                 );
             }
             _ => {}
