@@ -1,5 +1,5 @@
 use agtx::agent::{known_agents, parse_agent_selection, AgentOperations, CodingAgent};
-use agtx::skills::{agent_native_skill_dir, transform_plugin_command};
+use agtx::skills::{agent_native_skill_dir, scan_agent_skills, transform_plugin_command};
 
 #[test]
 fn test_parse_agent_selection_empty_defaults_to_first() {
@@ -312,6 +312,8 @@ fn test_grok_transform_plugin_command() {
         Some("/gsd-plan-phase 1".to_string())
     );
 }
+
+// =============================================================================
 // Tests for pi (earendil-works pi coding agent) integration
 // =============================================================================
 
@@ -349,8 +351,14 @@ fn test_build_interactive_command_pi_escapes_single_quotes() {
     let agents = known_agents();
     let pi = agents.iter().find(|a| a.name == "pi").unwrap();
     let cmd = pi.build_interactive_command("it's a test");
-    assert!(cmd.starts_with("pi --approve "), "should use pi --approve: {cmd}");
-    assert!(cmd.contains("'\"'\"'"), "single quote must be escaped: {cmd}");
+    assert!(
+        cmd.starts_with("pi --approve "),
+        "should use pi --approve: {cmd}"
+    );
+    assert!(
+        cmd.contains("'\"'\"'"),
+        "single quote must be escaped: {cmd}"
+    );
 }
 
 #[test]
@@ -364,6 +372,61 @@ fn test_build_resume_command_pi() {
 fn test_pi_has_native_skill_dir() {
     let dir = agent_native_skill_dir("pi");
     assert_eq!(dir, Some((".pi/skills", "")));
+}
+
+#[test]
+fn test_scan_agent_skills_pi_uses_frontmatter_name() {
+    // pi registers a skill under its frontmatter `name:` and deliberately allows
+    // that to differ from the parent directory (the Agent Skills spec forbids it;
+    // pi relaxes the rule so one skill tree can be shared across harnesses).
+    // Keying the picker off the directory name emits a command pi cannot resolve.
+    let dir = tempfile::tempdir().unwrap();
+    let skill_dir = dir.path().join(".pi/skills/dirname-x");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: framework-thing\ndescription: A renamed skill.\n---\nbody\n",
+    )
+    .unwrap();
+
+    let found = scan_agent_skills("pi", dir.path());
+    assert_eq!(
+        found,
+        vec![(
+            "/skill:framework-thing".to_string(),
+            "A renamed skill.".to_string()
+        )]
+    );
+}
+
+#[test]
+fn test_scan_agent_skills_pi_falls_back_to_dirname() {
+    // No parseable frontmatter name — the directory is the best guess left.
+    let dir = tempfile::tempdir().unwrap();
+    let skill_dir = dir.path().join(".pi/skills/agtx-plan");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "no frontmatter here\n").unwrap();
+
+    let found = scan_agent_skills("pi", dir.path());
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].0, "/skill:agtx-plan");
+}
+
+#[test]
+fn test_scan_agent_skills_dirname_agents_ignore_frontmatter_name() {
+    // Cursor/Grok/Antigravity enforce name == directory, so they stay on dirname.
+    let dir = tempfile::tempdir().unwrap();
+    let skill_dir = dir.path().join(".grok/skills/dirname-x");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: framework-thing\ndescription: A renamed skill.\n---\nbody\n",
+    )
+    .unwrap();
+
+    let found = scan_agent_skills("grok", dir.path());
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].0, "/dirname-x");
 }
 
 #[test]
@@ -448,5 +511,3 @@ fn test_antigravity_transform_plugin_command() {
         Some("/gsd-plan-phase 1".to_string())
     );
 }
-
-// ======================================================================

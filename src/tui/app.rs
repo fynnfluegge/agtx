@@ -4972,7 +4972,9 @@ impl App {
                         plugin: plugin_name,
                         error: None,
                     });
-                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target, &planning_agent_clone) {
+                    if let Some(target) =
+                        wait_for_agent_ready(&tmux_ops, &target, &planning_agent_clone)
+                    {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -5808,7 +5810,9 @@ impl App {
                         error: None,
                     });
 
-                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target, &running_agent_clone) {
+                    if let Some(target) =
+                        wait_for_agent_ready(&tmux_ops, &target, &running_agent_clone)
+                    {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -5950,7 +5954,11 @@ impl App {
                                 &current_agent_clone,
                                 &new_cmd,
                             );
-                            let _ = wait_for_agent_ready(&tmux_ops, &session_clone, &planning_agent_clone);
+                            let _ = wait_for_agent_ready(
+                                &tmux_ops,
+                                &session_clone,
+                                &planning_agent_clone,
+                            );
                         }
                         send_skill_and_prompt(
                             &tmux_ops,
@@ -9135,12 +9143,26 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 /// pane (init_script uses `run_worktree_script`, agents spawn tools as piped children).
 ///
 /// `pi` only matches on Linux — macOS reports its Node entrypoint (`node`) instead,
-/// where `AGENT_ACTIVE_INDICATORS` covers it. Check a new agent's name with
+/// which `AGENT_SCOPED_COMMANDS` covers. Check a new agent's name with
 /// `tmux display -p '#{pane_current_command}'`, not `ps`; for pi the two disagree.
 const AGENT_COMMANDS: &[&str] = &[
     "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy", "pi", "python3",
     "python",
 ];
+
+/// Pane commands too generic for `AGENT_COMMANDS`: they only mean "an agent is
+/// running" when the pane belongs to the paired agent.
+///
+/// pi sets `process.title = "pi"`, but macOS fixes `p_comm` at exec, so tmux keeps
+/// reporting the Node entrypoint (Linux picks the rewrite up and reports `pi`, which
+/// `AGENT_COMMANDS` already covers). `node` cannot go in the global list: every
+/// Ink/Node agent would then look alive the moment its process starts, long before
+/// its TUI has rendered.
+///
+/// This is what makes `is_agent_active` work for pi on macOS. Pane *content* cannot
+/// do the job — pi renders inline, so after `/quit` its stale footer sits directly
+/// above the shell prompt and any content needle would report an exited pi as live.
+const AGENT_SCOPED_COMMANDS: &[(&str, &str)] = &[("pi", "node")];
 
 /// Strings in pane content that indicate an agent TUI is active and ready.
 /// Used by `is_agent_active` to detect agents like Gemini, Cursor and Grok that
@@ -9166,6 +9188,11 @@ const AGENT_ACTIVE_INDICATORS: &[&str] = &[
 /// alone would also match ordinary output like `Coverage: 85%/90%`, so matching it
 /// against a Claude or Codex pane would report an exited agent as still running.
 /// (It briefly reads `?/` instead right after a compaction, until the next response.)
+///
+/// For pi this is a backstop, not the primary signal: `AGENT_SCOPED_COMMANDS` detects
+/// it by pane command on both platforms. It still earns its place in
+/// `wait_for_agent_ready`'s Check 2, and because pi renders inline the footer is
+/// usually *outside* the 5-line tail `is_agent_active` inspects.
 const AGENT_SCOPED_INDICATORS: &[(&str, &str)] = &[("pi", "%/")];
 
 /// True if `text` carries an active-agent indicator — either a globally
@@ -9179,10 +9206,14 @@ fn has_active_indicator(text: &str, agent: &str) -> bool {
 
 /// Check if the pane is running a shell (i.e. the agent has exited).
 /// Returns true when `pane_current_command` reports a shell (bash, zsh, sh, fish)
-/// rather than an agent process.
-fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
+/// rather than an agent process — either a globally known agent binary, or one
+/// scoped to `agent`.
+fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str, agent: &str) -> bool {
     if let Some(cmd) = tmux_ops.pane_current_command(target) {
         !AGENT_COMMANDS.iter().any(|a| cmd.contains(a))
+            && !AGENT_SCOPED_COMMANDS
+                .iter()
+                .any(|(a, c)| *a == agent && cmd.contains(c))
     } else {
         false
     }
@@ -9276,7 +9307,7 @@ fn run_orchestrator_catchup(
 /// pane content indicators (works for Gemini which runs inside bash).
 fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str, agent: &str) -> bool {
     // Check 1: agent process visible in pane_current_command
-    if !is_pane_at_shell(tmux_ops, target) {
+    if !is_pane_at_shell(tmux_ops, target, agent) {
         return true;
     }
     // Check 2: check the bottom of the visible pane for agent UI indicators.
@@ -9488,7 +9519,7 @@ fn wait_for_agent_ready(
         std::thread::sleep(std::time::Duration::from_secs(1));
 
         // Check 1: agent process detected via pane_current_command
-        if !is_pane_at_shell(tmux_ops.as_ref(), target) {
+        if !is_pane_at_shell(tmux_ops.as_ref(), target, agent) {
             break;
         }
 
@@ -9886,7 +9917,8 @@ fn write_skills_to_worktree(
                         let skill_subdir = native_dir.join(skill_dir_name);
                         let _ = std::fs::create_dir_all(&skill_subdir);
                         let body = if *agent_name == "pi" {
-                            transform_skill_for_pi(&content)
+                            let prefix = pi_tool_prefix(Path::new(worktree_path));
+                            transform_skill_for_pi(&content, &prefix)
                         } else {
                             content.clone()
                         };
@@ -9945,7 +9977,7 @@ fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, agent_name: 
                 let skill_subdir = native_dir.join(skill_name);
                 let _ = std::fs::create_dir_all(&skill_subdir);
                 let body = if agent_name == "pi" {
-                    transform_skill_for_pi(content)
+                    transform_skill_for_pi(content, &pi_tool_prefix(target_dir))
                 } else {
                     content.to_string()
                 };
@@ -9988,13 +10020,40 @@ fn transform_skill_for_opencode(content: &str) -> String {
     format!("---\ndescription: \"{}\"\n---\n{}", description, body)
 }
 
+/// The pi-mcp-extension's default tool prefix.
+const PI_DEFAULT_TOOL_PREFIX: &str = "mcp";
+
+/// Resolve the tool prefix the pi-mcp-extension will register agtx's tools under.
+///
+/// The extension names tools `<toolPrefix>_<server>_<tool>`, where `toolPrefix` comes
+/// from the top-level `settings` block of an `mcp.json` — project first, then global.
+/// agtx merges its server entry into whatever config a repo already tracks rather than
+/// overwriting it, so a project that sets its own prefix must be honoured here or the
+/// tool names baked into deployed skills would not resolve.
+fn pi_tool_prefix(worktree_path: &Path) -> String {
+    let read_prefix = |path: PathBuf| -> Option<String> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let root: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        root.get("settings")?
+            .get("toolPrefix")?
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .map(|p| p.to_string())
+    };
+
+    read_prefix(worktree_path.join(".pi").join("mcp.json"))
+        .or_else(|| read_prefix(agent_trust_home()?.join(".pi").join("agent").join("mcp.json")))
+        .unwrap_or_else(|| PI_DEFAULT_TOOL_PREFIX.to_string())
+}
+
 /// Rewrite MCP tool references for pi.
 ///
 /// Skills name agtx's MCP tools in Claude Code's convention (`mcp__agtx__get_task`).
 /// Under pi the bridge is the pi-mcp-extension package, which registers tools as
-/// `<toolPrefix>_<server>_<tool>` — so the same tool is `mcp_agtx_get_task`.
-fn transform_skill_for_pi(content: &str) -> String {
-    content.replace("mcp__agtx__", "mcp_agtx_")
+/// `<toolPrefix>_<server>_<tool>` — so with the default prefix the same tool is
+/// `mcp_agtx_get_task`. See `pi_tool_prefix` for where the prefix comes from.
+fn transform_skill_for_pi(content: &str, tool_prefix: &str) -> String {
+    content.replace("mcp__agtx__", &format!("{}_agtx_", tool_prefix))
 }
 
 /// Resolve skill content: check plugin override, then fall back to default

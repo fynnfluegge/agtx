@@ -272,6 +272,7 @@ cp skills/sweep/SKILL.md ~/.gemini/antigravity-cli/skills/agtx-sweep/SKILL.md
 
 </details>
 
+<details>
 <summary><strong>pi</strong></summary>
 
 pi has no built-in MCP. Install the third-party [pi-mcp-extension](https://github.com/irahardianto/pi-mcp-extension) once, then register the server:

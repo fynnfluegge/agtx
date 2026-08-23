@@ -321,6 +321,33 @@ fn extract_description_from_file(path: &std::path::Path) -> Option<String> {
     extract_description(content)
 }
 
+/// Extract the `name:` field from YAML frontmatter.
+pub fn extract_name(content: &str) -> Option<String> {
+    if content.starts_with("---") {
+        if let Some(end) = content[3..].find("---") {
+            let frontmatter = &content[3..3 + end];
+            for line in frontmatter.lines() {
+                if let Some(name) = line.strip_prefix("name:") {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the frontmatter `name:` from a markdown file with YAML frontmatter on disk.
+fn extract_name_from_file(path: &std::path::Path) -> Option<String> {
+    let mut buf = vec![0u8; 512];
+    let mut file = std::fs::File::open(path).ok()?;
+    let n = std::io::Read::read(&mut file, &mut buf).ok()?;
+    let content = std::str::from_utf8(&buf[..n]).ok()?;
+    extract_name(content)
+}
+
 /// Extract description from a Gemini TOML command file on disk.
 fn extract_description_from_toml(path: &std::path::Path) -> Option<String> {
     let mut buf = vec![0u8; 512];
@@ -465,7 +492,14 @@ pub fn scan_agent_skills(
                 let skill_file = dir_entry.path().join("SKILL.md");
                 if skill_file.exists() {
                     let command = if agent_name == "pi" {
-                        format!("/skill:{}", dirname)
+                        // pi registers a skill under its frontmatter `name:`, and
+                        // deliberately allows that to differ from the parent directory
+                        // (the Agent Skills spec forbids it; pi relaxes the rule so one
+                        // skill tree can be shared across harnesses). Cursor/Grok/
+                        // Antigravity enforce the match, so dirname is fine for them.
+                        let name =
+                            extract_name_from_file(&skill_file).unwrap_or_else(|| dirname.clone());
+                        format!("/skill:{}", name)
                     } else {
                         format!("/{}", dirname)
                     };

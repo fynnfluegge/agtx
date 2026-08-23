@@ -2936,7 +2936,7 @@ fn test_is_pane_at_shell_returns_true_for_bash() {
         .withf(|t| t == "sess:win")
         .returning(|_| Some("bash".to_string()));
 
-    assert!(is_pane_at_shell(&mock, "sess:win"));
+    assert!(is_pane_at_shell(&mock, "sess:win", "claude"));
 }
 
 #[test]
@@ -2947,7 +2947,7 @@ fn test_is_pane_at_shell_returns_true_for_zsh() {
         .withf(|t| t == "sess:win")
         .returning(|_| Some("zsh".to_string()));
 
-    assert!(is_pane_at_shell(&mock, "sess:win"));
+    assert!(is_pane_at_shell(&mock, "sess:win", "claude"));
 }
 
 #[test]
@@ -2958,7 +2958,7 @@ fn test_is_pane_at_shell_returns_true_for_fish() {
         .withf(|t| t == "sess:win")
         .returning(|_| Some("fish".to_string()));
 
-    assert!(is_pane_at_shell(&mock, "sess:win"));
+    assert!(is_pane_at_shell(&mock, "sess:win", "claude"));
 }
 
 #[test]
@@ -2969,7 +2969,7 @@ fn test_is_pane_at_shell_returns_false_for_claude() {
         .withf(|t| t == "sess:win")
         .returning(|_| Some("claude".to_string()));
 
-    assert!(!is_pane_at_shell(&mock, "sess:win"));
+    assert!(!is_pane_at_shell(&mock, "sess:win", "claude"));
 }
 
 #[test]
@@ -2979,12 +2979,14 @@ fn test_is_pane_at_shell_returns_true_for_node() {
     // OpenCode, Codex) are detected via AGENT_ACTIVE_INDICATORS (Check 2) instead.
     // If node were in AGENT_COMMANDS, Check 1 would fire the moment the node process
     // starts, before the TUI has rendered, sending the prompt too early.
+    // pi is the one exception, via AGENT_SCOPED_COMMANDS — see
+    // `test_is_pane_at_shell_node_is_scoped_to_pi`.
     let mut mock = MockTmuxOperations::new();
     mock.expect_pane_current_command()
         .withf(|t| t == "sess:win")
         .returning(|_| Some("node".to_string()));
 
-    assert!(is_pane_at_shell(&mock, "sess:win"));
+    assert!(is_pane_at_shell(&mock, "sess:win", "claude"));
 }
 
 #[test]
@@ -2995,7 +2997,7 @@ fn test_is_pane_at_shell_returns_false_for_codex() {
         .withf(|t| t == "sess:win")
         .returning(|_| Some("codex".to_string()));
 
-    assert!(!is_pane_at_shell(&mock, "sess:win"));
+    assert!(!is_pane_at_shell(&mock, "sess:win", "claude"));
 }
 
 #[test]
@@ -3006,7 +3008,7 @@ fn test_is_pane_at_shell_returns_false_when_none() {
         .withf(|t| t == "sess:win")
         .returning(|_| None);
 
-    assert!(!is_pane_at_shell(&mock, "sess:win"));
+    assert!(!is_pane_at_shell(&mock, "sess:win", "claude"));
 }
 
 // === kill_windows_by_name tests ===
@@ -4163,6 +4165,8 @@ fn test_write_skills_to_worktree_pi_skills() {
 #[test]
 fn test_write_skills_to_worktree_pi_rewrites_mcp_tool_names() {
     let dir = tempfile::tempdir().unwrap();
+    // Keep the prefix lookup off the developer's real ~/.pi/agent/mcp.json.
+    let (_home, _guard) = redirect_agent_home();
     let wt = dir.path().to_string_lossy().to_string();
 
     write_skills_to_worktree(&wt, dir.path(), &None, &["pi"]);
@@ -4188,24 +4192,71 @@ fn test_write_skills_to_worktree_pi_rewrites_mcp_tool_names() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_is_pane_at_shell_detects_pi() {
-    // On Linux pi's `process.title = "pi"` makes tmux report `pi`.
-    for (cmd, expect_at_shell) in [
-        ("pi", false),
-        ("zsh", true),
-        // On macOS the same pi process reports `node`, which is deliberately not
-        // an agent command — AGENT_ACTIVE_INDICATORS covers that case instead.
-        ("node", true),
-    ] {
+    // On Linux pi's `process.title = "pi"` makes tmux report `pi`; on macOS the
+    // same process reports its Node entrypoint. Both must read as "not at shell",
+    // and a real shell must still read as one.
+    for (cmd, expect_at_shell) in [("pi", false), ("node", false), ("zsh", true), ("bash", true)] {
         let mut mock_tmux = MockTmuxOperations::new();
         mock_tmux
             .expect_pane_current_command()
             .returning(move |_| Some(cmd.to_string()));
         assert_eq!(
-            is_pane_at_shell(&mock_tmux, "w"),
+            is_pane_at_shell(&mock_tmux, "w", "pi"),
             expect_at_shell,
             "pane_current_command = {cmd:?}"
         );
     }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_node_is_scoped_to_pi() {
+    // `node` must not count globally: every Ink/Node agent would then look alive
+    // the moment its process starts, before its TUI has rendered.
+    for agent in ["claude", "gemini", "cursor", "codex"] {
+        let mut mock_tmux = MockTmuxOperations::new();
+        mock_tmux
+            .expect_pane_current_command()
+            .returning(|_| Some("node".to_string()));
+        assert!(
+            is_pane_at_shell(&mock_tmux, "w", agent),
+            "`node` must only mean 'agent running' for pi, not {agent:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agent_active_pi_detects_live_and_exited_session() {
+    // pi renders inline, so after `/quit` its stale footer (containing the "%/"
+    // context display) is left sitting directly above the shell prompt, and tmux
+    // pads the rest of the pane with blank lines. The pane command is what
+    // discriminates: `node` while live, a shell afterwards.
+    let stale_footer = format!(
+        "/some/worktree\n0.0%/272k (auto)          gpt-5.5 • medium\nbash-3.2$ {}",
+        "\n".repeat(20)
+    );
+
+    let mut live = MockTmuxOperations::new();
+    live.expect_pane_current_command()
+        .returning(|_| Some("node".to_string()));
+    live.expect_capture_pane().returning(|_| Ok(String::new()));
+    assert!(
+        is_agent_active(&live, "t", "pi"),
+        "a live pi session reports `node` on macOS and must read as active"
+    );
+
+    let mut exited = MockTmuxOperations::new();
+    exited
+        .expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    exited
+        .expect_capture_pane()
+        .returning(move |_| Ok(stale_footer.clone()));
+    assert!(
+        !is_agent_active(&exited, "t", "pi"),
+        "an exited pi session must not be kept alive by its own leftover footer"
+    );
 }
 
 #[test]
@@ -4243,10 +4294,61 @@ fn test_has_active_indicator_scoping() {
 #[test]
 fn test_transform_skill_for_pi_leaves_other_content_alone() {
     let input = "---\nname: agtx-plan\n---\nCall mcp__agtx__get_task(id) then mcp__other__thing()";
-    let out = transform_skill_for_pi(input);
+    let out = transform_skill_for_pi(input, PI_DEFAULT_TOOL_PREFIX);
     assert!(out.contains("mcp_agtx_get_task(id)"));
     // Only the agtx server is remapped; unrelated tool references are untouched.
     assert!(out.contains("mcp__other__thing()"));
+}
+
+#[test]
+fn test_pi_tool_prefix_defaults_when_unconfigured() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_home, _guard) = redirect_agent_home();
+    assert_eq!(pi_tool_prefix(dir.path()), PI_DEFAULT_TOOL_PREFIX);
+}
+
+#[test]
+fn test_pi_tool_prefix_honours_project_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_home, _guard) = redirect_agent_home();
+    let pi_dir = dir.path().join(".pi");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    std::fs::write(
+        pi_dir.join("mcp.json"),
+        r#"{"settings":{"toolPrefix":"tools"},"mcpServers":{}}"#,
+    )
+    .unwrap();
+    assert_eq!(pi_tool_prefix(dir.path()), "tools");
+}
+
+#[test]
+fn test_write_skills_to_worktree_pi_uses_configured_tool_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_home, _guard) = redirect_agent_home();
+    let wt = dir.path().to_string_lossy().to_string();
+    // agtx merges into a repo's tracked .pi/mcp.json rather than overwriting it, so
+    // a project-set toolPrefix survives — and the deployed skills must match it.
+    let pi_dir = dir.path().join(".pi");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    std::fs::write(
+        pi_dir.join("mcp.json"),
+        r#"{"settings":{"toolPrefix":"tools"},"mcpServers":{}}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"]);
+
+    let content =
+        std::fs::read_to_string(dir.path().join(".pi/skills/agtx-plan/SKILL.md")).unwrap();
+    assert!(
+        content.contains("tools_agtx_get_task"),
+        "skill must use the project's configured toolPrefix: {content}"
+    );
+    assert!(!content.contains("mcp__agtx__"));
+    // The setting itself is preserved, not overwritten.
+    let cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(pi_dir.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(cfg["settings"]["toolPrefix"], "tools");
 }
 
 #[test]
@@ -8698,7 +8800,7 @@ fn test_is_pane_at_shell_returns_true_for_shell_command() {
     mock_tmux
         .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
-    assert!(is_pane_at_shell(&mock_tmux, "proj:task"));
+    assert!(is_pane_at_shell(&mock_tmux, "proj:task", "claude"));
 }
 
 #[test]
@@ -8706,7 +8808,7 @@ fn test_is_pane_at_shell_returns_true_for_shell_command() {
 fn test_is_pane_at_shell_returns_false_when_no_command() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_pane_current_command().returning(|_| None);
-    assert!(!is_pane_at_shell(&mock_tmux, "proj:task"));
+    assert!(!is_pane_at_shell(&mock_tmux, "proj:task", "claude"));
 }
 
 // --- is_agent_active ---
@@ -9464,7 +9566,7 @@ fn test_is_pane_at_shell_returns_true_for_shell_process() {
         mock.expect_pane_current_command()
             .returning(move |_| Some(shell_str.clone()));
         assert!(
-            is_pane_at_shell(&mock, "t"),
+            is_pane_at_shell(&mock, "t", "claude"),
             "should be at shell for {}",
             shell
         );
@@ -9480,7 +9582,7 @@ fn test_is_pane_at_shell_returns_false_for_agent_processes() {
         mock.expect_pane_current_command()
             .returning(move |_| Some(agent_str.clone()));
         assert!(
-            !is_pane_at_shell(&mock, "t"),
+            !is_pane_at_shell(&mock, "t", "claude"),
             "should not be at shell for {}",
             agent
         );
@@ -9584,7 +9686,11 @@ fn test_wait_for_agent_ready_detects_claude_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Claude Code v2.1.72\nsome context".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", "claude");
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock) as Arc<dyn TmuxOperations>),
+        "proj:task",
+        "claude",
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9596,7 +9702,11 @@ fn test_wait_for_agent_ready_detects_cursor_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Cursor Agent\n> ".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", "claude");
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock) as Arc<dyn TmuxOperations>),
+        "proj:task",
+        "claude",
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9608,7 +9718,11 @@ fn test_wait_for_agent_ready_detects_opencode_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Ask anything\n> ".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", "claude");
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock) as Arc<dyn TmuxOperations>),
+        "proj:task",
+        "claude",
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9620,7 +9734,11 @@ fn test_wait_for_agent_ready_detects_codex_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("OpenAI Codex\nsome output".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", "claude");
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock) as Arc<dyn TmuxOperations>),
+        "proj:task",
+        "claude",
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
