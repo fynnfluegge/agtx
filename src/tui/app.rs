@@ -4867,6 +4867,7 @@ impl App {
                 &task_content,
                 task.cycle,
                 &task.id,
+                true,
             );
             let prompt =
                 resolve_prompt(&plugin, planning_phase, &task_content, &task.id, task.cycle);
@@ -4910,6 +4911,19 @@ impl App {
             &task_content,
             task.cycle,
             &task.id,
+            true,
+        );
+        // The launch lane hands the command to the process in argv, so it keeps the
+        // task's own line structure. Only the send-after-ready fallback below needs
+        // the flattened form. See `resolve_skill_command`.
+        let skill_cmd_launch = resolve_skill_command(
+            &plugin,
+            "planning",
+            &planning_agent,
+            &task_content,
+            task.cycle,
+            &task.id,
+            false,
         );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
         let all_agents = collect_phase_agents(&self.state.config);
@@ -4993,7 +5007,7 @@ impl App {
                 skip_init_scripts,
                 skip_worktree,
                 agent_hooks,
-                skill_cmd.as_deref(),
+                skill_cmd_launch.as_deref(),
             );
 
             match result {
@@ -5066,6 +5080,7 @@ impl App {
                 &task_content,
                 task.cycle,
                 &task.id,
+                true,
             );
             let prompt = resolve_prompt(&plugin, run_phase, &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, run_phase);
@@ -5109,6 +5124,7 @@ impl App {
                 &task_content,
                 task.cycle,
                 &task.id,
+                true,
             );
             let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
@@ -5401,6 +5417,7 @@ impl App {
                         &task_content,
                         task_cycle,
                         &task_id,
+                        true,
                     );
                     let prompt_trigger = resolve_prompt_trigger(&plugin, research_phase);
 
@@ -5763,6 +5780,17 @@ impl App {
             &task_content,
             task.cycle,
             &task.id,
+            true,
+        );
+        // Verbatim variant for the launch lane — see the planning path above.
+        let skill_cmd_launch = resolve_skill_command(
+            &plugin,
+            "running",
+            &running_agent,
+            &task_content,
+            task.cycle,
+            &task.id,
+            false,
         );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
         let auto_dismiss = plugin
@@ -5859,7 +5887,7 @@ impl App {
                 skip_init_scripts,
                 skip_worktree,
                 agent_hooks,
-                skill_cmd.as_deref(),
+                skill_cmd_launch.as_deref(),
             );
 
             match result {
@@ -5990,6 +6018,7 @@ impl App {
                     &task_content,
                     task.cycle,
                     &task.id,
+                    true,
                 );
                 let prompt =
                     resolve_prompt(&plugin, "planning", &task_content, &task.id, task.cycle);
@@ -6317,6 +6346,7 @@ impl App {
                 &task_content,
                 task.cycle,
                 &task.id,
+                true,
             );
             let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
@@ -7831,7 +7861,7 @@ fn setup_task_worktree(
         agent_ops.build_interactive_command(&launch_text)
     } else {
         let has_skill_support =
-            resolve_skill_command(plugin, "planning", agent_name, "", task.cycle, &task.id)
+            resolve_skill_command(plugin, "planning", agent_name, "", task.cycle, &task.id, true)
                 .is_some();
         if has_skill_support {
             agent_ops.build_interactive_command("")
@@ -8686,6 +8716,17 @@ fn resolve_prompt(
 
 /// Resolve the skill command to send via send_keys for a given phase.
 /// Returns the plugin command transformed for the target agent, or None if no command is configured.
+/// `collapse` controls how `{task}` is substituted.
+///
+/// `true` flattens the task to a single line, which the **typed** send path
+/// needs: it delivers the command with `send_keys`, where an embedded newline is
+/// a real Enter and would submit the message half-written.
+///
+/// `false` substitutes it verbatim. The **launch lane** passes the command in
+/// argv, where newlines are just bytes, so a task keeps the paragraphs and lists
+/// its author wrote — `spec-kit`'s `/speckit.specify {task}` and `openspec`'s
+/// `/opsx:propose {task}` are the two bundled plugins this affects.
+#[allow(clippy::too_many_arguments)]
 fn resolve_skill_command(
     plugin: &Option<WorkflowPlugin>,
     phase: &str,
@@ -8693,6 +8734,7 @@ fn resolve_skill_command(
     task_content: &str,
     cycle: i32,
     task_id: &str,
+    collapse: bool,
 ) -> Option<String> {
     let p = plugin.as_ref()?;
 
@@ -8721,14 +8763,17 @@ fn resolve_skill_command(
         if phase == "planning_with_research" || phase == "running_with_research_or_planning" {
             cmd.replace("{task}", "").trim().to_string()
         } else {
-            // Collapse task content to single line for commands (newlines → spaces)
-            let task_oneline = task_content
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-            cmd.replace("{task}", &task_oneline)
+            let task_text = if collapse {
+                task_content
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                task_content.to_string()
+            };
+            cmd.replace("{task}", &task_text)
         };
     let expanded = expanded.replace("{phase}", &cycle.to_string());
     let expanded = expanded.replace("{task_id}", task_id);

@@ -2210,23 +2210,23 @@ fn test_enumerate_available_skills_opencode() {
 fn test_resolve_skill_command_no_plugin() {
     // No plugin: no commands, returns None for all agents/phases
     assert_eq!(
-        resolve_skill_command(&None, "planning", "claude", "", 1, ""),
+        resolve_skill_command(&None, "planning", "claude", "", 1, "", true),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "running", "codex", "", 1, ""),
+        resolve_skill_command(&None, "running", "codex", "", 1, "", true),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "review", "gemini", "", 1, ""),
+        resolve_skill_command(&None, "review", "gemini", "", 1, "", true),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "planning", "opencode", "", 1, ""),
+        resolve_skill_command(&None, "planning", "opencode", "", 1, "", true),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "planning", "copilot", "", 1, ""),
+        resolve_skill_command(&None, "planning", "copilot", "", 1, "", true),
         None
     );
 }
@@ -2260,42 +2260,42 @@ fn test_resolve_skill_command_with_plugin() {
     });
     // Claude/Gemini: canonical form unchanged
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "claude", "", 1, ""),
+        resolve_skill_command(&plugin, "planning", "claude", "", 1, "", true),
         Some("/gsd:plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "running", "claude", "", 1, ""),
+        resolve_skill_command(&plugin, "running", "claude", "", 1, "", true),
         Some("/gsd:execute-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "review", "gemini", "", 1, ""),
+        resolve_skill_command(&plugin, "review", "gemini", "", 1, "", true),
         Some("/gsd:verify-work 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "research", "claude", "", 1, ""),
+        resolve_skill_command(&plugin, "research", "claude", "", 1, "", true),
         Some("/gsd:discuss-phase 1".to_string())
     );
     // OpenCode: colon → hyphen
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "opencode", "", 1, ""),
+        resolve_skill_command(&plugin, "planning", "opencode", "", 1, "", true),
         Some("/gsd-plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "research", "opencode", "", 1, ""),
+        resolve_skill_command(&plugin, "research", "opencode", "", 1, "", true),
         Some("/gsd-discuss-phase 1".to_string())
     );
     // Codex: slash → dollar, colon → hyphen
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "codex", "", 1, ""),
+        resolve_skill_command(&plugin, "planning", "codex", "", 1, "", true),
         Some("$gsd-plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "running", "codex", "", 1, ""),
+        resolve_skill_command(&plugin, "running", "codex", "", 1, "", true),
         Some("$gsd-execute-phase 1".to_string())
     );
     // Unsupported agents: None (will use file-path fallback in prompt)
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "copilot", "", 1, ""),
+        resolve_skill_command(&plugin, "planning", "copilot", "", 1, "", true),
         None
     );
 }
@@ -2637,7 +2637,7 @@ fn test_resolve_skill_command_research_phase() {
         [artifacts]
     "#;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
-    let cmd = resolve_skill_command(&Some(plugin), "research", "claude", "", 1, "");
+    let cmd = resolve_skill_command(&Some(plugin), "research", "claude", "", 1, "", true);
     assert_eq!(cmd, Some("/gsd:new-project".to_string()));
 }
 
@@ -2656,7 +2656,7 @@ fn test_resolve_skill_command_planning_with_plugin() {
         [artifacts]
     "#;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
-    let cmd = resolve_skill_command(&Some(plugin), "planning", "claude", "", 1, "");
+    let cmd = resolve_skill_command(&Some(plugin), "planning", "claude", "", 1, "", true);
     assert_eq!(cmd, Some("/gsd:plan-phase 1".to_string()));
 }
 
@@ -3234,6 +3234,67 @@ fn test_switch_agent_codex_sends_ctrl_c() {
 // Tests for cyclic phase support and {phase} substitution
 // =============================================================================
 
+/// The launch lane passes the command in argv, where a newline is just a byte,
+/// so `{task}` keeps the structure its author wrote. The typed path cannot: it
+/// sends with `send_keys`, where a newline is a real Enter that would submit the
+/// message half-written.
+#[test]
+fn test_resolve_skill_command_collapse_controls_task_structure() {
+    use crate::config::WorkflowPlugin;
+    let plugin: WorkflowPlugin = toml::from_str(
+        r#"
+        name = "spec-kit"
+        [commands]
+        planning = "/speckit.specify {task}"
+        [prompts]
+        [artifacts]
+    "#,
+    )
+    .unwrap();
+    let plugin = Some(plugin);
+    let task = "Add a login form.\n\n- email field\n- password field";
+
+    let collapsed =
+        resolve_skill_command(&plugin, "planning", "claude", task, 1, "id-1", true).unwrap();
+    assert_eq!(
+        collapsed,
+        "/speckit.specify Add a login form. - email field - password field",
+        "typed path must stay on one line"
+    );
+    assert!(!collapsed.contains('\n'));
+
+    let verbatim =
+        resolve_skill_command(&plugin, "planning", "claude", task, 1, "id-1", false).unwrap();
+    assert_eq!(verbatim, format!("/speckit.specify {task}"));
+    assert!(
+        verbatim.contains("\n\n- email field"),
+        "launch lane must preserve blank lines and list structure: {verbatim:?}"
+    );
+}
+
+/// Collapsing is only about `{task}`; a command without the placeholder is
+/// identical either way.
+#[test]
+fn test_resolve_skill_command_collapse_is_a_noop_without_task_placeholder() {
+    use crate::config::WorkflowPlugin;
+    let plugin: WorkflowPlugin = toml::from_str(
+        r#"
+        name = "agtx"
+        [commands]
+        planning = "/agtx:plan {task_id}"
+        [prompts]
+        [artifacts]
+    "#,
+    )
+    .unwrap();
+    let plugin = Some(plugin);
+    let task = "line one\nline two";
+    assert_eq!(
+        resolve_skill_command(&plugin, "planning", "claude", task, 1, "id-1", true),
+        resolve_skill_command(&plugin, "planning", "claude", task, 1, "id-1", false),
+    );
+}
+
 #[test]
 fn test_resolve_skill_command_phase_substitution() {
     use crate::config::{PluginCommands, WorkflowPlugin};
@@ -3254,35 +3315,35 @@ fn test_resolve_skill_command_phase_substitution() {
 
     // Cycle 1: {phase} → "1"
     assert_eq!(
-        resolve_skill_command(&p, "planning", "claude", "", 1, ""),
+        resolve_skill_command(&p, "planning", "claude", "", 1, "", true),
         Some("/gsd:plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "running", "claude", "", 1, ""),
+        resolve_skill_command(&p, "running", "claude", "", 1, "", true),
         Some("/gsd:execute-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "review", "claude", "", 1, ""),
+        resolve_skill_command(&p, "review", "claude", "", 1, "", true),
         Some("/gsd:verify-work 1".to_string())
     );
 
     // Cycle 2: {phase} → "2"
     assert_eq!(
-        resolve_skill_command(&p, "planning", "claude", "", 2, ""),
+        resolve_skill_command(&p, "planning", "claude", "", 2, "", true),
         Some("/gsd:plan-phase 2".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "running", "claude", "", 2, ""),
+        resolve_skill_command(&p, "running", "claude", "", 2, "", true),
         Some("/gsd:execute-phase 2".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "review", "claude", "", 2, ""),
+        resolve_skill_command(&p, "review", "claude", "", 2, "", true),
         Some("/gsd:verify-work 2".to_string())
     );
 
     // preresearch also gets {phase} substitution (falls back to research command)
     assert_eq!(
-        resolve_skill_command(&p, "preresearch", "claude", "", 1, ""),
+        resolve_skill_command(&p, "preresearch", "claude", "", 1, "", true),
         Some("/gsd:new-project".to_string())
     );
 }
@@ -3418,7 +3479,7 @@ fn test_resolve_skill_command_preresearch_fallback() {
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
     let p = Some(plugin);
     assert_eq!(
-        resolve_skill_command(&p, "preresearch", "claude", "", 1, ""),
+        resolve_skill_command(&p, "preresearch", "claude", "", 1, "", true),
         Some("/test:discuss".to_string())
     );
 }
