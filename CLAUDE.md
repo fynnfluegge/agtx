@@ -209,6 +209,27 @@ Commands are written once in canonical format (`/ns:command`) and auto-translate
 
 `clear_context_on_advance` is applied before all three, and only for Claude (`/clear`, then poll until the pane stabilises).
 
+### First-Launch Dialogs
+Agents gate a brand-new directory behind an interactive dialog, and every task gets a brand-new
+worktree — so these fire on the *first* launch of nearly every task, not just in containers.
+`LAUNCH_DIALOGS` (`src/tui/app.rs`) is the table of `(patterns, answer)`; `dismiss_launch_dialog`
+answers any that is visible.
+
+| Dialog | Match | Answer | Scope |
+|---|---|---|---|
+| Claude workspace trust | `Yes, I trust this folder` | `1` | per directory — `projects."<dir>".hasTrustDialogAccepted` in `~/.claude.json` |
+| Claude bypass-permissions warning | `Yes, I accept` / `I accept the risk` | `2` | not per-project; the `bypassPermissionsModeAccepted` preflight does **not** reliably suppress it |
+| Gemini folder trust | `Do you trust the files in this folder?` | `1` | answering it restarts the process |
+
+It runs in **both** `wait_for_agent_ready` loops *and* the session-refresh loop: the readiness
+budget expires after ~60s and a slow agent can render its dialog later than that. A retry only
+happens while the pane is **unchanged** — a redraw means the answer landed, and resending would
+type a stray digit into the agent's live composer.
+
+Missing an arm is silent and total: the task's prompt is delivered but never read, because the
+agent never reaches its composer. Antigravity's trust dialog is deliberately *not* handled — see
+the note in the agent's own section.
+
 ### Session Persistence
 - Tmux window stays open when moving Running → Review
 - Resume from Review simply changes status back to Running (window already exists)

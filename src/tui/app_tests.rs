@@ -10833,6 +10833,57 @@ fn test_dismiss_launch_dialog_answers_claude_bypass_warning() {
     ));
 }
 
+/// Claude's workspace-trust gate, shown *before* the bypass warning on the first
+/// launch in any new directory — which is every task's worktree. Pane text
+/// captured verbatim from claude 2.1.241; answered with "1" ("Yes, I trust this
+/// folder"), not the "2" the bypass warning takes.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_answers_claude_workspace_trust() {
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = mockall::Sequence::new();
+    mock.expect_send_keys_literal()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "1")
+        .returning(|_, _| Ok(()));
+    mock.expect_send_keys_literal()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        "Accessing workspace:\n  /tmp/wt/task-slug\n\n\
+         Quick safety check: Is this a project you created or one you trust?\n\
+         Claude Code'll be able to read, edit, and execute files here.\n\
+         \u{276f} 1. Yes, I trust this folder\n    2. No, exit\n\
+         Enter to confirm \u{b7} Esc to cancel",
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// The two Claude gates are answered differently ("1" vs "2"), so a pane
+/// showing one must never match the other's arm.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_claude_launch_dialogs_do_not_overlap() {
+    let trust = "\u{276f} 1. Yes, I trust this folder\n    2. No, exit";
+    let bypass = "WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n  2. Yes, I accept";
+    let matches = |content: &str| -> Vec<&'static str> {
+        LAUNCH_DIALOGS
+            .iter()
+            .filter(|(patterns, _)| patterns.iter().any(|p| content.contains(p)))
+            .map(|(_, answer)| *answer)
+            .collect()
+    };
+    assert_eq!(matches(trust), vec!["1"], "trust dialog");
+    assert_eq!(matches(bypass), vec!["2"], "bypass dialog");
+}
+
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_answers_gemini_trust() {

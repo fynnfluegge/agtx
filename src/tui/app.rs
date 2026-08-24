@@ -9680,6 +9680,15 @@ const LAUNCH_DIALOGS: &[(&[&str], &str)] = &[
     // `hasTrustDialogAccepted` in ~/.claude.json, so copying that file (as the
     // swebench harness does) does not suppress it.
     (&["Yes, I accept", "I accept the risk"], "2"),
+    // Claude's *workspace trust* dialog ("Quick safety check: Is this a project
+    // you created or one you trust?"), which is a separate gate shown before the
+    // bypass warning. Recorded per directory as `hasTrustDialogAccepted` under
+    // `projects."<dir>"` in ~/.claude.json — and every task gets a brand-new
+    // worktree path, so it fires on the *first* launch of every Claude task.
+    // Missing this arm is why a launched task could sit forever with its prompt
+    // already delivered but never read: Claude parks on the dialog and the
+    // pane never reaches the composer.
+    (&["Yes, I trust this folder"], "1"),
     // Gemini folder trust — answering it restarts the process.
     (&["Do you trust the files in this folder?"], "1"),
 ];
