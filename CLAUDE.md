@@ -62,7 +62,8 @@ src/
 │   ├── operations.rs # GitOperations trait (mockable for testing)
 │   └── provider.rs   # GitProviderOperations trait (GitHub PR ops)
 ├── agent/
-│   ├── mod.rs        # Agent definitions, detection, spawn args
+│   ├── mod.rs        # Agent struct, detection, command builders (all derived from spec.rs)
+│   ├── spec.rs       # AgentSpec table — one declarative record per agent + kind enums
 │   └── operations.rs # AgentOperations/CodingAgent traits (mockable)
 ├── mcp/
 │   ├── mod.rs        # Re-exports
@@ -109,6 +110,8 @@ tests/
 ├── board_tests.rs     # Board navigation tests
 ├── git_tests.rs       # Git worktree tests
 ├── agent_tests.rs     # Agent detection and spawn args tests
+├── agent_parity_tests.rs # Per-agent behaviour lock (launch/resume/skill paths/syntax)
+├── hook_status_tests.rs  # Agent lifecycle-hook status reporting
 ├── mcp_tests.rs       # MCP server tests
 ├── mock_infrastructure_tests.rs # Mock infrastructure tests
 └── shell_popup_tests.rs         # Shell popup logic tests
@@ -554,9 +557,13 @@ Claude Code ──hook──► agtx hook <task-id> <worktree> ──► {worktr
 - The skill instructs the agent to: commit current work → merge origin/main → resolve conflicts → review only conflicted files against both parents → run tests
 
 ### Agent Integration
+- Every per-agent value below is one field of that agent's `AgentSpec` in `src/agent/spec.rs`; the
+  functions here read the table rather than matching on the agent's name
 - Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
 - Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`), Copilot (`--allow-all-tools`), Cursor (`agent --yolo`), Grok (`--yolo --trust`, where `--trust` also ungates the repo-local `.grok/config.toml` MCP server and suppresses the directory-trust dialog), Antigravity (`agy --dangerously-skip-permissions --mode accept-edits` — two orthogonal controls: the flag governs shell/MCP/URL approvals, `--mode` governs the file-edit diff review, and both are needed to run unattended)
-- `build_resume_command()` is the recovery variant used after a tmux/server restart — mostly `--continue`, but Gemini uses `--resume` and Codex uses `codex resume --last`
+- `build_resume_command()` is the recovery variant used after a tmux/server restart — mostly `--continue` appended to the launch flags (`ResumeArgs::Append`), but Gemini uses `--resume` and Codex's `resume --last` *replaces* them (`ResumeArgs::Replace`: `codex resume` rejects `--sandbox`)
+- `tests/agent_parity_tests.rs` pins every one of these strings per agent. It is written against
+  behaviour, not derived from the table, so a diff there means something actually changed
 - Skills deployed to agent-native paths via `write_skills_to_worktree()` in app.rs
 - Commands resolved per-task via `resolve_skill_command()` (plugin command + agent transform)
 - Prompts resolved per-task via `resolve_prompt()` (pure template substitution, agent-agnostic)
@@ -595,33 +602,37 @@ Dependencies require:
 3. Use `hex_to_color(&state.config.theme.color_*)` in app.rs
 
 ### Adding a new agent
-Adding grok touched every one of these — use `git log -p` for that change as a worked example. Required:
+Half of this is now one table entry; the other half is still per-agent match arms in `app.rs`
+(migrating those is stage E of `docs/planning/agent-spec-table.md`).
 
-**`src/agent/mod.rs`**
-1. Add to `known_agents()` (name, binary, description, git co-author)
-2. Add a `build_interactive_command()` match arm (with and without a prompt)
-3. Add a `build_resume_command()` match arm (usually `--continue`)
+**`src/agent/spec.rs`** — the declarative half
+1. Add one `AgentSpec` entry to `AGENT_SPECS`: identity (name, binary, description, git co-author),
+   launching (`env`, `base_args`, `prompt_form`, `resume`, `headless_args`), and skills
+   (`skill_dir`, `skill_layout`, `skill_scan_dir`, `command_syntax`). Everything in
+   `src/agent/mod.rs`, `src/agent/operations.rs` and `src/skills.rs` is derived from it —
+   `known_agents`, both command builders, the headless invocation, the skill paths, the
+   command syntax, and skill discovery
+2. Leave `launch_prompt_verified: false` until the launch form is checked against the real
+   binary. A `-p`-style flag that runs headless and exits swallows the task text silently
+3. If no existing `SkillLayout` / `CommandSyntax` variant fits, add **one** variant plus the arm in
+   the single function that reads it — never a new match on the agent's name
 
-**`src/agent/operations.rs`**
-4. Add a `generate_text()` match arm — the headless/print invocation used for PR descriptions
+**`tests/agent_parity_tests.rs`**
+4. Extend every parity table with the new agent (`parity_covers_every_known_agent` fails until you
+   do). These are literals on purpose: a diff there means behaviour changed
 
-**`src/skills.rs`**
-5. Add the agent-native skill dir to `agent_native_skill_dir()`
-6. Add the plugin command transform to `transform_plugin_command()`
-7. Add a `scan_agent_skills()` branch so the agent's existing skills show up in the `/` skill picker
-
-**`src/tui/app.rs`**
-8. Add the binary to `AGENT_COMMANDS` (pane process detection)
-9. Add an activity indicator to `AGENT_ACTIVE_INDICATORS` if the agent is an Ink/Node TUI (runs inside bash)
-10. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
-11. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok"` for SKILL.md subdirectories)
-12. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`)
-12b. If the agent supports lifecycle hooks, register them so it reports its own phase status (see *Hook-Based Phase Status*); otherwise it falls back to the pane-hash heuristic
-13. Add an agent label color in the task-card footer `match task.agent.as_str()`
-14. If Ink/Node TUI: add to the combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
+**`src/tui/app.rs`** — still per-agent, until stage E
+5. Add the binary to `AGENT_COMMANDS` (pane process detection)
+6. Add an activity indicator to `AGENT_ACTIVE_INDICATORS` if the agent is an Ink/Node TUI (runs inside bash)
+7. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
+8. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok"` for SKILL.md subdirectories)
+9. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`)
+9b. If the agent supports lifecycle hooks, register them so it reports its own phase status (see *Hook-Based Phase Status*); otherwise it falls back to the pane-hash heuristic
+10. Add an agent label color in the task-card footer `match task.agent.as_str()`
+11. If Ink/Node TUI: add to the combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
 
 **Plugins**
-15. Add the agent to `supported_agents` in any `plugins/*/plugin.toml` that whitelists agents
+12. Add the agent to `supported_agents` in any `plugins/*/plugin.toml` that whitelists agents
 
 ### Adding a keyboard shortcut
 1. Find the appropriate `handle_*_key` function in `src/tui/app.rs`

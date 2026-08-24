@@ -60,17 +60,7 @@ impl CodingAgent {
 
 impl AgentOperations for CodingAgent {
     fn generate_text(&self, working_dir: &Path, prompt: &str) -> Result<String> {
-        // Build the command based on agent type
-        let (cmd, args) = match self.agent.name.as_str() {
-            "claude" => ("claude", vec!["--print", prompt]),
-            "codex" => ("codex", vec!["exec", "--sandbox", "workspace-write", prompt]),
-            "copilot" => ("copilot", vec!["-p", prompt]),
-            "gemini" => ("gemini", vec!["-p", prompt]),
-            "cursor" => ("agent", vec!["--print", "--yolo", prompt]),
-            "grok" => ("grok", vec!["-p", prompt]),
-            "antigravity" => ("agy", vec!["-p", prompt]),
-            _ => (self.agent.command.as_str(), vec![prompt]),
-        };
+        let (cmd, args) = self.agent.headless_invocation(prompt);
 
         let output = std::process::Command::new(cmd)
             .current_dir(working_dir)
