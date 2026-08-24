@@ -64,6 +64,38 @@ pub enum CommandSyntax {
     None,
 }
 
+/// Where and how an agent's project-scoped MCP server config is written.
+///
+/// Seven variants for seven agents, which looks untidy and is: the formats
+/// genuinely differ (JSON vs TOML, `mcpServers` vs `mcp_servers` vs `mcp`). What
+/// the enum buys is that the mess lives in one function instead of a 170-line
+/// match inside `write_skills_to_worktree`, and that the names now say *why* the
+/// arms differ.
+///
+/// The `…Merge` variants must not overwrite: their file is vendor-neutral or
+/// otherwise likely to be tracked in the repo already, so clobbering it destroys
+/// the user's own settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpConfigKind {
+    /// `.mcp.json`. Also writes `.claude/settings.local.json`
+    /// (`enableAllProjectMcpServers`, the bypass preflight, and agtx's hooks).
+    ClaudeJson,
+    /// `.codex/config.toml`. Also appends a trust entry for the worktree to the
+    /// user's global `~/.codex/config.toml`, without which Codex prompts on open.
+    CodexToml,
+    /// `.gemini/settings.json`, which additionally needs `trust: true`.
+    GeminiJson,
+    /// `.cursor/mcp.json`.
+    CursorJson,
+    /// `.grok/config.toml` — appended if the agtx table is absent.
+    GrokTomlMerge,
+    /// `.agents/mcp_config.json` — parsed, agtx inserted, written back, so other
+    /// servers and sibling top-level keys survive.
+    AntigravityJsonMerge,
+    /// `opencode.json`, whose key is `mcp` and whose entry shape differs.
+    OpenCode,
+}
+
 /// Everything agtx knows about one coding agent.
 #[derive(Debug, Clone, Copy)]
 pub struct AgentSpec {
@@ -105,6 +137,11 @@ pub struct AgentSpec {
     /// same as `skill_dir`'s base; OpenCode is the exception.
     pub skill_scan_dir: Option<&'static str>,
     pub command_syntax: CommandSyntax,
+
+    // ── integration ──────────────────────────────────────────────────────
+    /// How this agent's project-scoped MCP config is written, or `None` for an
+    /// agent agtx does not wire up to the MCP server.
+    pub mcp_config: Option<McpConfigKind>,
 }
 
 /// Every agent agtx ships with.
@@ -130,6 +167,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_layout: SkillLayout::CommandFile,
         skill_scan_dir: Some(".claude/commands"),
         command_syntax: CommandSyntax::Colon,
+        mcp_config: Some(McpConfigKind::ClaudeJson),
     },
     AgentSpec {
         name: "codex",
@@ -147,6 +185,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_layout: SkillLayout::SkillDir,
         skill_scan_dir: Some(".codex/skills"),
         command_syntax: CommandSyntax::Dollar,
+        mcp_config: Some(McpConfigKind::CodexToml),
     },
     AgentSpec {
         name: "copilot",
@@ -168,6 +207,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // it as a file-path reference in the prompt instead. Its skills are
         // still discovered and listed by the `/` picker.
         command_syntax: CommandSyntax::None,
+        // Copilot is not wired to the MCP server.
+        mcp_config: None,
     },
     AgentSpec {
         name: "gemini",
@@ -184,6 +225,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_layout: SkillLayout::GeminiToml,
         skill_scan_dir: Some(".gemini/commands"),
         command_syntax: CommandSyntax::Colon,
+        mcp_config: Some(McpConfigKind::GeminiJson),
     },
     AgentSpec {
         name: "opencode",
@@ -202,6 +244,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // tree, but OpenCode's own project commands live under `.config/`.
         skill_scan_dir: Some(".config/opencode/command"),
         command_syntax: CommandSyntax::Hyphen,
+        mcp_config: Some(McpConfigKind::OpenCode),
     },
     AgentSpec {
         name: "cursor",
@@ -218,6 +261,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_layout: SkillLayout::SkillDir,
         skill_scan_dir: Some(".cursor/skills"),
         command_syntax: CommandSyntax::Hyphen,
+        mcp_config: Some(McpConfigKind::CursorJson),
     },
     AgentSpec {
         name: "grok",
@@ -236,6 +280,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_layout: SkillLayout::SkillDir,
         skill_scan_dir: Some(".grok/skills"),
         command_syntax: CommandSyntax::Hyphen,
+        mcp_config: Some(McpConfigKind::GrokTomlMerge),
     },
     AgentSpec {
         name: "antigravity",
@@ -257,6 +302,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_layout: SkillLayout::SkillDir,
         skill_scan_dir: Some(".agents/skills"),
         command_syntax: CommandSyntax::Hyphen,
+        mcp_config: Some(McpConfigKind::AntigravityJsonMerge),
     },
     // TODO: investigate CLI usage before enabling
     // aider  — "AI pair programming in your terminal", Aider <noreply@aider.chat>

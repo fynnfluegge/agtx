@@ -11335,3 +11335,33 @@ fn test_deploy_skill_paths_for_every_agent() {
         );
     }
 }
+
+/// Copilot declares `mcp_config: None` — agtx does not wire it to the MCP
+/// server, so no config file should appear anywhere in its worktree. Guards the
+/// new `Option<McpConfigKind>`: before it, "no MCP arm" and "an arm that does
+/// nothing" were indistinguishable.
+#[test]
+fn test_write_skills_to_worktree_writes_no_mcp_config_for_copilot() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["copilot"], false);
+
+    // Its skills still deploy — only the MCP wiring is absent.
+    assert!(dir.path().join(".github/agents/agtx/plan.md").exists());
+
+    for absent in [
+        ".mcp.json",
+        "opencode.json",
+        ".codex/config.toml",
+        ".gemini/settings.json",
+        ".cursor/mcp.json",
+        ".grok/config.toml",
+        ".agents/mcp_config.json",
+    ] {
+        assert!(
+            !dir.path().join(absent).exists(),
+            "copilot should get no MCP config, found {absent}"
+        );
+    }
+}

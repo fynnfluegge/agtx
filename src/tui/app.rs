@@ -10200,180 +10200,14 @@ fn write_skills_to_worktree(
     // Marker for the startup drift check; see DEPLOY_MARKER.
     let _ = std::fs::write(Path::new(worktree_path).join(DEPLOY_MARKER), &agtx_bin);
     for agent_name in agent_names {
-        match *agent_name {
-            "claude" => {
-                let cfg = serde_json::json!({
-                    "mcpServers": {
-                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
-                    }
-                });
-                let _ = std::fs::write(
-                    Path::new(worktree_path).join(".mcp.json"),
-                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
-                );
-                // Merge into any existing settings rather than replacing them:
-                // `.claude` is in AGENT_CONFIG_DIRS, so a project that ships its own
-                // settings.local.json has it copied into every worktree, and a plain
-                // write would silently drop the user's permissions/env/hooks.
-                // Same merge-don't-overwrite rule the grok and antigravity writers follow.
-                let claude_dir = Path::new(worktree_path).join(".claude");
-                let _ = std::fs::create_dir_all(&claude_dir);
-                let settings_path = claude_dir.join("settings.local.json");
-                let mut settings = std::fs::read_to_string(&settings_path)
-                    .ok()
-                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                    .filter(|v| v.is_object())
-                    .unwrap_or_else(|| serde_json::json!({}));
-
-                if let Some(obj) = settings.as_object_mut() {
-                    // Pre-trust the agtx MCP server so Claude doesn't show an interactive
-                    // trust dialog when the agent window opens for the first time.
-                    obj.insert(
-                        "enableAllProjectMcpServers".to_string(),
-                        serde_json::json!(true),
-                    );
-                    // agtx always launches Claude with --dangerously-skip-permissions, and
-                    // since Claude Code ~2.1 that mode is gated behind an interactive
-                    // "Yes, I accept" dialog. A worktree is a brand-new directory every
-                    // time, so without this the agent parks on that dialog and the task
-                    // prompt is typed into the menu. (IS_SANDBOX=1 covers only the
-                    // separate root-user check, not this one.)
-                    obj.insert(
-                        "bypassPermissionsModeAccepted".to_string(),
-                        serde_json::json!(true),
-                    );
-                    if agent_hooks {
-                        merge_claude_hooks(
-                            obj,
-                            claude_hook_settings(&agtx_bin),
-                        );
-                    }
-                }
-                let _ = std::fs::write(
-                    &settings_path,
-                    serde_json::to_string_pretty(&settings).unwrap_or_default(),
-                );
-            }
-            "codex" => {
-                let toml = format!(
-                    "[mcp_servers.agtx]\ncommand = \"{}\"\nargs = [\"mcp-serve\", \"{}\"]\n",
-                    agtx_bin, project_path_str
-                );
-                let dir = Path::new(worktree_path).join(".codex");
-                let _ = std::fs::create_dir_all(&dir);
-                let _ = std::fs::write(dir.join("config.toml"), toml);
-
-                // Codex only loads project-local .codex/config.toml for trusted paths.
-                // Add a trust entry for this worktree to ~/.codex/config.toml.
-                if let Some(home) = agent_trust_home() {
-                    let global_config_path = home.join(".codex").join("config.toml");
-                    let trust_entry = format!(
-                        "\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
-                        worktree_path
-                    );
-                    let existing = std::fs::read_to_string(&global_config_path).unwrap_or_default();
-                    if !existing.contains(worktree_path) {
-                        let _ = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&global_config_path)
-                            .and_then(|mut f| {
-                                use std::io::Write;
-                                f.write_all(trust_entry.as_bytes())
-                            });
-                    }
-                }
-            }
-            "gemini" => {
-                let cfg = serde_json::json!({
-                    "mcpServers": {
-                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str], "trust": true }
-                    }
-                });
-                let dir = Path::new(worktree_path).join(".gemini");
-                let _ = std::fs::create_dir_all(&dir);
-                let _ = std::fs::write(
-                    dir.join("settings.json"),
-                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
-                );
-            }
-            "cursor" => {
-                let cfg = serde_json::json!({
-                    "mcpServers": {
-                        "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
-                    }
-                });
-                let dir = Path::new(worktree_path).join(".cursor");
-                let _ = std::fs::create_dir_all(&dir);
-                let _ = std::fs::write(
-                    dir.join("mcp.json"),
-                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
-                );
-            }
-            "grok" => {
-                // Grok reads project-scoped MCP servers from .grok/config.toml (TOML, not JSON),
-                // walking from the worktree up to the git root.
-                let esc = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
-                let cfg = format!(
-                    "[mcp_servers.agtx]\ncommand = \"{}\"\nargs = [\"mcp-serve\", \"{}\"]\n",
-                    esc(&agtx_bin),
-                    esc(&project_path_str)
-                );
-                let dir = Path::new(worktree_path).join(".grok");
-                let _ = std::fs::create_dir_all(&dir);
-                // A repo may already ship a .grok/config.toml — append the agtx table
-                // instead of clobbering the project's own settings.
-                let path = dir.join("config.toml");
-                let existing = std::fs::read_to_string(&path).unwrap_or_default();
-                if !existing.contains("[mcp_servers.agtx]") {
-                    let merged = if existing.trim().is_empty() {
-                        cfg
-                    } else {
-                        format!("{}\n\n{}", existing.trim_end(), cfg)
-                    };
-                    let _ = std::fs::write(&path, merged);
-                }
-            }
-            "antigravity" => {
-                // Antigravity reads workspace MCP servers from .agents/mcp_config.json
-                // (JSON, `mcpServers`). `.agents/` is vendor-neutral and may already be
-                // tracked in the repo, so merge the agtx entry into any existing file
-                // instead of clobbering the project's own servers.
-                let dir = Path::new(worktree_path).join(".agents");
-                let _ = std::fs::create_dir_all(&dir);
-                let path = dir.join("mcp_config.json");
-                let mut root = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .filter(|v| v.is_object())
-                    .unwrap_or_else(|| serde_json::json!({}));
-                if !root["mcpServers"].is_object() {
-                    root["mcpServers"] = serde_json::json!({});
-                }
-                root["mcpServers"]["agtx"] = serde_json::json!({
-                    "command": &agtx_bin,
-                    "args": ["mcp-serve", &project_path_str]
-                });
-                let _ = std::fs::write(
-                    &path,
-                    serde_json::to_string_pretty(&root).unwrap_or_default(),
-                );
-            }
-            "opencode" => {
-                let cfg = serde_json::json!({
-                    "mcp": {
-                        "agtx": {
-                            "type": "local",
-                            "command": [&agtx_bin, "mcp-serve", &project_path_str]
-                        }
-                    }
-                });
-                let _ = std::fs::write(
-                    Path::new(worktree_path).join("opencode.json"),
-                    serde_json::to_string_pretty(&cfg).unwrap_or_default(),
-                );
-            }
-            _ => {}
+        if let Some(spec) = agent::spec(agent_name) {
+            write_mcp_config(
+                spec,
+                worktree_path,
+                &project_path_str,
+                &agtx_bin,
+                agent_hooks,
+            );
         }
     }
 
@@ -10396,6 +10230,203 @@ fn write_skills_to_worktree(
                     resolve_skill_content(plugin, skill_dir_name, project_path, default_content);
                 write_skill_file(spec, skill_dir_name, &content, &native_dir);
             }
+        }
+    }
+}
+
+/// Write the project-scoped MCP server config for one agent into its worktree.
+///
+/// Selected by [`McpConfigKind`](agent::McpConfigKind) rather than agent name.
+/// The variants are genuinely seven, not one parameterised writer: the formats
+/// differ (JSON vs TOML, `mcpServers` vs `mcp_servers` vs `mcp`), two must
+/// **merge** rather than overwrite because their file may already be tracked in
+/// the repo, and two carry a side-effect beyond the config file itself — so the
+/// `…Merge` names mark where clobbering a user's file is the failure mode.
+///
+/// `project_path_str` is the *project root*, not the worktree, so the server
+/// opens the project DB where tasks actually live.
+fn write_mcp_config(
+    spec: &agent::AgentSpec,
+    worktree_path: &str,
+    project_path_str: &str,
+    agtx_bin: &str,
+    agent_hooks: bool,
+) {
+    let Some(kind) = spec.mcp_config else {
+        return;
+    };
+    match kind {
+        agent::McpConfigKind::ClaudeJson => {
+            let cfg = serde_json::json!({
+                "mcpServers": {
+                    "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
+                }
+            });
+            let _ = std::fs::write(
+                Path::new(worktree_path).join(".mcp.json"),
+                serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+            );
+            // Merge into any existing settings rather than replacing them:
+            // `.claude` is in AGENT_CONFIG_DIRS, so a project that ships its own
+            // settings.local.json has it copied into every worktree, and a plain
+            // write would silently drop the user's permissions/env/hooks.
+            // Same merge-don't-overwrite rule the grok and antigravity writers follow.
+            let claude_dir = Path::new(worktree_path).join(".claude");
+            let _ = std::fs::create_dir_all(&claude_dir);
+            let settings_path = claude_dir.join("settings.local.json");
+            let mut settings = std::fs::read_to_string(&settings_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .filter(|v| v.is_object())
+                .unwrap_or_else(|| serde_json::json!({}));
+
+            if let Some(obj) = settings.as_object_mut() {
+                // Pre-trust the agtx MCP server so Claude doesn't show an interactive
+                // trust dialog when the agent window opens for the first time.
+                obj.insert(
+                    "enableAllProjectMcpServers".to_string(),
+                    serde_json::json!(true),
+                );
+                // agtx always launches Claude with --dangerously-skip-permissions, and
+                // since Claude Code ~2.1 that mode is gated behind an interactive
+                // "Yes, I accept" dialog. A worktree is a brand-new directory every
+                // time, so without this the agent parks on that dialog and the task
+                // prompt is typed into the menu. (IS_SANDBOX=1 covers only the
+                // separate root-user check, not this one.)
+                obj.insert(
+                    "bypassPermissionsModeAccepted".to_string(),
+                    serde_json::json!(true),
+                );
+                if agent_hooks {
+                    merge_claude_hooks(
+                        obj,
+                        claude_hook_settings(&agtx_bin),
+                    );
+                }
+            }
+            let _ = std::fs::write(
+                &settings_path,
+                serde_json::to_string_pretty(&settings).unwrap_or_default(),
+            );
+        }
+        agent::McpConfigKind::CodexToml => {
+            let toml = format!(
+                "[mcp_servers.agtx]\ncommand = \"{}\"\nargs = [\"mcp-serve\", \"{}\"]\n",
+                agtx_bin, project_path_str
+            );
+            let dir = Path::new(worktree_path).join(".codex");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("config.toml"), toml);
+
+            // Codex only loads project-local .codex/config.toml for trusted paths.
+            // Add a trust entry for this worktree to ~/.codex/config.toml.
+            if let Some(home) = agent_trust_home() {
+                let global_config_path = home.join(".codex").join("config.toml");
+                let trust_entry = format!(
+                    "\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                    worktree_path
+                );
+                let existing = std::fs::read_to_string(&global_config_path).unwrap_or_default();
+                if !existing.contains(worktree_path) {
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&global_config_path)
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            f.write_all(trust_entry.as_bytes())
+                        });
+                }
+            }
+        }
+        agent::McpConfigKind::GeminiJson => {
+            let cfg = serde_json::json!({
+                "mcpServers": {
+                    "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str], "trust": true }
+                }
+            });
+            let dir = Path::new(worktree_path).join(".gemini");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(
+                dir.join("settings.json"),
+                serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+            );
+        }
+        agent::McpConfigKind::CursorJson => {
+            let cfg = serde_json::json!({
+                "mcpServers": {
+                    "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
+                }
+            });
+            let dir = Path::new(worktree_path).join(".cursor");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(
+                dir.join("mcp.json"),
+                serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+            );
+        }
+        agent::McpConfigKind::GrokTomlMerge => {
+            // Grok reads project-scoped MCP servers from .grok/config.toml (TOML, not JSON),
+            // walking from the worktree up to the git root.
+            let esc = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
+            let cfg = format!(
+                "[mcp_servers.agtx]\ncommand = \"{}\"\nargs = [\"mcp-serve\", \"{}\"]\n",
+                esc(&agtx_bin),
+                esc(&project_path_str)
+            );
+            let dir = Path::new(worktree_path).join(".grok");
+            let _ = std::fs::create_dir_all(&dir);
+            // A repo may already ship a .grok/config.toml — append the agtx table
+            // instead of clobbering the project's own settings.
+            let path = dir.join("config.toml");
+            let existing = std::fs::read_to_string(&path).unwrap_or_default();
+            if !existing.contains("[mcp_servers.agtx]") {
+                let merged = if existing.trim().is_empty() {
+                    cfg
+                } else {
+                    format!("{}\n\n{}", existing.trim_end(), cfg)
+                };
+                let _ = std::fs::write(&path, merged);
+            }
+        }
+        agent::McpConfigKind::AntigravityJsonMerge => {
+            // Antigravity reads workspace MCP servers from .agents/mcp_config.json
+            // (JSON, `mcpServers`). `.agents/` is vendor-neutral and may already be
+            // tracked in the repo, so merge the agtx entry into any existing file
+            // instead of clobbering the project's own servers.
+            let dir = Path::new(worktree_path).join(".agents");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join("mcp_config.json");
+            let mut root = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .filter(|v| v.is_object())
+                .unwrap_or_else(|| serde_json::json!({}));
+            if !root["mcpServers"].is_object() {
+                root["mcpServers"] = serde_json::json!({});
+            }
+            root["mcpServers"]["agtx"] = serde_json::json!({
+                "command": &agtx_bin,
+                "args": ["mcp-serve", &project_path_str]
+            });
+            let _ = std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&root).unwrap_or_default(),
+            );
+        }
+        agent::McpConfigKind::OpenCode => {
+            let cfg = serde_json::json!({
+                "mcp": {
+                    "agtx": {
+                        "type": "local",
+                        "command": [&agtx_bin, "mcp-serve", &project_path_str]
+                    }
+                }
+            });
+            let _ = std::fs::write(
+                Path::new(worktree_path).join("opencode.json"),
+                serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+            );
         }
     }
 }
