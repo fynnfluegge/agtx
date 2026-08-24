@@ -10380,7 +10380,10 @@ fn write_skills_to_worktree(
     // Write to agent-native discovery paths (e.g. .claude/commands/agtx/)
     // Deploy for all configured agents so skills are available across phase transitions
     for agent_name in agent_names {
-        if let Some((base_dir, namespace)) = skills::agent_native_skill_dir(agent_name) {
+        let Some(spec) = agent::spec(agent_name) else {
+            continue;
+        };
+        if let Some((base_dir, namespace)) = spec.skill_dir {
             let native_dir = if namespace.is_empty() {
                 Path::new(worktree_path).join(base_dir)
             } else {
@@ -10391,37 +10394,52 @@ fn write_skills_to_worktree(
             for (skill_dir_name, default_content) in skills::BUILTIN_SKILLS {
                 let content =
                     resolve_skill_content(plugin, skill_dir_name, project_path, default_content);
-
-                match *agent_name {
-                    "gemini" => {
-                        // Gemini uses .toml command files with description + prompt fields
-                        let description = skills::extract_description(&content)
-                            .unwrap_or_else(|| format!("agtx {} phase skill", skill_dir_name));
-                        let toml_content = skills::skill_to_gemini_toml(&description, &content);
-                        let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
-                        let _ = std::fs::write(native_dir.join(&filename), toml_content);
-                    }
-                    "codex" | "cursor" | "grok" | "antigravity" => {
-                        // Codex/Cursor/Grok/Antigravity use SKILL.md in skill-name/ subdirectories
-                        let skill_subdir = native_dir.join(skill_dir_name);
-                        let _ = std::fs::create_dir_all(&skill_subdir);
-                        let _ = std::fs::write(skill_subdir.join("SKILL.md"), &content);
-                    }
-                    "opencode" => {
-                        // OpenCode uses flat .md command files: .opencode/command/agtx-research.md
-                        // Commands have description frontmatter + prompt template
-                        let oc_content = transform_skill_for_opencode(&content);
-                        let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
-                        let _ = std::fs::write(native_dir.join(&filename), oc_content);
-                    }
-                    _ => {
-                        // Claude and others: .md files with transformed frontmatter
-                        let content = transform_skill_frontmatter(&content);
-                        let filename = skills::skill_dir_to_filename(skill_dir_name, agent_name);
-                        let _ = std::fs::write(native_dir.join(&filename), content);
-                    }
-                }
+                write_skill_file(spec, skill_dir_name, &content, &native_dir);
             }
+        }
+    }
+}
+
+/// Write one skill into an agent's native discovery directory, in that agent's
+/// layout.
+///
+/// `native_dir` is the already-created base directory (plus namespace subdir if
+/// the agent uses one). Selected by [`SkillLayout`] rather than by agent name, so
+/// an agent reusing an existing layout needs no code here.
+///
+/// This is the single implementation behind both [`deploy_skill`] and
+/// [`write_skills_to_worktree`], which each carried their own copy of this branch
+/// and had already drifted: the latter treated Claude's format as its `_`
+/// fallback, so a future agent with a skill dir but no arm would silently get
+/// Claude's `.md` layout from one and nothing from the other.
+fn write_skill_file(
+    spec: &agent::AgentSpec,
+    skill_name: &str,
+    content: &str,
+    native_dir: &Path,
+) {
+    match spec.skill_layout {
+        agent::SkillLayout::CommandFile => {
+            let transformed = transform_skill_frontmatter(content);
+            let filename = skills::skill_dir_to_filename(skill_name, spec.name);
+            let _ = std::fs::write(native_dir.join(&filename), transformed);
+        }
+        agent::SkillLayout::GeminiToml => {
+            let description = skills::extract_description(content)
+                .unwrap_or_else(|| format!("agtx {} skill", skill_name));
+            let toml_content = skills::skill_to_gemini_toml(&description, content);
+            let filename = skills::skill_dir_to_filename(skill_name, spec.name);
+            let _ = std::fs::write(native_dir.join(&filename), toml_content);
+        }
+        agent::SkillLayout::SkillDir => {
+            let skill_subdir = native_dir.join(skill_name);
+            let _ = std::fs::create_dir_all(&skill_subdir);
+            let _ = std::fs::write(skill_subdir.join("SKILL.md"), content);
+        }
+        agent::SkillLayout::OpenCodeFlat => {
+            let oc_content = transform_skill_for_opencode(content);
+            let filename = skills::skill_dir_to_filename(skill_name, spec.name);
+            let _ = std::fs::write(native_dir.join(&filename), oc_content);
         }
     }
 }
@@ -10435,39 +10453,17 @@ fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, agent_name: 
     let _ = std::fs::write(canonical_dir.join("SKILL.md"), content);
 
     // Write to agent-native discovery path
-    if let Some((base_dir, namespace)) = skills::agent_native_skill_dir(agent_name) {
+    let Some(spec) = agent::spec(agent_name) else {
+        return;
+    };
+    if let Some((base_dir, namespace)) = spec.skill_dir {
         let native_dir = if namespace.is_empty() {
             target_dir.join(base_dir)
         } else {
             target_dir.join(base_dir).join(namespace)
         };
         let _ = std::fs::create_dir_all(&native_dir);
-
-        match agent_name {
-            "claude" | "copilot" => {
-                let transformed = transform_skill_frontmatter(content);
-                let filename = skills::skill_dir_to_filename(skill_name, agent_name);
-                let _ = std::fs::write(native_dir.join(&filename), transformed);
-            }
-            "gemini" => {
-                let description = skills::extract_description(content)
-                    .unwrap_or_else(|| format!("agtx {} skill", skill_name));
-                let toml_content = skills::skill_to_gemini_toml(&description, content);
-                let filename = skills::skill_dir_to_filename(skill_name, agent_name);
-                let _ = std::fs::write(native_dir.join(&filename), toml_content);
-            }
-            "codex" | "cursor" | "grok" | "antigravity" => {
-                let skill_subdir = native_dir.join(skill_name);
-                let _ = std::fs::create_dir_all(&skill_subdir);
-                let _ = std::fs::write(skill_subdir.join("SKILL.md"), content);
-            }
-            "opencode" => {
-                let oc_content = transform_skill_for_opencode(content);
-                let filename = skills::skill_dir_to_filename(skill_name, agent_name);
-                let _ = std::fs::write(native_dir.join(&filename), oc_content);
-            }
-            _ => {}
-        }
+        write_skill_file(spec, skill_name, content, &native_dir);
     }
 }
 

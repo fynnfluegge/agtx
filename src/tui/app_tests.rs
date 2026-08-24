@@ -11296,3 +11296,42 @@ fn test_claude_settings_preflight_bypass_acceptance() {
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(v["bypassPermissionsModeAccepted"], serde_json::json!(true));
 }
+
+/// Deploying one skill for every supported agent lands at exactly these paths.
+///
+/// The step-5 guard from docs/planning/agent-spec-table.md: `deploy_skill` and
+/// `write_skills_to_worktree` each carried their own copy of this layout branch
+/// and had already drifted apart, so the layouts are pinned as literals here
+/// rather than derived from the same table the code reads.
+#[test]
+fn test_deploy_skill_paths_for_every_agent() {
+    let expected: &[(&str, &str)] = &[
+        ("claude", ".claude/commands/agtx/plan.md"),
+        ("copilot", ".github/agents/agtx/plan.md"),
+        ("gemini", ".gemini/commands/agtx/plan.toml"),
+        ("codex", ".codex/skills/agtx-plan/SKILL.md"),
+        ("cursor", ".cursor/skills/agtx-plan/SKILL.md"),
+        ("grok", ".grok/skills/agtx-plan/SKILL.md"),
+        ("antigravity", ".agents/skills/agtx-plan/SKILL.md"),
+        ("opencode", ".opencode/command/agtx-plan.md"),
+    ];
+    let content = "---\nname: agtx-plan\ndescription: Plan the work\n---\n\nbody\n";
+
+    for (agent, rel) in expected {
+        let dir = tempfile::tempdir().unwrap();
+        deploy_skill(dir.path(), "agtx-plan", content, agent);
+
+        let native = dir.path().join(rel);
+        assert!(native.exists(), "{agent}: expected {rel}");
+        assert!(
+            !std::fs::read_to_string(&native).unwrap().is_empty(),
+            "{agent}: {rel} is empty"
+        );
+
+        // The canonical copy is written for every agent, whatever the layout.
+        assert!(
+            dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists(),
+            "{agent}: canonical copy missing"
+        );
+    }
+}
