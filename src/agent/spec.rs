@@ -64,6 +64,68 @@ pub enum CommandSyntax {
     None,
 }
 
+/// When an agent's dialog appears, which decides how it is matched.
+///
+/// The distinction is forced by what each call site knows. `wait_for_agent_ready`
+/// is handed only a tmux target, so it matches `Launch` dialogs against any pane
+/// regardless of agent — a false positive is possible in principle and is the
+/// subject of open question 1 in docs/planning/agent-spec-table.md. The
+/// session-refresh loop *does* know which agent runs in the pane, so `Session`
+/// dialogs are matched only against their own agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogScope {
+    /// Shown once when the agent opens in a directory it has not seen.
+    Launch,
+    /// Shown mid-session, e.g. the first time the agent calls an MCP tool.
+    Session,
+}
+
+/// An interactive prompt that blocks the agent until it is answered.
+///
+/// `answer` is sent as a key — a menu digit — followed by Enter.
+#[derive(Debug, Clone, Copy)]
+pub struct AgentDialog {
+    /// Text to look for in the pane. Combined per [`require_all`](Self::require_all).
+    pub patterns: &'static [&'static str],
+    /// When false the patterns are **alternatives**: any one matching is enough,
+    /// which is how a dialog whose wording varies between versions is caught.
+    /// When true they are a **conjunction**: all must be present, for a prompt
+    /// identified by a combination of phrases rather than one distinctive string.
+    pub require_all: bool,
+    pub answer: &'static str,
+    pub scope: DialogScope,
+}
+
+impl AgentDialog {
+    /// Whether this dialog is visible in `content`.
+    pub fn matches(&self, content: &str) -> bool {
+        if self.require_all {
+            self.patterns.iter().all(|p| content.contains(p))
+        } else {
+            self.patterns.iter().any(|p| content.contains(p))
+        }
+    }
+}
+
+/// How a mid-session message (a phase advance into a running agent) is delivered.
+///
+/// The plan that introduced this sketched a fourth variant, `CombinedThenPicker`,
+/// for Codex's second Enter. Bracketed paste removed the need for it: Codex's
+/// `$skill` picker opens on typing, not on a paste, so there is nothing to
+/// dismiss. Three variants, not four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendStrategy {
+    /// Send the command, optionally wait on a `prompt_trigger`, then the prompt.
+    Generic,
+    /// Combine skill and prompt into one bracketed paste, then a single Enter.
+    /// Ink-class TUIs need this: they lose a separately-sent prompt, and a typed
+    /// newline submits the message half-written.
+    Combined,
+    /// OpenCode's command picker strips arguments when the whole string is typed
+    /// at once, so the text must arrive in two pieces by design.
+    OpenCodePicker,
+}
+
 /// Where and how an agent's project-scoped MCP server config is written.
 ///
 /// Seven variants for seven agents, which looks untidy and is: the formats
@@ -163,6 +225,19 @@ pub struct AgentSpec {
     pub label_fg: (u8, u8, u8),
     /// Background colour, for the agents whose branding is a filled chip.
     pub label_bg: Option<(u8, u8, u8)>,
+
+    // ── sending ──────────────────────────────────────────────────────────
+    pub send_strategy: SendStrategy,
+    /// Command that clears the agent's context, for `clear_context_on_advance`.
+    /// `None` where no such command is known — the phase advance then just sends
+    /// normally. Tracked in issue #46.
+    pub clear_context_command: Option<&'static str>,
+
+    // ── dialogs ──────────────────────────────────────────────────────────
+    /// Interactive prompts this agent shows that agtx answers on the user's
+    /// behalf. Missing one is silent and total: the task's prompt is delivered
+    /// but never read, because the agent never reaches its composer.
+    pub dialogs: &'static [AgentDialog],
 }
 
 /// Every agent agtx ships with.
@@ -194,6 +269,31 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         exit_command: Some("/exit"),
         label_fg: (227, 148, 62), // orange
         label_bg: None,
+        send_strategy: SendStrategy::Generic,
+        clear_context_command: Some("/clear"),
+        dialogs: &[
+            // Workspace trust, shown before the bypass warning in any directory
+            // Claude has not seen. Recorded per directory as
+            // `projects."<dir>".hasTrustDialogAccepted` in ~/.claude.json, and
+            // every task gets a new worktree — so this fires on the first launch
+            // of nearly every Claude task, not just in containers.
+            AgentDialog {
+                patterns: &["Yes, I trust this folder"],
+                require_all: false,
+                answer: "1",
+                scope: DialogScope::Launch,
+            },
+            // `--dangerously-skip-permissions` acceptance. Not covered by
+            // hasTrustDialogAccepted, so copying ~/.claude.json (as the swebench
+            // harness does) does not suppress it.
+            AgentDialog {
+                // Alternatives: the wording has varied across Claude versions.
+                patterns: &["Yes, I accept", "I accept the risk"],
+                require_all: false,
+                answer: "2",
+                scope: DialogScope::Launch,
+            },
+        ],
     },
     AgentSpec {
         name: "codex",
@@ -217,6 +317,20 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         exit_command: None,
         label_fg: (255, 255, 255), // white on black
         label_bg: Some((20, 20, 20)),
+        send_strategy: SendStrategy::Combined,
+        clear_context_command: None,
+        dialogs: &[
+            // MCP tool approval, shown mid-session the first time the agent calls
+            // an agtx tool — not at launch, so it is matched only against a pane
+            // known to be running codex.
+            AgentDialog {
+                // A conjunction: none of these three is distinctive alone.
+                patterns: &["Allow the", "MCP server to run tool", "Always allow"],
+                require_all: true,
+                answer: "3",
+                scope: DialogScope::Session,
+            },
+        ],
     },
     AgentSpec {
         name: "copilot",
@@ -245,6 +359,9 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         exit_command: Some("/exit"),
         label_fg: (255, 255, 255), // default white
         label_bg: None,
+        send_strategy: SendStrategy::Generic,
+        clear_context_command: None,
+        dialogs: &[],
     },
     AgentSpec {
         name: "gemini",
@@ -267,6 +384,17 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         exit_command: Some("/quit"),
         label_fg: (234, 130, 180), // pink
         label_bg: None,
+        send_strategy: SendStrategy::Combined,
+        clear_context_command: None,
+        dialogs: &[
+            // Answering this restarts the process.
+            AgentDialog {
+                patterns: &["Do you trust the files in this folder?"],
+                require_all: false,
+                answer: "1",
+                scope: DialogScope::Launch,
+            },
+        ],
     },
     AgentSpec {
         name: "opencode",
@@ -291,6 +419,9 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         exit_command: Some("/exit"),
         label_fg: (255, 255, 255), // white on grey
         label_bg: Some((80, 80, 80)),
+        send_strategy: SendStrategy::OpenCodePicker,
+        clear_context_command: None,
+        dialogs: &[],
     },
     AgentSpec {
         name: "cursor",
@@ -313,6 +444,9 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         exit_command: None,
         label_fg: (255, 255, 255), // default white
         label_bg: None,
+        send_strategy: SendStrategy::Combined,
+        clear_context_command: None,
+        dialogs: &[],
     },
     AgentSpec {
         name: "grok",
@@ -337,6 +471,9 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         exit_command: Some("/quit"),
         label_fg: (20, 20, 20), // black on white
         label_bg: Some((255, 255, 255)),
+        send_strategy: SendStrategy::Generic,
+        clear_context_command: None,
+        dialogs: &[],
     },
     AgentSpec {
         name: "antigravity",
@@ -364,6 +501,9 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         exit_command: Some("/exit"),
         label_fg: (120, 190, 255), // light blue
         label_bg: None,
+        send_strategy: SendStrategy::Combined,
+        clear_context_command: None,
+        dialogs: &[],
     },
     // TODO: investigate CLI usage before enabling
     // aider  — "AI pair programming in your terminal", Aider <noreply@aider.chat>

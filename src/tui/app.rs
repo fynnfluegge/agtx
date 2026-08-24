@@ -7031,17 +7031,13 @@ impl App {
                             let mut st = LaunchDialogState::default();
                             dismiss_launch_dialog(&tmux_ops, sn, &content, &mut st);
 
-                            // Codex's MCP approval dialog — a workaround for an
+                            // Mid-session approval prompts (Codex's "allow this
+                            // MCP server to run tool") — a workaround for an
                             // interactive prompt, not part of status detection.
-                            if agent == "codex"
-                                && content.contains("Allow the")
-                                && content.contains("MCP server to run tool")
-                                && content.contains("Always allow")
-                            {
-                                let _ = tmux_ops.send_keys_literal(sn, "3");
-                                std::thread::sleep(std::time::Duration::from_millis(100));
-                                let _ = tmux_ops.send_keys_literal(sn, "Enter");
-                            }
+                            // Matched against this agent's own dialogs only: the
+                            // refresh loop knows what runs in the pane, unlike
+                            // `wait_for_agent_ready`.
+                            answer_session_dialogs(&tmux_ops, sn, &agent, &content);
                         }
                     }
                 }
@@ -8886,11 +8882,12 @@ fn send_skill_and_prompt(
     auto_dismiss: &[crate::config::AutoDismiss],
     clear_context: bool,
 ) {
-    // Opt-in context clear on phase advance. Only Claude Code has a known
-    // clear command; other agents are tbd per issue #46 and fall through
-    // to normal send unchanged.
-    if clear_context && agent_name == "claude" {
-        let _ = tmux_ops.send_keys(target, "/clear");
+    // Opt-in context clear on phase advance. Agents with no known clear command
+    // (`clear_context_command: None`, tbd per issue #46) fall through to a normal
+    // send unchanged.
+    let clear_cmd = agent::spec(agent_name).and_then(|s| s.clear_context_command);
+    if let (true, Some(cmd)) = (clear_context, clear_cmd) {
+        let _ = tmux_ops.send_keys(target, cmd);
         // Wait for Claude to clear its buffer and return to idle prompt.
         // Pattern mirrors the stability-poll loops used elsewhere in this
         // function: poll until pane content stabilises (no changes for ~1s),
@@ -8920,7 +8917,9 @@ fn send_skill_and_prompt(
     //
     // Fix: send just the command name, wait for picker, Enter to confirm (inserts cmd),
     // then send the args (picker dismissed, input now has just the command), then Enter.
-    if agent_name == "opencode" {
+    let strategy = agent::spec(agent_name).map_or(agent::SendStrategy::Generic, |s| s.send_strategy);
+
+    if strategy == agent::SendStrategy::OpenCodePicker {
         // Build the full message: skill command (if any) + prompt (if any)
         let full_text = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
@@ -9014,7 +9013,7 @@ fn send_skill_and_prompt(
     // Antigravity: descends from the Gemini CLI lineage (settings live under
     //   ~/.gemini/), so it is treated as Ink-class and gets the same
     //   wait-for-echo send. Not yet confirmed against a live session.
-    if matches!(agent_name, "gemini" | "codex" | "cursor" | "antigravity") {
+    if strategy == agent::SendStrategy::Combined {
         let text_to_send = if let Some(cmd) = skill_cmd {
             if !prompt.is_empty() {
                 Some(format!("{}\n\n{}", cmd, prompt))
@@ -9734,29 +9733,29 @@ const CONTENT_STABLE_THRESHOLD: u32 = 3;
 ///
 /// A worktree is a brand-new directory every time, so these fire on most task
 /// starts — they are the normal case, not an edge case.
-const LAUNCH_DIALOGS: &[(&[&str], &str)] = &[
-    // Claude's `--dangerously-skip-permissions` acceptance. Not covered by
-    // `hasTrustDialogAccepted` in ~/.claude.json, so copying that file (as the
-    // swebench harness does) does not suppress it.
-    (&["Yes, I accept", "I accept the risk"], "2"),
-    // Claude's *workspace trust* dialog ("Quick safety check: Is this a project
-    // you created or one you trust?"), which is a separate gate shown before the
-    // bypass warning. Recorded per directory as `hasTrustDialogAccepted` under
-    // `projects."<dir>"` in ~/.claude.json — and every task gets a brand-new
-    // worktree path, so it fires on the *first* launch of every Claude task.
-    // Missing this arm is why a launched task could sit forever with its prompt
-    // already delivered but never read: Claude parks on the dialog and the
-    // pane never reaches the composer.
-    (&["Yes, I trust this folder"], "1"),
-    // Gemini folder trust — answering it restarts the process.
-    (&["Do you trust the files in this folder?"], "1"),
-];
+/// Every agent's `Launch`-scope dialog, flattened.
+///
+/// Flat because `wait_for_agent_ready` is handed only a tmux target and does not
+/// know which agent runs there. Attributing these at match time is strictly more
+/// correct but *changes behaviour*, so it gets its own change — see open question
+/// 1 in docs/planning/agent-spec-table.md. `Session`-scope dialogs are excluded:
+/// they are matched against their own agent only, by the refresh loop.
+static LAUNCH_DIALOGS: std::sync::LazyLock<Vec<&'static agent::AgentDialog>> =
+    std::sync::LazyLock::new(|| {
+        agent::AGENT_SPECS
+            .iter()
+            .flat_map(|s| s.dialogs.iter())
+            .filter(|d| d.scope == agent::DialogScope::Launch)
+            .collect()
+    });
 
 /// Per-launch state for [`dismiss_launch_dialog`].
 #[derive(Default)]
 struct LaunchDialogState {
     /// Answers sent per dialog, and a hash of the pane at the last attempt.
-    attempts: [(u8, u64); 4],
+    /// Indexed by position in [`LAUNCH_DIALOGS`], so it grows with the table
+    /// rather than needing a hand-maintained size.
+    attempts: Vec<(u8, u64)>,
 }
 
 /// An agent TUI that has not yet started reading stdin drops the keystrokes, so
@@ -9778,6 +9777,33 @@ fn hash_of(content: &str) -> u64 {
     h.finish()
 }
 
+/// Answer any `Session`-scope dialog this agent shows, visible in `content`.
+///
+/// Unlike the launch dialogs these are matched **only** against their own agent,
+/// because the caller knows which agent occupies the pane and these prompts can
+/// appear at any point in a session rather than once at startup.
+fn answer_session_dialogs(
+    tmux_ops: &Arc<dyn TmuxOperations>,
+    target: &str,
+    agent_name: &str,
+    content: &str,
+) {
+    let Some(spec) = agent::spec(agent_name) else {
+        return;
+    };
+    for dialog in spec
+        .dialogs
+        .iter()
+        .filter(|d| d.scope == agent::DialogScope::Session)
+    {
+        if dialog.matches(content) {
+            let _ = tmux_ops.send_keys_literal(target, dialog.answer);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let _ = tmux_ops.send_keys_literal(target, "Enter");
+        }
+    }
+}
+
 /// Answer any known first-launch dialog visible in `content`.
 ///
 /// Retries only while **nothing has changed** since the last attempt: an
@@ -9793,10 +9819,12 @@ fn dismiss_launch_dialog(
     content: &str,
     state: &mut LaunchDialogState,
 ) -> bool {
-    debug_assert!(LAUNCH_DIALOGS.len() <= 4, "state array holds 4 dialogs");
     let content_hash = hash_of(content);
-    for (i, (patterns, answer)) in LAUNCH_DIALOGS.iter().enumerate() {
-        if !patterns.iter().any(|p| content.contains(p)) {
+    if state.attempts.len() < LAUNCH_DIALOGS.len() {
+        state.attempts.resize(LAUNCH_DIALOGS.len(), (0, 0));
+    }
+    for (i, dialog) in LAUNCH_DIALOGS.iter().enumerate() {
+        if !dialog.matches(content) {
             continue;
         }
         let (attempts, last_hash) = state.attempts[i];
@@ -9808,7 +9836,7 @@ fn dismiss_launch_dialog(
         if attempts > 0 && last_hash != content_hash {
             continue;
         }
-        let _ = tmux_ops.send_keys_literal(target, answer);
+        let _ = tmux_ops.send_keys_literal(target, dialog.answer);
         std::thread::sleep(std::time::Duration::from_millis(200));
         let _ = tmux_ops.send_keys_literal(target, "Enter");
         state.attempts[i] = (attempts + 1, content_hash);

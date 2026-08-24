@@ -10985,8 +10985,8 @@ fn test_claude_launch_dialogs_do_not_overlap() {
     let matches = |content: &str| -> Vec<&'static str> {
         LAUNCH_DIALOGS
             .iter()
-            .filter(|(patterns, _)| patterns.iter().any(|p| content.contains(p)))
-            .map(|(_, answer)| *answer)
+            .filter(|d| d.matches(content))
+            .map(|d| d.answer)
             .collect()
     };
     assert_eq!(matches(trust), vec!["1"], "trust dialog");
@@ -11422,4 +11422,120 @@ fn test_exit_command_per_agent() {
     }
     // An agent agtx has never heard of keeps the historical default.
     assert!(crate::agent::spec("mistral").is_none());
+}
+
+/// Which send path each agent takes, pinned as literals. `Combined` is the
+/// bracketed-paste path; `OpenCodePicker` is the one flow where the text must
+/// arrive in two pieces by design.
+#[test]
+fn test_send_strategy_per_agent() {
+    use crate::agent::SendStrategy;
+    for (agent, want) in [
+        ("claude", SendStrategy::Generic),
+        ("copilot", SendStrategy::Generic),
+        ("grok", SendStrategy::Generic),
+        ("gemini", SendStrategy::Combined),
+        ("codex", SendStrategy::Combined),
+        ("cursor", SendStrategy::Combined),
+        ("antigravity", SendStrategy::Combined),
+        ("opencode", SendStrategy::OpenCodePicker),
+    ] {
+        assert_eq!(
+            crate::agent::spec(agent).unwrap().send_strategy,
+            want,
+            "{agent}"
+        );
+    }
+}
+
+/// `/clear` is Claude-only today (issue #46). An agent with `None` must fall
+/// through to a normal send rather than typing a command it does not understand
+/// into its composer.
+#[test]
+fn test_clear_context_command_is_claude_only() {
+    assert_eq!(
+        crate::agent::spec("claude").unwrap().clear_context_command,
+        Some("/clear")
+    );
+    for agent in ["codex", "gemini", "cursor", "antigravity", "opencode", "grok", "copilot"] {
+        assert_eq!(
+            crate::agent::spec(agent).unwrap().clear_context_command,
+            None,
+            "{agent}"
+        );
+    }
+}
+
+/// `LAUNCH_DIALOGS` is now derived from `AGENT_SPECS`. Pinned against the
+/// literals it replaced, and asserting `Session`-scope dialogs stay out — they
+/// are matched per agent, not against any pane.
+#[test]
+fn test_launch_dialog_derivation_matches_the_previous_literals() {
+    let mut got: Vec<(Vec<&str>, &str)> = LAUNCH_DIALOGS
+        .iter()
+        .map(|d| (d.patterns.to_vec(), d.answer))
+        .collect();
+    got.sort();
+    let mut want = vec![
+        (vec!["Yes, I accept", "I accept the risk"], "2"),
+        (vec!["Yes, I trust this folder"], "1"),
+        (vec!["Do you trust the files in this folder?"], "1"),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+
+    // Codex's MCP approval is Session-scope and must not leak into the flat list:
+    // there it would fire for any agent's pane, and during startup too.
+    assert!(
+        !LAUNCH_DIALOGS
+            .iter()
+            .any(|d| d.patterns.contains(&"MCP server to run tool")),
+        "session dialogs must not be matched against any pane"
+    );
+}
+
+/// Codex's mid-session MCP approval, previously hand-rolled in the refresh loop.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_answer_session_dialogs_handles_codex_mcp_approval() {
+    let pane = "Allow the agtx MCP server to run tool get_task?\n  1. Yes  2. No  3. Always allow";
+
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = mockall::Sequence::new();
+    mock.expect_send_keys_literal()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "3")
+        .returning(|_, _| Ok(()));
+    mock.expect_send_keys_literal()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    answer_session_dialogs(&ops, "t:1", "codex", pane);
+}
+
+/// The same pane under a different agent must be left alone — session dialogs
+/// are matched only against the agent that owns them.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_answer_session_dialogs_is_scoped_to_its_own_agent() {
+    let pane = "Allow the agtx MCP server to run tool get_task?\n  3. Always allow";
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_keys_literal().never();
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    answer_session_dialogs(&ops, "t:1", "claude", pane);
+    answer_session_dialogs(&ops, "t:1", "mistral", pane);
+}
+
+/// All three patterns are required for the codex prompt: none is distinctive
+/// enough alone, and a partial match would type a stray "3" into the composer.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_answer_session_dialogs_requires_every_pattern() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_keys_literal().never();
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    answer_session_dialogs(&ops, "t:1", "codex", "Allow the tool to run? Always allow");
 }
