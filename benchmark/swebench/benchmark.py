@@ -149,7 +149,22 @@ class McpClient:
         self._proc.stdin.write(line)
         self._proc.stdin.flush()
 
+    # A reply should take milliseconds. This is not a latency budget, it is a
+    # deadlock guard: `readline()` on a live-but-silent server blocks forever, and
+    # no --phase-timeout can rescue it because the block is inside the MCP call
+    # rather than inside the artifact poll that the timeout governs.
+    RECV_TIMEOUT_SECONDS = 120
+
     def _recv(self) -> dict:
+        import selectors
+
+        with selectors.DefaultSelector() as sel:
+            sel.register(self._proc.stdout, selectors.EVENT_READ)
+            if not sel.select(timeout=self.RECV_TIMEOUT_SECONDS):
+                raise McpError(
+                    f"MCP server did not respond within {self.RECV_TIMEOUT_SECONDS}s "
+                    "(agent may be parked on an interactive prompt or a usage limit)"
+                )
         line = self._proc.stdout.readline()
         if not line:
             raise McpError("MCP server closed connection")
@@ -1328,6 +1343,12 @@ class TaskRunner:
         r"\[Y/N\]",
         r"Press Enter to continue",
         r"Press any key",
+        # Claude's usage-limit pause. It ends the turn and waits on a keypress
+        # that nothing sends, so the task parks indefinitely — observed sitting
+        # ~50 minutes, past both the stated reset time and --phase-timeout.
+        # Matching it turns a silent stall into a named failure.
+        r"You've hit your session limit",
+        r"Press .* to continue after reset",
     ]
 
     def _check_interactive_prompt(self, content: str) -> str | None:
@@ -1400,6 +1421,20 @@ class TaskRunner:
 
     def run(self) -> dict:
         start = time.monotonic()
+        # What `git diff <base_commit>` already reports before the agent has done
+        # anything. SWE-bench images are not pristine checkouts of base_commit:
+        # for astropy-12907 the baseline is 1861 files (3722 lines of
+        # `old mode 100644` / `new mode 100755`) plus the image's own
+        # `setuptools==68.0.0` pin in pyproject.toml. Subtracted at collection so
+        # a real fix is not buried in ~224KB of noise.
+        self.baseline_patch = self._raw_diff()
+        if self.verbose and self.baseline_patch:
+            n = self.baseline_patch.count("diff --git ")
+            print(
+                f"  [{self.instance_id}] Baseline diff: {n} file(s) already differ from "
+                f"base_commit before the agent runs; these are excluded from the prediction.",
+                file=sys.stderr,
+            )
         if self.verbose:
             print(f"  [{self.instance_id}] Starting MCP handshake...", file=sys.stderr)
         self.mcp = McpClient(self.agtx_bin, str(self.repo_path), container_id=self.container_id)
@@ -1528,7 +1563,47 @@ class TaskRunner:
             if self.mcp:
                 self.mcp.close()
 
+    @staticmethod
+    def _split_file_sections(patch: str) -> dict[str, str]:
+        """Split a unified diff into {path_header: section_text}."""
+        sections: dict[str, str] = {}
+        current: str | None = None
+        buf: list[str] = []
+        for line in patch.splitlines(keepends=True):
+            if line.startswith("diff --git "):
+                if current is not None:
+                    sections[current] = "".join(buf)
+                current = line.strip()
+                buf = [line]
+            elif current is not None:
+                buf.append(line)
+        if current is not None:
+            sections[current] = "".join(buf)
+        return sections
+
+    def _strip_baseline(self, patch: str) -> str:
+        """Drop file sections identical to the pre-agent baseline.
+
+        Per file rather than per line: a file the agent genuinely edited has a
+        different section and survives whole, so an agent that legitimately
+        touches pyproject.toml is not silently dropped along with the image's
+        own pin of it.
+        """
+        baseline = getattr(self, "baseline_patch", "") or ""
+        if not baseline:
+            return patch
+        base_sections = self._split_file_sections(baseline)
+        kept = [
+            text
+            for header, text in self._split_file_sections(patch).items()
+            if base_sections.get(header) != text
+        ]
+        return "".join(kept)
+
     def _collect_patch(self, task: dict) -> str:
+        return self._strip_baseline(self._raw_diff(task))
+
+    def _raw_diff(self, task: dict | None = None) -> str:
         base_commit = self.instance["base_commit"]
 
         if self.container_id:
@@ -1545,7 +1620,7 @@ class TaskRunner:
                 return ""
             return result.stdout.decode("utf-8", errors="replace")
 
-        worktree_path = task.get("worktree_path")
+        worktree_path = (task or {}).get("worktree_path") or str(self.repo_path)
         if not worktree_path:
             return ""
         # Diff the worktree's actual files against the base commit.
