@@ -201,13 +201,30 @@ Commands are written once in canonical format (`/ns:command`) and auto-translate
 - Copilot: no interactive skill invocation (prompt only, no commands sent)
 
 ### Sending Skills & Prompts to Agents
-`send_skill_and_prompt()` has **three** send paths, because agent TUIs disagree about how a slash command plus arguments must arrive. Getting this wrong is the usual cause of "the agent started but never got the task":
+Prompt delivery has **two lanes**. Getting this wrong is the usual cause of "the agent started but never got the task".
 
-1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter
-2. **gemini / codex / cursor / antigravity** — always combine skill + prompt into a *single* message via `send_keys_literal`, then poll the pane until the text renders before pressing Enter (Ink TUIs drop keys sent too early). Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. Codex additionally needs a second Enter to dismiss its command picker. Antigravity's slash-command picker closes as soon as arguments are typed, so the combined text submits on a single Enter (verified against agy 1.1.19) — no Codex-style second Enter
+**Launch lane — the first message of a task's life.** The skill command and prompt are composed by `compose_launch_text()` and handed to the process in **argv**, so the agent starts with the task already in hand: no readiness polling, no window in which a keystroke can be dropped. Gated by `spec::can_launch_with_prompt()`, which requires both an agent whose launch form is *verified* (`AgentSpec::launch_prompt_verified` — Claude only today) and a prompt under `MAX_LAUNCH_PROMPT_BYTES` (128 KiB; `execve` counts bytes). Anything else falls through to the mid-session lane. `setup_task_worktree` returns `(target, launched_with_prompt)` and its callers skip the send entirely when true.
+
+Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used here, so `{task}` keeps its paragraphs and lists (the typed path must flatten them); and `spec::normalize_prompt()` strips NUL, `\r` and other control characters that cannot survive argv, keeping `\n` and `\t`.
+
+**Mid-session lane — phase advances into an already-running agent.** `send_skill_and_prompt()`, three paths, because agent TUIs disagree about how a slash command plus arguments must arrive:
+
+1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter. Still on the typed path: it is the one flow where the text has to arrive in two pieces by design
+2. **gemini / codex / cursor / antigravity** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. **No second Enter for Codex**: its command picker opens on *typing*, not on a paste (verified against codex-cli 0.144.5), so there is nothing to dismiss
 3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
 
 `clear_context_on_advance` is applied before all three, and only for Claude (`/clear`, then poll until the pane stabilises).
+
+**tmux send primitives** — pick by what you are sending, they are not interchangeable:
+
+| Method | tmux | Use for |
+|---|---|---|
+| `paste_text` | `load-buffer` + `paste-buffer -p` | a whole message; bracketed, atomic, newlines stay literal |
+| `send_text` | `send-keys -l --` | literal text; no key-name lookup |
+| `send_keys_literal` | `send-keys` (no `-l`) | **key names** — `Enter`, `C-c`, dialog answers |
+| `send_keys` | `send-keys` + `Enter` | text plus a submit, generic path |
+
+Without `-l`, tmux resolves an argument that matches a key name *as that key*: `"Space"` arrives as `0x20`, `"Escape"` as `ESC`, `"Up"` as `\033[A` (tmux 3.5a). So `send_keys_literal` — despite its name — must never carry task-derived text.
 
 ### First-Launch Dialogs
 Agents gate a brand-new directory behind an interactive dialog, and every task gets a brand-new
@@ -633,8 +650,10 @@ Half of this is now one table entry; the other half is still per-agent match arm
    `src/agent/mod.rs`, `src/agent/operations.rs` and `src/skills.rs` is derived from it —
    `known_agents`, both command builders, the headless invocation, the skill paths, the
    command syntax, and skill discovery
-2. Leave `launch_prompt_verified: false` until the launch form is checked against the real
-   binary. A `-p`-style flag that runs headless and exits swallows the task text silently
+2. Declare `prompt_form` (how the CLI takes a prompt: `Argv` or `Flag("-i")`) but leave
+   `launch_prompt_verified: false` until that form is checked against the real binary. A
+   `-p`-style flag that runs headless and exits swallows the task text silently; flipping the bool
+   is what opts the agent into the launch lane
 3. If no existing `SkillLayout` / `CommandSyntax` variant fits, add **one** variant plus the arm in
    the single function that reads it — never a new match on the agent's name
 

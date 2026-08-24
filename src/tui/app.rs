@@ -7849,14 +7849,11 @@ fn setup_task_worktree(
     // Hand the opening message to the agent process when it can take one. That
     // removes the send-after-ready race entirely for the first message: there is
     // no window in which a keystroke can be dropped, and nothing to poll for.
-    // Agents without a verified launch form fall back to the historical path
-    // (launch bare, wait for readiness, type).
+    // Agents without a verified launch form — or a task too large for argv —
+    // fall back to the historical path (launch bare, wait for readiness, type).
     let launch_text = compose_launch_text(skill_cmd, prompt);
-    let launched_with_prompt = !launch_text.is_empty()
-        && !matches!(
-            agent_ops.prompt_injection(),
-            agent::PromptInjection::Unknown
-        );
+    let launched_with_prompt =
+        agent::spec::can_launch_with_prompt(agent_ops.prompt_injection(), &launch_text);
     let agent_cmd = if launched_with_prompt {
         agent_ops.build_interactive_command(&launch_text)
     } else {

@@ -275,6 +275,47 @@ pub fn spec(name: &str) -> Option<&'static AgentSpec> {
 /// The prompt is single-quoted with the POSIX `'"'"'` idiom because the result
 /// is wrapped in `sh -c '…'` by `create_window`; a bare quote would close that
 /// outer quote and let the shell mangle the text.
+/// Largest prompt agtx will hand to a process in argv.
+///
+/// `ARG_MAX` is ~1 MB on macOS and Linux and task descriptions are far below
+/// that, but the limit should be explicit rather than incidental: past this the
+/// caller falls back to the mid-session lane, which has no such ceiling. Counted
+/// in bytes, not chars, because that is what `execve` counts.
+pub const MAX_LAUNCH_PROMPT_BYTES: usize = 128 * 1024;
+
+/// Strip characters that cannot survive the trip through argv intact.
+///
+/// The command string is handed to tmux, which runs it through a shell, so the
+/// prompt is embedded in a single-quoted word. Single quotes are escaped by
+/// [`compose_command`]; this handles the rest:
+///
+/// - **NUL** would truncate the argument at the C-string boundary, silently
+///   discarding the rest of the task.
+/// - **`\r`** renders as a carriage return, moving the agent's cursor to column
+///   zero and corrupting the echoed prompt. It is almost always a paste artifact
+///   from a CRLF source.
+/// - **Other control characters** (ESC in particular) let pasted text move the
+///   cursor or set colours in the agent's TUI.
+///
+/// `\n` and `\t` are kept: they are ordinary structure in a task description,
+/// and inside a single-quoted argv word they are just bytes.
+pub fn normalize_prompt(prompt: &str) -> String {
+    prompt
+        .chars()
+        .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
+        .collect()
+}
+
+/// Whether `text` can be delivered as a launch argument for this injection mode.
+///
+/// False sends the caller down the mid-session lane instead — either because the
+/// agent's launch form is unverified, or because the text is too large for argv.
+pub fn can_launch_with_prompt(injection: crate::agent::PromptInjection, text: &str) -> bool {
+    !text.is_empty()
+        && !matches!(injection, crate::agent::PromptInjection::Unknown)
+        && text.len() <= MAX_LAUNCH_PROMPT_BYTES
+}
+
 pub fn compose_command(spec: &AgentSpec, args: &[&str], prompt: Option<&str>) -> String {
     let mut out = String::new();
     for (key, value) in spec.env {
@@ -293,6 +334,11 @@ pub fn compose_command(spec: &AgentSpec, args: &[&str], prompt: Option<&str>) ->
             out.push(' ');
             out.push_str(flag);
         }
+        // POSIX single-quote escaping: close, emit a literal quote, reopen. The
+        // whole command is itself wrapped in `sh -c '…'` by create_window, so a
+        // bare quote here would end that outer word and let the shell interpret
+        // the rest of the task as code.
+        let prompt = normalize_prompt(prompt);
         out.push_str(&format!(" '{}'", prompt.replace('\'', "'\"'\"'")));
     }
     out

@@ -492,3 +492,95 @@ fn scan_agent_skills_is_sorted_and_skips_malformed_entries() {
     assert_eq!(commands, vec!["/agtx:alpha", "/agtx:zeta"]);
     assert!(agtx::skills::scan_agent_skills("grok", root).is_empty());
 }
+
+// =============================================================================
+// Prompt normalization and the launch-lane size cap
+// =============================================================================
+
+use agtx::agent::spec::{can_launch_with_prompt, normalize_prompt, MAX_LAUNCH_PROMPT_BYTES};
+
+#[test]
+fn shell_metacharacters_survive_as_literal_text() {
+    // The command is wrapped in `sh -c '…'`, so anything that could end the
+    // quoted word or start a substitution must come back out verbatim. This is
+    // the case that turns a task description into executed code if it regresses.
+    let nasty = r#"fix `rm -rf /` and $(whoami) and ${HOME} and "quotes" and it's"#;
+    let cmd = agent("claude").build_interactive_command(nasty);
+
+    // Exactly one opening quote, and the payload is escaped, not interpreted.
+    assert!(cmd.starts_with("claude --dangerously-skip-permissions '"));
+    assert!(cmd.ends_with('\''));
+    assert!(cmd.contains("`rm -rf /`"), "backticks kept literal: {cmd}");
+    assert!(
+        cmd.contains("$(whoami)"),
+        "substitution kept literal: {cmd}"
+    );
+    assert!(cmd.contains("${HOME}"), "expansion kept literal: {cmd}");
+    // Every single quote from the input is escaped by the POSIX idiom; no bare
+    // quote can appear except the two wrapping ones.
+    let inner = &cmd["claude --dangerously-skip-permissions '".len()..cmd.len() - 1];
+    for (i, _) in inner.match_indices('\'') {
+        let around = &inner[i.saturating_sub(2)..(i + 3).min(inner.len())];
+        assert!(
+            around.contains(r#"'"'"#) || around.contains(r#""'"#),
+            "unescaped quote at {i} in {inner:?}"
+        );
+    }
+}
+
+#[test]
+fn newlines_and_tabs_survive_normalization() {
+    // Ordinary structure in a task description, and just bytes inside a quoted
+    // argv word — plan D phase 4 depends on them reaching the agent intact.
+    let text = "line one\n\n- bullet\n\tindented";
+    assert_eq!(normalize_prompt(text), text);
+    assert!(agent("claude")
+        .build_interactive_command(text)
+        .contains("\n\n- bullet"));
+}
+
+#[test]
+fn normalization_strips_characters_that_cannot_survive_argv() {
+    // NUL truncates the C string, silently dropping the rest of the task.
+    assert_eq!(normalize_prompt("before\u{0}after"), "beforeafter");
+    // CR is a paste artifact from CRLF sources; it would move the agent's cursor
+    // to column zero and corrupt the echoed prompt.
+    assert_eq!(
+        normalize_prompt("line one\r\nline two"),
+        "line one\nline two"
+    );
+    // ESC would let pasted text drive the agent's TUI.
+    assert_eq!(normalize_prompt("plain\u{1b}[31mred"), "plain[31mred");
+    // A prompt of nothing but control characters collapses to empty, which the
+    // launch check then treats as "no prompt".
+    assert_eq!(normalize_prompt("\u{0}\r\u{1b}"), "");
+}
+
+#[test]
+fn launch_lane_is_declined_for_oversized_prompts() {
+    use agtx::agent::PromptInjection;
+
+    let ok = "x".repeat(MAX_LAUNCH_PROMPT_BYTES);
+    let too_big = "x".repeat(MAX_LAUNCH_PROMPT_BYTES + 1);
+
+    assert!(can_launch_with_prompt(PromptInjection::Argv, &ok));
+    assert!(
+        !can_launch_with_prompt(PromptInjection::Argv, &too_big),
+        "oversized prompts must fall back to the mid-session lane"
+    );
+    // Unverified agents never take the lane, whatever the size.
+    assert!(!can_launch_with_prompt(PromptInjection::Unknown, &ok));
+    // Neither does an empty prompt — there would be nothing to deliver.
+    assert!(!can_launch_with_prompt(PromptInjection::Argv, ""));
+}
+
+#[test]
+fn the_size_cap_is_counted_in_bytes_not_chars() {
+    use agtx::agent::PromptInjection;
+    // `execve` counts bytes. A multi-byte character must not let a prompt slip
+    // past the cap by being counted as one.
+    let wide = "é".repeat(MAX_LAUNCH_PROMPT_BYTES); // 2 bytes each
+    assert!(wide.chars().count() <= MAX_LAUNCH_PROMPT_BYTES);
+    assert!(wide.len() > MAX_LAUNCH_PROMPT_BYTES);
+    assert!(!can_launch_with_prompt(PromptInjection::Argv, &wide));
+}
