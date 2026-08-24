@@ -232,11 +232,19 @@ worktree — so these fire on the *first* launch of nearly every task, not just 
 `LAUNCH_DIALOGS` (`src/tui/app.rs`) is the table of `(patterns, answer)`; `dismiss_launch_dialog`
 answers any that is visible.
 
-| Dialog | Match | Answer | Scope |
-|---|---|---|---|
-| Claude workspace trust | `Yes, I trust this folder` | `1` | per directory — `projects."<dir>".hasTrustDialogAccepted` in `~/.claude.json` |
-| Claude bypass-permissions warning | `Yes, I accept` / `I accept the risk` | `2` | not per-project; the `bypassPermissionsModeAccepted` preflight does **not** reliably suppress it |
-| Gemini folder trust | `Do you trust the files in this folder?` | `1` | answering it restarts the process |
+Dialogs are declared per agent on `AgentSpec::dialogs` and **matched against the running agent's own entries** — answering sends a menu digit, and a stray digit typed into another agent's live composer is real corruption. An agent with no spec falls back to matching every known dialog, which beats leaving its pane blocked forever.
+
+| Agent | Dialog | Match | Answer | Scope |
+|---|---|---|---|---|
+| claude | workspace trust | `Yes, I trust this folder` | `1` | Launch — per directory, `projects."<dir>".hasTrustDialogAccepted` in `~/.claude.json` |
+| claude | bypass-permissions warning | `Yes, I accept` / `I accept the risk` | `2` | Launch — the `bypassPermissionsModeAccepted` preflight does **not** reliably suppress it |
+| codex | directory trust | `Do you trust the contents of this directory?` | `1` | Launch — per directory. Worded unlike Claude's *and* Gemini's, so neither pattern catches it |
+| codex | update prompt | `Update now (runs` | `2` (Skip) | Launch — never "Update now": agtx must not upgrade an agent binary behind the user's back |
+| codex | MCP tool approval | `Allow the` + `MCP server to run tool` + `Always allow` | `3` | **Session** — mid-session, matched only against a codex pane |
+| gemini | folder trust | `Do you trust the files in this folder?` | `1` | Launch — answering it restarts the process |
+| antigravity | project trust | *(none — deliberately unhandled)* | — | Its wording matches Claude's exactly, so flat matching used to answer it; per-agent scoping is what makes the documented "leave it to the user" decision real |
+
+`require_all` distinguishes alternatives (several wordings of one prompt) from conjunctions (a prompt identified only by a combination of phrases).
 
 It runs in **both** `wait_for_agent_ready` loops *and* the session-refresh loop: the readiness
 budget expires after ~60s and a slow agent can render its dialog later than that. A retry only

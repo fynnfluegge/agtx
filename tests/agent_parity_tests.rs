@@ -201,19 +201,43 @@ fn headless_invocation_does_not_carry_launch_env() {
 // prompt_injection — which agents take the opening message at launch
 // =============================================================================
 
+/// Which agents may take the opening message at launch.
+///
+/// Each `Argv`/`FlagInteractive` entry below was checked against the real binary
+/// in a scratch worktree: the skill command had to expand, the skill body had to
+/// run, and the session had to stay usable afterwards. Everything else keeps the
+/// send-after-ready path — guessing here silently swallows the task text.
 #[test]
 fn prompt_injection_parity() {
-    // Verified against claude 2.1.241. Every other agent keeps the
-    // send-after-ready path until its launch form is verified the same way;
-    // guessing here silently swallows the task text.
-    assert_eq!(agent("claude").prompt_injection(), PromptInjection::Argv);
-    for name in AGENTS.iter().copied().filter(|n| *n != "claude") {
+    let verified: &[(&str, PromptInjection)] = &[
+        // claude 2.1.241
+        ("claude", PromptInjection::Argv),
+        // codex-cli 0.144.5
+        ("codex", PromptInjection::Argv),
+        // Grok 4.6
+        ("grok", PromptInjection::Argv),
+    ];
+    for (name, want) in verified {
+        assert_eq!(agent(name).prompt_injection(), *want, "{name}");
+    }
+
+    let unverified = ["copilot", "gemini", "opencode", "cursor", "antigravity"];
+    for name in unverified {
         assert_eq!(
             agent(name).prompt_injection(),
             PromptInjection::Unknown,
             "{name} must stay unverified until checked against the real binary"
         );
     }
+    // antigravity is the interesting one: `agy … -i` *does* deliver the prompt,
+    // but the session is then parked on its trust dialog, which agtx does not
+    // answer by design. Delivering into a blocked session is not a working lane.
+
+    assert_eq!(
+        verified.len() + unverified.len(),
+        AGENTS.len(),
+        "every agent must be classified"
+    );
     assert_eq!(unknown().prompt_injection(), PromptInjection::Unknown);
 }
 

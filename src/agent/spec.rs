@@ -303,7 +303,10 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         env: &[],
         base_args: &["--sandbox", "workspace-write"],
         prompt_form: PromptForm::Argv,
-        launch_prompt_verified: false,
+        // Verified against codex-cli 0.144.5: `codex --sandbox workspace-write
+        // '$agtx-plan <id>\n\n<task>'` starts interactively with the prompt
+        // submitted, and the `$skill` mention resolves and runs.
+        launch_prompt_verified: true,
         // `codex resume` is its own subcommand and rejects the launch flags.
         resume: ResumeArgs::Replace(&["resume", "--last"]),
         headless_args: &["exec", "--sandbox", "workspace-write"],
@@ -320,6 +323,26 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         send_strategy: SendStrategy::Combined,
         clear_context_command: None,
         dialogs: &[
+            // Directory trust, per directory, so it fires on the first launch of
+            // every codex task. Worded differently from both Claude's ("Yes, I
+            // trust this folder") and Gemini's ("files in this folder"), so
+            // neither of their patterns catches it. Verified against
+            // codex-cli 0.144.5.
+            AgentDialog {
+                patterns: &["Do you trust the contents of this directory?"],
+                require_all: false,
+                answer: "1",
+                scope: DialogScope::Launch,
+            },
+            // Update prompt, shown whenever a newer codex is published. "Skip"
+            // rather than "Update now": agtx must never upgrade a user's agent
+            // binary behind their back, but leaving the pane blocked is worse.
+            AgentDialog {
+                patterns: &["Update now (runs"],
+                require_all: false,
+                answer: "2",
+                scope: DialogScope::Launch,
+            },
             // MCP tool approval, shown mid-session the first time the agent calls
             // an agtx tool — not at launch, so it is matched only against a pane
             // known to be running codex.
@@ -458,7 +481,10 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // and suppresses the directory-trust dialog.
         base_args: &["--yolo", "--trust"],
         prompt_form: PromptForm::Argv,
-        launch_prompt_verified: false,
+        // Verified against Grok 4.6: `grok --yolo --trust '/agtx-plan <id>\n\n<task>'`
+        // delivered the prompt at launch, the skill ran, and `--trust` meant no
+        // dialog appeared at all.
+        launch_prompt_verified: true,
         resume: ResumeArgs::Append(&["--continue"]),
         headless_args: &["-p"],
         skill_dir: Some((".grok/skills", "")),
@@ -486,6 +512,12 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // unattended.
         base_args: &["--dangerously-skip-permissions", "--mode", "accept-edits"],
         prompt_form: PromptForm::Flag("-i"),
+        // Deliberately still false. `agy … -i '<prompt>'` *does* deliver — the
+        // skill ran and wrote its file — but the session is then parked on
+        // antigravity's own trust dialog ("Do you trust the contents of this
+        // project?", arrow-navigated), which agtx does not answer by design: see
+        // the antigravity notes in CLAUDE.md. A launch lane that delivers into a
+        // blocked session is not a working launch lane.
         launch_prompt_verified: false,
         resume: ResumeArgs::Append(&["--continue"]),
         headless_args: &["-p"],

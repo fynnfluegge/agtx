@@ -11495,10 +11495,14 @@ fn test_launch_dialog_derivation_matches_the_previous_literals() {
         .map(|d| (d.patterns.to_vec(), d.answer))
         .collect();
     got.sort();
+    // The first three are the literals this derivation replaced; the two codex
+    // entries were added afterwards, each verified against codex-cli 0.144.5.
     let mut want = vec![
         (vec!["Yes, I accept", "I accept the risk"], "2"),
         (vec!["Yes, I trust this folder"], "1"),
         (vec!["Do you trust the files in this folder?"], "1"),
+        (vec!["Do you trust the contents of this directory?"], "1"),
+        (vec!["Update now (runs"], "2"),
     ];
     want.sort();
     assert_eq!(got, want);
@@ -11630,6 +11634,96 @@ fn test_unknown_agent_falls_back_to_every_dialog() {
         "t:1",
         None,
         "Do you trust the files in this folder?",
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// Codex's own directory-trust dialog, worded differently from Claude's and
+/// Gemini's so neither of their patterns catches it. Per directory, so it fires
+/// on the first launch of every codex task. Captured verbatim from codex-cli
+/// 0.144.5.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_answers_codex_directory_trust() {
+    let pane = "> You are in /tmp/wt/task-slug\n  \
+                Do you trust the contents of this directory? Working with untrusted contents \
+                comes with higher risk of prompt injection.\n\
+                \u{203a} 1. Yes, continue\n  2. No, quit\n  Press enter to continue";
+
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = mockall::Sequence::new();
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "1")
+        .returning(|_, _| Ok(()));
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("codex"),
+        pane,
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// The update prompt is answered "Skip", never "Update now" — agtx must not
+/// upgrade a user's agent binary behind their back, but a blocked pane is worse
+/// than a skipped update.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_skips_codex_update_prompt() {
+    let pane = "  \u{2728} Update available! 0.144.5 -> 0.147.0\n\
+                \u{203a} 1. Update now (runs `sh -c 'curl -fsSL https://example/install.sh | sh'`)\n\
+                  2. Skip\n  3. Skip until next version\n  Press enter to continue";
+
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = mockall::Sequence::new();
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "2")
+        .returning(|_, _| Ok(()));
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("codex"),
+        pane,
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// Antigravity's trust dialog is worded identically to Claude's ("Yes, I trust
+/// this folder"). Under the old flat matching it would have been answered in an
+/// agy pane by Claude's entry; agtx's documented decision is to leave that choice
+/// to the user, and per-agent scoping is what actually makes that true.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_antigravity_trust_dialog_is_left_to_the_user() {
+    let pane = "Do you trust the contents of this project?\n\
+                > Yes, I trust this folder\n  No, exit\n  \u{2191}/\u{2193} Navigate \u{b7} enter Confirm";
+
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().never();
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(!dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("antigravity"),
+        pane,
         &mut LaunchDialogState::default(),
     ));
 }
