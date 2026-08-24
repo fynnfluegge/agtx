@@ -25,6 +25,9 @@ cargo build --release
 
 # Run the MCP server (global mode, or project-scoped with a path)
 ./target/release/agtx mcp-serve [path]
+
+# Record an agent lifecycle event (invoked by agent hooks, not by hand)
+./target/release/agtx hook <task-id> <worktree> [agent] < payload.json
 ```
 
 Logs are written as JSON to `~/.config/agtx/logs/agtx.log` (daily rotation, `RUST_LOG` respected).
@@ -299,6 +302,7 @@ Global config lives at `~/.config/agtx/config.toml` (`GlobalConfig`):
 ```toml
 default_agent = "claude"
 fullscreen_on_enter = false  # When true, Enter on a task attaches to tmux directly instead of opening the in-TUI popup
+agent_hooks = true           # Write agent lifecycle-hook configs into worktrees (see Hook-Based Phase Status)
 
 [agents]                     # Per-phase agent overrides (PhaseAgentsConfig)
 research = "claude"
@@ -472,10 +476,62 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 - Overlap guard: only one refresh thread runs at a time (`session_refresh_rx.is_some()`)
 - Thread does all expensive work: plugin TOML loading, artifact file checks, `tmux capture-pane`, copy-back side effects
 - `apply_session_refresh()` applies results on main thread (non-blocking `try_recv`)
-- Idle detection (Working → Idle) handled on main thread using `pane_content_hashes` timestamps
-- Four states (`PhaseStatus` in `src/db/models.rs`): Working (spinner), Idle (pause icon, 15s no output), Ready (checkmark), Exited (no window)
+- Idle detection (Working → Idle) handled on main thread using `pane_content_hashes` timestamps — **only for tasks with no hook report**, see below
+- Five states (`PhaseStatus` in `src/db/models.rs`): Working (spinner), Blocked (bold `?`, agent-reported only), Idle (pause icon, 15s no output), Ready (checkmark), Exited (no window)
 - Phase artifact paths come from the task's plugin or agtx defaults
 - Plugin instances cached per task in `HashMap<Option<String>, Option<WorkflowPlugin>>` to avoid repeated disk reads
+
+### Hook-Based Phase Status
+Agents that support lifecycle hooks report their own state instead of agtx guessing it from pane
+output. Design notes: `docs/planning/hook-based-phase-status.md`.
+
+```
+Claude Code ──hook──► agtx hook <task-id> <worktree> ──► {worktree}/.agtx/status/{task_id}.json
+                                                                   │
+                                        maybe_spawn_session_refresh ┘──► apply_session_refresh
+```
+
+- **Writing the config**: `write_skills_to_worktree()` merges a `hooks` block into the worktree's
+  `.claude/settings.local.json` (the same file that carries `enableAllProjectMcpServers`). Built by
+  `claude_hook_settings()`. Gated on `config.agent_hooks`; Claude-only today
+- **The Claude settings writer merges, it does not overwrite.** `.claude` is in
+  `AGENT_CONFIG_DIRS`, so a project shipping its own `settings.local.json` has it copied into every
+  worktree — a plain write would drop the user's `permissions`/`env`/`hooks`. `merge_claude_hooks()`
+  keeps user entries on the same events and replaces only agtx's own (matched by the agtx binary
+  path in the command), so redeploying is idempotent instead of accumulating duplicate hooks. Same
+  merge-don't-overwrite rule as the grok and antigravity MCP writers
+- **The hook command is task-agnostic**: `agtx hook --env claude`. The task is read from
+  `AGTX_TASK_ID` / `AGTX_WORKTREE`, set on the tmux **window** by `create_window` (tmux `-e`, so a
+  resumed or switched agent inherits them). Baking the task id into the command breaks
+  `skip_worktree`, where every task shares the project's `.claude/settings.local.json` and the last
+  deploy would re-point every other task's agent at its own status file. The hook exits silently
+  when the variables are absent, so a future user-global registration stays inert outside agtx, and
+  when `CLAUDE_JOB_DIR` is set, since a backgrounded task inherits its parent's env
+- **Registered events** (verified against Claude Code 2.1.241): `SessionStart`, `UserPromptSubmit`,
+  `PreToolUse` (heartbeat) → `working`; `PermissionRequest`, `Notification` → `blocked`; `Stop`,
+  `StopFailure` → `waiting`; `SessionEnd` → `ended`. Unregistered names are ignored by the agent
+- **`src/agent/hook_status.rs`** is pure (no tmux/DB/TUI types): event mapping, atomic
+  write-then-rename, staleness, and `merge_event`'s guard preventing a late `PreToolUse` from
+  clearing a fresh `Blocked`
+- **Precedence** in the refresh thread: artifact → `Ready` > window gone → `Exited` > hook status >
+  pane-hash heuristic. Only *liveness* is replaced; artifact detection is untouched
+- **Purely additive**: no status file means the pre-existing 15s pane-hash heuristic runs unchanged.
+  A `working` record older than `HOOK_STALE_SECS` (300s) is distrusted and also falls back
+- The pane is **not** captured when a hook report exists — one fewer `capture-pane` per task per
+  refresh. Codex's MCP approval auto-dismiss runs outside that branch so it fires either way
+- **Consumers**: `Blocked` fires the orchestrator stuck-task notification *immediately* (with the
+  reason text from `blocked_reasons`) rather than after 60s of `Idle`; the merge-conflict trigger
+  skips `Blocked` entirely. MCP `get_task` exposes `agent_state` + `blocked_reason`, read straight
+  from the file — it works cross-process precisely because it is a file, not TUI state
+- **Binary-path drift**: the absolute `agtx` path from `current_exe()` is baked into the hook command
+  *and* every MCP config a worktree gets, so moving or reinstalling agtx would silently break both
+  for worktrees created earlier. `write_skills_to_worktree` records the deploying binary in
+  `.agtx/deployed-by`; `refresh_stale_worktree_configs` re-deploys mismatched worktrees on a
+  background thread at startup. `is_agtx_hook_command` matches on the `" hook --env"` invocation
+  rather than the binary path so the merge still recognises its own entries across a move
+- Not yet wired for Codex/Gemini/Cursor: those read hooks from user-global paths
+  (`~/.codex/hooks.json`, `~/.gemini/settings.json`, `~/.cursor/hooks.json`) and need an
+  install/uninstall lifecycle plus `cwd`-based routing
 
 ### Task References & Dependencies
 - In description input, type `!` (at start of line or after space) to search existing tasks
@@ -560,6 +616,7 @@ Adding grok touched every one of these — use `git log -p` for that change as a
 10. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
 11. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok"` for SKILL.md subdirectories)
 12. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`)
+12b. If the agent supports lifecycle hooks, register them so it reports its own phase status (see *Hook-Based Phase Status*); otherwise it falls back to the pane-hash heuristic
 13. Add an agent label color in the task-card footer `match task.agent.as_str()`
 14. If Ink/Node TUI: add to the combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
 

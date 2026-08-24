@@ -4,8 +4,7 @@ use std::process::Command;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
-    ServerHandler, ServiceExt,
+    schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
 
@@ -125,7 +124,9 @@ pub struct SendToTaskParams {
     #[schemars(description = "The task ID (UUID)")]
     pub task_id: String,
     /// Message to send to the task's agent pane (followed by Enter). Max 4096 bytes, no null bytes.
-    #[schemars(description = "Message to send to the task's agent pane (followed by Enter). Max 4096 bytes.")]
+    #[schemars(
+        description = "Message to send to the task's agent pane (followed by Enter). Max 4096 bytes."
+    )]
     pub message: String,
     /// Project ID (required in global mode — call list_projects first to get IDs).
     #[schemars(
@@ -188,7 +189,9 @@ pub struct BatchTask {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateTasksBatchParams {
     /// Array of tasks to create, with index-based dependency wiring
-    #[schemars(description = "Array of tasks to create. Use depends_on with 0-based indices to wire dependencies between them.")]
+    #[schemars(
+        description = "Array of tasks to create. Use depends_on with 0-based indices to wire dependencies between them."
+    )]
     pub tasks: Vec<BatchTask>,
     /// Project ID (required in global mode — call list_projects first to get IDs).
     #[schemars(
@@ -290,6 +293,15 @@ struct TaskDetail {
     blocking_tasks: Vec<BlockingTask>,
     /// Actions the orchestrator can take on this task given its current status and plugin rules.
     allowed_actions: Vec<String>,
+    /// The agent's own report of what it is doing: "working", "blocked",
+    /// "waiting" or "ended". Absent when the agent reports nothing (hooks
+    /// disabled, or an agent that does not support them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_state: Option<String>,
+    /// What the agent is waiting for, when `agent_state` is "blocked". This is
+    /// the permission prompt or question text the agent itself reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocked_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -430,8 +442,7 @@ impl AgtxMcpServer {
     /// Open a project DB, resolving the path via `resolve_project_path`.
     fn open_project_db_for(&self, project_id: Option<&str>) -> Result<Database, String> {
         let path = self.resolve_project_path(project_id)?;
-        Database::open_project(&path)
-            .map_err(|e| format!("Failed to open project database: {}", e))
+        Database::open_project(&path).map_err(|e| format!("Failed to open project database: {}", e))
     }
 
     fn open_project_db(&self) -> Result<Database, String> {
@@ -475,12 +486,9 @@ impl AgtxMcpServer {
         let mut actions = Vec::new();
 
         let _plugin = match &task.plugin {
-            Some(name) => crate::config::WorkflowPlugin::load(
-                name,
-                project_path.as_deref(),
-            )
-            .ok()
-            .or_else(|| crate::skills::load_bundled_plugin(name)),
+            Some(name) => crate::config::WorkflowPlugin::load(name, project_path.as_deref())
+                .ok()
+                .or_else(|| crate::skills::load_bundled_plugin(name)),
             None => crate::skills::load_bundled_plugin("agtx"),
         };
 
@@ -589,7 +597,7 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "Get full details of a specific task by its ID. Includes allowed_actions based on the task's current status and plugin rules. In global mode, project_id is required — call list_projects first."
+        description = "Get full details of a specific task by its ID. Includes allowed_actions based on the task's current status and plugin rules, and agent_state (working/blocked/waiting/ended) as reported by the agent itself — when it is \"blocked\", blocked_reason names what the agent is waiting for. In global mode, project_id is required — call list_projects first."
     )]
     fn get_task(&self, Parameters(params): Parameters<GetTaskParams>) -> String {
         tracing::info!(tool = "get_task", task_id = %params.task_id, "MCP tool called");
@@ -607,10 +615,7 @@ impl AgtxMcpServer {
                                     .ok()
                                     .flatten()
                                     .filter(|dep| {
-                                        !matches!(
-                                            dep.status,
-                                            TaskStatus::Review | TaskStatus::Done
-                                        )
+                                        !matches!(dep.status, TaskStatus::Review | TaskStatus::Done)
                                     })
                                     .map(|dep| BlockingTask {
                                         id: dep.id,
@@ -621,6 +626,27 @@ impl AgtxMcpServer {
                             .collect(),
                         _ => Vec::new(),
                     };
+                    // Read the agent's own status file, written by its hooks.
+                    // Works cross-process precisely because it is a file rather
+                    // than TUI state — see docs/planning/hook-based-phase-status.md.
+                    let hook = t.worktree_path.as_ref().and_then(|wt| {
+                        crate::agent::hook_status::read_status(
+                            std::path::Path::new(wt),
+                            &t.id,
+                            chrono::Utc::now().timestamp(),
+                        )
+                    });
+                    let agent_state = hook.as_ref().map(|h| {
+                        match h.state {
+                            crate::agent::hook_status::HookState::Working => "working",
+                            crate::agent::hook_status::HookState::Blocked => "blocked",
+                            crate::agent::hook_status::HookState::Waiting => "waiting",
+                            crate::agent::hook_status::HookState::Ended => "ended",
+                        }
+                        .to_string()
+                    });
+                    let blocked_reason = hook.as_ref().and_then(|h| h.message.clone());
+
                     let detail = TaskDetail {
                         id: t.id,
                         title: t.title,
@@ -643,6 +669,8 @@ impl AgtxMcpServer {
                         deps_satisfied: deps_ok,
                         blocking_tasks: blocking,
                         allowed_actions: allowed,
+                        agent_state,
+                        blocked_reason,
                     };
                     serde_json::to_string_pretty(&detail)
                         .unwrap_or_else(|e| format!("Error serializing: {}", e))
@@ -1043,11 +1071,12 @@ impl AgtxMcpServer {
     #[tool(
         description = "Create multiple tasks at once with index-based dependency wiring. Each task's depends_on field uses 0-based indices into the tasks array (no forward references). Returns all created task IDs. In global mode, project_id is required — call list_projects first."
     )]
-    fn create_tasks_batch(
-        &self,
-        Parameters(params): Parameters<CreateTasksBatchParams>,
-    ) -> String {
-        tracing::info!(tool = "create_tasks_batch", count = params.tasks.len(), "MCP tool called");
+    fn create_tasks_batch(&self, Parameters(params): Parameters<CreateTasksBatchParams>) -> String {
+        tracing::info!(
+            tool = "create_tasks_batch",
+            count = params.tasks.len(),
+            "MCP tool called"
+        );
         if params.tasks.is_empty() {
             return "Error: tasks array is empty".to_string();
         }

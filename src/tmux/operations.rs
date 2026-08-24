@@ -11,6 +11,9 @@ pub trait TmuxOperations: Send + Sync {
     /// Create a new tmux window. `keep_shell_on_exit=true` drops to a shell
     /// after `command` exits (task panes); `false` lets tmux close the window
     /// (orchestrator, where a leftover shell looks like a zombie).
+    /// Create a window. `env` is set on the **window** (tmux `-e`), so anything
+    /// started in it later — a resumed agent, a switched agent — inherits it,
+    /// which a per-command `env VAR=x` prefix would not.
     fn create_window(
         &self,
         session: &str,
@@ -18,6 +21,7 @@ pub trait TmuxOperations: Send + Sync {
         working_dir: &str,
         command: Option<String>,
         keep_shell_on_exit: bool,
+        env: &[(String, String)],
     ) -> Result<()>;
 
     /// Kill a tmux window
@@ -69,12 +73,19 @@ impl TmuxOperations for RealTmuxOps {
         working_dir: &str,
         command: Option<String>,
         keep_shell_on_exit: bool,
+        env: &[(String, String)],
     ) -> Result<()> {
         let mut cmd = std::process::Command::new("tmux");
         let target = format!("{}:", session);
         cmd.args(["-L", super::AGENT_SERVER])
             .args(["new-window", "-d", "-t", &target, "-n", window_name])
             .args(["-c", working_dir]);
+
+        // tmux 3.0+; sets the variable on the window so every process started in
+        // it inherits it, including agents launched later by resume or switch.
+        for (key, value) in env {
+            cmd.args(["-e", &format!("{}={}", key, value)]);
+        }
 
         if let Some(ref shell_cmd) = command {
             // Unset Claude Code's nesting-detection env vars so that agents

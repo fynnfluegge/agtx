@@ -1,3 +1,4 @@
+pub mod hook_status;
 mod operations;
 
 pub use operations::{AgentOperations, AgentRegistry, CodingAgent, RealAgentRegistry};
@@ -17,7 +18,41 @@ pub struct Agent {
     pub co_author: String,
 }
 
+/// How an agent accepts an initial prompt at launch.
+///
+/// `Argv`/`FlagInteractive` let agtx hand the opening message to the process
+/// itself, so there is no window in which keystrokes can be dropped and nothing
+/// to poll for. `Unknown` keeps the historical path: launch bare, wait for the
+/// TUI to look ready, then type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptInjection {
+    /// Positional argument: `claude "<text>"`.
+    Argv,
+    /// Interactive prompt flag: `gemini -i "<text>"`.
+    FlagInteractive(&'static str),
+    /// No verified interactive launch form — send after readiness instead.
+    Unknown,
+}
+
 impl Agent {
+    /// Whether this agent can take the opening message at launch.
+    ///
+    /// Deliberately conservative: an agent is only listed once its launch form
+    /// has been verified against the real binary, because getting this wrong
+    /// means the task text is silently swallowed (a `-p`-style flag that runs
+    /// headless and exits) rather than failing loudly.
+    pub fn prompt_injection(&self) -> PromptInjection {
+        match self.name.as_str() {
+            // Verified against claude 2.1.241: `claude [prompt]` starts an
+            // interactive session with the prompt submitted, and a leading
+            // `/agtx:plan …` still expands as a slash command.
+            "claude" => PromptInjection::Argv,
+            // The rest keep today's send-after-ready path until their launch
+            // form is verified the same way — see docs/planning/native-prompt-injection.md.
+            _ => PromptInjection::Unknown,
+        }
+    }
+
     pub fn new(name: &str, command: &str, description: &str, co_author: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -40,7 +75,9 @@ impl Agent {
             "claude" => "claude --dangerously-skip-permissions --continue".to_string(),
             "codex" => "codex resume --last".to_string(),
             "copilot" => "copilot --allow-all-tools --continue".to_string(),
-            "gemini" => "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo --resume".to_string(),
+            "gemini" => {
+                "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo --resume".to_string()
+            }
             "opencode" => "opencode --continue".to_string(),
             "cursor" => "agent --yolo --continue".to_string(),
             "grok" => "grok --yolo --trust --continue".to_string(),
@@ -75,8 +112,13 @@ impl Agent {
         match self.name.as_str() {
             "claude" => format!("claude --dangerously-skip-permissions '{}'", escaped_prompt),
             "codex" => format!("codex --sandbox workspace-write '{}'", escaped_prompt),
-            "copilot" => format!("copilot --allow-all-tools -p '{}'", escaped_prompt),
-            "gemini" => format!("GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo -i '{}'", escaped_prompt),
+            // -i keeps the session interactive; -p is print mode and exits on
+            // completion, killing the task's agent window.
+            "copilot" => format!("copilot --allow-all-tools -i '{}'", escaped_prompt),
+            "gemini" => format!(
+                "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo -i '{}'",
+                escaped_prompt
+            ),
             "opencode" => format!("opencode -p '{}'", escaped_prompt),
             "cursor" => format!("agent --yolo '{}'", escaped_prompt),
             "grok" => format!("grok --yolo --trust '{}'", escaped_prompt),
@@ -194,4 +236,3 @@ pub fn parse_agent_selection(input: &str, agent_count: usize) -> Option<usize> {
     }
     None
 }
-

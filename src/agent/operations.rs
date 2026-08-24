@@ -32,6 +32,12 @@ pub trait AgentOperations: Send + Sync {
     /// in the current working directory. Used to recover from tmux/server restarts.
     fn build_resume_command(&self) -> String;
 
+    /// Whether this agent takes the opening message at launch; see
+    /// [`crate::agent::PromptInjection`].
+    fn prompt_injection(&self) -> crate::agent::PromptInjection {
+        crate::agent::PromptInjection::Unknown
+    }
+
     /// Build the full shell command to run this agent as an orchestrator.
     /// Includes MCP registration (if supported by the agent) and cleanup on exit.
     /// Default implementation: no MCP, just launches the agent interactively.
@@ -89,6 +95,10 @@ impl AgentOperations for CodingAgent {
 
     fn build_resume_command(&self) -> String {
         self.agent.build_resume_command()
+    }
+
+    fn prompt_injection(&self) -> crate::agent::PromptInjection {
+        self.agent.prompt_injection()
     }
 
     fn build_orchestrator_command(&self, mcp_json: &str, _agtx_bin: &str) -> String {

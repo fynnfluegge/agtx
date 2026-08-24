@@ -15,6 +15,7 @@ use std::sync::{
 };
 use std::time::Instant;
 
+use crate::agent::hook_status::{self, HookState};
 use crate::agent::{self, AgentOperations};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig, WorkflowPlugin};
 use crate::db::{Database, PhaseStatus, Task, TaskStatus, TransitionRequest};
@@ -292,6 +293,8 @@ struct AppState {
     spinner_frame: usize,
     // Idle detection: (content_hash, last_change_time) per task
     pane_content_hashes: HashMap<String, (u64, Instant)>,
+    /// Why a task is Blocked, as reported by its agent's hook payload.
+    blocked_reasons: HashMap<String, String>,
     // Guard: task IDs for which merge-conflict check has already been performed
     merge_conflict_checked: HashSet<String>,
     // Guard: task IDs for which stuck-task notification has been fired (reset on phase advance)
@@ -402,6 +405,8 @@ struct SessionTaskStatus {
     agent: String,
     /// Whether this task was already Ready before this refresh cycle.
     was_ready: bool,
+    /// The agent's own report of its state, when it writes one.
+    hook_status: Option<hook_status::AgentHookStatus>,
 }
 
 /// Results sent back from the background session refresh thread.
@@ -569,55 +574,66 @@ impl App {
         let available_agents = agent::detect_available_agents();
 
         // Setup based on mode
-        let (db, project_path, project_name, tmux_project_name, project_config, trust_warning) = match &mode {
-            AppMode::Dashboard => (
-                None,
-                None,
-                "Dashboard".to_string(),
-                tmux::safe_session_name("Dashboard"),
-                ProjectConfig::default(),
-                None,
-            ),
-            AppMode::Project(path) => {
-                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-                let name = canonical
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                let tmux_name = tmux::safe_session_name(&name);
-                let mut project_config = ProjectConfig::load(&canonical).unwrap_or_default();
-                let db = Database::open_project(&canonical)?;
+        let (db, project_path, project_name, tmux_project_name, project_config, trust_warning) =
+            match &mode {
+                AppMode::Dashboard => (
+                    None,
+                    None,
+                    "Dashboard".to_string(),
+                    tmux::safe_session_name("Dashboard"),
+                    ProjectConfig::default(),
+                    None,
+                ),
+                AppMode::Project(path) => {
+                    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    let name = canonical
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let tmux_name = tmux::safe_session_name(&name);
+                    let mut project_config = ProjectConfig::load(&canonical).unwrap_or_default();
+                    let db = Database::open_project(&canonical)?;
 
-                // Trust-on-first-use: suppress dangerous config fields from untrusted projects
-                let trust_store = crate::config::TrustStore::load().unwrap_or_default();
-                let trust_warning = if !trust_store.is_trusted(&canonical) {
-                    if project_config.init_script.is_some() || project_config.copy_files.is_some() || project_config.cleanup_script.is_some() {
-                        tracing::warn!(
-                            project = %canonical.display(),
-                            "Untrusted project config — init_script, cleanup_script, and copy_files suppressed"
-                        );
-                        project_config.init_script = None;
-                        project_config.cleanup_script = None;
-                        project_config.copy_files = None;
-                        Some("Untrusted project config: init_script, cleanup_script, and copy_files disabled. Run `agtx trust` to enable.".to_string())
+                    // Trust-on-first-use: suppress dangerous config fields from untrusted projects
+                    let trust_store = crate::config::TrustStore::load().unwrap_or_default();
+                    let trust_warning = if !trust_store.is_trusted(&canonical) {
+                        if project_config.init_script.is_some()
+                            || project_config.copy_files.is_some()
+                            || project_config.cleanup_script.is_some()
+                        {
+                            tracing::warn!(
+                                project = %canonical.display(),
+                                "Untrusted project config — init_script, cleanup_script, and copy_files suppressed"
+                            );
+                            project_config.init_script = None;
+                            project_config.cleanup_script = None;
+                            project_config.copy_files = None;
+                            Some("Untrusted project config: init_script, cleanup_script, and copy_files disabled. Run `agtx trust` to enable.".to_string())
+                        } else {
+                            None
+                        }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
+                    };
 
-                // Register project in global database
-                let project = crate::db::Project::new(&name, canonical.to_string_lossy());
-                global_db.upsert_project(&project)?;
+                    // Register project in global database
+                    let project = crate::db::Project::new(&name, canonical.to_string_lossy());
+                    global_db.upsert_project(&project)?;
 
-                // Ensure tmux session exists for this project
-                ensure_project_tmux_session(&tmux_name, &canonical, tmux_ops.as_ref());
+                    // Ensure tmux session exists for this project
+                    ensure_project_tmux_session(&tmux_name, &canonical, tmux_ops.as_ref());
 
-                (Some(db), Some(canonical), name, tmux_name, project_config, trust_warning)
-            }
-        };
+                    (
+                        Some(db),
+                        Some(canonical),
+                        name,
+                        tmux_name,
+                        project_config,
+                        trust_warning,
+                    )
+                }
+            };
 
         let config = MergedConfig::merge(&global_config, &project_config);
 
@@ -681,6 +697,7 @@ impl App {
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
+                blocked_reasons: HashMap::new(),
                 merge_conflict_checked: HashSet::new(),
                 stuck_task_notified: HashSet::new(),
                 stuck_task_idle_since: HashMap::new(),
@@ -711,6 +728,26 @@ impl App {
         // Load projects from global database
         app.refresh_projects()?;
 
+        // Re-deploy agent configs for worktrees set up by a different agtx binary.
+        if let Some(ref project_path) = app.state.project_path {
+            let candidates: Vec<(String, Option<String>)> = app
+                .state
+                .board
+                .tasks
+                .iter()
+                .filter(|t| t.status != TaskStatus::Done)
+                .filter_map(|t| t.worktree_path.clone().map(|wt| (wt, t.plugin.clone())))
+                .collect();
+            if !candidates.is_empty() {
+                refresh_stale_worktree_configs(
+                    candidates,
+                    project_path.clone(),
+                    collect_phase_agents(&app.state.config),
+                    app.state.config.agent_hooks,
+                );
+            }
+        }
+
         // Recover tasks whose tmux windows were lost (server restart, manual kill, etc.)
         {
             let tasks_to_recover: Vec<_> = app
@@ -737,10 +774,7 @@ impl App {
                 let _ = recover_task_session(
                     task,
                     &app.state.tmux_project_name,
-                    app.state
-                        .project_path
-                        .as_deref()
-                        .unwrap_or(Path::new(".")),
+                    app.state.project_path.as_deref().unwrap_or(Path::new(".")),
                     app.state.tmux_ops.as_ref(),
                     agent_ops.as_ref(),
                 );
@@ -868,6 +902,7 @@ impl App {
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
+                blocked_reasons: HashMap::new(),
                 merge_conflict_checked: HashSet::new(),
                 stuck_task_notified: HashSet::new(),
                 stuck_task_idle_since: HashMap::new(),
@@ -1370,10 +1405,7 @@ impl App {
                 push_wrapped(
                     &mut lines,
                     vec![
-                        Span::styled(
-                            "  Title: ".to_string(),
-                            Style::default().fg(dimmed_color),
-                        ),
+                        Span::styled("  Title: ".to_string(), Style::default().fg(dimmed_color)),
                         Span::styled(
                             state.pending_task_title.clone(),
                             Style::default().fg(text_color),
@@ -1391,10 +1423,7 @@ impl App {
                 push_wrapped(
                     &mut lines,
                     vec![
-                        Span::styled(
-                            "  Plugin: ".to_string(),
-                            Style::default().fg(dimmed_color),
-                        ),
+                        Span::styled("  Plugin: ".to_string(), Style::default().fg(dimmed_color)),
                         Span::styled(plugin_name, Style::default().fg(text_color)),
                     ],
                 );
@@ -1459,10 +1488,7 @@ impl App {
                                     opt.description.clone(),
                                     Style::default().fg(desc_color),
                                 ),
-                                Span::styled(
-                                    check.to_string(),
-                                    Style::default().fg(Color::Green),
-                                ),
+                                Span::styled(check.to_string(), Style::default().fg(Color::Green)),
                             ],
                         );
                     }
@@ -2292,9 +2318,9 @@ impl App {
         let level_count = popup.graph.level_count();
         if level_count == 0 {
             let empty = Paragraph::new("No tasks").block(
-                Block::default().borders(Borders::ALL).border_style(
-                    Style::default().fg(hex_to_color(&theme.color_popup_border)),
-                ),
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(hex_to_color(&theme.color_popup_border))),
             );
             frame.render_widget(empty, body);
         } else {
@@ -2309,11 +2335,7 @@ impl App {
             // on screen — covers the initial open (cursor may start in a far
             // level) and every navigation (the key handler just moves the cursor
             // and lets this clamp re-scroll).
-            let sel_level = popup
-                .graph
-                .nodes
-                .get(popup.selected)
-                .map_or(0, |n| n.level);
+            let sel_level = popup.graph.nodes.get(popup.selected).map_or(0, |n| n.level);
             let start = clamp_scroll_to_selected(
                 popup.scroll_levels.get(),
                 sel_level,
@@ -2467,7 +2489,10 @@ impl App {
                 String::new()
             } else {
                 let joined = node.dep_titles.join(", ");
-                format!("\u{2190} {}", truncate_str(&joined, inner.width.saturating_sub(2) as usize))
+                format!(
+                    "\u{2190} {}",
+                    truncate_str(&joined, inner.width.saturating_sub(2) as usize)
+                )
             };
             let hint_line = Line::from(Span::styled(
                 hint,
@@ -2572,6 +2597,12 @@ impl App {
                     let spinner = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
                     Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow))
                 }
+                Some((PhaseStatus::Blocked, _)) => Span::styled(
+                    "? ",
+                    Style::default()
+                        .fg(hex_to_color(&theme.color_accent))
+                        .bold(),
+                ),
                 Some((PhaseStatus::Idle, _)) => Span::styled(
                     "\u{23f8} ",
                     Style::default().fg(hex_to_color(&theme.color_dimmed)),
@@ -2605,8 +2636,7 @@ impl App {
         } else if deps_blocked {
             let lock_span = Span::styled(
                 "\u{2298} ",
-                Style::default()
-                    .fg(hex_to_color(&theme.color_dimmed)),
+                Style::default().fg(hex_to_color(&theme.color_dimmed)),
             );
             let title_spans = Line::from(vec![lock_span, Span::styled(title, title_style)]);
             let title_line = Paragraph::new(title_spans);
@@ -2912,7 +2942,9 @@ impl App {
                 InputMode::Normal => {
                     // Ctrl+f = fullscreen attach (handled here since handle_normal_key only gets KeyCode)
                     if key.code == KeyCode::Char('f')
-                        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                        && key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
                     {
                         if let Some(task) = self.state.board.selected_task() {
                             if let Some(window_name) = task.session_name.clone() {
@@ -3026,7 +3058,8 @@ impl App {
             self.state.config = crate::config::MergedConfig::merge(&global_config, &project_config);
             self.state.flags.no_init_scripts = false;
             self.state.warning_message = Some((
-                "Project trusted. init_script, cleanup_script, and copy_files are now active.".to_string(),
+                "Project trusted. init_script, cleanup_script, and copy_files are now active."
+                    .to_string(),
                 Instant::now(),
             ));
         }
@@ -3928,8 +3961,7 @@ impl App {
             }
             KeyCode::Delete => {
                 if self.state.input_cursor < self.state.input_buffer.len() {
-                    let end =
-                        next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                    let end = next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
                     self.state.input_buffer.drain(self.state.input_cursor..end);
                 }
             }
@@ -4286,8 +4318,7 @@ impl App {
             }
             KeyCode::Delete => {
                 if self.state.input_cursor < self.state.input_buffer.len() {
-                    let end =
-                        next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
+                    let end = next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
                     self.state.input_buffer.drain(self.state.input_cursor..end);
                 }
             }
@@ -4699,8 +4730,10 @@ impl App {
             if current_status == TaskStatus::Backlog {
                 if let Some(db) = &self.state.db {
                     if !db.deps_satisfied(&task) {
-                        self.state.warning_message =
-                            Some(("Dependencies not in Review/Done — cannot start task".to_string(), Instant::now()));
+                        self.state.warning_message = Some((
+                            "Dependencies not in Review/Done — cannot start task".to_string(),
+                            Instant::now(),
+                        ));
                         return Ok(());
                     }
                 }
@@ -4844,6 +4877,8 @@ impl App {
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
+                task.id.clone(),
+                self.state.config.agent_hooks,
                 target,
                 task.agent.clone(),
                 planning_agent.clone(),
@@ -4894,6 +4929,7 @@ impl App {
         };
         let skip_init_scripts = self.state.flags.no_init_scripts;
         let skip_worktree = self.state.config.skip_worktree;
+        let agent_hooks = self.state.config.agent_hooks;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
         let agent_ops = self.state.agent_registry.get(&planning_agent);
@@ -4956,10 +4992,12 @@ impl App {
                 &referenced_tasks,
                 skip_init_scripts,
                 skip_worktree,
+                agent_hooks,
+                skill_cmd.as_deref(),
             );
 
             match result {
-                Ok(target) => {
+                Ok((target, launched_with_prompt)) => {
                     let _ = tx.send(SetupResult {
                         task_id: task_id.clone(),
                         session_name: tmp_task.session_name.unwrap_or_default(),
@@ -4970,7 +5008,11 @@ impl App {
                         plugin: plugin_name,
                         error: None,
                     });
-                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                    // Skip the whole send-after-ready dance when the agent was
+                    // launched with the opening message already in argv.
+                    if launched_with_prompt {
+                        // nothing to send
+                    } else if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -5033,6 +5075,8 @@ impl App {
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
+                task.id.clone(),
+                self.state.config.agent_hooks,
                 session_name.clone(),
                 task.agent.clone(),
                 running_agent.clone(),
@@ -5058,8 +5102,14 @@ impl App {
         if let Some(session_name) = &task.session_name {
             let plugin = self.load_task_plugin(task);
             let task_content = task.content_text();
-            let skill_cmd =
-                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle, &task.id);
+            let skill_cmd = resolve_skill_command(
+                &plugin,
+                "review",
+                &review_agent,
+                &task_content,
+                task.cycle,
+                &task.id,
+            );
             let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
             let auto_dismiss = plugin
@@ -5068,6 +5118,8 @@ impl App {
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
+                task.id.clone(),
+                self.state.config.agent_hooks,
                 session_name.clone(),
                 task.agent.clone(),
                 review_agent.clone(),
@@ -5265,6 +5317,7 @@ impl App {
         };
         let skip_init_scripts = self.state.flags.no_init_scripts;
         let skip_worktree = self.state.config.skip_worktree;
+        let agent_hooks = self.state.config.agent_hooks;
 
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
@@ -5307,10 +5360,14 @@ impl App {
                 &[],
                 skip_init_scripts,
                 skip_worktree,
+                agent_hooks,
+                // Research keeps the send-after-ready path for now: its skill is
+                // resolved later in the thread, and the launch lane is planning-only.
+                None,
             );
 
             match result {
-                Ok(target) => {
+                Ok((target, launched_with_prompt)) => {
                     let worktree_path = tmp_task.worktree_path.clone().unwrap_or_default();
 
                     // Determine preresearch vs research by checking if preresearch artifacts
@@ -5359,7 +5416,11 @@ impl App {
                     });
 
                     // Wait for agent ready and send skill+prompt
-                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                    // Skip the whole send-after-ready dance when the agent was
+                    // launched with the opening message already in argv.
+                    if launched_with_prompt {
+                        // nothing to send
+                    } else if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -5398,17 +5459,15 @@ impl App {
         };
         let tasks = db.get_all_tasks().unwrap_or_default();
         if tasks.is_empty() {
-            self.state.warning_message =
-                Some(("No tasks to show in the dependency view".to_string(), Instant::now()));
+            self.state.warning_message = Some((
+                "No tasks to show in the dependency view".to_string(),
+                Instant::now(),
+            ));
             return Ok(());
         }
         let graph = crate::tui::dep_graph::build_dep_graph(&tasks, |t| db.deps_satisfied(t));
         // Start the cursor on the first unblocked node if there is one.
-        let selected = graph
-            .nodes
-            .iter()
-            .position(|n| n.unblocked)
-            .unwrap_or(0);
+        let selected = graph.nodes.iter().position(|n| n.unblocked).unwrap_or(0);
         self.state.dep_graph_popup = Some(DepGraphPopup {
             graph,
             selected,
@@ -5594,7 +5653,10 @@ impl App {
             return Ok(());
         }
         let (mut task, project_path) = match (
-            self.state.db.as_ref().and_then(|db| db.get_task(task_id).ok().flatten()),
+            self.state
+                .db
+                .as_ref()
+                .and_then(|db| db.get_task(task_id).ok().flatten()),
             self.state.project_path.clone(),
         ) {
             (Some(t), Some(p)) => (t, p),
@@ -5654,8 +5716,10 @@ impl App {
         // Block when dependencies are not satisfied
         if let Some(db) = &self.state.db {
             if !db.deps_satisfied(&task) {
-                self.state.warning_message =
-                    Some(("Dependencies not in Review/Done — cannot start task".to_string(), Instant::now()));
+                self.state.warning_message = Some((
+                    "Dependencies not in Review/Done — cannot start task".to_string(),
+                    Instant::now(),
+                ));
                 return Ok(());
             }
         }
@@ -5718,6 +5782,8 @@ impl App {
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
+                task.id.clone(),
+                self.state.config.agent_hooks,
                 target,
                 task.agent.clone(),
                 agent_switch_agent.clone(),
@@ -5757,6 +5823,7 @@ impl App {
         };
         let skip_init_scripts = self.state.flags.no_init_scripts;
         let skip_worktree = self.state.config.skip_worktree;
+        let agent_hooks = self.state.config.agent_hooks;
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let git_ops = Arc::clone(&self.state.git_ops);
         let agent_ops = self.state.agent_registry.get(&running_agent);
@@ -5791,10 +5858,12 @@ impl App {
                 &[],
                 skip_init_scripts,
                 skip_worktree,
+                agent_hooks,
+                skill_cmd.as_deref(),
             );
 
             match result {
-                Ok(target) => {
+                Ok((target, launched_with_prompt)) => {
                     let _ = tx.send(SetupResult {
                         task_id: task_id.clone(),
                         session_name: tmp_task.session_name.unwrap_or_default(),
@@ -5806,7 +5875,11 @@ impl App {
                         error: None,
                     });
 
-                    if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                    // Skip the whole send-after-ready dance when the agent was
+                    // launched with the opening message already in argv.
+                    if launched_with_prompt {
+                        // nothing to send
+                    } else if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -5853,6 +5926,7 @@ impl App {
                 if agent_switch {
                     if let Some(session_name) = &task.session_name {
                         let session_clone = session_name.clone();
+                        let hook_task_id = task.id.clone();
                         let tmux_ops = Arc::clone(&self.state.tmux_ops);
                         let agent_registry = Arc::clone(&self.state.agent_registry);
                         let running_agent_clone = running_agent.clone();
@@ -5865,6 +5939,7 @@ impl App {
                                 &session_clone,
                                 agent_ops.as_ref(),
                                 wt_path.as_deref(),
+                                &hook_task_id,
                             );
                             let new_cmd = agent_ops.build_interactive_command("");
                             switch_agent_in_tmux(
@@ -5922,6 +5997,7 @@ impl App {
 
                 if let Some(session_name) = &task.session_name {
                     let session_clone = session_name.clone();
+                    let hook_task_id = task.id.clone();
                     let tmux_ops = Arc::clone(&self.state.tmux_ops);
                     let agent_registry = Arc::clone(&self.state.agent_registry);
                     let planning_agent_clone = planning_agent.clone();
@@ -5939,6 +6015,7 @@ impl App {
                             &session_clone,
                             agent_ops.as_ref(),
                             wt_path.as_deref(),
+                            &hook_task_id,
                         );
                         if agent_switch {
                             let new_cmd = agent_ops.build_interactive_command("");
@@ -5987,6 +6064,7 @@ impl App {
                 if agent_switch {
                     if let Some(session_name) = &task.session_name {
                         let session_clone = session_name.clone();
+                        let hook_task_id = task.id.clone();
                         let tmux_ops = Arc::clone(&self.state.tmux_ops);
                         let agent_registry = Arc::clone(&self.state.agent_registry);
                         let planning_agent_clone = planning_agent.clone();
@@ -5999,6 +6077,7 @@ impl App {
                                 &session_clone,
                                 agent_ops.as_ref(),
                                 wt_path.as_deref(),
+                                &hook_task_id,
                             );
                             let new_cmd = agent_ops.build_interactive_command("");
                             switch_agent_in_tmux(
@@ -6051,9 +6130,7 @@ impl App {
             if let Some(db) = &self.state.db {
                 let _ = match &result {
                     Ok(()) => db.mark_transition_processed(&req.id, None),
-                    Err(e) => {
-                        db.mark_transition_processed(&req.id, Some(&e.to_string()))
-                    }
+                    Err(e) => db.mark_transition_processed(&req.id, Some(&e.to_string())),
                 };
             }
             self.refresh_tasks()?;
@@ -6091,9 +6168,7 @@ impl App {
             "move_forward" | "move_to_planning" | "move_to_running" | "research"
         );
         if is_forward && task.status == TaskStatus::Backlog && !db.deps_satisfied(&task) {
-            anyhow::bail!(
-                "Cannot advance task: dependencies not in Review/Done"
-            );
+            anyhow::bail!("Cannot advance task: dependencies not in Review/Done");
         }
 
         match req.action.as_str() {
@@ -6235,8 +6310,14 @@ impl App {
         if let Some(session_name) = &task.session_name {
             let plugin = self.load_task_plugin(task);
             let task_content = task.content_text();
-            let skill_cmd =
-                resolve_skill_command(&plugin, "review", &review_agent, &task_content, task.cycle, &task.id);
+            let skill_cmd = resolve_skill_command(
+                &plugin,
+                "review",
+                &review_agent,
+                &task_content,
+                task.cycle,
+                &task.id,
+            );
             let prompt = resolve_prompt(&plugin, "review", &task_content, &task.id, task.cycle);
             let prompt_trigger = resolve_prompt_trigger(&plugin, "review");
             let auto_dismiss = plugin
@@ -6245,6 +6326,8 @@ impl App {
             spawn_send_to_agent(
                 Arc::clone(&self.state.tmux_ops),
                 Arc::clone(&self.state.agent_registry),
+                task.id.clone(),
+                self.state.config.agent_hooks,
                 session_name.clone(),
                 task.agent.clone(),
                 review_agent.clone(),
@@ -6287,8 +6370,7 @@ impl App {
 
         // If orchestrator is running, open the popup to view it
         if is_orchestrator_live(self.state.tmux_ops.as_ref(), &orch_target) {
-            let first_time =
-                self.state.orchestrator_session.as_deref() != Some(&orch_target);
+            let first_time = self.state.orchestrator_session.as_deref() != Some(&orch_target);
             self.state.orchestrator_session = Some(orch_target.clone());
 
             if first_time {
@@ -6380,6 +6462,8 @@ impl App {
             &project_path_str,
             Some(agent_cmd),
             false,
+            // The orchestrator is not a task, so it reports no hook status.
+            &[],
         )?;
 
         self.state.orchestrator_session = Some(orch_target.clone());
@@ -6413,7 +6497,11 @@ impl App {
         );
 
         if let Some(ref db) = self.state.db {
-            run_orchestrator_catchup(db, &self.state.board.tasks, self.state.project_path.as_deref());
+            run_orchestrator_catchup(
+                db,
+                &self.state.board.tasks,
+                self.state.project_path.as_deref(),
+            );
         }
 
         // Send the /agtx:orchestrate command once the agent is ready
@@ -6443,11 +6531,7 @@ impl App {
                     .unwrap_or(true)
                 {
                     let agent_ops = self.state.agent_registry.get(&task.agent);
-                    let project_path = self
-                        .state
-                        .project_path
-                        .as_deref()
-                        .unwrap_or(Path::new("."));
+                    let project_path = self.state.project_path.as_deref().unwrap_or(Path::new("."));
                     let _ = recover_task_session(
                         task,
                         &self.state.tmux_project_name,
@@ -6527,9 +6611,14 @@ impl App {
             // window_name is already session:window format, use it directly.
             let _ = std::process::Command::new("tmux")
                 .args([
-                    "-L", tmux::AGENT_SERVER,
-                    "select-window", "-t", window_name,
-                    ";", "resize-window", "-A",
+                    "-L",
+                    tmux::AGENT_SERVER,
+                    "select-window",
+                    "-t",
+                    window_name,
+                    ";",
+                    "resize-window",
+                    "-A",
                 ])
                 .output();
         } else {
@@ -6547,10 +6636,18 @@ impl App {
             // Unset $TMUX so tmux allows attaching when inside a different tmux.
             let _ = std::process::Command::new("tmux")
                 .args([
-                    "-L", tmux::AGENT_SERVER,
-                    "attach", "-t", session,
-                    ";", "select-window", "-t", window_name,
-                    ";", "resize-window", "-A",
+                    "-L",
+                    tmux::AGENT_SERVER,
+                    "attach",
+                    "-t",
+                    session,
+                    ";",
+                    "select-window",
+                    "-t",
+                    window_name,
+                    ";",
+                    "resize-window",
+                    "-A",
                 ])
                 .env_remove("TMUX")
                 .status();
@@ -6653,7 +6750,9 @@ impl App {
         // Check window still exists
         if !is_orchestrator_live(self.state.tmux_ops.as_ref(), &orch_target) {
             self.state.orchestrator_session = None;
-            self.state.orchestrator_ready.store(false, Ordering::Release);
+            self.state
+                .orchestrator_ready
+                .store(false, Ordering::Release);
             return;
         }
 
@@ -6773,6 +6872,7 @@ impl App {
         std::thread::spawn(move || {
             let mut plugin_cache: HashMap<Option<String>, Option<WorkflowPlugin>> = HashMap::new();
             let mut statuses = Vec::new();
+            let now_secs = chrono::Utc::now().timestamp();
 
             for (
                 task_id,
@@ -6864,12 +6964,34 @@ impl App {
                     phase_status
                 };
 
-                // Capture tmux content hash for idle detection (only when Working and window alive)
-                let content_hash = if phase_status == PhaseStatus::Working && !window_gone {
-                    session_name.as_ref().and_then(|sn| {
-                        tmux_ops.capture_pane(sn).ok().map(|content| {
-                            // Auto-dismiss Codex MCP tool approval prompt ("Always allow")
-                            // so agents can call agtx MCP tools without manual confirmation.
+                // The agent's own report of what it is doing, when it writes one.
+                // Authoritative over the pane heuristic below — see
+                // docs/planning/hook-based-phase-status.md.
+                let hook_status = if phase_status == PhaseStatus::Working && !window_gone {
+                    worktree_path
+                        .as_ref()
+                        .and_then(|wt| hook_status::read_status(Path::new(wt), &task_id, now_secs))
+                } else {
+                    None
+                };
+
+                // Interactive prompts that block an agent are answered here as well
+                // as during startup, because `wait_for_agent_ready` gives up after
+                // ~60s and a slow agent can render its first-launch dialog later
+                // than that — observed in an emulated swebench container, where
+                // Claude showed the bypass warning well after the readiness window
+                // had closed and nothing was left watching for it.
+                if phase_status == PhaseStatus::Working && !window_gone && hook_status.is_none() {
+                    if let Some(sn) = session_name.as_ref() {
+                        if let Ok(content) = tmux_ops.capture_pane(sn) {
+                            // A fresh state each poll: the attempt cap guards a
+                            // single startup burst, whereas here the 2s cadence
+                            // between polls is itself the pacing.
+                            let mut st = LaunchDialogState::default();
+                            dismiss_launch_dialog(&tmux_ops, sn, &content, &mut st);
+
+                            // Codex's MCP approval dialog — a workaround for an
+                            // interactive prompt, not part of status detection.
                             if agent == "codex"
                                 && content.contains("Allow the")
                                 && content.contains("MCP server to run tool")
@@ -6879,7 +7001,19 @@ impl App {
                                 std::thread::sleep(std::time::Duration::from_millis(100));
                                 let _ = tmux_ops.send_keys_literal(sn, "Enter");
                             }
+                        }
+                    }
+                }
 
+                // Pane hash is the fallback for agents that report nothing.
+                // Skipping it when a hook status exists also drops one
+                // `capture-pane` subprocess per task per refresh.
+                let content_hash = if phase_status == PhaseStatus::Working
+                    && !window_gone
+                    && hook_status.is_none()
+                {
+                    session_name.as_ref().and_then(|sn| {
+                        tmux_ops.capture_pane(sn).ok().map(|content| {
                             use std::hash::{Hash, Hasher};
                             let mut hasher = std::collections::hash_map::DefaultHasher::new();
                             content.hash(&mut hasher);
@@ -6894,6 +7028,7 @@ impl App {
                     task_id,
                     phase_status,
                     content_hash,
+                    hook_status,
                     status,
                     worktree_path,
                     session_name,
@@ -6914,23 +7049,62 @@ impl App {
             let mut phase = task_status.phase_status;
 
             if phase == PhaseStatus::Working {
-                // Idle detection: check if content hash has been stable for 15s
-                if let Some(hash) = task_status.content_hash {
-                    let entry = self
-                        .state
-                        .pane_content_hashes
-                        .entry(task_status.task_id.clone())
-                        .or_insert((hash, now));
-                    if entry.0 != hash {
-                        *entry = (hash, now);
-                    } else if now.duration_since(entry.1) >= std::time::Duration::from_secs(15) {
+                match task_status.hook_status.as_ref().map(|h| h.state) {
+                    // The agent told us what it is doing — believe it, and drop
+                    // the pane history so a later fallback starts clean.
+                    Some(HookState::Working) => {
+                        self.state.pane_content_hashes.remove(&task_status.task_id);
+                    }
+                    Some(HookState::Blocked) => {
+                        phase = PhaseStatus::Blocked;
+                        self.state.pane_content_hashes.remove(&task_status.task_id);
+                    }
+                    // Turn ended with no artifact yet: what Idle has always meant.
+                    Some(HookState::Waiting) => {
                         phase = PhaseStatus::Idle;
+                        self.state.pane_content_hashes.remove(&task_status.task_id);
+                    }
+                    Some(HookState::Ended) => {
+                        phase = PhaseStatus::Exited;
+                        self.state.pane_content_hashes.remove(&task_status.task_id);
+                    }
+                    // No hook report: unchanged 15s pane-hash heuristic.
+                    None => {
+                        if let Some(hash) = task_status.content_hash {
+                            let entry = self
+                                .state
+                                .pane_content_hashes
+                                .entry(task_status.task_id.clone())
+                                .or_insert((hash, now));
+                            if entry.0 != hash {
+                                *entry = (hash, now);
+                            } else if now.duration_since(entry.1)
+                                >= std::time::Duration::from_secs(15)
+                            {
+                                phase = PhaseStatus::Idle;
+                            }
+                        }
                     }
                 }
             } else if phase == PhaseStatus::Ready {
                 self.state.pane_content_hashes.remove(&task_status.task_id);
             } else if phase == PhaseStatus::Exited {
                 self.state.pane_content_hashes.remove(&task_status.task_id);
+            }
+
+            // Keep the reason text alongside the status so the card and the
+            // orchestrator notification can name what the agent is waiting for.
+            match (phase, task_status.hook_status.as_ref()) {
+                (PhaseStatus::Blocked, Some(h)) => {
+                    if let Some(msg) = h.message.clone() {
+                        self.state
+                            .blocked_reasons
+                            .insert(task_status.task_id.clone(), msg);
+                    }
+                }
+                _ => {
+                    self.state.blocked_reasons.remove(&task_status.task_id);
+                }
             }
 
             let newly_ready = phase == PhaseStatus::Ready && !task_status.was_ready;
@@ -7042,20 +7216,25 @@ impl App {
             if matches!(
                 task_status.status,
                 TaskStatus::Planning | TaskStatus::Running
-            ) && phase == PhaseStatus::Idle
+            ) && matches!(phase, PhaseStatus::Idle | PhaseStatus::Blocked)
                 && self.state.orchestrator_session.is_some()
                 && should_send_stuck_notification(task_plugin)
             {
                 let stuck_key = format!("{}:{}", task_status.task_id, task_status.status.as_str());
                 if !self.state.stuck_task_notified.contains(&stuck_key) {
-                    // Track when this task first became Idle
+                    // Blocked is agent-reported: the agent has *said* it is
+                    // waiting on a human, so there is nothing to wait out. Idle is
+                    // still a guess from pane output, so it keeps its 1m settle.
+                    let blocked = phase == PhaseStatus::Blocked;
                     let idle_since = self
                         .state
                         .stuck_task_idle_since
                         .entry(task_status.task_id.clone())
                         .or_insert(now);
 
-                    if now.duration_since(*idle_since) >= std::time::Duration::from_secs(60) {
+                    if blocked
+                        || now.duration_since(*idle_since) >= std::time::Duration::from_secs(60)
+                    {
                         self.state.stuck_task_notified.insert(stuck_key);
 
                         if let Some(db) = &self.state.db {
@@ -7072,18 +7251,34 @@ impl App {
                             } else {
                                 &task_status.task_id
                             };
-                            let notif = crate::db::Notification::new(format!(
-                                "Task \"{}\" ({}) has been idle for 1m in phase: {}",
-                                task_title,
-                                short_id,
-                                task_status.status.as_str()
-                            ));
+                            let reason = self.state.blocked_reasons.get(&task_status.task_id);
+                            let notif = crate::db::Notification::new(match (blocked, reason) {
+                                (true, Some(r)) => format!(
+                                    "Task \"{}\" ({}) is blocked in phase {} waiting for: {}",
+                                    task_title,
+                                    short_id,
+                                    task_status.status.as_str(),
+                                    r
+                                ),
+                                (true, None) => format!(
+                                    "Task \"{}\" ({}) is blocked in phase {} waiting for user input",
+                                    task_title,
+                                    short_id,
+                                    task_status.status.as_str()
+                                ),
+                                _ => format!(
+                                    "Task \"{}\" ({}) has been idle for 1m in phase: {}",
+                                    task_title,
+                                    short_id,
+                                    task_status.status.as_str()
+                                ),
+                            });
                             let _ = db.create_notification(&notif);
                         }
                     }
                 }
-            } else if phase != PhaseStatus::Idle {
-                // Task is no longer idle — reset the idle-since timer
+            } else if !matches!(phase, PhaseStatus::Idle | PhaseStatus::Blocked) {
+                // Task is working again — reset the idle-since timer
                 self.state
                     .stuck_task_idle_since
                     .remove(&task_status.task_id);
@@ -7273,7 +7468,14 @@ fn recover_task_session(
 
     let resume_cmd = agent_ops.build_resume_command();
 
-    tmux_ops.create_window(session, window, worktree_path, Some(resume_cmd), true)?;
+    tmux_ops.create_window(
+        session,
+        window,
+        worktree_path,
+        Some(resume_cmd),
+        true,
+        &agtx_task_env(&task.id, worktree_path),
+    )?;
 
     Ok(target.clone())
 }
@@ -7298,7 +7500,6 @@ fn copy_back_to_project(worktree: &Path, project_root: &Path, entries: &[String]
         }
     }
 }
-
 
 /// Generate a URL-safe slug from task ID and title
 fn generate_task_slug(task_id: &str, title: &str) -> String {
@@ -7465,7 +7666,9 @@ fn setup_task_worktree(
     referenced_tasks: &[ReferencedTaskInfo],
     skip_init_scripts: bool,
     skip_worktree: bool,
-) -> Result<String> {
+    agent_hooks: bool,
+    skill_cmd: Option<&str>,
+) -> Result<(String, bool)> {
     let unique_slug = generate_task_slug(&task.id, &task.title);
     let window_name = format!("task-{}", unique_slug);
     let target = format!("{}:{}", tmux_project_name, window_name);
@@ -7476,7 +7679,13 @@ fn setup_task_worktree(
         project_path.to_string_lossy().to_string()
     } else {
         // Create git worktree from the configured base branch
-        match git_ops.create_worktree(project_path, &unique_slug, base_branch, worktree_dir, branch_prefix) {
+        match git_ops.create_worktree(
+            project_path,
+            &unique_slug,
+            base_branch,
+            worktree_dir,
+            branch_prefix,
+        ) {
             Ok(path) => path,
             Err(e) => {
                 eprintln!("Failed to create worktree: {}", e);
@@ -7526,7 +7735,13 @@ fn setup_task_worktree(
     // Write skills to worktree .agtx/skills/ and agent-native discovery paths
     // Deploy for all unique agents configured across phases
     let agent_refs: Vec<&str> = all_phase_agents.iter().map(|s| s.as_str()).collect();
-    write_skills_to_worktree(&worktree_path_str, project_path, plugin, &agent_refs);
+    write_skills_to_worktree(
+        &worktree_path_str,
+        project_path,
+        plugin,
+        &agent_refs,
+        agent_hooks,
+    );
 
     // Copy referenced task artifacts into .agtx/references/
     if !referenced_tasks.is_empty() {
@@ -7601,14 +7816,28 @@ fn setup_task_worktree(
         }
     }
 
-    // Build the interactive command. For agents with skill/command support,
-    // start with no prompt — the skill command and task content are sent via send_keys.
-    let has_skill_support =
-        resolve_skill_command(plugin, "planning", agent_name, "", task.cycle, &task.id).is_some();
-    let agent_cmd = if has_skill_support {
-        agent_ops.build_interactive_command("")
+    // Hand the opening message to the agent process when it can take one. That
+    // removes the send-after-ready race entirely for the first message: there is
+    // no window in which a keystroke can be dropped, and nothing to poll for.
+    // Agents without a verified launch form fall back to the historical path
+    // (launch bare, wait for readiness, type).
+    let launch_text = compose_launch_text(skill_cmd, prompt);
+    let launched_with_prompt = !launch_text.is_empty()
+        && !matches!(
+            agent_ops.prompt_injection(),
+            agent::PromptInjection::Unknown
+        );
+    let agent_cmd = if launched_with_prompt {
+        agent_ops.build_interactive_command(&launch_text)
     } else {
-        agent_ops.build_interactive_command(prompt)
+        let has_skill_support =
+            resolve_skill_command(plugin, "planning", agent_name, "", task.cycle, &task.id)
+                .is_some();
+        if has_skill_support {
+            agent_ops.build_interactive_command("")
+        } else {
+            agent_ops.build_interactive_command(prompt)
+        }
     };
 
     // Ensure project tmux session exists
@@ -7627,13 +7856,14 @@ fn setup_task_worktree(
         &worktree_path_str,
         Some(agent_cmd),
         true,
+        &agtx_task_env(&task.id, &worktree_path_str),
     )?;
 
     task.session_name = Some(target.clone());
     task.worktree_path = Some(worktree_path_str);
     task.branch_name = Some(format!("{}/{}", branch_prefix, unique_slug));
 
-    Ok(target)
+    Ok((target, launched_with_prompt))
 }
 
 /// Delete task resources: kill tmux window, run cleanup script, remove worktree, delete branch
@@ -7970,11 +8200,7 @@ fn send_key_to_tmux(
         _ => return,
     };
 
-    let key_str = if has_alt {
-        format!("M-{}", base)
-    } else {
-        base
-    };
+    let key_str = if has_alt { format!("M-{}", base) } else { base };
 
     let _ = tmux_ops.send_keys_literal(window_name, &key_str);
 }
@@ -8511,9 +8737,12 @@ fn resolve_skill_command(
 
 /// Spawn a background thread that optionally switches agent, waits for readiness,
 /// then sends a skill command and prompt to the tmux pane.
+#[allow(clippy::too_many_arguments)]
 fn spawn_send_to_agent(
     tmux_ops: Arc<dyn TmuxOperations>,
     agent_registry: Arc<dyn agent::AgentRegistry>,
+    task_id: String,
+    agent_hooks: bool,
     target: String,
     current_agent: String,
     target_agent: String,
@@ -8536,6 +8765,7 @@ fn spawn_send_to_agent(
                 &target,
                 agent_ops.as_ref(),
                 worktree_path.as_deref(),
+                &task_id,
             );
         }
 
@@ -8556,7 +8786,13 @@ fn spawn_send_to_agent(
                     })
                     .unwrap_or(true); // no native path for this agent — nothing to deploy
                 if !already_deployed {
-                    write_skills_to_worktree(wt_path, &project_path, &plugin, &[&target_agent]);
+                    write_skills_to_worktree(
+                        wt_path,
+                        &project_path,
+                        &plugin,
+                        &[&target_agent],
+                        agent_hooks,
+                    );
                 }
             }
             let agent_ops = agent_registry.get(&target_agent);
@@ -9118,8 +9354,7 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 /// Note: on systems where agents are installed via asdf/nvm, all agents run as `node`
 /// and Check 1 never fires — AGENT_ACTIVE_INDICATORS is the only reliable signal there.
 const AGENT_COMMANDS: &[&str] = &[
-    "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy", "python3",
-    "python",
+    "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy", "python3", "python",
 ];
 
 /// Strings in pane content that indicate an agent TUI is active and ready.
@@ -9188,11 +9423,7 @@ fn kill_windows_by_name(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
 }
 
 /// Replay "completed phase" notifications for tasks whose artifact is on disk.
-fn run_orchestrator_catchup(
-    db: &Database,
-    tasks: &[Task],
-    project_path: Option<&Path>,
-) {
+fn run_orchestrator_catchup(db: &Database, tasks: &[Task], project_path: Option<&Path>) {
     let existing: HashSet<String> = db
         .peek_notifications()
         .unwrap_or_default()
@@ -9265,6 +9496,7 @@ fn ensure_window_or_recover(
     target: &str,
     agent_ops: &dyn AgentOperations,
     worktree_path: Option<&str>,
+    task_id: &str,
 ) {
     if !tmux_ops.window_exists(target).unwrap_or(true) {
         let Some(wt_path) = worktree_path else { return };
@@ -9278,7 +9510,14 @@ fn ensure_window_or_recover(
             let _ = tmux_ops.create_session(session, wt_path);
         }
         let resume_cmd = agent_ops.build_resume_command();
-        let _ = tmux_ops.create_window(session, window, wt_path, Some(resume_cmd), true);
+        let _ = tmux_ops.create_window(
+            session,
+            window,
+            wt_path,
+            Some(resume_cmd),
+            true,
+            &agtx_task_env(task_id, wt_path),
+        );
     }
 }
 
@@ -9304,7 +9543,7 @@ fn switch_agent_in_tmux(
     let exit_cmd = match current_agent {
         "codex" => None, // Codex has no exit command — Ctrl+C is the only way
         "gemini" => Some("/quit"),
-        "cursor" => None,   // Ink/Node TUI — Ctrl+C is the only reliable exit
+        "cursor" => None, // Ink/Node TUI — Ctrl+C is the only reliable exit
         "grok" => Some("/quit"),
         _ => Some("/exit"), // claude, opencode, and others
     };
@@ -9431,6 +9670,85 @@ fn switch_agent_in_tmux(
 /// 3s of no pane content changes = agent has finished loading its TUI.
 const CONTENT_STABLE_THRESHOLD: u32 = 3;
 
+/// Known first-launch dialogs that block an agent before it accepts any input,
+/// paired with the keystroke that answers them.
+///
+/// A worktree is a brand-new directory every time, so these fire on most task
+/// starts — they are the normal case, not an edge case.
+const LAUNCH_DIALOGS: &[(&[&str], &str)] = &[
+    // Claude's `--dangerously-skip-permissions` acceptance. Not covered by
+    // `hasTrustDialogAccepted` in ~/.claude.json, so copying that file (as the
+    // swebench harness does) does not suppress it.
+    (&["Yes, I accept", "I accept the risk"], "2"),
+    // Gemini folder trust — answering it restarts the process.
+    (&["Do you trust the files in this folder?"], "1"),
+];
+
+/// Per-launch state for [`dismiss_launch_dialog`].
+#[derive(Default)]
+struct LaunchDialogState {
+    /// Answers sent per dialog, and a hash of the pane at the last attempt.
+    attempts: [(u8, u64); 4],
+}
+
+/// An agent TUI that has not yet started reading stdin drops the keystrokes, so
+/// a single attempt is not enough on a slow machine.
+///
+/// Sized to span the whole readiness budget (30 polls in step 1 + 30 in the
+/// settle loop, one per second), because that is how long the agent has to
+/// become ready. An earlier value of 5 exhausted itself in the first five
+/// seconds of an emulated swebench container — every answer was dropped, and
+/// Claude sat on the bypass warning for the rest of the run. The cap is only a
+/// backstop against a pattern that matches something which is not a dialog;
+/// the real guard is that a retry requires an unchanged pane.
+const LAUNCH_DIALOG_MAX_ATTEMPTS: u8 = 60;
+
+fn hash_of(content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut h);
+    h.finish()
+}
+
+/// Answer any known first-launch dialog visible in `content`.
+///
+/// Retries only while **nothing has changed** since the last attempt: an
+/// unchanged pane means the keystrokes were dropped, whereas any redraw means
+/// they landed and resending would type a stray "2" into the agent's live
+/// composer. Capped at [`LAUNCH_DIALOG_MAX_ATTEMPTS`] so a pattern that matches
+/// something which is not really a dialog cannot hammer the pane forever.
+///
+/// Returns true when an answer was sent.
+fn dismiss_launch_dialog(
+    tmux_ops: &Arc<dyn TmuxOperations>,
+    target: &str,
+    content: &str,
+    state: &mut LaunchDialogState,
+) -> bool {
+    debug_assert!(LAUNCH_DIALOGS.len() <= 4, "state array holds 4 dialogs");
+    let content_hash = hash_of(content);
+    for (i, (patterns, answer)) in LAUNCH_DIALOGS.iter().enumerate() {
+        if !patterns.iter().any(|p| content.contains(p)) {
+            continue;
+        }
+        let (attempts, last_hash) = state.attempts[i];
+        if attempts >= LAUNCH_DIALOG_MAX_ATTEMPTS {
+            continue;
+        }
+        // The pane redrew since the last answer — it landed; the lingering text
+        // is just the previous frame. Do not send into a live composer.
+        if attempts > 0 && last_hash != content_hash {
+            continue;
+        }
+        let _ = tmux_ops.send_keys_literal(target, answer);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = tmux_ops.send_keys_literal(target, "Enter");
+        state.attempts[i] = (attempts + 1, content_hash);
+        return true;
+    }
+    false
+}
+
 fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Option<String> {
     // Step 1: detect the ready signal (up to 30s).
     // Three detection methods, whichever fires first:
@@ -9440,10 +9758,31 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
     let mut last_content = String::new();
     let mut stable_ticks: u32 = 0;
     let mut change_count: u32 = 0;
+    // Shared with the settle loop below so attempt counts carry across both.
+    let mut dialog_state = LaunchDialogState::default();
 
     for _ in 0..30 {
         // 30s (30 * 1s)
         std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // A blocking dialog is checked BEFORE anything that can break out of this
+        // loop. A native-binary agent (claude, grok) changes
+        // `pane_current_command` to its own name the moment it execs — before it
+        // has rendered anything — so Check 1 used to win this race and leave the
+        // dialog standing, with the task prompt then typed into the menu.
+        let content = tmux_ops.capture_pane(target).ok();
+        if let Some(ref c) = content {
+            if dismiss_launch_dialog(tmux_ops, target, c, &mut dialog_state) {
+                // Keep looping rather than breaking: the answer may have been
+                // dropped by a TUI that was not reading stdin yet, and the
+                // readiness checks below would otherwise run against a pane
+                // that is still showing the dialog.
+                last_content = String::new();
+                stable_ticks = 0;
+                change_count = 0;
+                continue;
+            }
+        }
 
         // Check 1: agent process detected via pane_current_command
         if !is_pane_at_shell(tmux_ops.as_ref(), target) {
@@ -9451,30 +9790,7 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
         }
 
         // Check 2 & 3: pane content checks
-        if let Ok(content) = tmux_ops.capture_pane(target) {
-            // Handle Claude bypass prompt immediately
-            if content.contains("Yes, I accept") || content.contains("I accept the risk") {
-                let _ = tmux_ops.send_keys_literal(target, "2");
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
-                // Fall through to settle wait below
-                break;
-            }
-
-            // Handle Gemini trust dialog — auto-trust the folder so MCP servers
-            // and skills are loaded. After answering, Gemini restarts; reset
-            // stabilization counters so we wait for the new instance to be ready.
-            if content.contains("Do you trust the files in this folder?") {
-                let _ = tmux_ops.send_keys_literal(target, "1");
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
-                // Reset stabilization — Gemini will restart and we must wait again
-                last_content = String::new();
-                stable_ticks = 0;
-                change_count = 0;
-                continue;
-            }
-
+        if let Some(content) = content {
             // Check 2: known ready indicator in pane content
             if AGENT_ACTIVE_INDICATORS.iter().any(|s| content.contains(s)) {
                 break;
@@ -9506,6 +9822,15 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
         // 30s hard timeout
         std::thread::sleep(std::time::Duration::from_secs(1));
         if let Ok(content) = tmux_ops.capture_pane(target) {
+            // The dialog can render *after* the process is detectable, so it must
+            // be watched for here too — this is the case that actually bit in a
+            // swebench container: claude exec'd, Check 1 broke out of step 1, and
+            // the warning appeared only once we were already in this loop.
+            if dismiss_launch_dialog(tmux_ops, target, &content, &mut dialog_state) {
+                last_content = String::new();
+                stable_ticks = 0;
+                continue;
+            }
             if content != last_content {
                 stable_ticks = 0;
                 last_content = content;
@@ -9588,11 +9913,195 @@ fn agent_trust_home() -> Option<PathBuf> {
 /// Write skill files to a worktree's .agtx/skills/ directory and agent-native discovery paths.
 /// `agent_names` determines which native paths to use (e.g. `.claude/commands/agtx/` for Claude).
 /// When multiple agents are configured for different phases, skills are deployed for all of them.
+/// Build the `hooks` block for a worktree's `.claude/settings.local.json`.
+///
+/// Every registered event invokes `agtx hook <task-id> <worktree>`, which writes
+/// the agent's own view of its state to `.agtx/status/{task_id}.json`. Event
+/// names were verified against Claude Code 2.1.241; unregistered names are
+/// ignored by older builds, so listing one Claude does not know is harmless.
+fn claude_hook_settings(agtx_bin: &str) -> serde_json::Value {
+    // Task-agnostic on purpose: the hook reads AGTX_TASK_ID / AGTX_WORKTREE from
+    // the window env. Baking the task id in here would break `skip_worktree`,
+    // where every task shares one settings file and the last deploy would
+    // re-point every other task's agent at its own status file.
+    let command = format!("{} hook --env claude", agtx_bin);
+    let entry = |matcher: Option<&str>| {
+        let mut e = serde_json::json!({
+            "hooks": [{ "type": "command", "command": command }]
+        });
+        if let (Some(m), Some(obj)) = (matcher, e.as_object_mut()) {
+            obj.insert("matcher".to_string(), serde_json::json!(m));
+        }
+        serde_json::json!([e])
+    };
+    serde_json::json!({
+        // Liveness: a turn started, or a tool is about to run (heartbeat).
+        "SessionStart": entry(None),
+        "UserPromptSubmit": entry(None),
+        "PreToolUse": entry(Some("*")),
+        // Blocked: the agent is stopped waiting on a human.
+        "PermissionRequest": entry(Some("*")),
+        "Notification": entry(None),
+        // Turn over / session over.
+        "Stop": entry(None),
+        "StopFailure": entry(None),
+        "SessionEnd": entry(None),
+    })
+}
+
+/// Re-deploy agent configs for worktrees that were set up by a different agtx
+/// binary.
+///
+/// The hook command and every MCP config embed an absolute path from
+/// `current_exe()`. After `cargo install`, a Homebrew upgrade, or a `cargo clean`
+/// following a debug-build session, those paths dangle: hooks stop reporting (the
+/// board silently falls back to the pane heuristic) and the task's MCP server
+/// stops resolving. Neither failure is visible.
+///
+/// Runs on a background thread at startup and rewrites only worktrees whose
+/// marker disagrees with the running binary.
+fn refresh_stale_worktree_configs(
+    stale_candidates: Vec<(String, Option<String>)>,
+    project_path: PathBuf,
+    agent_names: Vec<String>,
+    agent_hooks: bool,
+) {
+    let Ok(current_bin) = std::env::current_exe() else {
+        return;
+    };
+    let current_bin = current_bin.to_string_lossy().to_string();
+
+    std::thread::spawn(move || {
+        let mut plugin_cache: HashMap<Option<String>, Option<WorkflowPlugin>> = HashMap::new();
+        let refs: Vec<&str> = agent_names.iter().map(|s| s.as_str()).collect();
+
+        for (worktree, plugin_name) in stale_candidates {
+            let wt = Path::new(&worktree);
+            if !wt.exists() {
+                continue;
+            }
+            // A missing marker means the worktree predates the marker itself, so
+            // its paths cannot be verified — redeploy to be sure.
+            if read_deploy_marker(wt).as_deref() == Some(current_bin.as_str()) {
+                continue;
+            }
+            let plugin = plugin_cache
+                .entry(plugin_name.clone())
+                .or_insert_with(|| match &plugin_name {
+                    Some(name) => WorkflowPlugin::load(name, Some(project_path.as_path()))
+                        .ok()
+                        .or_else(|| skills::load_bundled_plugin(name)),
+                    None => skills::load_bundled_plugin("agtx"),
+                })
+                .clone();
+
+            tracing::info!(
+                worktree = %worktree,
+                "Re-deploying agent configs: worktree was set up by a different agtx binary"
+            );
+            write_skills_to_worktree(&worktree, &project_path, &plugin, &refs, agent_hooks);
+        }
+    });
+}
+
+/// True when a hook command is one agtx wrote, regardless of where the binary
+/// lived at the time. See `merge_claude_hooks`.
+fn is_agtx_hook_command(command: &str) -> bool {
+    command.contains(" hook --env")
+}
+
+/// Records which agtx binary deployed a worktree's agent configs.
+///
+/// The absolute path from `current_exe()` is baked into the hook command and
+/// every MCP config, so moving or reinstalling agtx silently breaks both for
+/// worktrees deployed earlier. This marker makes the mismatch detectable in O(1)
+/// per task instead of parsing seven different config formats.
+const DEPLOY_MARKER: &str = ".agtx/deployed-by";
+
+fn read_deploy_marker(worktree: &Path) -> Option<String> {
+    std::fs::read_to_string(worktree.join(DEPLOY_MARKER))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Compose the opening message handed to an agent at launch: the phase skill
+/// command followed by the task prompt.
+///
+/// Same text `send_skill_and_prompt` builds for the combined-send agents, but
+/// given to the process instead of typed at it.
+fn compose_launch_text(skill_cmd: Option<&str>, prompt: &str) -> String {
+    match (skill_cmd, prompt.trim().is_empty()) {
+        (Some(cmd), false) => format!("{}\n\n{}", cmd, prompt),
+        (Some(cmd), true) => cmd.to_string(),
+        (None, false) => prompt.to_string(),
+        (None, true) => String::new(),
+    }
+}
+
+/// Environment identifying which task a tmux window belongs to.
+///
+/// Set on the window (tmux `-e`) so the agent — and any hook it spawns —
+/// inherits it. Agent hooks are registered once with a task-agnostic command and
+/// read these to know what they are reporting about, which is what lets several
+/// tasks share one `.claude/settings.local.json` under `skip_worktree`.
+fn agtx_task_env(task_id: &str, worktree: &str) -> Vec<(String, String)> {
+    vec![
+        ("AGTX_TASK_ID".to_string(), task_id.to_string()),
+        ("AGTX_WORKTREE".to_string(), worktree.to_string()),
+    ]
+}
+
+/// Merge agtx's hook entries into an existing `hooks` object, preserving the
+/// user's own entries on the same events.
+///
+/// agtx's previous entries (identified by the agtx binary path in the command,
+/// the same way orca matches on its managed script filename) are dropped first,
+/// so re-running against an existing worktree replaces them rather than
+/// accumulating duplicates that would fire the hook N times per event.
+fn merge_claude_hooks(
+    settings: &mut serde_json::Map<String, serde_json::Value>,
+    ours: serde_json::Value,
+) {
+    // Match on the invocation, not the binary path: the path changes when agtx is
+    // moved or reinstalled, and a prefix match would then stop recognising our own
+    // entries — leaving the stale one behind and appending a duplicate.
+    let is_ours = |def: &serde_json::Value| -> bool {
+        def["hooks"].as_array().is_some_and(|hooks| {
+            hooks
+                .iter()
+                .any(|h| h["command"].as_str().is_some_and(is_agtx_hook_command))
+        })
+    };
+
+    let existing = settings
+        .get("hooks")
+        .and_then(|h| h.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let mut merged = existing.clone();
+
+    if let Some(ours) = ours.as_object() {
+        for (event, our_defs) in ours {
+            let mut defs: Vec<serde_json::Value> = existing
+                .get(event)
+                .and_then(|d| d.as_array())
+                .map(|a| a.iter().filter(|d| !is_ours(d)).cloned().collect())
+                .unwrap_or_default();
+            if let Some(arr) = our_defs.as_array() {
+                defs.extend(arr.iter().cloned());
+            }
+            merged.insert(event.clone(), serde_json::Value::Array(defs));
+        }
+    }
+    settings.insert("hooks".to_string(), serde_json::Value::Object(merged));
+}
+
 fn write_skills_to_worktree(
     worktree_path: &str,
     project_path: &Path,
     plugin: &Option<WorkflowPlugin>,
     agent_names: &[&str],
+    agent_hooks: bool,
 ) {
     let agtx_dir = Path::new(worktree_path).join(".agtx");
     let _ = std::fs::create_dir_all(&agtx_dir);
@@ -9637,6 +10146,8 @@ fn write_skills_to_worktree(
         .to_string_lossy()
         .to_string();
     let project_path_str = project_path.to_string_lossy().to_string();
+    // Marker for the startup drift check; see DEPLOY_MARKER.
+    let _ = std::fs::write(Path::new(worktree_path).join(DEPLOY_MARKER), &agtx_bin);
     for agent_name in agent_names {
         match *agent_name {
             "claude" => {
@@ -9649,13 +10160,46 @@ fn write_skills_to_worktree(
                     Path::new(worktree_path).join(".mcp.json"),
                     serde_json::to_string_pretty(&cfg).unwrap_or_default(),
                 );
-                // Pre-trust the agtx MCP server so Claude doesn't show an interactive
-                // trust dialog when the agent window opens for the first time.
-                let settings = serde_json::json!({ "enableAllProjectMcpServers": true });
+                // Merge into any existing settings rather than replacing them:
+                // `.claude` is in AGENT_CONFIG_DIRS, so a project that ships its own
+                // settings.local.json has it copied into every worktree, and a plain
+                // write would silently drop the user's permissions/env/hooks.
+                // Same merge-don't-overwrite rule the grok and antigravity writers follow.
                 let claude_dir = Path::new(worktree_path).join(".claude");
                 let _ = std::fs::create_dir_all(&claude_dir);
+                let settings_path = claude_dir.join("settings.local.json");
+                let mut settings = std::fs::read_to_string(&settings_path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                    .filter(|v| v.is_object())
+                    .unwrap_or_else(|| serde_json::json!({}));
+
+                if let Some(obj) = settings.as_object_mut() {
+                    // Pre-trust the agtx MCP server so Claude doesn't show an interactive
+                    // trust dialog when the agent window opens for the first time.
+                    obj.insert(
+                        "enableAllProjectMcpServers".to_string(),
+                        serde_json::json!(true),
+                    );
+                    // agtx always launches Claude with --dangerously-skip-permissions, and
+                    // since Claude Code ~2.1 that mode is gated behind an interactive
+                    // "Yes, I accept" dialog. A worktree is a brand-new directory every
+                    // time, so without this the agent parks on that dialog and the task
+                    // prompt is typed into the menu. (IS_SANDBOX=1 covers only the
+                    // separate root-user check, not this one.)
+                    obj.insert(
+                        "bypassPermissionsModeAccepted".to_string(),
+                        serde_json::json!(true),
+                    );
+                    if agent_hooks {
+                        merge_claude_hooks(
+                            obj,
+                            claude_hook_settings(&agtx_bin),
+                        );
+                    }
+                }
                 let _ = std::fs::write(
-                    claude_dir.join("settings.local.json"),
+                    &settings_path,
                     serde_json::to_string_pretty(&settings).unwrap_or_default(),
                 );
             }
@@ -9763,7 +10307,6 @@ fn write_skills_to_worktree(
                     &path,
                     serde_json::to_string_pretty(&root).unwrap_or_default(),
                 );
-
             }
             "opencode" => {
                 let cfg = serde_json::json!({
