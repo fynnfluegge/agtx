@@ -11365,3 +11365,61 @@ fn test_write_skills_to_worktree_writes_no_mcp_config_for_copilot() {
         );
     }
 }
+
+/// `AGENT_COMMANDS` and `AGENT_ACTIVE_INDICATORS` are now derived from
+/// `AGENT_SPECS`. These pin the *result* against the literals they replaced, so
+/// the derivation is checked rather than assumed — a test that rebuilt them from
+/// the same table would assert nothing.
+#[test]
+fn test_agent_commands_derivation_matches_the_previous_literals() {
+    let mut got: Vec<&str> = AGENT_COMMANDS.to_vec();
+    got.sort_unstable();
+    let mut want = vec![
+        "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy",
+        // Not agent binaries, but a Python entry point must not read as "shell".
+        "python3", "python",
+    ];
+    want.sort_unstable();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn test_active_indicator_derivation_matches_the_previous_literals() {
+    let mut got: Vec<&str> = AGENT_ACTIVE_INDICATORS.to_vec();
+    got.sort_unstable();
+    let mut want = vec![
+        "Claude Code",       // Claude
+        "Type your message", // Gemini
+        "Ask anything",      // OpenCode
+        "Cursor Agent",      // Cursor
+        "OpenAI Codex",      // Codex
+        "Grok Build",        // Grok — splash/footer
+        "Shift+Tab:mode",    // Grok — session footer once a turn has run
+    ];
+    want.sort_unstable();
+    assert_eq!(got, want);
+}
+
+/// The arm most easily lost in migration: an agent with no exit command must get
+/// Ctrl+C, not a `/exit` typed into a TUI that does not understand it.
+#[test]
+fn test_exit_command_per_agent() {
+    for (agent, want) in [
+        ("claude", Some("/exit")),
+        ("opencode", Some("/exit")),
+        ("copilot", Some("/exit")),
+        ("antigravity", Some("/exit")),
+        ("gemini", Some("/quit")),
+        ("grok", Some("/quit")),
+        ("codex", None),
+        ("cursor", None),
+    ] {
+        assert_eq!(
+            crate::agent::spec(agent).unwrap().exit_command,
+            want,
+            "{agent}"
+        );
+    }
+    // An agent agtx has never heard of keeps the historical default.
+    assert!(crate::agent::spec("mistral").is_none());
+}

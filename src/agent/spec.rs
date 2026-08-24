@@ -142,6 +142,27 @@ pub struct AgentSpec {
     /// How this agent's project-scoped MCP config is written, or `None` for an
     /// agent agtx does not wire up to the MCP server.
     pub mcp_config: Option<McpConfigKind>,
+
+    // ── process / liveness ───────────────────────────────────────────────
+    /// Process names this agent may appear as in `pane_current_command`.
+    ///
+    /// Node/Ink agents often report `node` or `bash` instead of their own name,
+    /// which is what `active_indicators` is for.
+    pub process_names: &'static [&'static str],
+    /// Strings in pane content that mean this agent's TUI is up and ready.
+    ///
+    /// Needed for agents that run inside bash/node and so never show their own
+    /// name in `pane_current_command`.
+    pub active_indicators: &'static [&'static str],
+    /// Command that makes the agent exit cleanly, or `None` when Ctrl+C is the
+    /// only way out.
+    pub exit_command: Option<&'static str>,
+
+    // ── display ──────────────────────────────────────────────────────────
+    /// Foreground colour of the agent label on a task card.
+    pub label_fg: (u8, u8, u8),
+    /// Background colour, for the agents whose branding is a filled chip.
+    pub label_bg: Option<(u8, u8, u8)>,
 }
 
 /// Every agent agtx ships with.
@@ -168,6 +189,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".claude/commands"),
         command_syntax: CommandSyntax::Colon,
         mcp_config: Some(McpConfigKind::ClaudeJson),
+        process_names: &["claude"],
+        active_indicators: &["Claude Code"],
+        exit_command: Some("/exit"),
+        label_fg: (227, 148, 62), // orange
+        label_bg: None,
     },
     AgentSpec {
         name: "codex",
@@ -186,6 +212,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".codex/skills"),
         command_syntax: CommandSyntax::Dollar,
         mcp_config: Some(McpConfigKind::CodexToml),
+        process_names: &["codex"],
+        active_indicators: &["OpenAI Codex"],
+        exit_command: None,
+        label_fg: (255, 255, 255), // white on black
+        label_bg: Some((20, 20, 20)),
     },
     AgentSpec {
         name: "copilot",
@@ -209,6 +240,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         command_syntax: CommandSyntax::None,
         // Copilot is not wired to the MCP server.
         mcp_config: None,
+        process_names: &["copilot"],
+        active_indicators: &[],
+        exit_command: Some("/exit"),
+        label_fg: (255, 255, 255), // default white
+        label_bg: None,
     },
     AgentSpec {
         name: "gemini",
@@ -226,6 +262,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".gemini/commands"),
         command_syntax: CommandSyntax::Colon,
         mcp_config: Some(McpConfigKind::GeminiJson),
+        process_names: &["gemini"],
+        active_indicators: &["Type your message"],
+        exit_command: Some("/quit"),
+        label_fg: (234, 130, 180), // pink
+        label_bg: None,
     },
     AgentSpec {
         name: "opencode",
@@ -245,6 +286,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".config/opencode/command"),
         command_syntax: CommandSyntax::Hyphen,
         mcp_config: Some(McpConfigKind::OpenCode),
+        process_names: &["opencode"],
+        active_indicators: &["Ask anything"],
+        exit_command: Some("/exit"),
+        label_fg: (255, 255, 255), // white on grey
+        label_bg: Some((80, 80, 80)),
     },
     AgentSpec {
         name: "cursor",
@@ -262,6 +308,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".cursor/skills"),
         command_syntax: CommandSyntax::Hyphen,
         mcp_config: Some(McpConfigKind::CursorJson),
+        process_names: &["agent"],
+        active_indicators: &["Cursor Agent"],
+        exit_command: None,
+        label_fg: (255, 255, 255), // default white
+        label_bg: None,
     },
     AgentSpec {
         name: "grok",
@@ -281,6 +332,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".grok/skills"),
         command_syntax: CommandSyntax::Hyphen,
         mcp_config: Some(McpConfigKind::GrokTomlMerge),
+        process_names: &["grok"],
+        active_indicators: &["Grok Build", "Shift+Tab:mode"],
+        exit_command: Some("/quit"),
+        label_fg: (20, 20, 20), // black on white
+        label_bg: Some((255, 255, 255)),
     },
     AgentSpec {
         name: "antigravity",
@@ -303,6 +359,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".agents/skills"),
         command_syntax: CommandSyntax::Hyphen,
         mcp_config: Some(McpConfigKind::AntigravityJsonMerge),
+        process_names: &["agy"],
+        active_indicators: &[],
+        exit_command: Some("/exit"),
+        label_fg: (120, 190, 255), // light blue
+        label_bg: None,
     },
     // TODO: investigate CLI usage before enabling
     // aider  — "AI pair programming in your terminal", Aider <noreply@aider.chat>

@@ -2710,14 +2710,25 @@ impl App {
                 width: inner.width,
                 height: 1,
             };
-            let agent_style = match task.agent.as_str() {
-                "claude" => Style::default().fg(Color::Rgb(227, 148, 62)), // orange
-                "gemini" => Style::default().fg(Color::Rgb(234, 130, 180)), // pink
-                "opencode" => Style::default().fg(Color::White).bg(Color::Rgb(80, 80, 80)), // white on grey
-                "codex" => Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 20)), // white on black
-                "grok" => Style::default().fg(Color::Rgb(20, 20, 20)).bg(Color::White), // black on white
-                "antigravity" => Style::default().fg(Color::Rgb(120, 190, 255)), // light blue
-                _ => Style::default().fg(Color::White),
+            // Pure white stays `Color::White` rather than becoming truecolor: it
+            // is an ANSI palette entry, which a themed terminal renders as its
+            // own white. Rgb(255,255,255) would override the user's theme.
+            let to_color = |(r, g, b): (u8, u8, u8)| {
+                if (r, g, b) == (255, 255, 255) {
+                    Color::White
+                } else {
+                    Color::Rgb(r, g, b)
+                }
+            };
+            let agent_style = match agent::spec(task.agent.as_str()) {
+                Some(spec) => {
+                    let style = Style::default().fg(to_color(spec.label_fg));
+                    match spec.label_bg {
+                        Some(bg) => style.bg(to_color(bg)),
+                        None => style,
+                    }
+                }
+                None => Style::default().fg(Color::White),
             };
             let agent_label = Paragraph::new(format!(" {} ", task.agent))
                 .style(agent_style)
@@ -9395,9 +9406,15 @@ fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
 /// can fire for them rather than Check 1 firing too early.
 /// Note: on systems where agents are installed via asdf/nvm, all agents run as `node`
 /// and Check 1 never fires — AGENT_ACTIVE_INDICATORS is the only reliable signal there.
-const AGENT_COMMANDS: &[&str] = &[
-    "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy", "python3", "python",
-];
+static AGENT_COMMANDS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
+    agent::AGENT_SPECS
+        .iter()
+        .flat_map(|s| s.process_names.iter().copied())
+        // Not agent binaries: a pane running a Python entry point (the swebench
+        // harness) must not read as "back at the shell".
+        .chain(["python3", "python"])
+        .collect()
+});
 
 /// Strings in pane content that indicate an agent TUI is active and ready.
 /// Used by `is_agent_active` to detect agents like Gemini, Cursor and Grok that
@@ -9405,15 +9422,19 @@ const AGENT_COMMANDS: &[&str] = &[
 /// (Grok is a native binary, but the npm package launches it through a wrapper,
 /// so the pane still reports `bash`.)
 /// Also used by `wait_for_agent_ready` (Check 2) to detect readiness for these agents.
-const AGENT_ACTIVE_INDICATORS: &[&str] = &[
-    "Claude Code",       // Claude
-    "Type your message", // Gemini
-    "Ask anything",      // OpenCode
-    "Cursor Agent",      // Cursor
-    "OpenAI Codex",      // Codex
-    "Grok Build",        // Grok — splash/footer
-    "Shift+Tab:mode",    // Grok — session footer once a turn has run
-];
+/// Flattened across all agents deliberately: matching is done against any pane
+/// regardless of which agent runs there. Attributing each string to its agent
+/// would be strictly more correct — "Ask anything" matching in a Claude pane is a
+/// false positive today — but that *changes behaviour*, so it belongs in its own
+/// change with its own test rather than riding inside a refactor that is meant to
+/// preserve it. See open question 1 in docs/planning/agent-spec-table.md.
+static AGENT_ACTIVE_INDICATORS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        agent::AGENT_SPECS
+            .iter()
+            .flat_map(|s| s.active_indicators.iter().copied())
+            .collect()
+    });
 
 /// Check if the pane is running a shell (i.e. the agent has exited).
 /// Returns true when `pane_current_command` reports a shell (bash, zsh, sh, fish)
@@ -9582,13 +9603,9 @@ fn switch_agent_in_tmux(
     new_agent_cmd: &str,
 ) {
     // 1. Send the graceful exit command for the current agent.
-    let exit_cmd = match current_agent {
-        "codex" => None, // Codex has no exit command — Ctrl+C is the only way
-        "gemini" => Some("/quit"),
-        "cursor" => None, // Ink/Node TUI — Ctrl+C is the only reliable exit
-        "grok" => Some("/quit"),
-        _ => Some("/exit"), // claude, opencode, and others
-    };
+    // `None` means Ctrl+C is the only way out (codex, cursor). An agent agtx does
+    // not know keeps the historical default of /exit.
+    let exit_cmd = agent::spec(current_agent).map_or(Some("/exit"), |s| s.exit_command);
 
     if let Some(cmd) = exit_cmd {
         // For Gemini (Ink/Node TUI): send text first, wait for it to appear in pane,
