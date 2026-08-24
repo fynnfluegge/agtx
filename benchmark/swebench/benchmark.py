@@ -637,6 +637,40 @@ def setup_container(
                     check=True, capture_output=not verbose,
                 )
 
+    # macOS keeps the Claude OAuth credentials in the login Keychain, not in
+    # ~/.claude/.credentials.json, so a subscription login does not travel with the
+    # file copy above and the container lands on "Not logged in · Please run /login".
+    # Materialise the same JSON that Claude Code writes on Linux.
+    #
+    # The secret is piped through stdin: never written to a host temp file, and
+    # never placed in argv where `ps` would expose it.
+    if sys.platform == "darwin" and not (claude_dir / ".credentials.json").exists():
+        creds = ""
+        try:
+            creds = subprocess.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        if creds:
+            subprocess.run(
+                ["docker", "exec", "-i", container_id, "/bin/bash", "-c",
+                 "umask 077 && cat > /home/bench/.claude/.credentials.json"],
+                input=creds, text=True, check=True, capture_output=not verbose,
+            )
+            if verbose:
+                print("  [docker] Claude credentials taken from the macOS Keychain.",
+                      file=sys.stderr)
+        else:
+            print(
+                "  [docker] WARNING: no Claude credentials found. On macOS the OAuth token "
+                "lives in the Keychain; `security` could not read it (you may need to allow "
+                "access when prompted). Set ANTHROPIC_API_KEY instead, or the agent will "
+                "report 'Not logged in'.",
+                file=sys.stderr,
+            )
+
     # Copy ~/.claude.json as a snapshot so Claude skips the first-launch welcome screen.
     claude_json = home / ".claude.json"
     if claude_json.exists():
@@ -686,6 +720,31 @@ def setup_container(
          r"sed -i 's|http://localhost:|http://host.docker.internal:|g'"
          r" /home/bench/.claude/settings.json 2>/dev/null || true"],
         capture_output=True,
+    )
+
+    # Drop empty auth keys from the container's settings.json. Because that `env`
+    # block outranks process env, an `ANTHROPIC_AUTH_TOKEN: ""` left over from a
+    # proxy setup can shadow both the Keychain credentials and a real
+    # ANTHROPIC_API_KEY, and the agent reports "Not logged in" with valid auth
+    # available. Host file untouched.
+    subprocess.run(
+        ["docker", "exec", container_id, "/bin/bash", "-c",
+         "python3 - <<'ENDOFPATCH'\n"
+         "import json\n"
+         "p='/home/bench/.claude/settings.json'\n"
+         "try:\n"
+         "    d=json.load(open(p))\n"
+         "except Exception:\n"
+         "    raise SystemExit(0)\n"
+         "env=d.get('env')\n"
+         "if isinstance(env, dict):\n"
+         "    drop=[k for k,v in env.items() if v == '']\n"
+         "    for k in drop: env.pop(k)\n"
+         "    if drop:\n"
+         "        json.dump(d, open(p,'w'), indent=2)\n"
+         "        print('dropped empty env keys: ' + ', '.join(drop))\n"
+         "ENDOFPATCH"],
+        capture_output=not verbose,
     )
 
     # Write global agtx config for bench user so the TUI skips the agent-selection wizard
@@ -810,7 +869,7 @@ def start_tui_in_container(slug: str, container_id: str, verbose: bool = False) 
     # Pass through API keys that agents read from the environment (only when set
     # on the host). Grok uses XAI_API_KEY when ~/.grok/auth.json is absent.
     passthrough_env = {
-        k: v for k in ("XAI_API_KEY",) if (v := os.environ.get(k))
+        k: v for k in ("XAI_API_KEY", "ANTHROPIC_API_KEY") if (v := os.environ.get(k))
     }
     for key, val in passthrough_env.items():
         env_prefix += f" {key}={shlex.quote(val)}"
