@@ -8985,37 +8985,36 @@ fn send_skill_and_prompt(
         };
 
         if let Some(text) = text_to_send {
-            let _ = tmux_ops.send_keys_literal(target, &text);
-            // Wait for text to appear in pane before sending Enter (Ink TUIs need time to render)
-            let check_str = text.lines().next().unwrap_or(&text);
-            for _ in 0..20 {
-                // up to 4s
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                if let Ok(content) = tmux_ops.capture_pane(target) {
-                    if content.contains(check_str) {
-                        break;
-                    }
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            // Bracketed paste rather than typed keystrokes. Two reasons, both of
+            // which the echo-poll this replaces was only working around:
+            //
+            // 1. It is atomic. `send-keys` streams characters into a TUI that may
+            //    not have attached its stdin reader yet, so the old code typed the
+            //    text and then polled `capture_pane` for up to 4s waiting for it to
+            //    render before daring to press Enter. A paste arrives as one write
+            //    wrapped in \x1b[200~ … \x1b[201~, so there is no window to lose
+            //    keystrokes in and nothing to poll for.
+            // 2. It keeps newlines as newlines. A skill command and its prompt are
+            //    joined by "\n\n", and `send-keys` delivers those as real Enter
+            //    presses — an Ink composer submits on the first one and the rest of
+            //    the message arrives as a second, truncated turn. Inside a bracketed
+            //    paste they are literal text.
+            //
+            // The short sleep gives the TUI a frame to ingest the paste before the
+            // submit; it is not a race the way the poll was, because the bytes are
+            // already in the pane's input buffer.
+            let _ = tmux_ops.paste_text(target, &text);
+            std::thread::sleep(std::time::Duration::from_millis(150));
             let _ = tmux_ops.send_keys_literal(target, "Enter");
 
-            // Codex shows a command picker popup when a skill is typed.
-            // The first Enter confirms/closes the picker; a second Enter is needed
-            // to actually submit the message.
-            if agent_name == "codex" {
-                for _ in 0..20 {
-                    // up to 4s
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    if let Ok(content) = tmux_ops.capture_pane(target) {
-                        if !content.contains("Press enter to insert") {
-                            break;
-                        }
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
-            }
+            // No second Enter for Codex any more. Its command picker ("Press enter
+            // to insert") opens in response to *typing* a `$skill`, not to a paste,
+            // so with bracketed paste there is no picker to dismiss and the first
+            // Enter submits. Verified against codex-cli 0.144.5: pasting
+            // "$agtx-plan <id>\n\n<task>" put both lines in the composer with the
+            // newlines intact, no picker appeared, and a single Enter submitted —
+            // the skill resolved and ran. A second Enter here would fire into an
+            // already-empty composer.
         }
         return;
     }
@@ -9095,7 +9094,8 @@ fn send_skill_and_prompt(
                     .collect::<Vec<_>>()
                     .join(" ");
                 if !oneline.is_empty() {
-                    let _ = tmux_ops.send_keys_literal(target, &oneline);
+                    // Task-derived text: must not go through key-name lookup.
+                    let _ = tmux_ops.send_text(target, &oneline);
                 }
             }
         }
@@ -9553,7 +9553,7 @@ fn switch_agent_in_tmux(
         // then send Enter — same pattern as send_skill_and_prompt. Without this delay,
         // Enter fires before the Ink TUI has rendered the input, and /quit is lost.
         if current_agent == "gemini" {
-            let _ = tmux_ops.send_keys_literal(target, cmd);
+            let _ = tmux_ops.send_text(target, cmd);
             for _ in 0..20 {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 if let Ok(content) = tmux_ops.capture_pane(target) {
@@ -9593,7 +9593,7 @@ fn switch_agent_in_tmux(
 
         if let Some(cmd) = exit_cmd {
             if current_agent == "gemini" {
-                let _ = tmux_ops.send_keys_literal(target, cmd);
+                let _ = tmux_ops.send_text(target, cmd);
                 for _ in 0..20 {
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     if let Ok(content) = tmux_ops.capture_pane(target) {

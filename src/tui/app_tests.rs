@@ -3182,8 +3182,10 @@ fn test_switch_agent_gemini_sends_quit() {
     let quit_sent_c = quit_sent.clone();
 
     mock.expect_send_keys().returning(|_, _| Ok(()));
-    // Gemini /quit is sent via send_keys_literal (needs delay before Enter for Ink TUI)
-    mock.expect_send_keys_literal().returning(move |_, k| {
+    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    // Gemini's /quit is *text*, sent via send_text (`send-keys -l`) with a delay
+    // before the separate Enter keypress, which the Ink TUI needs to render first.
+    mock.expect_send_text().returning(move |_, k| {
         if k == "/quit" {
             quit_sent_c.store(true, Ordering::SeqCst);
         }
@@ -3481,8 +3483,15 @@ fn test_send_skill_and_prompt_gemini_combined() {
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
 
+    let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let pastes_c = pastes.clone();
+
     mock.expect_send_keys_literal().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    mock.expect_paste_text().returning(move |_, text| {
+        pastes_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
     mock.expect_capture_pane()
@@ -3500,11 +3509,23 @@ fn test_send_skill_and_prompt_gemini_combined() {
         &[],
         false,
     );
+    // The message arrives as one bracketed paste, newlines intact — not as typed
+    // keystrokes, which an Ink composer would submit at the first newline.
+    let pasted = pastes.lock().unwrap();
+    assert_eq!(pasted.len(), 1, "exactly one paste");
+    assert!(pasted[0].contains("/agtx:plan") && pasted[0].contains("my task"));
+    assert!(pasted[0].contains('\n'), "newlines preserved in the paste");
+
     let calls = literal_calls.lock().unwrap();
-    assert!(calls
-        .iter()
-        .any(|c| c.contains("/agtx:plan") && c.contains("my task")));
-    assert!(calls.iter().any(|c| c == "Enter"));
+    assert!(
+        !calls.iter().any(|c| c.contains("my task")),
+        "the message must not also be typed: {calls:?}"
+    );
+    assert_eq!(
+        calls.iter().filter(|c| *c == "Enter").count(),
+        1,
+        "exactly one Enter submits it: {calls:?}"
+    );
 }
 
 #[test]
@@ -3514,8 +3535,15 @@ fn test_send_skill_and_prompt_codex_combined() {
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
 
+    let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let pastes_c = pastes.clone();
+
     mock.expect_send_keys_literal().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    mock.expect_paste_text().returning(move |_, text| {
+        pastes_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
     mock.expect_capture_pane()
@@ -3533,11 +3561,20 @@ fn test_send_skill_and_prompt_codex_combined() {
         &[],
         false,
     );
+    let pasted = pastes.lock().unwrap();
+    assert_eq!(pasted.len(), 1, "exactly one paste");
+    assert!(pasted[0].contains("$agtx-plan") && pasted[0].contains("do the thing"));
+
+    // Codex used to need a second Enter to dismiss its `$skill` command picker.
+    // That picker opens on *typing*, not on a paste, so with bracketed paste there
+    // is nothing to dismiss and a second Enter would fire into an empty composer.
+    // Verified against codex-cli 0.144.5.
     let calls = literal_calls.lock().unwrap();
-    assert!(calls
-        .iter()
-        .any(|c| c.contains("$agtx-plan") && c.contains("do the thing")));
-    assert!(calls.iter().any(|c| c == "Enter"));
+    assert_eq!(
+        calls.iter().filter(|c| *c == "Enter").count(),
+        1,
+        "codex must send exactly one Enter after a paste: {calls:?}"
+    );
 }
 
 #[test]
@@ -3638,6 +3675,7 @@ fn test_send_skill_and_prompt_clear_context_ignored_for_non_claude() {
         Ok(())
     });
     mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_paste_text().returning(|_, _| Ok(()));
     mock.expect_capture_pane().returning(|_| Ok(String::new()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
@@ -3692,13 +3730,17 @@ fn test_send_skill_and_prompt_prompt_only() {
 #[cfg(feature = "test-mocks")]
 fn test_send_skill_and_prompt_void_prefill() {
     let mut mock = MockTmuxOperations::new();
-    let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let literal_c = literal_calls.clone();
+    let texts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let texts_c = texts.clone();
 
-    mock.expect_send_keys_literal().returning(move |_, text| {
-        literal_c.lock().unwrap().push(text.to_string());
+    // Task-derived text goes through `send_text` (`send-keys -l`), never the
+    // key-name path — a prefill that happened to spell "Up" or "Space" would
+    // otherwise arrive as an arrow key or a bare space.
+    mock.expect_send_text().returning(move |_, text| {
+        texts_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
+    mock.expect_send_keys_literal().never();
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -3712,7 +3754,7 @@ fn test_send_skill_and_prompt_void_prefill() {
         &[],
         false,
     );
-    let calls = literal_calls.lock().unwrap();
+    let calls = texts.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0], "fix the login bug");
 }
@@ -9799,13 +9841,19 @@ fn test_send_skill_and_prompt_opencode_combined_with_double_enter() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_send_skill_and_prompt_cursor_combined_single_enter() {
-    // Cursor: skill+prompt combined, only one Enter needed (no command picker)
+    // Cursor: skill+prompt combined into one bracketed paste, one Enter to submit.
     let mut mock = MockTmuxOperations::new();
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
+    let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let pastes_c = pastes.clone();
 
     mock.expect_send_keys_literal().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    mock.expect_paste_text().returning(move |_, text| {
+        pastes_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
     mock.expect_capture_pane()
@@ -9823,14 +9871,14 @@ fn test_send_skill_and_prompt_cursor_combined_single_enter() {
         &[],
         false,
     );
-    let calls = literal_calls.lock().unwrap();
+    let pasted = pastes.lock().unwrap();
+    assert_eq!(pasted.len(), 1, "exactly one paste");
     assert!(
-        calls
-            .iter()
-            .any(|c| c.contains("/agtx-plan") && c.contains("my task")),
+        pasted[0].contains("/agtx-plan") && pasted[0].contains("my task"),
         "skill+prompt should be combined for cursor"
     );
     // Only one Enter (cursor has no command picker)
+    let calls = literal_calls.lock().unwrap();
     assert_eq!(
         calls.iter().filter(|c| c.as_str() == "Enter").count(),
         1,

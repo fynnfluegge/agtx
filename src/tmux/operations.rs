@@ -30,11 +30,33 @@ pub trait TmuxOperations: Send + Sync {
     /// Check if a window exists
     fn window_exists(&self, target: &str) -> Result<bool>;
 
-    /// Send keys to a window (with Enter at the end)
+    /// Send keys to a window (with Enter at the end).
+    ///
+    /// Like [`send_keys_literal`](Self::send_keys_literal), this goes through
+    /// tmux's **key-name** lookup — see the note there.
     fn send_keys(&self, target: &str, keys: &str) -> Result<()>;
 
-    /// Send keys to a window without pressing Enter
+    /// Send one or more **key names** to a window, without a trailing Enter.
+    ///
+    /// This does *not* pass `-l`, so tmux resolves the whole argument as a key
+    /// name when it matches one: `"Enter"`, `"C-c"`, `"C-d"`, `"1"`. Callers
+    /// answering a dialog or pressing a control key want exactly that.
+    ///
+    /// It is the wrong call for arbitrary text, because the same lookup applies:
+    /// verified against tmux 3.5a, `"Space"` arrives as `0x20`, `"Escape"` as
+    /// `ESC`, and `"Up"` as `\033[A`. Use [`send_text`](Self::send_text) — or,
+    /// for a whole message, [`paste_text`](Self::paste_text) — instead.
+    ///
+    /// (The name predates that distinction and is misleading; renaming it to
+    /// `send_key` is deferred until the opencode picker path also moves off it.)
     fn send_keys_literal(&self, target: &str, keys: &str) -> Result<()>;
+
+    /// Send literal text to a window (`send-keys -l`), without a trailing Enter.
+    ///
+    /// Unlike [`send_keys_literal`](Self::send_keys_literal) the argument is never
+    /// interpreted as a key name, so text that happens to spell one survives
+    /// intact. Use this for anything user- or task-derived.
+    fn send_text(&self, target: &str, text: &str) -> Result<()>;
 
     /// Paste a block of text into a pane using tmux load-buffer + paste-buffer.
     /// This sends proper bracketed paste sequences to the target pane.
@@ -162,6 +184,16 @@ impl TmuxOperations for RealTmuxOps {
         std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
             .args(["send-keys", "-t", target, keys])
+            .output()?;
+        Ok(())
+    }
+
+    fn send_text(&self, target: &str, text: &str) -> Result<()> {
+        // `-l` disables key-name lookup; `--` stops tmux parsing text that begins
+        // with a dash as flags.
+        std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["send-keys", "-t", target, "-l", "--", text])
             .output()?;
         Ok(())
     }
