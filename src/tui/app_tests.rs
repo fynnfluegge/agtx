@@ -709,7 +709,7 @@ fn test_send_key_to_tmux_char() {
     let mut mock_tmux = MockTmuxOperations::new();
 
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(
             mockall::predicate::eq("test-window"),
             mockall::predicate::eq("a"),
@@ -731,7 +731,7 @@ fn test_send_key_to_tmux_enter() {
     let mut mock_tmux = MockTmuxOperations::new();
 
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(
             mockall::predicate::eq("test-window"),
             mockall::predicate::eq("Enter"),
@@ -754,7 +754,7 @@ fn test_send_key_to_tmux_special_keys() {
 
     // Test Escape
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(
             mockall::predicate::eq("win"),
             mockall::predicate::eq("Escape"),
@@ -770,7 +770,7 @@ fn test_send_key_to_tmux_special_keys() {
     // Test Backspace
     let mut mock_tmux2 = MockTmuxOperations::new();
     mock_tmux2
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(
             mockall::predicate::eq("win"),
             mockall::predicate::eq("BSpace"),
@@ -791,7 +791,7 @@ fn test_send_key_to_tmux_function_key() {
     let mut mock_tmux = MockTmuxOperations::new();
 
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(mockall::predicate::eq("win"), mockall::predicate::eq("F5"))
         .returning(|_, _| Ok(()));
 
@@ -808,7 +808,7 @@ fn test_send_key_to_tmux_function_key() {
 fn test_send_key_to_tmux_alt_arrow_keys() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(
             mockall::predicate::eq("win"),
             mockall::predicate::eq("M-Left"),
@@ -824,7 +824,7 @@ fn test_send_key_to_tmux_alt_arrow_keys() {
 
     let mut mock_tmux2 = MockTmuxOperations::new();
     mock_tmux2
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(
             mockall::predicate::eq("win"),
             mockall::predicate::eq("M-Right"),
@@ -845,7 +845,7 @@ fn test_send_key_to_tmux_alt_arrow_keys() {
 fn test_send_key_to_tmux_alt_b_f() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-b"))
         .times(1)
         .returning(|_, _| Ok(()));
@@ -858,7 +858,7 @@ fn test_send_key_to_tmux_alt_b_f() {
 
     let mut mock_tmux2 = MockTmuxOperations::new();
     mock_tmux2
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-f"))
         .times(1)
         .returning(|_, _| Ok(()));
@@ -3154,7 +3154,7 @@ fn test_switch_agent_claude_sends_exit() {
         }
         Ok(())
     });
-    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_send_key().returning(|_, _| Ok(()));
     // Return shell immediately so polling exits fast
     mock.expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
@@ -3182,7 +3182,7 @@ fn test_switch_agent_gemini_sends_quit() {
     let quit_sent_c = quit_sent.clone();
 
     mock.expect_send_keys().returning(|_, _| Ok(()));
-    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_send_key().returning(|_, _| Ok(()));
     // Gemini's /quit is *text*, sent via send_text (`send-keys -l`) with a delay
     // before the separate Enter keypress, which the Ink TUI needs to render first.
     mock.expect_send_text().returning(move |_, k| {
@@ -3213,7 +3213,7 @@ fn test_switch_agent_codex_sends_ctrl_c() {
     let ctrl_c_sent_c = ctrl_c_sent.clone();
 
     mock.expect_send_keys().returning(|_, _| Ok(()));
-    mock.expect_send_keys_literal().returning(move |_, k| {
+    mock.expect_send_key().returning(move |_, k| {
         if k == "C-c" {
             ctrl_c_sent_c.store(true, Ordering::SeqCst);
         }
@@ -3547,7 +3547,7 @@ fn test_send_skill_and_prompt_gemini_combined() {
     let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let pastes_c = pastes.clone();
 
-    mock.expect_send_keys_literal().returning(move |_, text| {
+    mock.expect_send_key().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
@@ -3599,7 +3599,7 @@ fn test_send_skill_and_prompt_codex_combined() {
     let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let pastes_c = pastes.clone();
 
-    mock.expect_send_keys_literal().returning(move |_, text| {
+    mock.expect_send_key().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
@@ -3649,7 +3649,7 @@ fn test_send_skill_and_prompt_claude_with_trigger() {
         keys_c.lock().unwrap().push(k.to_string());
         Ok(())
     });
-    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_send_key().returning(|_, _| Ok(()));
     // Return trigger text immediately
     mock.expect_capture_pane()
         .returning(|_| Ok("Ready for input >".to_string()));
@@ -3690,7 +3690,7 @@ fn test_send_skill_and_prompt_clear_context_claude() {
         keys_c.lock().unwrap().push(k.to_string());
         Ok(())
     });
-    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_send_key().returning(|_, _| Ok(()));
     // Simulate stable pane after /clear so the poll exits quickly.
     mock.expect_capture_pane()
         .returning(|_| Ok("✻ Welcome to Claude Code!".to_string()));
@@ -3735,7 +3735,7 @@ fn test_send_skill_and_prompt_clear_context_ignored_for_non_claude() {
         keys_c.lock().unwrap().push(k.to_string());
         Ok(())
     });
-    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_send_key().returning(|_, _| Ok(()));
     mock.expect_paste_text().returning(|_, _| Ok(()));
     mock.expect_capture_pane().returning(|_| Ok(String::new()));
 
@@ -3801,7 +3801,7 @@ fn test_send_skill_and_prompt_void_prefill() {
         texts_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
-    mock.expect_send_keys_literal().never();
+    mock.expect_send_key().never();
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -3854,7 +3854,7 @@ fn test_wait_for_prompt_trigger_auto_dismiss_then_trigger() {
             Ok("Ready for input >".to_string())
         }
     });
-    mock.expect_send_keys_literal().returning(move |_, k| {
+    mock.expect_send_key().returning(move |_, k| {
         if k == "y" {
             dismiss_c.store(true, std::sync::atomic::Ordering::SeqCst);
         }
@@ -3885,7 +3885,7 @@ fn test_wait_for_agent_ready_detects_agent_process() {
     mock.expect_capture_pane().returning(|_| Ok(String::new()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win");
+    let result = wait_for_agent_ready(&tmux, "sess:win", None);
     assert_eq!(result, Some("sess:win".to_string()));
 }
 
@@ -3899,7 +3899,7 @@ fn test_wait_for_agent_ready_detects_ready_indicator() {
         .returning(|_| Ok("Welcome to Gemini\nType your message".to_string()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win");
+    let result = wait_for_agent_ready(&tmux, "sess:win", None);
     assert_eq!(result, Some("sess:win".to_string()));
 }
 
@@ -3914,13 +3914,13 @@ fn test_wait_for_agent_ready_claude_bypass_accept() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Do you trust this? Yes, I accept the terms".to_string()));
-    mock.expect_send_keys_literal().returning(move |_, k| {
+    mock.expect_send_key().returning(move |_, k| {
         literal_c.lock().unwrap().push(k.to_string());
         Ok(())
     });
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win");
+    let result = wait_for_agent_ready(&tmux, "sess:win", None);
     assert_eq!(result, Some("sess:win".to_string()));
     let calls = literal_calls.lock().unwrap();
     assert!(
@@ -5763,7 +5763,7 @@ fn test_transition_to_planning_reuses_live_session() {
     // spawn_send_to_agent may call these; allow any number of calls
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
@@ -5885,7 +5885,7 @@ fn test_transition_to_running_with_session_returns_false() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
@@ -5926,7 +5926,7 @@ fn test_transition_to_review_no_pr_sets_review_confirm_popup() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
@@ -5966,7 +5966,7 @@ fn test_transition_to_review_existing_pr_spawns_push() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
@@ -8865,7 +8865,7 @@ fn test_is_agent_active_true_when_agent_process_running() {
     mock_tmux
         .expect_pane_current_command()
         .returning(|_| Some("claude".to_string()));
-    assert!(is_agent_active(&mock_tmux, "proj:task"));
+    assert!(is_agent_active(&mock_tmux, "proj:task", None));
 }
 
 #[test]
@@ -8879,7 +8879,7 @@ fn test_is_agent_active_true_when_gemini_indicator_in_pane() {
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("some output\nType your message\n".to_string()));
-    assert!(is_agent_active(&mock_tmux, "proj:task"));
+    assert!(is_agent_active(&mock_tmux, "proj:task", None));
 }
 
 #[test]
@@ -8892,7 +8892,7 @@ fn test_is_agent_active_false_when_at_shell_no_indicator() {
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("$ ".to_string()));
-    assert!(!is_agent_active(&mock_tmux, "proj:task"));
+    assert!(!is_agent_active(&mock_tmux, "proj:task", None));
 }
 
 // --- collect_task_diff ---
@@ -9361,9 +9361,9 @@ fn test_switch_agent_claude_sends_exit_then_new_cmd() {
 fn test_switch_agent_codex_sends_ctrl_c_not_exit() {
     // Codex has no exit command — sends C-c instead
     let mut mock_tmux = MockTmuxOperations::new();
-    // C-c via send_keys_literal (not send_keys)
+    // C-c via send_key (not send_keys)
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -9419,7 +9419,7 @@ fn test_switch_agent_retries_with_ctrl_c_when_shell_not_found() {
         .returning(|_| Ok(String::new()));
     // C-c sent on retry
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -9448,13 +9448,13 @@ fn test_switch_agent_sends_ctrl_d_as_last_resort() {
         .returning(|_| Some("claude".to_string()));
     // C-c on retry
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
     // C-d as last resort
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "C-d")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -9481,7 +9481,7 @@ fn test_switch_agent_always_sends_new_agent_cmd() {
         .expect_pane_current_command()
         .returning(|_| Some("claude".to_string()));
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     // This is the key assertion — new_agent_cmd must be sent exactly once
     mock_tmux
@@ -9511,6 +9511,7 @@ fn test_wait_for_agent_ready_returns_when_process_detected() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        None,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9530,6 +9531,7 @@ fn test_wait_for_agent_ready_returns_when_ready_indicator_in_pane() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        None,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9548,13 +9550,13 @@ fn test_wait_for_agent_ready_handles_claude_bypass_prompt() {
     // Must send "2" to accept. The mock pane never changes, which is exactly how
     // a dropped keystroke looks, so the answer is retried up to the cap.
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "2")
         .times(LAUNCH_DIALOG_MAX_ATTEMPTS as usize)
         .returning(|_, _| Ok(()));
     // Must send Enter to confirm
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "Enter")
         .times(LAUNCH_DIALOG_MAX_ATTEMPTS as usize)
         .returning(|_, _| Ok(()));
@@ -9562,6 +9564,7 @@ fn test_wait_for_agent_ready_handles_claude_bypass_prompt() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        None,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9593,6 +9596,7 @@ fn test_wait_for_agent_ready_returns_when_content_stabilizes() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        None,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9618,6 +9622,7 @@ fn test_wait_for_agent_ready_always_returns_some() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        None,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9667,7 +9672,7 @@ fn test_is_agent_active_detects_claude_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("Claude Code v2.1.72\n> ".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", None),
         "Claude Code indicator should trigger is_agent_active"
     );
 }
@@ -9681,7 +9686,7 @@ fn test_is_agent_active_detects_gemini_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nType your message".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", None),
         "Gemini indicator should trigger is_agent_active"
     );
 }
@@ -9695,7 +9700,7 @@ fn test_is_agent_active_detects_opencode_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nAsk anything".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", None),
         "OpenCode indicator should trigger is_agent_active"
     );
 }
@@ -9709,7 +9714,7 @@ fn test_is_agent_active_detects_cursor_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nCursor Agent\n> ".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", None),
         "Cursor indicator should trigger is_agent_active"
     );
 }
@@ -9723,7 +9728,7 @@ fn test_is_agent_active_detects_codex_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nOpenAI Codex".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", None),
         "Codex indicator should trigger is_agent_active"
     );
 }
@@ -9737,7 +9742,7 @@ fn test_is_agent_active_returns_false_when_no_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("just some shell output".to_string()));
     assert!(
-        !is_agent_active(&mock, "t"),
+        !is_agent_active(&mock, "t", None),
         "no indicator should return false"
     );
 }
@@ -9755,7 +9760,7 @@ fn test_wait_for_agent_ready_detects_claude_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Claude Code v2.1.72\nsome context".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9767,7 +9772,7 @@ fn test_wait_for_agent_ready_detects_cursor_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Cursor Agent\n> ".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9779,7 +9784,7 @@ fn test_wait_for_agent_ready_detects_opencode_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Ask anything\n> ".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9791,7 +9796,7 @@ fn test_wait_for_agent_ready_detects_codex_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("OpenAI Codex\nsome output".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9805,7 +9810,7 @@ fn test_switch_agent_cursor_sends_ctrl_c_not_exit() {
     // Cursor is an Ink/Node TUI — uses Ctrl+C to exit, no /exit command
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -9838,7 +9843,7 @@ fn test_switch_agent_opencode_sends_exit() {
         Ok(())
     });
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     mock_tmux
         .expect_pane_current_command()
@@ -9862,9 +9867,17 @@ fn test_send_skill_and_prompt_opencode_combined_with_double_enter() {
     let mut mock = MockTmuxOperations::new();
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
+    let texts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let texts_c = texts.clone();
 
-    mock.expect_send_keys_literal().returning(move |_, text| {
+    mock.expect_send_key().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    // The message itself is text, so it goes through send_text (`send-keys -l`);
+    // only the Enters are keys.
+    mock.expect_send_text().returning(move |_, text| {
+        texts_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
     // capture_pane returns content with skill+prompt text so the wait loop exits quickly
@@ -9883,14 +9896,14 @@ fn test_send_skill_and_prompt_opencode_combined_with_double_enter() {
         &[],
         false,
     );
-    let calls = literal_calls.lock().unwrap();
+    let sent = texts.lock().unwrap();
     // Combined message sent
     assert!(
-        calls
-            .iter()
+        sent.iter()
             .any(|c| c.contains("/agtx-plan") && c.contains("do the thing")),
         "skill+prompt should be combined for opencode"
     );
+    let calls = literal_calls.lock().unwrap();
     // Two Enters sent (first to close picker, second to submit)
     assert_eq!(
         calls.iter().filter(|c| c.as_str() == "Enter").count(),
@@ -9909,7 +9922,7 @@ fn test_send_skill_and_prompt_cursor_combined_single_enter() {
     let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let pastes_c = pastes.clone();
 
-    mock.expect_send_keys_literal().returning(move |_, text| {
+    mock.expect_send_key().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
@@ -10537,7 +10550,7 @@ fn test_wait_for_prompt_trigger_repeated_auto_dismiss() {
             Ok("Ready for input >".to_string())
         }
     });
-    mock.expect_send_keys_literal().returning(move |_, k| {
+    mock.expect_send_key().returning(move |_, k| {
         if k == "y" {
             dismiss_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
@@ -10642,7 +10655,7 @@ fn test_task_has_live_session_returns_false_on_tmux_error() {
 #[cfg(feature = "test-mocks")]
 fn test_handle_paste_into_shell_popup_calls_paste_text() {
     // When shell popup is open, handle_paste must call paste_text exactly once
-    // with the full pasted string (not send_keys_literal character by character).
+    // with the full pasted string (not send_key character by character).
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
@@ -10679,7 +10692,7 @@ fn test_handle_paste_into_shell_popup_calls_paste_text() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_handle_paste_into_shell_popup_does_not_call_send_keys_literal() {
+fn test_handle_paste_into_shell_popup_does_not_call_send_key() {
     // Verify the old per-character path is not taken for paste events.
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
@@ -10689,8 +10702,8 @@ fn test_handle_paste_into_shell_popup_does_not_call_send_keys_literal() {
         .expect_paste_text()
         .times(1)
         .returning(|_, _| Ok(()));
-    // send_keys_literal must NOT be called — mockall panics if an unexpected call occurs
-    mock_tmux.expect_send_keys_literal().times(0);
+    // send_key must NOT be called — mockall panics if an unexpected call occurs
+    mock_tmux.expect_send_key().times(0);
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -10922,12 +10935,12 @@ fn test_agent_hooks_false_writes_no_hooks() {
 fn test_dismiss_launch_dialog_answers_claude_bypass_warning() {
     let mut mock = MockTmuxOperations::new();
     let mut seq = mockall::Sequence::new();
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times(1)
         .in_sequence(&mut seq)
         .withf(|_, k| k == "2")
         .returning(|_, _| Ok(()));
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times(1)
         .in_sequence(&mut seq)
         .withf(|_, k| k == "Enter")
@@ -10937,6 +10950,7 @@ fn test_dismiss_launch_dialog_answers_claude_bypass_warning() {
     assert!(dismiss_launch_dialog(
         &ops,
         "t:1",
+        Some("claude"),
         "WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n  2. Yes, I accept",
         &mut LaunchDialogState::default(),
     ));
@@ -10951,12 +10965,12 @@ fn test_dismiss_launch_dialog_answers_claude_bypass_warning() {
 fn test_dismiss_launch_dialog_answers_claude_workspace_trust() {
     let mut mock = MockTmuxOperations::new();
     let mut seq = mockall::Sequence::new();
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times(1)
         .in_sequence(&mut seq)
         .withf(|_, k| k == "1")
         .returning(|_, _| Ok(()));
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times(1)
         .in_sequence(&mut seq)
         .withf(|_, k| k == "Enter")
@@ -10966,6 +10980,7 @@ fn test_dismiss_launch_dialog_answers_claude_workspace_trust() {
     assert!(dismiss_launch_dialog(
         &ops,
         "t:1",
+        Some("claude"),
         "Accessing workspace:\n  /tmp/wt/task-slug\n\n\
          Quick safety check: Is this a project you created or one you trust?\n\
          Claude Code'll be able to read, edit, and execute files here.\n\
@@ -10997,7 +11012,7 @@ fn test_claude_launch_dialogs_do_not_overlap() {
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_answers_gemini_trust() {
     let mut mock = MockTmuxOperations::new();
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times(2)
         .returning(|_, _| Ok(()));
 
@@ -11005,6 +11020,7 @@ fn test_dismiss_launch_dialog_answers_gemini_trust() {
     assert!(dismiss_launch_dialog(
         &ops,
         "t:1",
+        Some("gemini"),
         "Do you trust the files in this folder?",
         &mut LaunchDialogState::default(),
     ));
@@ -11016,12 +11032,13 @@ fn test_dismiss_launch_dialog_answers_gemini_trust() {
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_ignores_normal_output() {
     let mut mock = MockTmuxOperations::new();
-    mock.expect_send_keys_literal().never();
+    mock.expect_send_key().never();
 
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
     assert!(!dismiss_launch_dialog(
         &ops,
         "t:1",
+        None,
         "❯ Claude Code\n  Ask anything\n✻ Cooked for 3s",
         &mut LaunchDialogState::default(),
     ));
@@ -11034,7 +11051,7 @@ fn test_dismiss_launch_dialog_ignores_normal_output() {
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_retries_while_the_pane_is_unchanged() {
     let mut mock = MockTmuxOperations::new();
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times(4) // two rounds of ("2", Enter)
         .returning(|_, _| Ok(()));
 
@@ -11042,9 +11059,9 @@ fn test_dismiss_launch_dialog_retries_while_the_pane_is_unchanged() {
     let mut st = LaunchDialogState::default();
     let pane = "WARNING: Bypass Permissions mode\n  2. Yes, I accept";
 
-    assert!(dismiss_launch_dialog(&ops, "t:1", pane, &mut st));
+    assert!(dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st));
     assert!(
-        dismiss_launch_dialog(&ops, "t:1", pane, &mut st),
+        dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st),
         "an unchanged pane means the answer was dropped — retry"
     );
 }
@@ -11055,18 +11072,19 @@ fn test_dismiss_launch_dialog_retries_while_the_pane_is_unchanged() {
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_stops_once_the_pane_redraws() {
     let mut mock = MockTmuxOperations::new();
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times(2) // exactly one round
         .returning(|_, _| Ok(()));
 
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
     let mut st = LaunchDialogState::default();
 
-    assert!(dismiss_launch_dialog(&ops, "t:1", "2. Yes, I accept", &mut st));
+    assert!(dismiss_launch_dialog(&ops, "t:1", None, "2. Yes, I accept", &mut st));
     // Same dialog text, but the frame changed — it is the previous render.
     assert!(!dismiss_launch_dialog(
         &ops,
         "t:1",
+        None,
         "2. Yes, I accept\n(redrawing...)",
         &mut st
     ));
@@ -11078,7 +11096,7 @@ fn test_dismiss_launch_dialog_stops_once_the_pane_redraws() {
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_gives_up_after_max_attempts() {
     let mut mock = MockTmuxOperations::new();
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times((LAUNCH_DIALOG_MAX_ATTEMPTS as usize) * 2)
         .returning(|_, _| Ok(()));
 
@@ -11087,9 +11105,9 @@ fn test_dismiss_launch_dialog_gives_up_after_max_attempts() {
     let pane = "2. Yes, I accept";
 
     for _ in 0..LAUNCH_DIALOG_MAX_ATTEMPTS {
-        assert!(dismiss_launch_dialog(&ops, "t:1", pane, &mut st));
+        assert!(dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st));
     }
-    assert!(!dismiss_launch_dialog(&ops, "t:1", pane, &mut st));
+    assert!(!dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st));
 }
 
 /// The two dialogs are tracked independently — answering Claude's must not
@@ -11098,16 +11116,17 @@ fn test_dismiss_launch_dialog_gives_up_after_max_attempts() {
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_tracks_dialogs_independently() {
     let mut mock = MockTmuxOperations::new();
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times(4)
         .returning(|_, _| Ok(()));
 
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
     let mut answered = LaunchDialogState::default();
-    assert!(dismiss_launch_dialog(&ops, "t:1", "2. Yes, I accept", &mut answered));
+    assert!(dismiss_launch_dialog(&ops, "t:1", None, "2. Yes, I accept", &mut answered));
     assert!(dismiss_launch_dialog(
         &ops,
         "t:1",
+        Some("gemini"),
         "Do you trust the files in this folder?",
         &mut answered
     ));
@@ -11502,12 +11521,12 @@ fn test_answer_session_dialogs_handles_codex_mcp_approval() {
 
     let mut mock = MockTmuxOperations::new();
     let mut seq = mockall::Sequence::new();
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times(1)
         .in_sequence(&mut seq)
         .withf(|_, k| k == "3")
         .returning(|_, _| Ok(()));
-    mock.expect_send_keys_literal()
+    mock.expect_send_key()
         .times(1)
         .in_sequence(&mut seq)
         .withf(|_, k| k == "Enter")
@@ -11523,7 +11542,7 @@ fn test_answer_session_dialogs_handles_codex_mcp_approval() {
 fn test_answer_session_dialogs_is_scoped_to_its_own_agent() {
     let pane = "Allow the agtx MCP server to run tool get_task?\n  3. Always allow";
     let mut mock = MockTmuxOperations::new();
-    mock.expect_send_keys_literal().never();
+    mock.expect_send_key().never();
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
     answer_session_dialogs(&ops, "t:1", "claude", pane);
     answer_session_dialogs(&ops, "t:1", "mistral", pane);
@@ -11535,7 +11554,82 @@ fn test_answer_session_dialogs_is_scoped_to_its_own_agent() {
 #[cfg(feature = "test-mocks")]
 fn test_answer_session_dialogs_requires_every_pattern() {
     let mut mock = MockTmuxOperations::new();
-    mock.expect_send_keys_literal().never();
+    mock.expect_send_key().never();
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
     answer_session_dialogs(&ops, "t:1", "codex", "Allow the tool to run? Always allow");
+}
+
+// =============================================================================
+// Per-agent attribution of indicators and launch dialogs (open question 1)
+// =============================================================================
+
+/// Another agent's readiness string in this agent's pane no longer counts.
+/// "Ask anything" is OpenCode's; a Claude pane showing it — in conversation
+/// output, say — used to read as an agent being up.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_active_indicators_are_scoped_to_their_agent() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("zsh".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("some output mentioning Ask anything\n".to_string()));
+
+    // OpenCode's own indicator still counts in an OpenCode pane.
+    assert!(is_agent_active(&mock, "proj:task", Some("opencode")));
+    // In a Claude pane it does not.
+    assert!(!is_agent_active(&mock, "proj:task", Some("claude")));
+    // An agent agtx has no spec for keeps the historical flat match, so such a
+    // pane is not left undetectable.
+    assert!(is_agent_active(&mock, "proj:task", None));
+}
+
+/// Answering a dialog sends a menu digit. Doing that in the wrong agent's pane
+/// types a stray "1" into a live composer, so a dialog is only answered for the
+/// agent that owns it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_launch_dialogs_are_scoped_to_their_agent() {
+    let gemini_pane = "Do you trust the files in this folder?\n  1. Yes  2. No";
+
+    // In a Claude pane, Gemini's dialog is ignored.
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().never();
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(!dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("claude"),
+        gemini_pane,
+        &mut LaunchDialogState::default(),
+    ));
+
+    // In a Gemini pane it is answered.
+    let mut mock2 = MockTmuxOperations::new();
+    mock2.expect_send_key().times(2).returning(|_, _| Ok(()));
+    let ops2: Arc<dyn TmuxOperations> = Arc::new(mock2);
+    assert!(dismiss_launch_dialog(
+        &ops2,
+        "t:1",
+        Some("gemini"),
+        gemini_pane,
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// An unknown agent keeps the flat behaviour: better to answer a dialog that may
+/// not be its own than to leave the pane blocked forever.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_unknown_agent_falls_back_to_every_dialog() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().times(2).returning(|_, _| Ok(()));
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        None,
+        "Do you trust the files in this folder?",
+        &mut LaunchDialogState::default(),
+    ));
 }

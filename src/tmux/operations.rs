@@ -32,28 +32,25 @@ pub trait TmuxOperations: Send + Sync {
 
     /// Send keys to a window (with Enter at the end).
     ///
-    /// Like [`send_keys_literal`](Self::send_keys_literal), this goes through
+    /// Like [`send_key`](Self::send_key), this goes through
     /// tmux's **key-name** lookup — see the note there.
     fn send_keys(&self, target: &str, keys: &str) -> Result<()>;
 
-    /// Send one or more **key names** to a window, without a trailing Enter.
+    /// Send a **key name** to a window, without a trailing Enter.
     ///
-    /// This does *not* pass `-l`, so tmux resolves the whole argument as a key
-    /// name when it matches one: `"Enter"`, `"C-c"`, `"C-d"`, `"1"`. Callers
-    /// answering a dialog or pressing a control key want exactly that.
+    /// This deliberately does *not* pass `-l`, so tmux resolves the argument as a
+    /// key when it matches a key name: `"Enter"`, `"C-c"`, `"C-d"`, `"1"`.
+    /// Callers answering a dialog or pressing a control key want exactly that.
     ///
-    /// It is the wrong call for arbitrary text, because the same lookup applies:
-    /// verified against tmux 3.5a, `"Space"` arrives as `0x20`, `"Escape"` as
-    /// `ESC`, and `"Up"` as `\033[A`. Use [`send_text`](Self::send_text) — or,
-    /// for a whole message, [`paste_text`](Self::paste_text) — instead.
-    ///
-    /// (The name predates that distinction and is misleading; renaming it to
-    /// `send_key` is deferred until the opencode picker path also moves off it.)
-    fn send_keys_literal(&self, target: &str, keys: &str) -> Result<()>;
+    /// Never use it for text, because the same lookup applies: verified against
+    /// tmux 3.5a, `"Space"` arrives as `0x20`, `"Escape"` as `ESC`, and `"Up"` as
+    /// `\033[A`. Use [`send_text`](Self::send_text) — or, for a whole message,
+    /// [`paste_text`](Self::paste_text) — instead.
+    fn send_key(&self, target: &str, keys: &str) -> Result<()>;
 
     /// Send literal text to a window (`send-keys -l`), without a trailing Enter.
     ///
-    /// Unlike [`send_keys_literal`](Self::send_keys_literal) the argument is never
+    /// Unlike [`send_key`](Self::send_key) the argument is never
     /// interpreted as a key name, so text that happens to spell one survives
     /// intact. Use this for anything user- or task-derived.
     fn send_text(&self, target: &str, text: &str) -> Result<()>;
@@ -180,7 +177,7 @@ impl TmuxOperations for RealTmuxOps {
         Ok(())
     }
 
-    fn send_keys_literal(&self, target: &str, keys: &str) -> Result<()> {
+    fn send_key(&self, target: &str, keys: &str) -> Result<()> {
         std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
             .args(["send-keys", "-t", target, keys])

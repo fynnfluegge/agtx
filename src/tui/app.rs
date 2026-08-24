@@ -793,7 +793,7 @@ impl App {
             let tmux_ops = Arc::clone(&app.state.tmux_ops);
             let ready_flag = Arc::clone(&app.state.orchestrator_ready);
             std::thread::spawn(move || {
-                if wait_for_agent_ready(&tmux_ops, &orch_target).is_some() {
+                if wait_for_agent_ready(&tmux_ops, &orch_target, Some("claude")).is_some() {
                     ready_flag.store(true, Ordering::Release);
                 }
             });
@@ -4817,7 +4817,7 @@ impl App {
         }
         let agent_running = task.session_name.as_ref().map_or(false, |target| {
             self.state.tmux_ops.window_exists(target).unwrap_or(false)
-                && is_agent_active(&*self.state.tmux_ops, target)
+                && is_agent_active(&*self.state.tmux_ops, target, Some(task.agent.as_str()))
         });
         if agent_running {
             self.state.move_confirm_popup = Some(MoveConfirmPopup {
@@ -5037,7 +5037,9 @@ impl App {
                     // launched with the opening message already in argv.
                     if launched_with_prompt {
                         // nothing to send
-                    } else if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                    } else if let Some(target) =
+                        wait_for_agent_ready(&tmux_ops, &target, Some(&planning_agent_clone))
+                    {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -5448,7 +5450,9 @@ impl App {
                     // launched with the opening message already in argv.
                     if launched_with_prompt {
                         // nothing to send
-                    } else if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                    } else if let Some(target) =
+                        wait_for_agent_ready(&tmux_ops, &target, Some(&agent_name))
+                    {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -5918,7 +5922,9 @@ impl App {
                     // launched with the opening message already in argv.
                     if launched_with_prompt {
                         // nothing to send
-                    } else if let Some(target) = wait_for_agent_ready(&tmux_ops, &target) {
+                    } else if let Some(target) =
+                        wait_for_agent_ready(&tmux_ops, &target, Some(&running_agent_clone))
+                    {
                         send_skill_and_prompt(
                             &tmux_ops,
                             &target,
@@ -6065,7 +6071,9 @@ impl App {
                                 &current_agent_clone,
                                 &new_cmd,
                             );
-                            let _ = wait_for_agent_ready(&tmux_ops, &session_clone);
+                            // The *new* agent is what has to become ready.
+                            let _ =
+                                wait_for_agent_ready(&tmux_ops, &session_clone, Some(&planning_agent_clone));
                         }
                         send_skill_and_prompt(
                             &tmux_ops,
@@ -6430,7 +6438,7 @@ impl App {
                 let ready_flag = Arc::clone(&self.state.orchestrator_ready);
                 let target = orch_target.clone();
                 std::thread::spawn(move || {
-                    if wait_for_agent_ready(&tmux_ops, &target).is_some() {
+                    if wait_for_agent_ready(&tmux_ops, &target, Some("claude")).is_some() {
                         ready_flag.store(true, Ordering::Release);
                     }
                 });
@@ -6552,7 +6560,7 @@ impl App {
         let ready_flag = Arc::clone(&self.state.orchestrator_ready);
         let target = orch_target;
         std::thread::spawn(move || {
-            if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &target) {
+            if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &target, Some(&default_agent)) {
                 let _ = tmux_ops.send_keys(&ready_target, &skill_cmd);
                 ready_flag.store(true, Ordering::Release);
             }
@@ -7029,7 +7037,7 @@ impl App {
                             // single startup burst, whereas here the 2s cadence
                             // between polls is itself the pacing.
                             let mut st = LaunchDialogState::default();
-                            dismiss_launch_dialog(&tmux_ops, sn, &content, &mut st);
+                            dismiss_launch_dialog(&tmux_ops, sn, Some(&agent), &content, &mut st);
 
                             // Mid-session approval prompts (Codex's "allow this
                             // MCP server to run tool") — a workaround for an
@@ -8236,7 +8244,7 @@ fn send_key_to_tmux(
 
     let key_str = if has_alt { format!("M-{}", base) } else { base };
 
-    let _ = tmux_ops.send_keys_literal(window_name, &key_str);
+    let _ = tmux_ops.send_key(window_name, &key_str);
 }
 
 /// Parse ANSI escape sequences to ratatui Lines with colors
@@ -8847,7 +8855,8 @@ fn spawn_send_to_agent(
             let agent_ops = agent_registry.get(&target_agent);
             let new_cmd = agent_ops.build_interactive_command("");
             switch_agent_in_tmux(tmux_ops.as_ref(), &target, &current_agent, &new_cmd);
-            let _ = wait_for_agent_ready(&tmux_ops, &target);
+            // The *new* agent is what has to become ready.
+            let _ = wait_for_agent_ready(&tmux_ops, &target, Some(&target_agent));
         }
         let clear_context = plugin
             .as_ref()
@@ -8949,7 +8958,7 @@ fn send_skill_and_prompt(
 
                 if cmd_name.starts_with('/') {
                     // Send just the command name to trigger the picker
-                    let _ = tmux_ops.send_keys_literal(target, cmd_name);
+                    let _ = tmux_ops.send_text(target, cmd_name);
                     // Wait for picker to appear (command name visible in pane)
                     for _ in 0..20 {
                         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -8961,11 +8970,11 @@ fn send_skill_and_prompt(
                     }
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     // Enter confirms/inserts the command from picker
-                    let _ = tmux_ops.send_keys_literal(target, "Enter");
+                    let _ = tmux_ops.send_key(target, "Enter");
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     // Now send the args + any remaining prompt text
                     let remaining = format!("{}{}", cmd_args, rest);
-                    let _ = tmux_ops.send_keys_literal(target, &remaining);
+                    let _ = tmux_ops.send_text(target, &remaining);
                     // Wait for args to appear in pane
                     let check = cmd_args.trim();
                     if !check.is_empty() {
@@ -8979,13 +8988,13 @@ fn send_skill_and_prompt(
                         }
                     }
                     std::thread::sleep(std::time::Duration::from_millis(200));
-                    let _ = tmux_ops.send_keys_literal(target, "Enter");
+                    let _ = tmux_ops.send_key(target, "Enter");
                     return;
                 }
             }
 
             // No args (or no slash command): simple send + wait for visibility + Enter
-            let _ = tmux_ops.send_keys_literal(target, &full_text);
+            let _ = tmux_ops.send_text(target, &full_text);
             let check_str = full_text.lines().next().unwrap_or(&full_text);
             for _ in 0..20 {
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -8997,9 +9006,9 @@ fn send_skill_and_prompt(
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
             // Enter to confirm picker (if any), then second Enter to submit
-            let _ = tmux_ops.send_keys_literal(target, "Enter");
+            let _ = tmux_ops.send_key(target, "Enter");
             std::thread::sleep(std::time::Duration::from_millis(400));
-            let _ = tmux_ops.send_keys_literal(target, "Enter");
+            let _ = tmux_ops.send_key(target, "Enter");
         }
         return;
     }
@@ -9057,7 +9066,7 @@ fn send_skill_and_prompt(
             // already in the pane's input buffer.
             let _ = tmux_ops.paste_text(target, &text);
             std::thread::sleep(std::time::Duration::from_millis(150));
-            let _ = tmux_ops.send_keys_literal(target, "Enter");
+            let _ = tmux_ops.send_key(target, "Enter");
 
             // No second Enter for Codex any more. Its command picker ("Press enter
             // to insert") opens in response to *typing* a `$skill`, not to a paste,
@@ -9205,7 +9214,7 @@ fn wait_for_prompt_trigger(
                             "Auto-dismiss rule triggered"
                         );
                         for key in rule.response.split('\n') {
-                            let _ = tmux_ops.send_keys_literal(target, key);
+                            let _ = tmux_ops.send_key(target, key);
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
                         stable_ticks = 0;
@@ -9528,7 +9537,7 @@ fn run_orchestrator_catchup(db: &Database, tasks: &[Task], project_path: Option<
 /// Check if an agent is actively running in the pane.
 /// Uses both `pane_current_command` (works for Claude, Codex, Copilot) and
 /// pane content indicators (works for Gemini which runs inside bash).
-fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
+fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str, agent_name: Option<&str>) -> bool {
     // Check 1: agent process visible in pane_current_command
     if !is_pane_at_shell(tmux_ops, target) {
         return true;
@@ -9541,7 +9550,7 @@ fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
         let bottom = lines.len().saturating_sub(5);
         let tail = &lines[bottom..];
         let tail_text = tail.join("\n");
-        if AGENT_ACTIVE_INDICATORS
+        if active_indicators_for(agent_name)
             .iter()
             .any(|s| tail_text.contains(s))
         {
@@ -9621,12 +9630,12 @@ fn switch_agent_in_tmux(
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
-            let _ = tmux_ops.send_keys_literal(target, "Enter");
+            let _ = tmux_ops.send_key(target, "Enter");
         } else {
             let _ = tmux_ops.send_keys(target, cmd);
         }
     } else {
-        let _ = tmux_ops.send_keys_literal(target, "C-c");
+        let _ = tmux_ops.send_key(target, "C-c");
     }
 
     // 2. Poll for agent exit. If the agent was busy, the exit command
@@ -9638,7 +9647,7 @@ fn switch_agent_in_tmux(
     for _ in 0..30 {
         // 3s
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if !is_agent_active(tmux_ops, target) {
+        if !is_agent_active(tmux_ops, target, Some(current_agent)) {
             found_shell = true;
             break;
         }
@@ -9646,7 +9655,7 @@ fn switch_agent_in_tmux(
 
     // 3. If still running, the agent was likely busy. Ctrl+C to cancel, then retry exit.
     if !found_shell {
-        let _ = tmux_ops.send_keys_literal(target, "C-c");
+        let _ = tmux_ops.send_key(target, "C-c");
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
         if let Some(cmd) = exit_cmd {
@@ -9661,7 +9670,7 @@ fn switch_agent_in_tmux(
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                let _ = tmux_ops.send_keys_literal(target, "Enter");
+                let _ = tmux_ops.send_key(target, "Enter");
             } else {
                 let _ = tmux_ops.send_keys(target, cmd);
             }
@@ -9671,7 +9680,7 @@ fn switch_agent_in_tmux(
         for _ in 0..50 {
             // 5s
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if !is_agent_active(tmux_ops, target) {
+            if !is_agent_active(tmux_ops, target, Some(current_agent)) {
                 found_shell = true;
                 break;
             }
@@ -9680,11 +9689,11 @@ fn switch_agent_in_tmux(
 
     // 4. Last resort: Ctrl+D to force exit
     if !found_shell {
-        let _ = tmux_ops.send_keys_literal(target, "C-d");
+        let _ = tmux_ops.send_key(target, "C-d");
         for _ in 0..20 {
             // 2s
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if !is_agent_active(tmux_ops, target) {
+            if !is_agent_active(tmux_ops, target, Some(current_agent)) {
                 break;
             }
         }
@@ -9749,6 +9758,35 @@ static LAUNCH_DIALOGS: std::sync::LazyLock<Vec<&'static agent::AgentDialog>> =
             .collect()
     });
 
+/// The launch dialogs to match in a pane running `agent_name`.
+///
+/// Attributed when the agent is known, so one agent's prompt is never answered in
+/// another's pane — answering sends a menu digit, and a stray "2" typed into a
+/// live composer is a real corruption. Falls back to every agent's dialogs for an
+/// agent agtx has no spec for, which is the historical behaviour and better than
+/// leaving such a pane blocked forever.
+fn launch_dialogs_for(agent_name: Option<&str>) -> Vec<&'static agent::AgentDialog> {
+    match agent_name.and_then(agent::spec) {
+        Some(spec) => spec
+            .dialogs
+            .iter()
+            .filter(|d| d.scope == agent::DialogScope::Launch)
+            .collect(),
+        None => LAUNCH_DIALOGS.clone(),
+    }
+}
+
+/// The readiness indicators to look for in a pane running `agent_name`.
+///
+/// Same reasoning: "Ask anything" appearing in a Claude pane used to read as
+/// OpenCode being ready. Unknown agents keep the flat list.
+fn active_indicators_for(agent_name: Option<&str>) -> Vec<&'static str> {
+    match agent_name.and_then(agent::spec) {
+        Some(spec) => spec.active_indicators.to_vec(),
+        None => AGENT_ACTIVE_INDICATORS.clone(),
+    }
+}
+
 /// Per-launch state for [`dismiss_launch_dialog`].
 #[derive(Default)]
 struct LaunchDialogState {
@@ -9797,9 +9835,9 @@ fn answer_session_dialogs(
         .filter(|d| d.scope == agent::DialogScope::Session)
     {
         if dialog.matches(content) {
-            let _ = tmux_ops.send_keys_literal(target, dialog.answer);
+            let _ = tmux_ops.send_key(target, dialog.answer);
             std::thread::sleep(std::time::Duration::from_millis(100));
-            let _ = tmux_ops.send_keys_literal(target, "Enter");
+            let _ = tmux_ops.send_key(target, "Enter");
         }
     }
 }
@@ -9816,14 +9854,16 @@ fn answer_session_dialogs(
 fn dismiss_launch_dialog(
     tmux_ops: &Arc<dyn TmuxOperations>,
     target: &str,
+    agent_name: Option<&str>,
     content: &str,
     state: &mut LaunchDialogState,
 ) -> bool {
+    let dialogs = launch_dialogs_for(agent_name);
     let content_hash = hash_of(content);
-    if state.attempts.len() < LAUNCH_DIALOGS.len() {
-        state.attempts.resize(LAUNCH_DIALOGS.len(), (0, 0));
+    if state.attempts.len() < dialogs.len() {
+        state.attempts.resize(dialogs.len(), (0, 0));
     }
-    for (i, dialog) in LAUNCH_DIALOGS.iter().enumerate() {
+    for (i, dialog) in dialogs.iter().enumerate() {
         if !dialog.matches(content) {
             continue;
         }
@@ -9836,16 +9876,20 @@ fn dismiss_launch_dialog(
         if attempts > 0 && last_hash != content_hash {
             continue;
         }
-        let _ = tmux_ops.send_keys_literal(target, dialog.answer);
+        let _ = tmux_ops.send_key(target, dialog.answer);
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let _ = tmux_ops.send_keys_literal(target, "Enter");
+        let _ = tmux_ops.send_key(target, "Enter");
         state.attempts[i] = (attempts + 1, content_hash);
         return true;
     }
     false
 }
 
-fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Option<String> {
+fn wait_for_agent_ready(
+    tmux_ops: &Arc<dyn TmuxOperations>,
+    target: &str,
+    agent_name: Option<&str>,
+) -> Option<String> {
     // Step 1: detect the ready signal (up to 30s).
     // Three detection methods, whichever fires first:
     //   1. Agent process detected via pane_current_command (Claude, Codex, Copilot)
@@ -9868,7 +9912,7 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
         // dialog standing, with the task prompt then typed into the menu.
         let content = tmux_ops.capture_pane(target).ok();
         if let Some(ref c) = content {
-            if dismiss_launch_dialog(tmux_ops, target, c, &mut dialog_state) {
+            if dismiss_launch_dialog(tmux_ops, target, agent_name, c, &mut dialog_state) {
                 // Keep looping rather than breaking: the answer may have been
                 // dropped by a TUI that was not reading stdin yet, and the
                 // readiness checks below would otherwise run against a pane
@@ -9888,7 +9932,10 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
         // Check 2 & 3: pane content checks
         if let Some(content) = content {
             // Check 2: known ready indicator in pane content
-            if AGENT_ACTIVE_INDICATORS.iter().any(|s| content.contains(s)) {
+            if active_indicators_for(agent_name)
+                .iter()
+                .any(|s| content.contains(s))
+            {
                 break;
             }
 
@@ -9922,7 +9969,7 @@ fn wait_for_agent_ready(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> Opt
             // be watched for here too — this is the case that actually bit in a
             // swebench container: claude exec'd, Check 1 broke out of step 1, and
             // the warning appeared only once we were already in this loop.
-            if dismiss_launch_dialog(tmux_ops, target, &content, &mut dialog_state) {
+            if dismiss_launch_dialog(tmux_ops, target, agent_name, &content, &mut dialog_state) {
                 last_content = String::new();
                 stable_ticks = 0;
                 continue;

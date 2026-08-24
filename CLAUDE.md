@@ -221,10 +221,10 @@ Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used
 |---|---|---|
 | `paste_text` | `load-buffer` + `paste-buffer -p` | a whole message; bracketed, atomic, newlines stay literal |
 | `send_text` | `send-keys -l --` | literal text; no key-name lookup |
-| `send_keys_literal` | `send-keys` (no `-l`) | **key names** — `Enter`, `C-c`, dialog answers |
+| `send_key` | `send-keys` (no `-l`) | **key names** — `Enter`, `C-c`, dialog answers |
 | `send_keys` | `send-keys` + `Enter` | text plus a submit, generic path |
 
-Without `-l`, tmux resolves an argument that matches a key name *as that key*: `"Space"` arrives as `0x20`, `"Escape"` as `ESC`, `"Up"` as `\033[A` (tmux 3.5a). So `send_keys_literal` — despite its name — must never carry task-derived text.
+Without `-l`, tmux resolves an argument that matches a key name *as that key*: `"Space"` arrives as `0x20`, `"Escape"` as `ESC`, `"Up"` as `\033[A` (tmux 3.5a). So `send_key` must never carry task-derived text — that is what `send_text` is for.
 
 ### First-Launch Dialogs
 Agents gate a brand-new directory behind an interactive dialog, and every task gets a brand-new
