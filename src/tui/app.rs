@@ -6493,7 +6493,12 @@ impl App {
             "command": agtx_bin,
             "args": ["mcp-serve", &project_path_str]
         });
-        let mcp_json_str = mcp_json.to_string().replace('\'', "'\\''");
+        // Escaped for the single-quoted word it becomes inside the orchestrator
+        // command (`add-json … '<json>'`). Only reachable when the project path
+        // contains an apostrophe. The *outer* `sh -c` layer is handled by
+        // `single_quote` in create_window — pre-escaping for it here would
+        // double-escape and break the command.
+        let mcp_json_str = mcp_json.to_string().replace('\'', "'\"'\"'");
 
         let agent_cmd = agent.build_orchestrator_command(&mcp_json_str, &agtx_bin);
 
@@ -7014,8 +7019,7 @@ impl App {
                 };
 
                 // The agent's own report of what it is doing, when it writes one.
-                // Authoritative over the pane heuristic below — see
-                // docs/planning/hook-based-phase-status.md.
+                // Authoritative over the pane heuristic below.
                 let hook_status = if phase_status == PhaseStatus::Working && !window_gone {
                     worktree_path
                         .as_ref()
@@ -8876,6 +8880,139 @@ fn spawn_send_to_agent(
     });
 }
 
+/// Attempts and per-attempt budget for [`deliver_message`].
+///
+/// Worst case is `DELIVERY_ATTEMPTS × (settle + confirm)` = 3 × (10s + 2s) = 36s,
+/// because the settle runs *inside* the attempt loop — and the OpenCodePicker
+/// path calls this twice, so ~72s. That only happens when the pane never goes
+/// quiet and nothing ever lands, i.e. a session that is already broken; every
+/// call site is a background thread, so it delays that task's send and nothing
+/// else.
+const DELIVERY_ATTEMPTS: u32 = 3;
+const DELIVERY_CONFIRM_POLLS: u32 = 10; // x 200ms = 2s
+/// Pane-settle budget before each attempt: 1s of quiet, given up on after 10s.
+const SETTLE_STABLE_POLLS: u32 = 5;
+const SETTLE_MAX_POLLS: u32 = 50;
+
+/// Longest prefix of a message used to confirm it landed on a pane that never
+/// went quiet. Short on purpose: a composer wraps and re-indents what it echoes,
+/// so a long needle straddles a line break and reads as absent.
+const DELIVERY_NEEDLE_CHARS: usize = 16;
+
+/// Whitespace-collapsed prefix of `text`, or `None` when there is nothing
+/// distinctive enough to look for.
+fn delivery_needle(text: &str) -> Option<String> {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let needle: String = flat.chars().take(DELIVERY_NEEDLE_CHARS).collect();
+    (needle.chars().count() >= 4).then_some(needle)
+}
+
+/// Whether `needle` is visible in `pane`, comparing both whitespace-collapsed so
+/// a wrap or re-indent in the composer does not hide it.
+fn pane_shows(pane: &str, needle: &str) -> bool {
+    let flat: String = pane.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.contains(needle)
+}
+
+/// Wait for the pane to stop changing, up to [`SETTLE_MAX_POLLS`].
+///
+/// Returns whether it settled; callers proceed either way, since a pane that
+/// never settles (a spinner, a clock) must not block the send forever.
+fn wait_for_pane_settled(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> bool {
+    let mut last = String::new();
+    let mut stable = 0u32;
+    for _ in 0..SETTLE_MAX_POLLS {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let now = tmux_ops.capture_pane(target).unwrap_or_default();
+        if now == last {
+            stable += 1;
+            if stable >= SETTLE_STABLE_POLLS {
+                return true;
+            }
+        } else {
+            stable = 0;
+            last = now;
+        }
+    }
+    false
+}
+
+/// Put `text` into the agent's composer, resending while nothing lands.
+///
+/// An agent TUI that has not attached its stdin reader yet silently discards
+/// what it is sent, and bracketed paste does not help: the discard happens in
+/// the application, not in the pty. `wait_for_agent_ready` narrows that window
+/// but cannot close it — it has no signal for an agent that reports its npm
+/// wrapper in `pane_current_command` and declares no readiness indicator, so it
+/// falls through to a timeout and sends into whatever is there.
+///
+/// Landing is judged by **the pane changing**, not by finding the text in it: a
+/// composer wraps, re-indents and box-draws what it echoes, so any needle longer
+/// than a few characters is unreliable. Conversely a resend only happens while
+/// the pane is unchanged — the same rule [`dismiss_launch_dialog`] uses, and for
+/// the same reason: a redraw means the first one landed, and resending would
+/// double the message.
+///
+/// Returns whether the message was seen to land. Callers submit either way,
+/// because a false negative (a pane that happened not to redraw) must not
+/// swallow the task.
+fn deliver_message(
+    tmux_ops: &Arc<dyn TmuxOperations>,
+    target: &str,
+    text: &str,
+    paste: bool,
+) -> bool {
+    let needle = delivery_needle(text);
+    for attempt in 0..DELIVERY_ATTEMPTS {
+        // Settle first, for two reasons. A composer that is still rendering the
+        // previous turn may not take the message at all — a phase advance fires
+        // as soon as the artifact appears, which can be while the agent is still
+        // writing its closing lines. And a pane that is changing on its own makes
+        // change-detection meaningless, because the change it sees would be the
+        // agent's output rather than the echo of what was sent.
+        let settled = wait_for_pane_settled(tmux_ops, target);
+
+        // Clear the composer before a *resend* only. A resend happens because
+        // nothing was seen to land, but "seen" is not "did not" — if the first
+        // send did land and merely rendered late, appending a second copy gives
+        // the agent the message twice, concatenated. Ctrl+U is best-effort: an
+        // agent that does not map it to kill-line is no worse off than before
+        // this guard, and the first send is never preceded by one, so a fresh
+        // composer is never touched.
+        if attempt > 0 {
+            let _ = tmux_ops.send_key(target, "C-u");
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+
+        let before = tmux_ops.capture_pane(target).unwrap_or_default();
+        let _ = if paste {
+            tmux_ops.paste_text(target, text)
+        } else {
+            tmux_ops.send_text(target, text)
+        };
+        for _ in 0..DELIVERY_CONFIRM_POLLS {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let Ok(now) = tmux_ops.capture_pane(target) else {
+                continue;
+            };
+            // On a pane that went quiet, any change is the echo. On one that
+            // never did, a change proves nothing — it is the agent still
+            // writing — so the text itself has to be found. Without that
+            // distinction a busy pane confirms on its first poll every time,
+            // which is precisely the case the settle step exists for.
+            let landed = match (settled, needle.as_deref()) {
+                (true, _) => now != before,
+                (false, Some(n)) => pane_shows(&now, n),
+                (false, None) => now != before,
+            };
+            if landed {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Send skill command and prompt to the agent via tmux.
 /// When there is no prompt_trigger, combines skill command + prompt into a single message
 /// (separated by a newline). When a prompt_trigger is set, sends them as two separate messages
@@ -8957,53 +9094,29 @@ fn send_skill_and_prompt(
                 let rest = &full_text[first_line.len()..]; // rest of the message after first line
 
                 if cmd_name.starts_with('/') {
-                    // Send just the command name to trigger the picker
-                    let _ = tmux_ops.send_text(target, cmd_name);
-                    // Wait for picker to appear (command name visible in pane)
-                    for _ in 0..20 {
-                        std::thread::sleep(std::time::Duration::from_millis(200));
-                        if let Ok(content) = tmux_ops.capture_pane(target) {
-                            if content.contains(cmd_name) {
-                                break;
-                            }
-                        }
-                    }
+                    // Send just the command name to trigger the picker. Typed,
+                    // not pasted — the picker opens on typing — so this is the
+                    // step most exposed to a TUI that is not reading stdin yet,
+                    // and losing it loses the whole message: the Enter below then
+                    // confirms nothing and the args are typed into an empty
+                    // composer. `deliver_message` resends while the pane is
+                    // unchanged.
+                    deliver_message(tmux_ops, target, cmd_name, false);
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     // Enter confirms/inserts the command from picker
                     let _ = tmux_ops.send_key(target, "Enter");
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     // Now send the args + any remaining prompt text
                     let remaining = format!("{}{}", cmd_args, rest);
-                    let _ = tmux_ops.send_text(target, &remaining);
-                    // Wait for args to appear in pane
-                    let check = cmd_args.trim();
-                    if !check.is_empty() {
-                        for _ in 0..20 {
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                            if let Ok(content) = tmux_ops.capture_pane(target) {
-                                if content.contains(check) {
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    deliver_message(tmux_ops, target, &remaining, false);
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     let _ = tmux_ops.send_key(target, "Enter");
                     return;
                 }
             }
 
-            // No args (or no slash command): simple send + wait for visibility + Enter
-            let _ = tmux_ops.send_text(target, &full_text);
-            let check_str = full_text.lines().next().unwrap_or(&full_text);
-            for _ in 0..20 {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                if let Ok(content) = tmux_ops.capture_pane(target) {
-                    if content.contains(check_str) {
-                        break;
-                    }
-                }
-            }
+            // No args (or no slash command): one send, confirmed, then Enter.
+            deliver_message(tmux_ops, target, &full_text, false);
             std::thread::sleep(std::time::Duration::from_millis(200));
             // Enter to confirm picker (if any), then second Enter to submit
             let _ = tmux_ops.send_key(target, "Enter");
@@ -9061,10 +9174,12 @@ fn send_skill_and_prompt(
             //    the message arrives as a second, truncated turn. Inside a bracketed
             //    paste they are literal text.
             //
-            // The short sleep gives the TUI a frame to ingest the paste before the
-            // submit; it is not a race the way the poll was, because the bytes are
-            // already in the pane's input buffer.
-            let _ = tmux_ops.paste_text(target, &text);
+            // Atomic is not the same as delivered, though: an agent that has
+            // not attached its stdin reader discards the paste whole, which is
+            // how every antigravity task reached its composer empty. So the
+            // paste goes through `deliver_message`, which resends while the pane
+            // is unchanged, and only then is it submitted.
+            deliver_message(tmux_ops, target, &text, true);
             std::thread::sleep(std::time::Duration::from_millis(150));
             let _ = tmux_ops.send_key(target, "Enter");
 
@@ -9435,7 +9550,7 @@ static AGENT_COMMANDS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyL
 /// would be strictly more correct — "Ask anything" matching in a Claude pane is a
 /// false positive today — but that *changes behaviour*, so it belongs in its own
 /// change with its own test rather than riding inside a refactor that is meant to
-/// preserve it. See open question 1 in docs/planning/agent-spec-table.md.
+/// preserve it.
 static AGENT_ACTIVE_INDICATORS: std::sync::LazyLock<Vec<&'static str>> =
     std::sync::LazyLock::new(|| {
         agent::AGENT_SPECS
@@ -9746,9 +9861,9 @@ const CONTENT_STABLE_THRESHOLD: u32 = 3;
 ///
 /// Flat because `wait_for_agent_ready` is handed only a tmux target and does not
 /// know which agent runs there. Attributing these at match time is strictly more
-/// correct but *changes behaviour*, so it gets its own change — see open question
-/// 1 in docs/planning/agent-spec-table.md. `Session`-scope dialogs are excluded:
-/// they are matched against their own agent only, by the refresh loop.
+/// correct but *changes behaviour*, so it gets its own change. `Session`-scope
+/// dialogs are excluded: they are matched against their own agent only, by the
+/// refresh loop.
 static LAUNCH_DIALOGS: std::sync::LazyLock<Vec<&'static agent::AgentDialog>> =
     std::sync::LazyLock::new(|| {
         agent::AGENT_SPECS
@@ -9835,9 +9950,10 @@ fn answer_session_dialogs(
         .filter(|d| d.scope == agent::DialogScope::Session)
     {
         if dialog.matches(content) {
-            let _ = tmux_ops.send_key(target, dialog.answer);
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            let _ = tmux_ops.send_key(target, "Enter");
+            for key in dialog.answer {
+                let _ = tmux_ops.send_key(target, key);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
     }
 }
@@ -9876,9 +9992,10 @@ fn dismiss_launch_dialog(
         if attempts > 0 && last_hash != content_hash {
             continue;
         }
-        let _ = tmux_ops.send_key(target, dialog.answer);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let _ = tmux_ops.send_key(target, "Enter");
+        for key in dialog.answer {
+            let _ = tmux_ops.send_key(target, key);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         state.attempts[i] = (attempts + 1, content_hash);
         return true;
     }

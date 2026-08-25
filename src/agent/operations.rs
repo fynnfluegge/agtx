@@ -104,16 +104,17 @@ impl AgentOperations for CodingAgent {
             // `mcp remove`) so `add-json` doesn't fail with "already exists" and
             // short-circuit the `&&` into an empty shell.
             //
-            // The JSON must be single-quoted for `add-json`, but this whole
-            // command is itself wrapped in `sh -c '...'` by create_window. A bare
-            // `'{json}'` would close that outer quote and let the shell mangle the
-            // JSON (yielding "Invalid configuration: Invalid input"). Escape the
-            // wrapping quotes as `'\''` (the POSIX single-quote-in-single-quote
-            // idiom, same convention build_interactive_command uses for prompts)
-            // so they survive the outer `sh -c` layer intact.
+            // The JSON is a single-quoted word for `add-json`, and that is all
+            // this layer does. `create_window` wraps the whole command in
+            // `sh -c '…'` and quotes it properly on the way through
+            // (`single_quote` in src/tmux/operations.rs), so the wrapping quotes
+            // must **not** be pre-escaped here — doing so double-escapes them and
+            // the inner shell dies on an unterminated quote before `add-json`
+            // ever runs. Any apostrophe *inside* the JSON is escaped by the
+            // caller, which is the only thing that needs handling at this layer.
             "claude" => format!(
                 "claude mcp remove agtx-orchestrator --scope local 2>/dev/null || true; \
-                 claude mcp add-json agtx-orchestrator '\\''{}'\\'' --scope local && {}; \
+                 claude mcp add-json agtx-orchestrator '{}' --scope local && {}; \
                  claude mcp remove agtx-orchestrator --scope local",
                 mcp_json,
                 self.build_interactive_command("")

@@ -114,7 +114,13 @@ tests/
 ├── hook_status_tests.rs  # Agent lifecycle-hook status reporting
 ├── mcp_tests.rs       # MCP server tests
 ├── mock_infrastructure_tests.rs # Mock infrastructure tests
-└── shell_popup_tests.rs         # Shell popup logic tests
+├── shell_popup_tests.rs         # Shell popup logic tests
+└── smoke/             # Per-agent smoke tests — real binaries, no mocks, opt-in
+    ├── agent_smoke.py      # The runner: scratch repo → TUI in tmux → phases over MCP
+    ├── test_agent_smoke.py # Deterministic tests for the harness itself (no tmux/auth)
+    ├── agent_matrix.rs     # Dumps AGENT_SPECS + BUNDLED_PLUGINS as JSON for the runner
+    │                       # (a [[example]] in Cargo.toml, so `cargo test` compiles it)
+    └── README.md           # What it asserts, its outcomes, and what it has found
 
 benchmark/             # SWE-bench harness
 docker/                # Container images for sandboxed runs
@@ -207,11 +213,15 @@ Prompt delivery has **two lanes**. Getting this wrong is the usual cause of "the
 
 Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used here, so `{task}` keeps its paragraphs and lists (the typed path must flatten them); and `spec::normalize_prompt()` strips NUL, `\r` and other control characters that cannot survive argv, keeping `\n` and `\t`.
 
+**The prompt is quoted twice, and both layers must escape.** `compose_command` single-quotes the prompt, then `create_window` nests the whole command inside `sh -c …`. Interpolating it raw ends the outer word at the first inner quote and the shell parses the prompt as code — verified against tmux 3.5a, claude received argv `["--dangerously-skip-permissions", "/agtx:plan"]` with the task id and entire task silently gone, and codex's `$agtx-plan` lost `$agtx` to expansion. `single_quote()` in `src/tmux/operations.rs` is the second layer; its tests run the wrapper through a real `sh` and assert the delivered argv, because a string-equality test would have passed on the broken version.
+
 **Mid-session lane — phase advances into an already-running agent.** `send_skill_and_prompt()`, three paths, because agent TUIs disagree about how a slash command plus arguments must arrive:
 
 1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter. Still on the typed path: it is the one flow where the text has to arrive in two pieces by design
 2. **gemini / codex / cursor / antigravity** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. **No second Enter for Codex**: its command picker opens on *typing*, not on a paste (verified against codex-cli 0.144.5), so there is nothing to dismiss
 3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
+
+**Atomic is not the same as delivered.** An agent TUI that has not attached its stdin reader yet discards what it is sent — bracketed paste included, because the discard happens in the application, not in the pty — and `wait_for_agent_ready` cannot prove otherwise. So paths 1 and 2 go through `deliver_message()`, which resends **while the pane is unchanged** (three attempts, 2s each) and stops the moment it redraws, on the same reasoning `dismiss_launch_dialog` uses: a redraw means it landed, and resending would double the message. Landing is judged by the pane changing rather than by finding the text, because a composer wraps, re-indents and box-draws what it echoes.
 
 `clear_context_on_advance` is applied before all three, and only for Claude (`/clear`, then poll until the pane stabilises).
 
@@ -232,17 +242,20 @@ worktree — so these fire on the *first* launch of nearly every task, not just 
 `LAUNCH_DIALOGS` (`src/tui/app.rs`) is the table of `(patterns, answer)`; `dismiss_launch_dialog`
 answers any that is visible.
 
-Dialogs are declared per agent on `AgentSpec::dialogs` and **matched against the running agent's own entries** — answering sends a menu digit, and a stray digit typed into another agent's live composer is real corruption. An agent with no spec falls back to matching every known dialog, which beats leaving its pane blocked forever.
+Dialogs are declared per agent on `AgentSpec::dialogs` and **matched against the running agent's own entries** — a stray digit typed into another agent's live composer is real corruption. An agent with no spec falls back to matching every known dialog, which beats leaving its pane blocked forever.
+
+`answer` is a **key sequence**, not one key, because menus differ in kind: a numbered menu needs the digit and then an Enter to confirm, while an arrow-navigated menu whose safe option is already highlighted needs only the Enter — and sending it a digit first would type a stray character into the composer it opens.
 
 | Agent | Dialog | Match | Answer | Scope |
 |---|---|---|---|---|
-| claude | workspace trust | `Yes, I trust this folder` | `1` | Launch — per directory, `projects."<dir>".hasTrustDialogAccepted` in `~/.claude.json` |
-| claude | bypass-permissions warning | `Yes, I accept` / `I accept the risk` | `2` | Launch — the `bypassPermissionsModeAccepted` preflight does **not** reliably suppress it |
-| codex | directory trust | `Do you trust the contents of this directory?` | `1` | Launch — per directory. Worded unlike Claude's *and* Gemini's, so neither pattern catches it |
-| codex | update prompt | `Update now (runs` | `2` (Skip) | Launch — never "Update now": agtx must not upgrade an agent binary behind the user's back |
-| codex | MCP tool approval | `Allow the` + `MCP server to run tool` + `Always allow` | `3` | **Session** — mid-session, matched only against a codex pane |
-| gemini | folder trust | `Do you trust the files in this folder?` | `1` | Launch — answering it restarts the process |
-| antigravity | project trust | *(none — deliberately unhandled)* | — | Its wording matches Claude's exactly, so flat matching used to answer it; per-agent scoping is what makes the documented "leave it to the user" decision real |
+| claude | workspace trust | `Yes, I trust this folder` | `1` `Enter` | Launch — per directory, `projects."<dir>".hasTrustDialogAccepted` in `~/.claude.json` |
+| claude | bypass-permissions warning | `Yes, I accept` / `I accept the risk` | `2` `Enter` | Launch — the `bypassPermissionsModeAccepted` preflight does **not** reliably suppress it |
+| codex | directory trust | `Do you trust the contents of this directory?` | `1` `Enter` | Launch — per directory. Worded unlike Claude's *and* Gemini's, so neither pattern catches it |
+| codex | update prompt | `Update now (runs` | `2` `Enter` (Skip) | Launch — never "Update now": agtx must not upgrade an agent binary behind the user's back |
+| codex | MCP tool approval | `Allow the` + `MCP server to run tool` + `Always allow` | `3` `Enter` | **Session** — mid-session, matched only against a codex pane |
+| gemini | folder trust | `Do you trust the files in this folder?` | `1` `Enter` | Launch — answering it restarts the process |
+| cursor | workspace trust | `Workspace Trust Required` | `a` alone | Launch — its question line is *identical* to codex's, so it is matched on the heading. Answered with the access key the dialog advertises, which survives an option being added above the highlighted row |
+| antigravity | project trust | `Do you trust the contents of this project?` | `Enter` alone | Launch — arrow-navigated with "Yes, I trust this folder" preselected, so a digit would land in the composer. Its own wording, not Claude's; codex's differs by one word (`directory`) |
 
 `require_all` distinguishes alternatives (several wordings of one prompt) from conjunctions (a prompt identified only by a combination of phrases).
 
@@ -252,8 +265,20 @@ happens while the pane is **unchanged** — a redraw means the answer landed, an
 type a stray digit into the agent's live composer.
 
 Missing an arm is silent and total: the task's prompt is delivered but never read, because the
-agent never reaches its composer. Antigravity's trust dialog is deliberately *not* handled — see
-the note in the agent's own section.
+agent never reaches its composer. Antigravity and cursor are the worked examples — same bug, two
+agents, found within a day of each other by the same smoke run. Antigravity's is the fuller story. It was left unhandled on the
+reasoning that its wording matched Claude's and the choice belonged to the user — but "unhandled"
+was never neutral: agtx pasted the task into a menu that ignores text, and its follow-up Enter
+confirmed the dialog, so **every** antigravity task reached its composer empty with the prompt gone.
+Per-agent scoping is what made answering it safe, and the per-agent smoke run
+(`tests/smoke/agent_smoke.py`) is what found it. Cursor's was the same shape, and shows why the
+scoping matters: its question line is *character-identical* to codex's, whose answer (`1`) is not
+even an option in cursor's menu.
+
+Some prompts must stay unanswered, and that is a different thing from being undeclared. Gemini's
+first-run `Opening authentication page in your browser. Do you want to continue?` has `1. Yes`
+preselected — an Enter would start an OAuth flow and open a browser, which is not a side effect a
+phase transition gets to have. Same reasoning as never choosing codex's "Update now".
 
 ### Session Persistence
 - Tmux window stays open when moving Running → Review
@@ -532,7 +557,7 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 
 ### Hook-Based Phase Status
 Agents that support lifecycle hooks report their own state instead of agtx guessing it from pane
-output. Design notes: `docs/planning/hook-based-phase-status.md`.
+output.
 
 ```
 Claude Code ──hook──► agtx hook <task-id> <worktree> ──► {worktree}/.agtx/status/{task_id}.json
@@ -625,7 +650,23 @@ cargo test
 
 # Run tests with mock support
 cargo test --features test-mocks
+
+# Per-agent smoke tests — real binaries, real auth, real tokens (opt-in, never CI)
+tests/smoke/agent_smoke.py                    # installed agents x the agtx plugin
+python3 tests/smoke/test_agent_smoke.py       # tests for the harness itself
 ```
+
+The smoke runner answers the one question the Rust suite cannot: **does a real agent binary actually
+receive its work?** Unit tests mock `TmuxOperations` and `agent_parity_tests.rs` pins the strings
+agtx builds, so neither can see "the agent ignored it" — the gap where every silent-hang bug so far
+has lived. Per phase it asserts the command was *submitted* (not parked in a composer), that a marker
+file carries the **task id** that was passed in, that the artifact appeared and the phase advanced,
+and that the session is still usable (process alive, no dialog on screen). Dialogs are never
+pre-answered — they are the thing under test. Details: `tests/smoke/README.md`.
+
+`cargo run --example agent_matrix` (source in `tests/smoke/`) dumps `AGENT_SPECS` +
+`BUNDLED_PLUGINS` as JSON. The smoke runner reads it instead of keeping its own copy of the agent
+table, and `cargo test` compiles it, so a new spec field breaks the build rather than drifting.
 
 Dependencies require:
 - A recent stable Rust (CI builds on `stable`; no MSRV is pinned in `Cargo.toml`)
@@ -648,8 +689,7 @@ Dependencies require:
 3. Use `hex_to_color(&state.config.theme.color_*)` in app.rs
 
 ### Adding a new agent
-Half of this is now one table entry; the other half is still per-agent match arms in `app.rs`
-(migrating those is stage E of `docs/planning/agent-spec-table.md`).
+Half of this is now one table entry; the other half is still per-agent match arms in `app.rs`.
 
 **`src/agent/spec.rs`** — the declarative half
 1. Add one `AgentSpec` entry to `AGENT_SPECS`: identity (name, binary, description, git co-author),

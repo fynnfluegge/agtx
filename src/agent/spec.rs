@@ -2,8 +2,7 @@
 //!
 //! Everything agtx knows about an agent that is *data* lives here; everything
 //! that is *behaviour* is selected by a small closed enum stored in the record
-//! rather than by re-matching the agent's name in each function. See
-//! `docs/planning/agent-spec-table.md` for the full rationale — the short
+//! rather than by re-matching the agent's name in each function. The short
 //! version is that a name-match ending in `_ => {}` cannot tell you an agent was
 //! only half added, and a kind-match over a closed enum can.
 //!
@@ -68,8 +67,7 @@ pub enum CommandSyntax {
 ///
 /// The distinction is forced by what each call site knows. `wait_for_agent_ready`
 /// is handed only a tmux target, so it matches `Launch` dialogs against any pane
-/// regardless of agent — a false positive is possible in principle and is the
-/// subject of open question 1 in docs/planning/agent-spec-table.md. The
+/// regardless of agent — a false positive is possible in principle. The
 /// session-refresh loop *does* know which agent runs in the pane, so `Session`
 /// dialogs are matched only against their own agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,8 +79,6 @@ pub enum DialogScope {
 }
 
 /// An interactive prompt that blocks the agent until it is answered.
-///
-/// `answer` is sent as a key — a menu digit — followed by Enter.
 #[derive(Debug, Clone, Copy)]
 pub struct AgentDialog {
     /// Text to look for in the pane. Combined per [`require_all`](Self::require_all).
@@ -92,7 +88,14 @@ pub struct AgentDialog {
     /// When true they are a **conjunction**: all must be present, for a prompt
     /// identified by a combination of phrases rather than one distinctive string.
     pub require_all: bool,
-    pub answer: &'static str,
+    /// The keys that answer it, in order, sent through tmux's key-name lookup.
+    ///
+    /// A sequence rather than a single key because menus differ in kind: a
+    /// numbered menu needs the digit *and* an Enter to confirm it, while an
+    /// arrow-navigated menu whose safe option is already highlighted needs only
+    /// the Enter — antigravity's trust prompt is the latter, and sending it a
+    /// digit first would type a stray character into the composer it opens.
+    pub answer: &'static [&'static str],
     pub scope: DialogScope,
 }
 
@@ -280,7 +283,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             AgentDialog {
                 patterns: &["Yes, I trust this folder"],
                 require_all: false,
-                answer: "1",
+                answer: &["1", "Enter"],
                 scope: DialogScope::Launch,
             },
             // `--dangerously-skip-permissions` acceptance. Not covered by
@@ -290,7 +293,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
                 // Alternatives: the wording has varied across Claude versions.
                 patterns: &["Yes, I accept", "I accept the risk"],
                 require_all: false,
-                answer: "2",
+                answer: &["2", "Enter"],
                 scope: DialogScope::Launch,
             },
         ],
@@ -331,7 +334,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             AgentDialog {
                 patterns: &["Do you trust the contents of this directory?"],
                 require_all: false,
-                answer: "1",
+                answer: &["1", "Enter"],
                 scope: DialogScope::Launch,
             },
             // Update prompt, shown whenever a newer codex is published. "Skip"
@@ -340,7 +343,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             AgentDialog {
                 patterns: &["Update now (runs"],
                 require_all: false,
-                answer: "2",
+                answer: &["2", "Enter"],
                 scope: DialogScope::Launch,
             },
             // MCP tool approval, shown mid-session the first time the agent calls
@@ -350,7 +353,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
                 // A conjunction: none of these three is distinctive alone.
                 patterns: &["Allow the", "MCP server to run tool", "Always allow"],
                 require_all: true,
-                answer: "3",
+                answer: &["3", "Enter"],
                 scope: DialogScope::Session,
             },
         ],
@@ -414,7 +417,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             AgentDialog {
                 patterns: &["Do you trust the files in this folder?"],
                 require_all: false,
-                answer: "1",
+                answer: &["1", "Enter"],
                 scope: DialogScope::Launch,
             },
         ],
@@ -469,7 +472,25 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         label_bg: None,
         send_strategy: SendStrategy::Combined,
         clear_context_command: None,
-        dialogs: &[],
+        dialogs: &[
+            // Workspace trust, per directory, so it fires on the first launch of
+            // every cursor task. Its question line is *identical* to codex's
+            // ("Do you trust the contents of this directory?"), which is why it
+            // is matched on the heading instead — and why per-agent scoping is
+            // what makes declaring it safe.
+            //
+            // Answered with the access key the dialog itself advertises ("or
+            // press the key shown") rather than an Enter on the highlighted row:
+            // explicit, and it survives an option being added above it. Verified
+            // against cursor-agent 2026.08.11 — "a" trusts the workspace without
+            // restarting the process, and a paste lands immediately after.
+            AgentDialog {
+                patterns: &["Workspace Trust Required"],
+                require_all: false,
+                answer: &["a"],
+                scope: DialogScope::Launch,
+            },
+        ],
     },
     AgentSpec {
         name: "grok",
@@ -512,12 +533,15 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // unattended.
         base_args: &["--dangerously-skip-permissions", "--mode", "accept-edits"],
         prompt_form: PromptForm::Flag("-i"),
-        // Deliberately still false. `agy … -i '<prompt>'` *does* deliver — the
-        // skill ran and wrote its file — but the session is then parked on
-        // antigravity's own trust dialog ("Do you trust the contents of this
-        // project?", arrow-navigated), which agtx does not answer by design: see
-        // the antigravity notes in CLAUDE.md. A launch lane that delivers into a
-        // blocked session is not a working launch lane.
+        // Deliberately still false, for a narrower reason than before. `agy … -i
+        // '<prompt>'` *does* deliver — the skill ran and wrote its file — and the
+        // trust dialog that used to strand the session afterwards is now answered
+        // (see `dialogs` below). What is unverified is the *ordering*: on a first
+        // launch the dialog is up before the composer exists, and whether an
+        // argv-delivered prompt survives being handed to a menu has not been
+        // checked against the real binary. The mid-session lane works, so this
+        // stays off until someone measures it — flipping it wrong swallows the
+        // task silently.
         launch_prompt_verified: false,
         resume: ResumeArgs::Append(&["--continue"]),
         headless_args: &["-p"],
@@ -529,13 +553,42 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         command_syntax: CommandSyntax::Hyphen,
         mcp_config: Some(McpConfigKind::AntigravityJsonMerge),
         process_names: &["agy"],
-        active_indicators: &[],
+        // Shown only once the session is interactive: the trust dialog's own
+        // footer reads "↑/↓ Navigate · enter Confirm" instead, so this cannot
+        // fire while the pane is still blocked. Without it antigravity had no
+        // readiness signal at all — `pane_current_command` reports `bash` for its
+        // npm wrapper, and the content-stabilisation fallback needs three pane
+        // changes where its splash produces two.
+        active_indicators: &["? for shortcuts"],
         exit_command: Some("/exit"),
         label_fg: (120, 190, 255), // light blue
         label_bg: None,
         send_strategy: SendStrategy::Combined,
         clear_context_command: None,
-        dialogs: &[],
+        dialogs: &[
+            // Project trust, shown on the first launch in any directory — which
+            // is every task, because every task gets a new worktree. It was
+            // deliberately left unanswered while dialogs were matched flat, when
+            // answering it meant Claude's identical "Yes, I trust this folder"
+            // pattern firing in any pane. Per-agent scoping removed that risk,
+            // and leaving it stood the session up blocked: the paste went into a
+            // menu that ignores text and agtx's follow-up Enter confirmed the
+            // dialog, so every antigravity task reached its composer empty.
+            //
+            // Answered with a bare Enter: this menu is arrow-navigated with
+            // "Yes, I trust this folder" preselected, so a digit would be typed
+            // into the composer the Enter then opens. Verified against
+            // antigravity 1.1.20 — the process does not restart, and a paste
+            // lands immediately afterwards.
+            AgentDialog {
+                // Its own wording, not Claude's. Codex's differs by one word
+                // ("directory"), which is why each is matched separately.
+                patterns: &["Do you trust the contents of this project?"],
+                require_all: false,
+                answer: &["Enter"],
+                scope: DialogScope::Launch,
+            },
+        ],
     },
     // TODO: investigate CLI usage before enabling
     // aider  — "AI pair programming in your terminal", Aider <noreply@aider.chat>

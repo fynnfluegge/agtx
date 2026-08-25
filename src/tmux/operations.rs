@@ -81,6 +81,38 @@ pub trait TmuxOperations: Send + Sync {
     fn create_session(&self, session: &str, working_dir: &str) -> Result<()>;
 }
 
+/// Wrap `text` as one POSIX single-quoted shell word.
+///
+/// [`create_window`](TmuxOperations::create_window) nests the agent's launch
+/// command inside `sh -c …`, and that command has **already** been quoted by
+/// [`compose_command`](crate::agent::spec::compose_command) — which single-quotes
+/// the task prompt. Interpolating it into another pair of single quotes ends the
+/// outer word at the first inner quote, and the shell then parses the prompt as
+/// code: verified against tmux 3.5a, `claude --dangerously-skip-permissions
+/// '/agtx:plan <id>\n\n<task>'` reached the process as argv
+/// `["--dangerously-skip-permissions", "/agtx:plan"]` — the id and the whole task
+/// silently gone — and codex's `$agtx-plan` fared worse still, with `$agtx`
+/// expanded to nothing and only `-plan` surviving.
+///
+/// So the inner command is quoted here rather than interpolated raw, closing the
+/// quote and reopening it around each literal `'` in the usual POSIX way.
+fn single_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\"'\"'"))
+}
+
+/// The shell command tmux is asked to run for an agent pane.
+///
+/// `keep_shell_on_exit` drops to a login shell afterwards, so a task pane
+/// survives the agent quitting and can be inspected.
+fn wrap_launch_command(shell_cmd: &str, keep_shell_on_exit: bool) -> String {
+    let inner = single_quote(shell_cmd);
+    if keep_shell_on_exit {
+        format!("env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT sh -c {inner}; exec $SHELL")
+    } else {
+        format!("env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT sh -c {inner}")
+    }
+}
+
 /// Real implementation using actual tmux commands
 pub struct RealTmuxOps;
 
@@ -110,19 +142,8 @@ impl TmuxOperations for RealTmuxOps {
             // Unset Claude Code's nesting-detection env vars so that agents
             // launched in task panes are not blocked by the "launched inside
             // another Claude Code session" check.
-            if keep_shell_on_exit {
-                let wrapped = format!(
-                    "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT sh -c '{}'; exec $SHELL",
-                    shell_cmd
-                );
-                cmd.args(["sh", "-c", &wrapped]);
-            } else {
-                let wrapped = format!(
-                    "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT sh -c '{}'",
-                    shell_cmd
-                );
-                cmd.args(["sh", "-c", &wrapped]);
-            }
+            let wrapped = wrap_launch_command(shell_cmd, keep_shell_on_exit);
+            cmd.args(["sh", "-c", &wrapped]);
         }
 
         let output = cmd.output()?;
@@ -294,5 +315,148 @@ impl TmuxOperations for RealTmuxOps {
             .args(["-c", working_dir])
             .output()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run the wrapper through a real `sh`, exactly as tmux does, and report the
+    /// argv the launched process actually received.
+    fn argv_delivered_by(shell_cmd: &str) -> Vec<String> {
+        let wrapped = wrap_launch_command(shell_cmd, false);
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&wrapped)
+            .output()
+            .expect("sh should run");
+        String::from_utf8_lossy(&out.stdout)
+            .split('\u{1}')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// `printf` with a NUL-free separator, so an argument containing newlines
+    /// stays one argument in the parsed output.
+    fn dump_argv_command(args: &[&str]) -> String {
+        let quoted: Vec<String> = args.iter().map(|a| single_quote(a)).collect();
+        format!("printf '%s\u{1}' {}", quoted.join(" "))
+    }
+
+    #[test]
+    fn a_launch_prompt_reaches_the_process_intact() {
+        // The shape `compose_command` produces for the launch lane: flags, then
+        // the whole opening message as one single-quoted word.
+        let prompt = "/agtx:plan 57d57fe8-5990\n\nSMOKE TEST line two";
+        let cmd = dump_argv_command(&["--dangerously-skip-permissions", prompt]);
+        assert_eq!(
+            argv_delivered_by(&cmd),
+            vec!["--dangerously-skip-permissions".to_string(), prompt.to_string()],
+        );
+    }
+
+    #[test]
+    fn a_dollar_command_is_not_expanded_away() {
+        // Codex's skill syntax is `$agtx-plan`. Interpolated into the wrapper
+        // unquoted, the shell expanded `$agtx` to nothing and only `-plan`
+        // survived — the whole task text with it.
+        let prompt = "$agtx-plan 468b79fa\n\nSMOKE TEST";
+        let cmd = dump_argv_command(&["--sandbox", "workspace-write", prompt]);
+        assert_eq!(
+            argv_delivered_by(&cmd),
+            vec![
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+                prompt.to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_quote_in_the_task_survives_both_quoting_layers() {
+        let prompt = "fix the parser so it's correct";
+        let cmd = dump_argv_command(&[prompt]);
+        assert_eq!(argv_delivered_by(&cmd), vec![prompt.to_string()]);
+    }
+
+    /// Run the wrapped command with a fake `claude` on `PATH` that echoes its
+    /// argv, and return what that binary actually received.
+    ///
+    /// `sh -n` is not enough here: it parses only the *outer* layer, and the
+    /// wrapper is always outer-valid. A mis-quoted inner command parses fine and
+    /// then dies at run time with "unexpected EOF while looking for matching `''"
+    /// — verified, and the reason the first version of this test had no teeth.
+    #[cfg(unix)]
+    fn argv_seen_by_fake_claude(shell_cmd: &str) -> (bool, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = dir.path().join("claude");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").expect("write fake");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(wrap_launch_command(shell_cmd, false))
+            .env("PATH", path)
+            .output()
+            .expect("sh should run");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )
+    }
+
+    /// The orchestrator command is the other thing `create_window` wraps, and it
+    /// carries a single-quoted JSON blob for `claude mcp add-json`.
+    ///
+    /// It used to pre-escape its own wrapping quotes because it was interpolated
+    /// raw. Now that `single_quote` quotes the whole command, that pre-escape
+    /// double-escapes: the pane dies on an unterminated quote before `add-json`
+    /// runs, silently, because the window is created either way. Nothing else
+    /// covers this path — the TUI tests mock the command builder.
+    #[cfg(unix)]
+    #[test]
+    fn the_orchestrator_command_reaches_claude_with_its_json_intact() {
+        let agent = crate::agent::Agent::new("claude", "claude", "", "");
+        let ops = crate::agent::CodingAgent::new(agent);
+        let json = r#"{"type":"stdio","command":"/bin/agtx","args":["mcp-serve","/tmp/repo"]}"#;
+        let cmd = crate::agent::AgentOperations::build_orchestrator_command(&ops, json, "/bin/agtx");
+        let (ok, seen) = argv_seen_by_fake_claude(&cmd);
+        assert!(ok, "the wrapped orchestrator command must run: {seen}");
+        assert!(
+            seen.lines().any(|l| l == json),
+            "claude must receive the JSON as one intact argument; got:\n{seen}"
+        );
+    }
+
+    /// ...and a project path containing an apostrophe still arrives intact,
+    /// because the caller escapes it for the single-quoted word it lands in.
+    #[cfg(unix)]
+    #[test]
+    fn an_apostrophe_in_the_mcp_json_survives_both_layers() {
+        let agent = crate::agent::Agent::new("claude", "claude", "", "");
+        let ops = crate::agent::CodingAgent::new(agent);
+        let raw = r#"{"args":["mcp-serve","/tmp/it's a repo"]}"#;
+        let escaped = raw.replace('\'', "'\"'\"'");
+        let cmd =
+            crate::agent::AgentOperations::build_orchestrator_command(&ops, &escaped, "/bin/agtx");
+        let (ok, seen) = argv_seen_by_fake_claude(&cmd);
+        assert!(ok, "the wrapped orchestrator command must run: {seen}");
+        assert!(
+            seen.lines().any(|l| l == raw),
+            "claude must receive the unescaped JSON; got:\n{seen}"
+        );
+    }
+
+    #[test]
+    fn the_pane_drops_to_a_shell_only_when_asked() {
+        assert!(wrap_launch_command("claude", true).ends_with("; exec $SHELL"));
+        assert!(!wrap_launch_command("claude", false).contains("exec $SHELL"));
     }
 }

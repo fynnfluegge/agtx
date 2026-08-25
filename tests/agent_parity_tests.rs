@@ -1,11 +1,10 @@
 //! Byte-for-byte lock on every pure per-agent function, for all supported agents.
 //!
-//! Written against the behaviour that existed *before* the `AgentSpec` table
-//! (docs/planning/agent-spec-table.md) and must not change value while that
-//! refactor proceeds: a diff in this file is the signal that a launch string,
-//! skill path or command syntax silently changed, which is exactly the failure
-//! mode this refactor risks — an agent that still compiles and still starts, but
-//! misbehaves inside a worktree.
+//! Written against the behaviour that existed *before* the `AgentSpec` table,
+//! and must not change value while that refactor proceeds: a diff in this file
+//! is the signal that a launch string, skill path or command syntax silently
+//! changed, which is exactly the failure mode this refactor risks — an agent
+//! that still compiles and still starts, but misbehaves inside a worktree.
 //!
 //! Expected values are written as literals on purpose. Deriving them from the
 //! same table the code reads would assert nothing.

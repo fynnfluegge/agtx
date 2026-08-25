@@ -628,7 +628,7 @@ impl AgtxMcpServer {
                     };
                     // Read the agent's own status file, written by its hooks.
                     // Works cross-process precisely because it is a file rather
-                    // than TUI state — see docs/planning/hook-based-phase-status.md.
+                    // than TUI state.
                     let hook = t.worktree_path.as_ref().and_then(|wt| {
                         crate::agent::hook_status::read_status(
                             std::path::Path::new(wt),

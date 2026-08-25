@@ -3537,6 +3537,252 @@ fn test_gsd_plugin_has_cyclic_and_copy_back() {
 // Tests for send_skill_and_prompt
 // =============================================================================
 
+/// A message the agent's TUI never echoed was dropped, not delayed — that is
+/// what a pane unchanged across the whole confirm budget means. Resending is the
+/// only recovery: `wait_for_agent_ready` cannot prove an Ink-class TUI has
+/// attached its stdin reader, and a dropped send is otherwise silent and total.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_resends_while_the_pane_is_unchanged() {
+    let mut mock = MockTmuxOperations::new();
+    let pastes = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let pastes_c = pastes.clone();
+    mock.expect_send_key().returning(|_, _| Ok(())); // the C-u before each resend
+    mock.expect_paste_text().returning(move |_, _| {
+        *pastes_c.lock().unwrap() += 1;
+        Ok(())
+    });
+    mock.expect_capture_pane()
+        .returning(|_| Ok("frozen splash".to_string()));
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(!deliver_message(&tmux, "sess:win", "hello", true));
+    assert_eq!(*pastes.lock().unwrap(), DELIVERY_ATTEMPTS as usize);
+}
+
+/// ...and the moment the pane redraws it stops, because a redraw means the
+/// message landed and a resend would double it — the same rule
+/// `dismiss_launch_dialog` uses for a dropped keystroke.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_stops_as_soon_as_the_pane_redraws() {
+    let mut mock = MockTmuxOperations::new();
+    let sends = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let sends_c = sends.clone();
+    mock.expect_send_text().returning(move |_, _| {
+        *sends_c.lock().unwrap() += 1;
+        Ok(())
+    });
+    expect_echoing_pane(&mut mock, "composer");
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(deliver_message(&tmux, "sess:win", "hello", false));
+    assert_eq!(*sends.lock().unwrap(), 1, "no resend after a redraw");
+}
+
+/// The antigravity failure mode end to end: the paste is dropped by a TUI that
+/// is not reading yet, so the combined send must retry rather than submit an
+/// empty composer.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_combined_send_retries_a_dropped_paste() {
+    let mut mock = MockTmuxOperations::new();
+    let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let pastes_c = pastes.clone();
+    mock.expect_send_key().returning(|_, _| Ok(()));
+    mock.expect_paste_text().returning(move |_, text| {
+        pastes_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    mock.expect_capture_pane()
+        .returning(|_| Ok("Do you trust the contents of this project?".to_string()));
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    send_skill_and_prompt(
+        &tmux,
+        "sess:win",
+        &Some("/agtx-plan abc".to_string()),
+        "",
+        &None,
+        "task",
+        "antigravity",
+        &[],
+        false,
+    );
+    let pasted = pastes.lock().unwrap();
+    assert_eq!(pasted.len(), DELIVERY_ATTEMPTS as usize);
+    assert!(pasted.iter().all(|p| p.contains("/agtx-plan abc")));
+}
+
+/// A pane that never goes quiet cannot confirm delivery by "something changed" —
+/// the change is the agent's own output. Confirming on the text itself is what
+/// keeps the busy case honest; without it the first poll always says "landed",
+/// which is exactly the case the settle step was added for.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_on_a_busy_pane_confirms_on_the_text_not_the_change() {
+    let mut mock = MockTmuxOperations::new();
+    let sends = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let sends_c = sends.clone();
+    let counter = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    mock.expect_send_key().returning(|_, _| Ok(()));
+    mock.expect_paste_text().returning(move |_, _| {
+        *sends_c.lock().unwrap() += 1;
+        Ok(())
+    });
+    // Never the same twice, and never containing the message: a streaming pane
+    // that dropped what it was sent.
+    mock.expect_capture_pane().returning(move |_| {
+        let mut n = counter.lock().unwrap();
+        *n += 1;
+        Ok(format!("streaming line {n}"))
+    });
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(!deliver_message(&tmux, "sess:win", "/agtx-plan abc-123", true));
+    assert_eq!(
+        *sends.lock().unwrap(),
+        DELIVERY_ATTEMPTS as usize,
+        "a busy pane that never shows the text must still retry"
+    );
+}
+
+/// ...and once the text does appear on that busy pane, it stops.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_on_a_busy_pane_stops_once_the_text_appears() {
+    let mut mock = MockTmuxOperations::new();
+    let sends = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let sends_c = sends.clone();
+    let counter = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    mock.expect_send_key().returning(|_, _| Ok(()));
+    mock.expect_paste_text().returning(move |_, _| {
+        *sends_c.lock().unwrap() += 1;
+        Ok(())
+    });
+    mock.expect_capture_pane().returning(move |_| {
+        let mut n = counter.lock().unwrap();
+        *n += 1;
+        // Still streaming, but the composer now echoes the message — wrapped and
+        // re-indented, the way a real one does.
+        Ok(format!("streaming {n}\n  >  /agtx-plan\n     abc-123"))
+    });
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(deliver_message(&tmux, "sess:win", "/agtx-plan abc-123", true));
+    assert_eq!(*sends.lock().unwrap(), 1, "no resend once the text is visible");
+}
+
+/// A resend clears the composer first: "nothing was seen to land" is not "nothing
+/// landed", and a late redraw would otherwise leave the agent holding the message
+/// twice, concatenated.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_clears_the_composer_before_a_resend() {
+    let mut mock = MockTmuxOperations::new();
+    let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keys_c = keys.clone();
+    mock.expect_send_key().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    mock.expect_paste_text().returning(|_, _| Ok(()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("frozen".to_string()));
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(!deliver_message(&tmux, "sess:win", "hello there", true));
+    let keys = keys.lock().unwrap();
+    assert_eq!(
+        keys.iter().filter(|k| k.as_str() == "C-u").count(),
+        DELIVERY_ATTEMPTS as usize - 1,
+        "one clear before each resend, never before the first send: {keys:?}"
+    );
+}
+
+/// The needle is short and whitespace-insensitive on both sides, because a
+/// composer wraps and re-indents what it echoes.
+#[test]
+fn test_delivery_needle_survives_wrapping() {
+    let needle = delivery_needle("/agtx-plan 57d57fe8-5990\n\nSMOKE TEST").unwrap();
+    assert!(pane_shows("  >  /agtx-plan\n     57d57fe8-5990 ...", &needle));
+    assert!(!pane_shows("  >  waiting for input", &needle));
+    // Nothing distinctive enough to look for.
+    assert!(delivery_needle("hi").is_none());
+    assert!(delivery_needle("   ").is_none());
+}
+
+/// A phase advance fires as soon as the artifact appears, which can be while the
+/// agent is still writing its closing lines — and a composer mid-render may not
+/// take the message at all. Worse, a pane changing on its own makes the delivery
+/// confirmation meaningless: the change it sees is the agent's output, not the
+/// echo. So the send waits for quiet first.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_waits_for_the_pane_to_go_quiet_first() {
+    let mut mock = MockTmuxOperations::new();
+    let captures_before_send = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counter = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let seen = captures_before_send.clone();
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let sent_c = sent.clone();
+    let counter_c = counter.clone();
+
+    mock.expect_capture_pane().returning(move |_| {
+        let mut n = counter_c.lock().unwrap();
+        *n += 1;
+        if !*sent_c.lock().unwrap() {
+            *seen.lock().unwrap() = *n;
+        }
+        // Streaming output for the first few polls, then quiet.
+        Ok(if *n <= 3 {
+            format!("streaming {n}")
+        } else if *sent_c.lock().unwrap() {
+            "echoed".to_string()
+        } else {
+            "quiet".to_string()
+        })
+    });
+    let sent_w = sent.clone();
+    mock.expect_paste_text().returning(move |_, _| {
+        *sent_w.lock().unwrap() = true;
+        Ok(())
+    });
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(deliver_message(&tmux, "sess:win", "hello", true));
+    assert!(
+        *captures_before_send.lock().unwrap() > 3,
+        "the send must wait out the streaming output, not fire into it"
+    );
+}
+
+/// A `capture_pane` that models an idle pane which then echoes what was sent:
+/// quiet long enough for `wait_for_pane_settled`, then changed once, so
+/// [`deliver_message`] confirms on its first poll and does not resend.
+///
+/// The number of quiet captures is derived from the settle constants rather than
+/// hardcoded, so tuning them does not silently turn these tests into
+/// resend-three-times tests. A pane that *never* changes is what a dropped
+/// message looks like, and is covered on purpose by
+/// `test_deliver_message_resends_while_the_pane_is_unchanged`.
+#[cfg(feature = "test-mocks")]
+fn expect_echoing_pane(mock: &mut MockTmuxOperations, echoed: &'static str) {
+    // `wait_for_pane_settled` needs one baseline capture plus SETTLE_STABLE_POLLS
+    // identical ones; `deliver_message` then takes its own baseline.
+    let quiet = SETTLE_STABLE_POLLS as usize + 2;
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    mock.expect_capture_pane().returning(move |_| {
+        let mut n = calls.lock().unwrap();
+        *n += 1;
+        Ok(if *n <= quiet {
+            "idle composer".to_string()
+        } else {
+            echoed.to_string()
+        })
+    });
+}
+
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_send_skill_and_prompt_gemini_combined() {
@@ -3555,8 +3801,7 @@ fn test_send_skill_and_prompt_gemini_combined() {
         pastes_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
-    mock.expect_capture_pane()
-        .returning(|_| Ok("/agtx:plan\n\nmy task".to_string()));
+    expect_echoing_pane(&mut mock, "/agtx:plan\n\nmy task");
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -3607,8 +3852,7 @@ fn test_send_skill_and_prompt_codex_combined() {
         pastes_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
-    mock.expect_capture_pane()
-        .returning(|_| Ok("$agtx-plan\n\ndo the thing".to_string()));
+    expect_echoing_pane(&mut mock, "$agtx-plan\n\ndo the thing");
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -6187,7 +6431,7 @@ fn test_apply_session_refresh_ready_inserts_cache() {
     assert!(!app.state.pane_content_hashes.contains_key("t1"));
 }
 
-// ── hook-reported status (docs/planning/hook-based-phase-status.md) ──────────
+// ── hook-reported status ─────────────────────────────────────────────────────
 
 #[cfg(feature = "test-mocks")]
 fn hook(state: crate::agent::hook_status::HookState) -> crate::agent::hook_status::AgentHookStatus {
@@ -9880,9 +10124,7 @@ fn test_send_skill_and_prompt_opencode_combined_with_double_enter() {
         texts_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
-    // capture_pane returns content with skill+prompt text so the wait loop exits quickly
-    mock.expect_capture_pane()
-        .returning(|_| Ok("/agtx-plan\n\ndo the thing".to_string()));
+    expect_echoing_pane(&mut mock, "/agtx-plan\n\ndo the thing");
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -9930,8 +10172,7 @@ fn test_send_skill_and_prompt_cursor_combined_single_enter() {
         pastes_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
-    mock.expect_capture_pane()
-        .returning(|_| Ok("/agtx-plan\n\nmy task".to_string()));
+    expect_echoing_pane(&mut mock, "/agtx-plan\n\nmy task");
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -10997,15 +11238,15 @@ fn test_dismiss_launch_dialog_answers_claude_workspace_trust() {
 fn test_claude_launch_dialogs_do_not_overlap() {
     let trust = "\u{276f} 1. Yes, I trust this folder\n    2. No, exit";
     let bypass = "WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n  2. Yes, I accept";
-    let matches = |content: &str| -> Vec<&'static str> {
+    let matches = |content: &str| -> Vec<&'static [&'static str]> {
         LAUNCH_DIALOGS
             .iter()
             .filter(|d| d.matches(content))
             .map(|d| d.answer)
             .collect()
     };
-    assert_eq!(matches(trust), vec!["1"], "trust dialog");
-    assert_eq!(matches(bypass), vec!["2"], "bypass dialog");
+    assert_eq!(matches(trust), vec![&["1", "Enter"][..]], "trust dialog");
+    assert_eq!(matches(bypass), vec![&["2", "Enter"][..]], "bypass dialog");
 }
 
 #[test]
@@ -11246,7 +11487,7 @@ fn test_skip_worktree_tasks_share_one_task_agnostic_hook() {
     );
 }
 
-// ── binary-path drift (docs/planning/hook-based-phase-status.md) ─────────────
+// ── binary-path drift ────────────────────────────────────────────────────────
 
 /// Deploying records which binary did it, so the startup check is O(1) per task
 /// instead of parsing seven config formats.
@@ -11318,7 +11559,7 @@ fn test_claude_settings_preflight_bypass_acceptance() {
 
 /// Deploying one skill for every supported agent lands at exactly these paths.
 ///
-/// The step-5 guard from docs/planning/agent-spec-table.md: `deploy_skill` and
+/// `deploy_skill` and
 /// `write_skills_to_worktree` each carried their own copy of this layout branch
 /// and had already drifted apart, so the layouts are pinned as literals here
 /// rather than derived from the same table the code reads.
@@ -11414,6 +11655,12 @@ fn test_active_indicator_derivation_matches_the_previous_literals() {
         "OpenAI Codex",      // Codex
         "Grok Build",        // Grok — splash/footer
         "Shift+Tab:mode",    // Grok — session footer once a turn has run
+        // Antigravity, added after the smoke run found it had no readiness
+        // signal at all: its npm wrapper reports `bash` in pane_current_command,
+        // and its splash produces two pane changes where the stabilisation
+        // fallback needs three. Its trust dialog's footer reads
+        // "↑/↓ Navigate · enter Confirm", so this cannot fire while blocked.
+        "? for shortcuts",
     ];
     want.sort_unstable();
     assert_eq!(got, want);
@@ -11490,19 +11737,30 @@ fn test_clear_context_command_is_claude_only() {
 /// are matched per agent, not against any pane.
 #[test]
 fn test_launch_dialog_derivation_matches_the_previous_literals() {
-    let mut got: Vec<(Vec<&str>, &str)> = LAUNCH_DIALOGS
+    let mut got: Vec<(Vec<&str>, Vec<&str>)> = LAUNCH_DIALOGS
         .iter()
-        .map(|d| (d.patterns.to_vec(), d.answer))
+        .map(|d| (d.patterns.to_vec(), d.answer.to_vec()))
         .collect();
     got.sort();
     // The first three are the literals this derivation replaced; the two codex
-    // entries were added afterwards, each verified against codex-cli 0.144.5.
+    // entries were added afterwards, each verified against codex-cli 0.144.5,
+    // and antigravity's after its trust dialog was found parking every task.
     let mut want = vec![
-        (vec!["Yes, I accept", "I accept the risk"], "2"),
-        (vec!["Yes, I trust this folder"], "1"),
-        (vec!["Do you trust the files in this folder?"], "1"),
-        (vec!["Do you trust the contents of this directory?"], "1"),
-        (vec!["Update now (runs"], "2"),
+        (vec!["Yes, I accept", "I accept the risk"], vec!["2", "Enter"]),
+        (vec!["Yes, I trust this folder"], vec!["1", "Enter"]),
+        (vec!["Do you trust the files in this folder?"], vec!["1", "Enter"]),
+        (
+            vec!["Do you trust the contents of this directory?"],
+            vec!["1", "Enter"],
+        ),
+        (vec!["Update now (runs"], vec!["2", "Enter"]),
+        // Enter alone: an arrow-navigated menu with the safe option preselected.
+        (
+            vec!["Do you trust the contents of this project?"],
+            vec!["Enter"],
+        ),
+        // Cursor advertises its own access key, so that is what it is sent.
+        (vec!["Workspace Trust Required"], vec!["a"]),
     ];
     want.sort();
     assert_eq!(got, want);
@@ -11706,23 +11964,139 @@ fn test_dismiss_launch_dialog_skips_codex_update_prompt() {
     ));
 }
 
-/// Antigravity's trust dialog is worded identically to Claude's ("Yes, I trust
-/// this folder"). Under the old flat matching it would have been answered in an
-/// agy pane by Claude's entry; agtx's documented decision is to leave that choice
-/// to the user, and per-agent scoping is what actually makes that true.
+/// Antigravity's trust dialog fires on the first launch in any directory, and
+/// every task gets a new worktree. Leaving it unanswered did not leave the choice
+/// to the user in any useful sense: agtx pasted the task into a menu that ignores
+/// text, then sent the Enter that confirmed the dialog, so every antigravity task
+/// arrived at an empty composer with its prompt gone. Verified against
+/// antigravity 1.1.20.
+///
+/// It is answered with a **bare Enter**: the menu is arrow-navigated with "Yes, I
+/// trust this folder" preselected, so a digit would be typed into the composer
+/// that the Enter opens.
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_antigravity_trust_dialog_is_left_to_the_user() {
+fn test_antigravity_trust_dialog_is_answered_with_a_bare_enter() {
     let pane = "Do you trust the contents of this project?\n\
                 > Yes, I trust this folder\n  No, exit\n  \u{2191}/\u{2193} Navigate \u{b7} enter Confirm";
 
+    let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keys_c = keys.clone();
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("antigravity"),
+        pane,
+        &mut LaunchDialogState::default(),
+    ));
+    assert_eq!(*keys.lock().unwrap(), vec!["Enter".to_string()]);
+}
+
+/// Cursor's workspace-trust dialog asks *the same question as codex* — "Do you
+/// trust the contents of this directory?" — so it is matched on its heading. It
+/// went undeclared until the smoke run caught agtx answering it by accident: the
+/// paste went into the menu and the follow-up Enter selected the highlighted row.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cursor_workspace_trust_is_answered_with_its_access_key() {
+    let pane = "\u{26a0} Workspace Trust Required\n\
+                Cursor Agent can execute code and access files in this directory.\n\
+                Do you trust the contents of this directory?\n\
+                \u{25b6} [a] Trust this workspace\n  [q] Quit\n\
+                Use arrow keys to navigate, Enter to select, or press the key shown";
+
+    let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keys_c = keys.clone();
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("cursor"),
+        pane,
+        &mut LaunchDialogState::default(),
+    ));
+    assert_eq!(*keys.lock().unwrap(), vec!["a".to_string()]);
+}
+
+/// ...and the shared question line must not make codex's entry fire in a cursor
+/// pane, or vice versa: codex's answer is "1", which in cursor's dialog is not
+/// an option at all.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cursor_and_codex_trust_dialogs_do_not_cross_fire() {
+    let cursor_pane = "\u{26a0} Workspace Trust Required\nDo you trust the contents of this directory?";
+    // Codex's entry matches the shared question line — and its answer is "1",
+    // which is not an option in cursor's menu at all. Scoping is what keeps it
+    // from firing here, so this must be asserted against *codex*, not against an
+    // agent that declares no matching dialog (which would pass vacuously).
+    let codex_keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let codex_keys_c = codex_keys.clone();
+    let mut cursor_mock = MockTmuxOperations::new();
+    cursor_mock.expect_send_key().returning(move |_, k| {
+        codex_keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    let cursor_ops: Arc<dyn TmuxOperations> = Arc::new(cursor_mock);
+    assert!(dismiss_launch_dialog(
+        &cursor_ops,
+        "t:1",
+        Some("cursor"),
+        cursor_pane,
+        &mut LaunchDialogState::default(),
+    ));
+    assert_eq!(
+        *codex_keys.lock().unwrap(),
+        vec!["a".to_string()],
+        "cursor's own answer, never codex's digit"
+    );
+
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().never();
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    // ...and cursor's heading is absent from codex's own dialog.
+    let codex_pane = "Do you trust the contents of this directory?\n  1. Yes\n  2. No";
+    let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keys_c = keys.clone();
+    let mut mock2 = MockTmuxOperations::new();
+    mock2.expect_send_key().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    let ops2: Arc<dyn TmuxOperations> = Arc::new(mock2);
+    assert!(dismiss_launch_dialog(
+        &ops2,
+        "t:1",
+        Some("cursor"),
+        codex_pane,
+        &mut LaunchDialogState::default(),
+    ) == false);
+}
+
+/// The reverse of the scoping guard: antigravity's own wording must not be
+/// answered in someone else's pane. Codex's differs by a single word
+/// ("directory" vs "project"), so a sloppy pattern would cross-fire.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_antigravity_trust_dialog_is_scoped_to_antigravity() {
+    let pane = "Do you trust the contents of this project?\n> Yes, I trust this folder";
     let mut mock = MockTmuxOperations::new();
     mock.expect_send_key().never();
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
     assert!(!dismiss_launch_dialog(
         &ops,
         "t:1",
-        Some("antigravity"),
+        Some("codex"),
         pane,
         &mut LaunchDialogState::default(),
     ));
