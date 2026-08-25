@@ -24,6 +24,16 @@ pub struct GlobalConfig {
     /// Whether to automatically fullscreen-attach to the tmux session when opening a task popup
     #[serde(default)]
     pub fullscreen_on_enter: bool,
+
+    /// Write agent lifecycle-hook configs into worktrees so agents report their
+    /// own phase status. When false, agtx falls back to inferring liveness from
+    /// tmux pane output.
+    #[serde(default = "default_agent_hooks")]
+    pub agent_hooks: bool,
+}
+
+fn default_agent_hooks() -> bool {
+    true
 }
 
 impl Default for GlobalConfig {
@@ -34,6 +44,7 @@ impl Default for GlobalConfig {
             worktree: WorktreeConfig::default(),
             theme: ThemeConfig::default(),
             fullscreen_on_enter: false,
+            agent_hooks: default_agent_hooks(),
         }
     }
 }
@@ -368,6 +379,7 @@ pub struct MergedConfig {
     pub workflow_plugin: Option<String>,
     pub fullscreen_on_enter: bool,
     pub branch_prefix: String,
+    pub agent_hooks: bool,
 }
 
 impl MergedConfig {
@@ -403,6 +415,7 @@ impl MergedConfig {
             cleanup_script: project.cleanup_script.clone(),
             workflow_plugin: project.workflow_plugin.clone(),
             fullscreen_on_enter: global.fullscreen_on_enter,
+            agent_hooks: global.agent_hooks,
             branch_prefix: project
                 .branch_prefix
                 .clone()
@@ -578,7 +591,10 @@ impl WorkflowPlugin {
                 name
             );
         }
-        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             anyhow::bail!(
                 "Plugin name '{}' contains invalid characters (only a-z, A-Z, 0-9, -, _ allowed)",
                 name
@@ -689,14 +705,15 @@ impl TrustStore {
     pub fn hash_config(project_path: &Path) -> Option<String> {
         let config_path = project_path.join(".agtx").join("config.toml");
         let content = std::fs::read(&config_path).ok()?;
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let hash = Sha256::digest(&content);
         Some(format!("{:x}", hash))
     }
 
     /// Check if a project's config is trusted (hash matches stored value).
     pub fn is_trusted(&self, project_path: &Path) -> bool {
-        let canonical = project_path.canonicalize()
+        let canonical = project_path
+            .canonicalize()
             .unwrap_or_else(|_| project_path.to_path_buf());
         let key = canonical.to_string_lossy().to_string();
         match (self.projects.get(&key), Self::hash_config(project_path)) {
@@ -708,7 +725,8 @@ impl TrustStore {
 
     /// Mark a project's current config as trusted.
     pub fn trust_project(&mut self, project_path: &Path) -> Result<()> {
-        let canonical = project_path.canonicalize()
+        let canonical = project_path
+            .canonicalize()
             .unwrap_or_else(|_| project_path.to_path_buf());
         let key = canonical.to_string_lossy().to_string();
         if let Some(hash) = Self::hash_config(project_path) {

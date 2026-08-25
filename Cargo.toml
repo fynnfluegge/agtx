@@ -46,6 +46,16 @@ rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
 default = []
 test-mocks = ["dep:mockall"]
 
+# Dev tooling for the smoke tests, not part of the shipped binary. Declared with
+# an explicit path so it can live next to its only consumer in tests/smoke/
+# rather than in an `examples/` directory that implies "here is how to use the
+# library". Kept an example rather than a bin so `cargo install` never ships it,
+# while `cargo test` still compiles it — a new `AgentSpec` field or enum variant
+# breaks the build here instead of silently drifting from the runner.
+[[example]]
+name = "agent_matrix"
+path = "tests/smoke/agent_matrix.rs"
+
 [dev-dependencies]
 tempfile = "3"
 mockall = "0.13"

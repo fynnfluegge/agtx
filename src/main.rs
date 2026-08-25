@@ -15,6 +15,17 @@ use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Fast path: `agtx hook <task-id> <worktree> [agent]` is invoked by agent
+    // lifecycle hooks, potentially on every tool call. Handle it before the
+    // logging and config setup below — building a daily rolling file appender
+    // per invocation is pure waste, and the agent consumes this process's stdout.
+    {
+        let raw: Vec<String> = std::env::args().collect();
+        if raw.get(1).map(String::as_str) == Some("hook") {
+            return agtx::agent::hook_status::run_hook_cli(&raw[2..]);
+        }
+    }
+
     // Initialize audit logging to ~/.config/agtx/logs/
     let log_dir = GlobalConfig::config_path()?
         .parent()
@@ -48,9 +59,7 @@ async fn main() -> Result<()> {
 
     let mode = match positional_args.first().copied() {
         Some("mcp-serve") => {
-            let project_path = positional_args
-                .get(1)
-                .map(PathBuf::from);
+            let project_path = positional_args.get(1).map(PathBuf::from);
             let project_path = match project_path {
                 Some(p) => {
                     let p = p.canonicalize()?;
@@ -84,7 +93,10 @@ async fn main() -> Result<()> {
         }
     };
 
-    let flags = FeatureFlags { experimental, no_init_scripts };
+    let flags = FeatureFlags {
+        experimental,
+        no_init_scripts,
+    };
 
     // First-run: determine action based on config/data state
     let config_path = GlobalConfig::config_path()?;

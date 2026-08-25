@@ -149,7 +149,22 @@ class McpClient:
         self._proc.stdin.write(line)
         self._proc.stdin.flush()
 
+    # A reply should take milliseconds. This is not a latency budget, it is a
+    # deadlock guard: `readline()` on a live-but-silent server blocks forever, and
+    # no --phase-timeout can rescue it because the block is inside the MCP call
+    # rather than inside the artifact poll that the timeout governs.
+    RECV_TIMEOUT_SECONDS = 120
+
     def _recv(self) -> dict:
+        import selectors
+
+        with selectors.DefaultSelector() as sel:
+            sel.register(self._proc.stdout, selectors.EVENT_READ)
+            if not sel.select(timeout=self.RECV_TIMEOUT_SECONDS):
+                raise McpError(
+                    f"MCP server did not respond within {self.RECV_TIMEOUT_SECONDS}s "
+                    "(agent may be parked on an interactive prompt or a usage limit)"
+                )
         line = self._proc.stdout.readline()
         if not line:
             raise McpError("MCP server closed connection")
@@ -637,6 +652,40 @@ def setup_container(
                     check=True, capture_output=not verbose,
                 )
 
+    # macOS keeps the Claude OAuth credentials in the login Keychain, not in
+    # ~/.claude/.credentials.json, so a subscription login does not travel with the
+    # file copy above and the container lands on "Not logged in · Please run /login".
+    # Materialise the same JSON that Claude Code writes on Linux.
+    #
+    # The secret is piped through stdin: never written to a host temp file, and
+    # never placed in argv where `ps` would expose it.
+    if sys.platform == "darwin" and not (claude_dir / ".credentials.json").exists():
+        creds = ""
+        try:
+            creds = subprocess.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        if creds:
+            subprocess.run(
+                ["docker", "exec", "-i", container_id, "/bin/bash", "-c",
+                 "umask 077 && cat > /home/bench/.claude/.credentials.json"],
+                input=creds, text=True, check=True, capture_output=not verbose,
+            )
+            if verbose:
+                print("  [docker] Claude credentials taken from the macOS Keychain.",
+                      file=sys.stderr)
+        else:
+            print(
+                "  [docker] WARNING: no Claude credentials found. On macOS the OAuth token "
+                "lives in the Keychain; `security` could not read it (you may need to allow "
+                "access when prompted). Set ANTHROPIC_API_KEY instead, or the agent will "
+                "report 'Not logged in'.",
+                file=sys.stderr,
+            )
+
     # Copy ~/.claude.json as a snapshot so Claude skips the first-launch welcome screen.
     claude_json = home / ".claude.json"
     if claude_json.exists():
@@ -686,6 +735,31 @@ def setup_container(
          r"sed -i 's|http://localhost:|http://host.docker.internal:|g'"
          r" /home/bench/.claude/settings.json 2>/dev/null || true"],
         capture_output=True,
+    )
+
+    # Drop empty auth keys from the container's settings.json. Because that `env`
+    # block outranks process env, an `ANTHROPIC_AUTH_TOKEN: ""` left over from a
+    # proxy setup can shadow both the Keychain credentials and a real
+    # ANTHROPIC_API_KEY, and the agent reports "Not logged in" with valid auth
+    # available. Host file untouched.
+    subprocess.run(
+        ["docker", "exec", container_id, "/bin/bash", "-c",
+         "python3 - <<'ENDOFPATCH'\n"
+         "import json\n"
+         "p='/home/bench/.claude/settings.json'\n"
+         "try:\n"
+         "    d=json.load(open(p))\n"
+         "except Exception:\n"
+         "    raise SystemExit(0)\n"
+         "env=d.get('env')\n"
+         "if isinstance(env, dict):\n"
+         "    drop=[k for k,v in env.items() if v == '']\n"
+         "    for k in drop: env.pop(k)\n"
+         "    if drop:\n"
+         "        json.dump(d, open(p,'w'), indent=2)\n"
+         "        print('dropped empty env keys: ' + ', '.join(drop))\n"
+         "ENDOFPATCH"],
+        capture_output=not verbose,
     )
 
     # Write global agtx config for bench user so the TUI skips the agent-selection wizard
@@ -810,7 +884,7 @@ def start_tui_in_container(slug: str, container_id: str, verbose: bool = False) 
     # Pass through API keys that agents read from the environment (only when set
     # on the host). Grok uses XAI_API_KEY when ~/.grok/auth.json is absent.
     passthrough_env = {
-        k: v for k in ("XAI_API_KEY",) if (v := os.environ.get(k))
+        k: v for k in ("XAI_API_KEY", "ANTHROPIC_API_KEY") if (v := os.environ.get(k))
     }
     for key, val in passthrough_env.items():
         env_prefix += f" {key}={shlex.quote(val)}"
@@ -1269,6 +1343,12 @@ class TaskRunner:
         r"\[Y/N\]",
         r"Press Enter to continue",
         r"Press any key",
+        # Claude's usage-limit pause. It ends the turn and waits on a keypress
+        # that nothing sends, so the task parks indefinitely — observed sitting
+        # ~50 minutes, past both the stated reset time and --phase-timeout.
+        # Matching it turns a silent stall into a named failure.
+        r"You've hit your session limit",
+        r"Press .* to continue after reset",
     ]
 
     def _check_interactive_prompt(self, content: str) -> str | None:
@@ -1341,6 +1421,20 @@ class TaskRunner:
 
     def run(self) -> dict:
         start = time.monotonic()
+        # What `git diff <base_commit>` already reports before the agent has done
+        # anything. SWE-bench images are not pristine checkouts of base_commit:
+        # for astropy-12907 the baseline is 1861 files (3722 lines of
+        # `old mode 100644` / `new mode 100755`) plus the image's own
+        # `setuptools==68.0.0` pin in pyproject.toml. Subtracted at collection so
+        # a real fix is not buried in ~224KB of noise.
+        self.baseline_patch = self._raw_diff()
+        if self.verbose and self.baseline_patch:
+            n = self.baseline_patch.count("diff --git ")
+            print(
+                f"  [{self.instance_id}] Baseline diff: {n} file(s) already differ from "
+                f"base_commit before the agent runs; these are excluded from the prediction.",
+                file=sys.stderr,
+            )
         if self.verbose:
             print(f"  [{self.instance_id}] Starting MCP handshake...", file=sys.stderr)
         self.mcp = McpClient(self.agtx_bin, str(self.repo_path), container_id=self.container_id)
@@ -1469,7 +1563,47 @@ class TaskRunner:
             if self.mcp:
                 self.mcp.close()
 
+    @staticmethod
+    def _split_file_sections(patch: str) -> dict[str, str]:
+        """Split a unified diff into {path_header: section_text}."""
+        sections: dict[str, str] = {}
+        current: str | None = None
+        buf: list[str] = []
+        for line in patch.splitlines(keepends=True):
+            if line.startswith("diff --git "):
+                if current is not None:
+                    sections[current] = "".join(buf)
+                current = line.strip()
+                buf = [line]
+            elif current is not None:
+                buf.append(line)
+        if current is not None:
+            sections[current] = "".join(buf)
+        return sections
+
+    def _strip_baseline(self, patch: str) -> str:
+        """Drop file sections identical to the pre-agent baseline.
+
+        Per file rather than per line: a file the agent genuinely edited has a
+        different section and survives whole, so an agent that legitimately
+        touches pyproject.toml is not silently dropped along with the image's
+        own pin of it.
+        """
+        baseline = getattr(self, "baseline_patch", "") or ""
+        if not baseline:
+            return patch
+        base_sections = self._split_file_sections(baseline)
+        kept = [
+            text
+            for header, text in self._split_file_sections(patch).items()
+            if base_sections.get(header) != text
+        ]
+        return "".join(kept)
+
     def _collect_patch(self, task: dict) -> str:
+        return self._strip_baseline(self._raw_diff(task))
+
+    def _raw_diff(self, task: dict | None = None) -> str:
         base_commit = self.instance["base_commit"]
 
         if self.container_id:
@@ -1486,7 +1620,7 @@ class TaskRunner:
                 return ""
             return result.stdout.decode("utf-8", errors="replace")
 
-        worktree_path = task.get("worktree_path")
+        worktree_path = (task or {}).get("worktree_path") or str(self.repo_path)
         if not worktree_path:
             return ""
         # Diff the worktree's actual files against the base commit.

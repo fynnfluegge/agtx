@@ -25,6 +25,9 @@ cargo build --release
 
 # Run the MCP server (global mode, or project-scoped with a path)
 ./target/release/agtx mcp-serve [path]
+
+# Record an agent lifecycle event (invoked by agent hooks, not by hand)
+./target/release/agtx hook <task-id> <worktree> [agent] < payload.json
 ```
 
 Logs are written as JSON to `~/.config/agtx/logs/agtx.log` (daily rotation, `RUST_LOG` respected).
@@ -59,7 +62,8 @@ src/
 │   ├── operations.rs # GitOperations trait (mockable for testing)
 │   └── provider.rs   # GitProviderOperations trait (GitHub PR ops)
 ├── agent/
-│   ├── mod.rs        # Agent definitions, detection, spawn args
+│   ├── mod.rs        # Agent struct, detection, command builders (all derived from spec.rs)
+│   ├── spec.rs       # AgentSpec table — one declarative record per agent + kind enums
 │   └── operations.rs # AgentOperations/CodingAgent traits (mockable)
 ├── mcp/
 │   ├── mod.rs        # Re-exports
@@ -106,9 +110,17 @@ tests/
 ├── board_tests.rs     # Board navigation tests
 ├── git_tests.rs       # Git worktree tests
 ├── agent_tests.rs     # Agent detection and spawn args tests
+├── agent_parity_tests.rs # Per-agent behaviour lock (launch/resume/skill paths/syntax)
+├── hook_status_tests.rs  # Agent lifecycle-hook status reporting
 ├── mcp_tests.rs       # MCP server tests
 ├── mock_infrastructure_tests.rs # Mock infrastructure tests
-└── shell_popup_tests.rs         # Shell popup logic tests
+├── shell_popup_tests.rs         # Shell popup logic tests
+└── smoke/             # Per-agent smoke tests — real binaries, no mocks, opt-in
+    ├── agent_smoke.py      # The runner: scratch repo → TUI in tmux → phases over MCP
+    ├── test_agent_smoke.py # Deterministic tests for the harness itself (no tmux/auth)
+    ├── agent_matrix.rs     # Dumps AGENT_SPECS + BUNDLED_PLUGINS as JSON for the runner
+    │                       # (a [[example]] in Cargo.toml, so `cargo test` compiles it)
+    └── README.md           # What it asserts, its outcomes, and what it has found
 
 benchmark/             # SWE-bench harness
 docker/                # Container images for sandboxed runs
@@ -195,13 +207,78 @@ Commands are written once in canonical format (`/ns:command`) and auto-translate
 - Copilot: no interactive skill invocation (prompt only, no commands sent)
 
 ### Sending Skills & Prompts to Agents
-`send_skill_and_prompt()` has **three** send paths, because agent TUIs disagree about how a slash command plus arguments must arrive. Getting this wrong is the usual cause of "the agent started but never got the task":
+Prompt delivery has **two lanes**. Getting this wrong is the usual cause of "the agent started but never got the task".
 
-1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter
-2. **gemini / codex / cursor / antigravity** — always combine skill + prompt into a *single* message via `send_keys_literal`, then poll the pane until the text renders before pressing Enter (Ink TUIs drop keys sent too early). Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. Codex additionally needs a second Enter to dismiss its command picker. Antigravity's slash-command picker closes as soon as arguments are typed, so the combined text submits on a single Enter (verified against agy 1.1.19) — no Codex-style second Enter
+**Launch lane — the first message of a task's life.** The skill command and prompt are composed by `compose_launch_text()` and handed to the process in **argv**, so the agent starts with the task already in hand: no readiness polling, no window in which a keystroke can be dropped. Gated by `spec::can_launch_with_prompt()`, which requires both an agent whose launch form is *verified* (`AgentSpec::launch_prompt_verified` — Claude only today) and a prompt under `MAX_LAUNCH_PROMPT_BYTES` (128 KiB; `execve` counts bytes). Anything else falls through to the mid-session lane. `setup_task_worktree` returns `(target, launched_with_prompt)` and its callers skip the send entirely when true.
+
+Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used here, so `{task}` keeps its paragraphs and lists (the typed path must flatten them); and `spec::normalize_prompt()` strips NUL, `\r` and other control characters that cannot survive argv, keeping `\n` and `\t`.
+
+**The prompt is quoted twice, and both layers must escape.** `compose_command` single-quotes the prompt, then `create_window` nests the whole command inside `sh -c …`. Interpolating it raw ends the outer word at the first inner quote and the shell parses the prompt as code — verified against tmux 3.5a, claude received argv `["--dangerously-skip-permissions", "/agtx:plan"]` with the task id and entire task silently gone, and codex's `$agtx-plan` lost `$agtx` to expansion. `single_quote()` in `src/tmux/operations.rs` is the second layer; its tests run the wrapper through a real `sh` and assert the delivered argv, because a string-equality test would have passed on the broken version.
+
+**Mid-session lane — phase advances into an already-running agent.** `send_skill_and_prompt()`, three paths, because agent TUIs disagree about how a slash command plus arguments must arrive:
+
+1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter. Still on the typed path: it is the one flow where the text has to arrive in two pieces by design
+2. **gemini / codex / cursor / antigravity** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. **No second Enter for Codex**: its command picker opens on *typing*, not on a paste (verified against codex-cli 0.144.5), so there is nothing to dismiss
 3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
 
+**Atomic is not the same as delivered.** An agent TUI that has not attached its stdin reader yet discards what it is sent — bracketed paste included, because the discard happens in the application, not in the pty — and `wait_for_agent_ready` cannot prove otherwise. So paths 1 and 2 go through `deliver_message()`, which resends **while the pane is unchanged** (three attempts, 2s each) and stops the moment it redraws, on the same reasoning `dismiss_launch_dialog` uses: a redraw means it landed, and resending would double the message. Landing is judged by the pane changing rather than by finding the text, because a composer wraps, re-indents and box-draws what it echoes.
+
 `clear_context_on_advance` is applied before all three, and only for Claude (`/clear`, then poll until the pane stabilises).
+
+**tmux send primitives** — pick by what you are sending, they are not interchangeable:
+
+| Method | tmux | Use for |
+|---|---|---|
+| `paste_text` | `load-buffer` + `paste-buffer -p` | a whole message; bracketed, atomic, newlines stay literal |
+| `send_text` | `send-keys -l --` | literal text; no key-name lookup |
+| `send_key` | `send-keys` (no `-l`) | **key names** — `Enter`, `C-c`, dialog answers |
+| `send_keys` | `send-keys` + `Enter` | text plus a submit, generic path |
+
+Without `-l`, tmux resolves an argument that matches a key name *as that key*: `"Space"` arrives as `0x20`, `"Escape"` as `ESC`, `"Up"` as `\033[A` (tmux 3.5a). So `send_key` must never carry task-derived text — that is what `send_text` is for.
+
+### First-Launch Dialogs
+Agents gate a brand-new directory behind an interactive dialog, and every task gets a brand-new
+worktree — so these fire on the *first* launch of nearly every task, not just in containers.
+`LAUNCH_DIALOGS` (`src/tui/app.rs`) is the table of `(patterns, answer)`; `dismiss_launch_dialog`
+answers any that is visible.
+
+Dialogs are declared per agent on `AgentSpec::dialogs` and **matched against the running agent's own entries** — a stray digit typed into another agent's live composer is real corruption. An agent with no spec falls back to matching every known dialog, which beats leaving its pane blocked forever.
+
+`answer` is a **key sequence**, not one key, because menus differ in kind: a numbered menu needs the digit and then an Enter to confirm, while an arrow-navigated menu whose safe option is already highlighted needs only the Enter — and sending it a digit first would type a stray character into the composer it opens.
+
+| Agent | Dialog | Match | Answer | Scope |
+|---|---|---|---|---|
+| claude | workspace trust | `Yes, I trust this folder` | `1` `Enter` | Launch — per directory, `projects."<dir>".hasTrustDialogAccepted` in `~/.claude.json` |
+| claude | bypass-permissions warning | `Yes, I accept` / `I accept the risk` | `2` `Enter` | Launch — the `bypassPermissionsModeAccepted` preflight does **not** reliably suppress it |
+| codex | directory trust | `Do you trust the contents of this directory?` | `1` `Enter` | Launch — per directory. Worded unlike Claude's *and* Gemini's, so neither pattern catches it |
+| codex | update prompt | `Update now (runs` | `2` `Enter` (Skip) | Launch — never "Update now": agtx must not upgrade an agent binary behind the user's back |
+| codex | MCP tool approval | `Allow the` + `MCP server to run tool` + `Always allow` | `3` `Enter` | **Session** — mid-session, matched only against a codex pane |
+| gemini | folder trust | `Do you trust the files in this folder?` | `1` `Enter` | Launch — answering it restarts the process |
+| cursor | workspace trust | `Workspace Trust Required` | `a` alone | Launch — its question line is *identical* to codex's, so it is matched on the heading. Answered with the access key the dialog advertises, which survives an option being added above the highlighted row |
+| antigravity | project trust | `Do you trust the contents of this project?` | `Enter` alone | Launch — arrow-navigated with "Yes, I trust this folder" preselected, so a digit would land in the composer. Its own wording, not Claude's; codex's differs by one word (`directory`) |
+
+`require_all` distinguishes alternatives (several wordings of one prompt) from conjunctions (a prompt identified only by a combination of phrases).
+
+It runs in **both** `wait_for_agent_ready` loops *and* the session-refresh loop: the readiness
+budget expires after ~60s and a slow agent can render its dialog later than that. A retry only
+happens while the pane is **unchanged** — a redraw means the answer landed, and resending would
+type a stray digit into the agent's live composer.
+
+Missing an arm is silent and total: the task's prompt is delivered but never read, because the
+agent never reaches its composer. Antigravity and cursor are the worked examples — same bug, two
+agents, found within a day of each other by the same smoke run. Antigravity's is the fuller story. It was left unhandled on the
+reasoning that its wording matched Claude's and the choice belonged to the user — but "unhandled"
+was never neutral: agtx pasted the task into a menu that ignores text, and its follow-up Enter
+confirmed the dialog, so **every** antigravity task reached its composer empty with the prompt gone.
+Per-agent scoping is what made answering it safe, and the per-agent smoke run
+(`tests/smoke/agent_smoke.py`) is what found it. Cursor's was the same shape, and shows why the
+scoping matters: its question line is *character-identical* to codex's, whose answer (`1`) is not
+even an option in cursor's menu.
+
+Some prompts must stay unanswered, and that is a different thing from being undeclared. Gemini's
+first-run `Opening authentication page in your browser. Do you want to continue?` has `1. Yes`
+preselected — an Enter would start an OAuth flow and open a browser, which is not a side effect a
+phase transition gets to have. Same reasoning as never choosing codex's "Update now".
 
 ### Session Persistence
 - Tmux window stays open when moving Running → Review
@@ -299,6 +376,7 @@ Global config lives at `~/.config/agtx/config.toml` (`GlobalConfig`):
 ```toml
 default_agent = "claude"
 fullscreen_on_enter = false  # When true, Enter on a task attaches to tmux directly instead of opening the in-TUI popup
+agent_hooks = true           # Write agent lifecycle-hook configs into worktrees (see Hook-Based Phase Status)
 
 [agents]                     # Per-phase agent overrides (PhaseAgentsConfig)
 research = "claude"
@@ -472,10 +550,62 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 - Overlap guard: only one refresh thread runs at a time (`session_refresh_rx.is_some()`)
 - Thread does all expensive work: plugin TOML loading, artifact file checks, `tmux capture-pane`, copy-back side effects
 - `apply_session_refresh()` applies results on main thread (non-blocking `try_recv`)
-- Idle detection (Working → Idle) handled on main thread using `pane_content_hashes` timestamps
-- Four states (`PhaseStatus` in `src/db/models.rs`): Working (spinner), Idle (pause icon, 15s no output), Ready (checkmark), Exited (no window)
+- Idle detection (Working → Idle) handled on main thread using `pane_content_hashes` timestamps — **only for tasks with no hook report**, see below
+- Five states (`PhaseStatus` in `src/db/models.rs`): Working (spinner), Blocked (bold `?`, agent-reported only), Idle (pause icon, 15s no output), Ready (checkmark), Exited (no window)
 - Phase artifact paths come from the task's plugin or agtx defaults
 - Plugin instances cached per task in `HashMap<Option<String>, Option<WorkflowPlugin>>` to avoid repeated disk reads
+
+### Hook-Based Phase Status
+Agents that support lifecycle hooks report their own state instead of agtx guessing it from pane
+output.
+
+```
+Claude Code ──hook──► agtx hook <task-id> <worktree> ──► {worktree}/.agtx/status/{task_id}.json
+                                                                   │
+                                        maybe_spawn_session_refresh ┘──► apply_session_refresh
+```
+
+- **Writing the config**: `write_skills_to_worktree()` merges a `hooks` block into the worktree's
+  `.claude/settings.local.json` (the same file that carries `enableAllProjectMcpServers`). Built by
+  `claude_hook_settings()`. Gated on `config.agent_hooks`; Claude-only today
+- **The Claude settings writer merges, it does not overwrite.** `.claude` is in
+  `AGENT_CONFIG_DIRS`, so a project shipping its own `settings.local.json` has it copied into every
+  worktree — a plain write would drop the user's `permissions`/`env`/`hooks`. `merge_claude_hooks()`
+  keeps user entries on the same events and replaces only agtx's own (matched by the agtx binary
+  path in the command), so redeploying is idempotent instead of accumulating duplicate hooks. Same
+  merge-don't-overwrite rule as the grok and antigravity MCP writers
+- **The hook command is task-agnostic**: `agtx hook --env claude`. The task is read from
+  `AGTX_TASK_ID` / `AGTX_WORKTREE`, set on the tmux **window** by `create_window` (tmux `-e`, so a
+  resumed or switched agent inherits them). Baking the task id into the command breaks
+  `skip_worktree`, where every task shares the project's `.claude/settings.local.json` and the last
+  deploy would re-point every other task's agent at its own status file. The hook exits silently
+  when the variables are absent, so a future user-global registration stays inert outside agtx, and
+  when `CLAUDE_JOB_DIR` is set, since a backgrounded task inherits its parent's env
+- **Registered events** (verified against Claude Code 2.1.241): `SessionStart`, `UserPromptSubmit`,
+  `PreToolUse` (heartbeat) → `working`; `PermissionRequest`, `Notification` → `blocked`; `Stop`,
+  `StopFailure` → `waiting`; `SessionEnd` → `ended`. Unregistered names are ignored by the agent
+- **`src/agent/hook_status.rs`** is pure (no tmux/DB/TUI types): event mapping, atomic
+  write-then-rename, staleness, and `merge_event`'s guard preventing a late `PreToolUse` from
+  clearing a fresh `Blocked`
+- **Precedence** in the refresh thread: artifact → `Ready` > window gone → `Exited` > hook status >
+  pane-hash heuristic. Only *liveness* is replaced; artifact detection is untouched
+- **Purely additive**: no status file means the pre-existing 15s pane-hash heuristic runs unchanged.
+  A `working` record older than `HOOK_STALE_SECS` (300s) is distrusted and also falls back
+- The pane is **not** captured when a hook report exists — one fewer `capture-pane` per task per
+  refresh. Codex's MCP approval auto-dismiss runs outside that branch so it fires either way
+- **Consumers**: `Blocked` fires the orchestrator stuck-task notification *immediately* (with the
+  reason text from `blocked_reasons`) rather than after 60s of `Idle`; the merge-conflict trigger
+  skips `Blocked` entirely. MCP `get_task` exposes `agent_state` + `blocked_reason`, read straight
+  from the file — it works cross-process precisely because it is a file, not TUI state
+- **Binary-path drift**: the absolute `agtx` path from `current_exe()` is baked into the hook command
+  *and* every MCP config a worktree gets, so moving or reinstalling agtx would silently break both
+  for worktrees created earlier. `write_skills_to_worktree` records the deploying binary in
+  `.agtx/deployed-by`; `refresh_stale_worktree_configs` re-deploys mismatched worktrees on a
+  background thread at startup. `is_agtx_hook_command` matches on the `" hook --env"` invocation
+  rather than the binary path so the merge still recognises its own entries across a move
+- Not yet wired for Codex/Gemini/Cursor: those read hooks from user-global paths
+  (`~/.codex/hooks.json`, `~/.gemini/settings.json`, `~/.cursor/hooks.json`) and need an
+  install/uninstall lifecycle plus `cwd`-based routing
 
 ### Task References & Dependencies
 - In description input, type `!` (at start of line or after space) to search existing tasks
@@ -498,9 +628,13 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 - The skill instructs the agent to: commit current work → merge origin/main → resolve conflicts → review only conflicted files against both parents → run tests
 
 ### Agent Integration
+- Every per-agent value below is one field of that agent's `AgentSpec` in `src/agent/spec.rs`; the
+  functions here read the table rather than matching on the agent's name
 - Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
 - Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`), Copilot (`--allow-all-tools`), Cursor (`agent --yolo`), Grok (`--yolo --trust`, where `--trust` also ungates the repo-local `.grok/config.toml` MCP server and suppresses the directory-trust dialog), Antigravity (`agy --dangerously-skip-permissions --mode accept-edits` — two orthogonal controls: the flag governs shell/MCP/URL approvals, `--mode` governs the file-edit diff review, and both are needed to run unattended)
-- `build_resume_command()` is the recovery variant used after a tmux/server restart — mostly `--continue`, but Gemini uses `--resume` and Codex uses `codex resume --last`
+- `build_resume_command()` is the recovery variant used after a tmux/server restart — mostly `--continue` appended to the launch flags (`ResumeArgs::Append`), but Gemini uses `--resume` and Codex's `resume --last` *replaces* them (`ResumeArgs::Replace`: `codex resume` rejects `--sandbox`)
+- `tests/agent_parity_tests.rs` pins every one of these strings per agent. It is written against
+  behaviour, not derived from the table, so a diff there means something actually changed
 - Skills deployed to agent-native paths via `write_skills_to_worktree()` in app.rs
 - Commands resolved per-task via `resolve_skill_command()` (plugin command + agent transform)
 - Prompts resolved per-task via `resolve_prompt()` (pure template substitution, agent-agnostic)
@@ -516,7 +650,23 @@ cargo test
 
 # Run tests with mock support
 cargo test --features test-mocks
+
+# Per-agent smoke tests — real binaries, real auth, real tokens (opt-in, never CI)
+tests/smoke/agent_smoke.py                    # installed agents x the agtx plugin
+python3 tests/smoke/test_agent_smoke.py       # tests for the harness itself
 ```
+
+The smoke runner answers the one question the Rust suite cannot: **does a real agent binary actually
+receive its work?** Unit tests mock `TmuxOperations` and `agent_parity_tests.rs` pins the strings
+agtx builds, so neither can see "the agent ignored it" — the gap where every silent-hang bug so far
+has lived. Per phase it asserts the command was *submitted* (not parked in a composer), that a marker
+file carries the **task id** that was passed in, that the artifact appeared and the phase advanced,
+and that the session is still usable (process alive, no dialog on screen). Dialogs are never
+pre-answered — they are the thing under test. Details: `tests/smoke/README.md`.
+
+`cargo run --example agent_matrix` (source in `tests/smoke/`) dumps `AGENT_SPECS` +
+`BUNDLED_PLUGINS` as JSON. The smoke runner reads it instead of keeping its own copy of the agent
+table, and `cargo test` compiles it, so a new spec field breaks the build rather than drifting.
 
 Dependencies require:
 - A recent stable Rust (CI builds on `stable`; no MSRV is pinned in `Cargo.toml`)
@@ -539,32 +689,38 @@ Dependencies require:
 3. Use `hex_to_color(&state.config.theme.color_*)` in app.rs
 
 ### Adding a new agent
-Adding grok touched every one of these — use `git log -p` for that change as a worked example. Required:
+Half of this is now one table entry; the other half is still per-agent match arms in `app.rs`.
 
-**`src/agent/mod.rs`**
-1. Add to `known_agents()` (name, binary, description, git co-author)
-2. Add a `build_interactive_command()` match arm (with and without a prompt)
-3. Add a `build_resume_command()` match arm (usually `--continue`)
+**`src/agent/spec.rs`** — the declarative half
+1. Add one `AgentSpec` entry to `AGENT_SPECS`: identity (name, binary, description, git co-author),
+   launching (`env`, `base_args`, `prompt_form`, `resume`, `headless_args`), and skills
+   (`skill_dir`, `skill_layout`, `skill_scan_dir`, `command_syntax`). Everything in
+   `src/agent/mod.rs`, `src/agent/operations.rs` and `src/skills.rs` is derived from it —
+   `known_agents`, both command builders, the headless invocation, the skill paths, the
+   command syntax, and skill discovery
+2. Declare `prompt_form` (how the CLI takes a prompt: `Argv` or `Flag("-i")`) but leave
+   `launch_prompt_verified: false` until that form is checked against the real binary. A
+   `-p`-style flag that runs headless and exits swallows the task text silently; flipping the bool
+   is what opts the agent into the launch lane
+3. If no existing `SkillLayout` / `CommandSyntax` variant fits, add **one** variant plus the arm in
+   the single function that reads it — never a new match on the agent's name
 
-**`src/agent/operations.rs`**
-4. Add a `generate_text()` match arm — the headless/print invocation used for PR descriptions
+**`tests/agent_parity_tests.rs`**
+4. Extend every parity table with the new agent (`parity_covers_every_known_agent` fails until you
+   do). These are literals on purpose: a diff there means behaviour changed
 
-**`src/skills.rs`**
-5. Add the agent-native skill dir to `agent_native_skill_dir()`
-6. Add the plugin command transform to `transform_plugin_command()`
-7. Add a `scan_agent_skills()` branch so the agent's existing skills show up in the `/` skill picker
-
-**`src/tui/app.rs`**
-8. Add the binary to `AGENT_COMMANDS` (pane process detection)
-9. Add an activity indicator to `AGENT_ACTIVE_INDICATORS` if the agent is an Ink/Node TUI (runs inside bash)
-10. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
-11. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok"` for SKILL.md subdirectories)
-12. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`)
-13. Add an agent label color in the task-card footer `match task.agent.as_str()`
-14. If Ink/Node TUI: add to the combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
+**`src/tui/app.rs`** — still per-agent, until stage E
+5. Add the binary to `AGENT_COMMANDS` (pane process detection)
+6. Add an activity indicator to `AGENT_ACTIVE_INDICATORS` if the agent is an Ink/Node TUI (runs inside bash)
+7. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
+8. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok"` for SKILL.md subdirectories)
+9. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`)
+9b. If the agent supports lifecycle hooks, register them so it reports its own phase status (see *Hook-Based Phase Status*); otherwise it falls back to the pane-hash heuristic
+10. Add an agent label color in the task-card footer `match task.agent.as_str()`
+11. If Ink/Node TUI: add to the combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
 
 **Plugins**
-15. Add the agent to `supported_agents` in any `plugins/*/plugin.toml` that whitelists agents
+12. Add the agent to `supported_agents` in any `plugins/*/plugin.toml` that whitelists agents
 
 ### Adding a keyboard shortcut
 1. Find the appropriate `handle_*_key` function in `src/tui/app.rs`

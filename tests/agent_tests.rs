@@ -198,12 +198,20 @@ fn test_build_orchestrator_command_claude_is_idempotent() {
         "must register under a unique name, not bare `agtx`:\n{cmd}"
     );
 
-    // The JSON's wrapping single quotes must be escaped (`'\''`) so the command
-    // survives create_window's outer `sh -c '...'` layer. A bare `'{json}'` would
-    // break out of that wrapper and mangle the JSON.
+    // The JSON is a plainly single-quoted word. It used to be pre-escaped as
+    // `'\''{json}'\''` because `create_window` interpolated this command raw into
+    // `sh -c '…'`; that wrapper now quotes what it is given, so pre-escaping here
+    // double-escapes and the pane dies on an unterminated quote before
+    // `add-json` ever runs. The end-to-end guarantee — the JSON reaching `claude`
+    // as one intact argument through both layers — is asserted in
+    // `tmux::operations::tests::the_orchestrator_command_reaches_claude_with_its_json_intact`.
     assert!(
-        cmd.contains(r"'\''"),
-        "JSON quotes must be escaped for the outer sh -c wrapper:\n{cmd}"
+        !cmd.contains(r"'\''"),
+        "JSON quotes must not be pre-escaped; the tmux wrapper quotes this command:\n{cmd}"
+    );
+    assert!(
+        cmd.contains(r#"add-json agtx-orchestrator '{"type":"stdio"}'"#),
+        "JSON must be a plainly single-quoted word:\n{cmd}"
     );
 
     let pre_section = &cmd[..add_idx];

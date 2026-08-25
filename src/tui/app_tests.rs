@@ -15,6 +15,9 @@ use crate::tmux::MockTmuxOperations;
 fn test_generate_pr_description_with_diff_and_agent() {
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     // Setup: git returns a diff stat
     mock_git
@@ -77,6 +80,9 @@ fn test_generate_pr_description_without_worktree() {
 fn test_generate_pr_description_with_empty_diff() {
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     // Git returns empty diff (no changes from main)
     mock_git
@@ -107,6 +113,9 @@ fn test_generate_pr_description_with_empty_diff() {
 fn test_generate_pr_description_agent_failure() {
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     mock_git
         .expect_diff_stat_from_main()
@@ -191,6 +200,9 @@ fn test_create_pr_with_content_success() {
     let mut mock_git = MockGitOperations::new();
     let mut mock_git_provider = MockGitProviderOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     let task = Task {
         id: "test-123".to_string(),
@@ -255,13 +267,15 @@ fn test_create_pr_with_content_success() {
     // Expect: create PR
     mock_git_provider
         .expect_create_pr()
-        .withf(|path: &Path, title: &str, body: &str, branch: &str, base: &Option<String>| {
-            path == Path::new("/project")
-                && title == "Test PR"
-                && body == "Test body"
-                && branch == "feature/test"
-                && base.is_none()
-        })
+        .withf(
+            |path: &Path, title: &str, body: &str, branch: &str, base: &Option<String>| {
+                path == Path::new("/project")
+                    && title == "Test PR"
+                    && body == "Test body"
+                    && branch == "feature/test"
+                    && base.is_none()
+            },
+        )
         .times(1)
         .returning(|_, _, _, _, _| Ok((42, "https://github.com/org/repo/pull/42".to_string())));
 
@@ -343,6 +357,9 @@ fn test_create_pr_with_content_push_failure() {
     let mut mock_git = MockGitOperations::new();
     let mock_git_provider = MockGitProviderOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     let task = Task {
         id: "test-123".to_string(),
@@ -404,6 +421,9 @@ fn test_create_pr_with_content_push_failure() {
 fn test_push_changes_to_existing_pr_success() {
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     let task = Task {
         id: "test-456".to_string(),
@@ -689,7 +709,7 @@ fn test_send_key_to_tmux_char() {
     let mut mock_tmux = MockTmuxOperations::new();
 
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(
             mockall::predicate::eq("test-window"),
             mockall::predicate::eq("a"),
@@ -711,7 +731,7 @@ fn test_send_key_to_tmux_enter() {
     let mut mock_tmux = MockTmuxOperations::new();
 
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(
             mockall::predicate::eq("test-window"),
             mockall::predicate::eq("Enter"),
@@ -734,7 +754,7 @@ fn test_send_key_to_tmux_special_keys() {
 
     // Test Escape
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(
             mockall::predicate::eq("win"),
             mockall::predicate::eq("Escape"),
@@ -750,7 +770,7 @@ fn test_send_key_to_tmux_special_keys() {
     // Test Backspace
     let mut mock_tmux2 = MockTmuxOperations::new();
     mock_tmux2
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(
             mockall::predicate::eq("win"),
             mockall::predicate::eq("BSpace"),
@@ -771,7 +791,7 @@ fn test_send_key_to_tmux_function_key() {
     let mut mock_tmux = MockTmuxOperations::new();
 
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(mockall::predicate::eq("win"), mockall::predicate::eq("F5"))
         .returning(|_, _| Ok(()));
 
@@ -788,8 +808,11 @@ fn test_send_key_to_tmux_function_key() {
 fn test_send_key_to_tmux_alt_arrow_keys() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux
-        .expect_send_keys_literal()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-Left"))
+        .expect_send_key()
+        .with(
+            mockall::predicate::eq("win"),
+            mockall::predicate::eq("M-Left"),
+        )
         .times(1)
         .returning(|_, _| Ok(()));
 
@@ -801,8 +824,11 @@ fn test_send_key_to_tmux_alt_arrow_keys() {
 
     let mut mock_tmux2 = MockTmuxOperations::new();
     mock_tmux2
-        .expect_send_keys_literal()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-Right"))
+        .expect_send_key()
+        .with(
+            mockall::predicate::eq("win"),
+            mockall::predicate::eq("M-Right"),
+        )
         .times(1)
         .returning(|_, _| Ok(()));
 
@@ -819,7 +845,7 @@ fn test_send_key_to_tmux_alt_arrow_keys() {
 fn test_send_key_to_tmux_alt_b_f() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-b"))
         .times(1)
         .returning(|_, _| Ok(()));
@@ -832,7 +858,7 @@ fn test_send_key_to_tmux_alt_b_f() {
 
     let mut mock_tmux2 = MockTmuxOperations::new();
     mock_tmux2
-        .expect_send_keys_literal()
+        .expect_send_key()
         .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-f"))
         .times(1)
         .returning(|_, _| Ok(()));
@@ -1088,13 +1114,7 @@ fn test_delete_task_resources_full_cleanup() {
     task.worktree_path = Some("/tmp/worktree".to_string());
     task.branch_name = Some("task/abc-feature".to_string());
 
-    delete_task_resources(
-        &task,
-        None,
-        Path::new("/project"),
-        &mock_tmux,
-        &mock_git,
-    );
+    delete_task_resources(&task, None, Path::new("/project"), &mock_tmux, &mock_git);
 }
 
 /// Test delete_task_resources handles task without resources
@@ -1110,13 +1130,7 @@ fn test_delete_task_resources_no_resources() {
     let task = Task::new("Simple task", "claude", "project-1");
     // No session_name, worktree_path, or branch_name
 
-    delete_task_resources(
-        &task,
-        None,
-        Path::new("/project"),
-        &mock_tmux,
-        &mock_git,
-    );
+    delete_task_resources(&task, None, Path::new("/project"), &mock_tmux, &mock_git);
 }
 
 // =============================================================================
@@ -1441,12 +1455,20 @@ fn test_footer_text_fullscreen_on_enter_hides_ctrl_f() {
     // Columns 1-3 should hide [C-f] when fullscreen_on_enter is true
     for col in 1..=3 {
         let text = build_footer_text(InputMode::Normal, false, col, false, true);
-        assert!(!text.contains("[C-f]"), "Column {} should hide [C-f] when fullscreen_on_enter=true", col);
+        assert!(
+            !text.contains("[C-f]"),
+            "Column {} should hide [C-f] when fullscreen_on_enter=true",
+            col
+        );
     }
     // And show it when false
     for col in 1..=3 {
         let text = build_footer_text(InputMode::Normal, false, col, false, false);
-        assert!(text.contains("[C-f]"), "Column {} should show [C-f] when fullscreen_on_enter=false", col);
+        assert!(
+            text.contains("[C-f]"),
+            "Column {} should show [C-f] when fullscreen_on_enter=false",
+            col
+        );
     }
 }
 
@@ -1502,6 +1524,9 @@ fn test_setup_task_worktree_success() {
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     // Expect worktree creation
     mock_git
@@ -1523,7 +1548,7 @@ fn test_setup_task_worktree_success() {
 
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _, _| Ok(()));
 
     let mut task = Task::new("Add login feature", "claude", "project-1");
     task.status = TaskStatus::Backlog;
@@ -1547,10 +1572,12 @@ fn test_setup_task_worktree_success() {
         &[],
         false,
         false,
+        false,
+        None,
     );
 
     assert!(result.is_ok());
-    let target = result.unwrap();
+    let (target, _launched) = result.unwrap();
     assert!(target.starts_with("my-project:task-"));
     assert!(task.session_name.is_some());
     assert!(task.worktree_path.is_some());
@@ -1567,6 +1594,9 @@ fn test_setup_task_worktree_sets_task_fields() {
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     mock_git
         .expect_create_worktree()
@@ -1580,7 +1610,7 @@ fn test_setup_task_worktree_sets_task_fields() {
     mock_tmux.expect_has_session().returning(|_| true);
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _, _| Ok(()));
 
     let mut task = Task::new("Fix bug", "claude", "project-1");
 
@@ -1603,8 +1633,11 @@ fn test_setup_task_worktree_sets_task_fields() {
         &[],
         false,
         false,
+        false,
+        None,
     )
     .unwrap();
+    let (target, _launched) = target;
 
     // session_name should be the returned target
     assert_eq!(task.session_name.as_ref().unwrap(), &target);
@@ -1615,7 +1648,13 @@ fn test_setup_task_worktree_sets_task_fields() {
         .unwrap()
         .contains(".agtx/worktrees/"));
     // branch_name should be {prefix}/{slug}
-    let slug = task.branch_name.as_ref().unwrap().rsplit_once('/').unwrap().1;
+    let slug = task
+        .branch_name
+        .as_ref()
+        .unwrap()
+        .rsplit_once('/')
+        .unwrap()
+        .1;
     assert!(task.worktree_path.as_ref().unwrap().ends_with(slug));
 }
 
@@ -1628,6 +1667,9 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     // Worktree creation fails
     mock_git
@@ -1644,7 +1686,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     mock_tmux.expect_has_session().returning(|_| true);
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _, _| Ok(()));
 
     let mut task = Task::new("Test task", "claude", "project-1");
 
@@ -1667,6 +1709,8 @@ fn test_setup_task_worktree_worktree_creation_fails() {
         &[],
         false,
         false,
+        false,
+        None,
     );
 
     // Should succeed despite worktree creation failure (uses fallback path)
@@ -1688,6 +1732,9 @@ fn test_setup_task_worktree_tmux_window_fails() {
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     mock_git
         .expect_create_worktree()
@@ -1703,7 +1750,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
     // Tmux window creation fails
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _, _| Err(anyhow::anyhow!("tmux not running")));
+        .returning(|_, _, _, _, _, _| Err(anyhow::anyhow!("tmux not running")));
 
     let mut task = Task::new("Test task", "claude", "project-1");
 
@@ -1726,6 +1773,8 @@ fn test_setup_task_worktree_tmux_window_fails() {
         &[],
         false,
         false,
+        false,
+        None,
     );
 
     // Should propagate the error
@@ -1742,6 +1791,9 @@ fn test_setup_task_worktree_creates_session_when_missing() {
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     mock_git
         .expect_create_worktree()
@@ -1758,7 +1810,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
     mock_tmux.expect_create_session().returning(|_, _| Ok(()));
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _, _| Ok(()));
 
     let mut task = Task::new("New task", "claude", "project-1");
 
@@ -1781,6 +1833,8 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         &[],
         false,
         false,
+        false,
+        None,
     );
 
     assert!(result.is_ok());
@@ -1795,6 +1849,9 @@ fn test_setup_task_worktree_passes_init_config() {
     let mut mock_tmux = MockTmuxOperations::new();
     let mut mock_git = MockGitOperations::new();
     let mut mock_agent = MockAgentOperations::new();
+    mock_agent
+        .expect_prompt_injection()
+        .returning(|| crate::agent::PromptInjection::Unknown);
 
     mock_git
         .expect_create_worktree()
@@ -1816,7 +1873,7 @@ fn test_setup_task_worktree_passes_init_config() {
     mock_tmux.expect_has_session().returning(|_| true);
     mock_tmux
         .expect_create_window()
-        .returning(|_, _, _, _, _| Ok(()));
+        .returning(|_, _, _, _, _, _| Ok(()));
 
     let mut task = Task::new("Task with config", "claude", "project-1");
 
@@ -1839,6 +1896,8 @@ fn test_setup_task_worktree_passes_init_config() {
         &[],
         false,
         false,
+        false,
+        None,
     );
 
     assert!(result.is_ok());
@@ -2151,23 +2210,23 @@ fn test_enumerate_available_skills_opencode() {
 fn test_resolve_skill_command_no_plugin() {
     // No plugin: no commands, returns None for all agents/phases
     assert_eq!(
-        resolve_skill_command(&None, "planning", "claude", "", 1, ""),
+        resolve_skill_command(&None, "planning", "claude", "", 1, "", true),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "running", "codex", "", 1, ""),
+        resolve_skill_command(&None, "running", "codex", "", 1, "", true),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "review", "gemini", "", 1, ""),
+        resolve_skill_command(&None, "review", "gemini", "", 1, "", true),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "planning", "opencode", "", 1, ""),
+        resolve_skill_command(&None, "planning", "opencode", "", 1, "", true),
         None
     );
     assert_eq!(
-        resolve_skill_command(&None, "planning", "copilot", "", 1, ""),
+        resolve_skill_command(&None, "planning", "copilot", "", 1, "", true),
         None
     );
 }
@@ -2201,42 +2260,42 @@ fn test_resolve_skill_command_with_plugin() {
     });
     // Claude/Gemini: canonical form unchanged
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "claude", "", 1, ""),
+        resolve_skill_command(&plugin, "planning", "claude", "", 1, "", true),
         Some("/gsd:plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "running", "claude", "", 1, ""),
+        resolve_skill_command(&plugin, "running", "claude", "", 1, "", true),
         Some("/gsd:execute-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "review", "gemini", "", 1, ""),
+        resolve_skill_command(&plugin, "review", "gemini", "", 1, "", true),
         Some("/gsd:verify-work 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "research", "claude", "", 1, ""),
+        resolve_skill_command(&plugin, "research", "claude", "", 1, "", true),
         Some("/gsd:discuss-phase 1".to_string())
     );
     // OpenCode: colon → hyphen
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "opencode", "", 1, ""),
+        resolve_skill_command(&plugin, "planning", "opencode", "", 1, "", true),
         Some("/gsd-plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "research", "opencode", "", 1, ""),
+        resolve_skill_command(&plugin, "research", "opencode", "", 1, "", true),
         Some("/gsd-discuss-phase 1".to_string())
     );
     // Codex: slash → dollar, colon → hyphen
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "codex", "", 1, ""),
+        resolve_skill_command(&plugin, "planning", "codex", "", 1, "", true),
         Some("$gsd-plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&plugin, "running", "codex", "", 1, ""),
+        resolve_skill_command(&plugin, "running", "codex", "", 1, "", true),
         Some("$gsd-execute-phase 1".to_string())
     );
     // Unsupported agents: None (will use file-path fallback in prompt)
     assert_eq!(
-        resolve_skill_command(&plugin, "planning", "copilot", "", 1, ""),
+        resolve_skill_command(&plugin, "planning", "copilot", "", 1, "", true),
         None
     );
 }
@@ -2578,7 +2637,7 @@ fn test_resolve_skill_command_research_phase() {
         [artifacts]
     "#;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
-    let cmd = resolve_skill_command(&Some(plugin), "research", "claude", "", 1, "");
+    let cmd = resolve_skill_command(&Some(plugin), "research", "claude", "", 1, "", true);
     assert_eq!(cmd, Some("/gsd:new-project".to_string()));
 }
 
@@ -2597,7 +2656,7 @@ fn test_resolve_skill_command_planning_with_plugin() {
         [artifacts]
     "#;
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
-    let cmd = resolve_skill_command(&Some(plugin), "planning", "claude", "", 1, "");
+    let cmd = resolve_skill_command(&Some(plugin), "planning", "claude", "", 1, "", true);
     assert_eq!(cmd, Some("/gsd:plan-phase 1".to_string()));
 }
 
@@ -3095,7 +3154,7 @@ fn test_switch_agent_claude_sends_exit() {
         }
         Ok(())
     });
-    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_send_key().returning(|_, _| Ok(()));
     // Return shell immediately so polling exits fast
     mock.expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
@@ -3123,8 +3182,10 @@ fn test_switch_agent_gemini_sends_quit() {
     let quit_sent_c = quit_sent.clone();
 
     mock.expect_send_keys().returning(|_, _| Ok(()));
-    // Gemini /quit is sent via send_keys_literal (needs delay before Enter for Ink TUI)
-    mock.expect_send_keys_literal().returning(move |_, k| {
+    mock.expect_send_key().returning(|_, _| Ok(()));
+    // Gemini's /quit is *text*, sent via send_text (`send-keys -l`) with a delay
+    // before the separate Enter keypress, which the Ink TUI needs to render first.
+    mock.expect_send_text().returning(move |_, k| {
         if k == "/quit" {
             quit_sent_c.store(true, Ordering::SeqCst);
         }
@@ -3152,7 +3213,7 @@ fn test_switch_agent_codex_sends_ctrl_c() {
     let ctrl_c_sent_c = ctrl_c_sent.clone();
 
     mock.expect_send_keys().returning(|_, _| Ok(()));
-    mock.expect_send_keys_literal().returning(move |_, k| {
+    mock.expect_send_key().returning(move |_, k| {
         if k == "C-c" {
             ctrl_c_sent_c.store(true, Ordering::SeqCst);
         }
@@ -3172,6 +3233,67 @@ fn test_switch_agent_codex_sends_ctrl_c() {
 // =============================================================================
 // Tests for cyclic phase support and {phase} substitution
 // =============================================================================
+
+/// The launch lane passes the command in argv, where a newline is just a byte,
+/// so `{task}` keeps the structure its author wrote. The typed path cannot: it
+/// sends with `send_keys`, where a newline is a real Enter that would submit the
+/// message half-written.
+#[test]
+fn test_resolve_skill_command_collapse_controls_task_structure() {
+    use crate::config::WorkflowPlugin;
+    let plugin: WorkflowPlugin = toml::from_str(
+        r#"
+        name = "spec-kit"
+        [commands]
+        planning = "/speckit.specify {task}"
+        [prompts]
+        [artifacts]
+    "#,
+    )
+    .unwrap();
+    let plugin = Some(plugin);
+    let task = "Add a login form.\n\n- email field\n- password field";
+
+    let collapsed =
+        resolve_skill_command(&plugin, "planning", "claude", task, 1, "id-1", true).unwrap();
+    assert_eq!(
+        collapsed,
+        "/speckit.specify Add a login form. - email field - password field",
+        "typed path must stay on one line"
+    );
+    assert!(!collapsed.contains('\n'));
+
+    let verbatim =
+        resolve_skill_command(&plugin, "planning", "claude", task, 1, "id-1", false).unwrap();
+    assert_eq!(verbatim, format!("/speckit.specify {task}"));
+    assert!(
+        verbatim.contains("\n\n- email field"),
+        "launch lane must preserve blank lines and list structure: {verbatim:?}"
+    );
+}
+
+/// Collapsing is only about `{task}`; a command without the placeholder is
+/// identical either way.
+#[test]
+fn test_resolve_skill_command_collapse_is_a_noop_without_task_placeholder() {
+    use crate::config::WorkflowPlugin;
+    let plugin: WorkflowPlugin = toml::from_str(
+        r#"
+        name = "agtx"
+        [commands]
+        planning = "/agtx:plan {task_id}"
+        [prompts]
+        [artifacts]
+    "#,
+    )
+    .unwrap();
+    let plugin = Some(plugin);
+    let task = "line one\nline two";
+    assert_eq!(
+        resolve_skill_command(&plugin, "planning", "claude", task, 1, "id-1", true),
+        resolve_skill_command(&plugin, "planning", "claude", task, 1, "id-1", false),
+    );
+}
 
 #[test]
 fn test_resolve_skill_command_phase_substitution() {
@@ -3193,35 +3315,35 @@ fn test_resolve_skill_command_phase_substitution() {
 
     // Cycle 1: {phase} → "1"
     assert_eq!(
-        resolve_skill_command(&p, "planning", "claude", "", 1, ""),
+        resolve_skill_command(&p, "planning", "claude", "", 1, "", true),
         Some("/gsd:plan-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "running", "claude", "", 1, ""),
+        resolve_skill_command(&p, "running", "claude", "", 1, "", true),
         Some("/gsd:execute-phase 1".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "review", "claude", "", 1, ""),
+        resolve_skill_command(&p, "review", "claude", "", 1, "", true),
         Some("/gsd:verify-work 1".to_string())
     );
 
     // Cycle 2: {phase} → "2"
     assert_eq!(
-        resolve_skill_command(&p, "planning", "claude", "", 2, ""),
+        resolve_skill_command(&p, "planning", "claude", "", 2, "", true),
         Some("/gsd:plan-phase 2".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "running", "claude", "", 2, ""),
+        resolve_skill_command(&p, "running", "claude", "", 2, "", true),
         Some("/gsd:execute-phase 2".to_string())
     );
     assert_eq!(
-        resolve_skill_command(&p, "review", "claude", "", 2, ""),
+        resolve_skill_command(&p, "review", "claude", "", 2, "", true),
         Some("/gsd:verify-work 2".to_string())
     );
 
     // preresearch also gets {phase} substitution (falls back to research command)
     assert_eq!(
-        resolve_skill_command(&p, "preresearch", "claude", "", 1, ""),
+        resolve_skill_command(&p, "preresearch", "claude", "", 1, "", true),
         Some("/gsd:new-project".to_string())
     );
 }
@@ -3357,7 +3479,7 @@ fn test_resolve_skill_command_preresearch_fallback() {
     let plugin: WorkflowPlugin = toml::from_str(plugin_toml).unwrap();
     let p = Some(plugin);
     assert_eq!(
-        resolve_skill_command(&p, "preresearch", "claude", "", 1, ""),
+        resolve_skill_command(&p, "preresearch", "claude", "", 1, "", true),
         Some("/test:discuss".to_string())
     );
 }
@@ -3415,6 +3537,252 @@ fn test_gsd_plugin_has_cyclic_and_copy_back() {
 // Tests for send_skill_and_prompt
 // =============================================================================
 
+/// A message the agent's TUI never echoed was dropped, not delayed — that is
+/// what a pane unchanged across the whole confirm budget means. Resending is the
+/// only recovery: `wait_for_agent_ready` cannot prove an Ink-class TUI has
+/// attached its stdin reader, and a dropped send is otherwise silent and total.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_resends_while_the_pane_is_unchanged() {
+    let mut mock = MockTmuxOperations::new();
+    let pastes = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let pastes_c = pastes.clone();
+    mock.expect_send_key().returning(|_, _| Ok(())); // the C-u before each resend
+    mock.expect_paste_text().returning(move |_, _| {
+        *pastes_c.lock().unwrap() += 1;
+        Ok(())
+    });
+    mock.expect_capture_pane()
+        .returning(|_| Ok("frozen splash".to_string()));
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(!deliver_message(&tmux, "sess:win", "hello", true));
+    assert_eq!(*pastes.lock().unwrap(), DELIVERY_ATTEMPTS as usize);
+}
+
+/// ...and the moment the pane redraws it stops, because a redraw means the
+/// message landed and a resend would double it — the same rule
+/// `dismiss_launch_dialog` uses for a dropped keystroke.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_stops_as_soon_as_the_pane_redraws() {
+    let mut mock = MockTmuxOperations::new();
+    let sends = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let sends_c = sends.clone();
+    mock.expect_send_text().returning(move |_, _| {
+        *sends_c.lock().unwrap() += 1;
+        Ok(())
+    });
+    expect_echoing_pane(&mut mock, "composer");
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(deliver_message(&tmux, "sess:win", "hello", false));
+    assert_eq!(*sends.lock().unwrap(), 1, "no resend after a redraw");
+}
+
+/// The antigravity failure mode end to end: the paste is dropped by a TUI that
+/// is not reading yet, so the combined send must retry rather than submit an
+/// empty composer.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_combined_send_retries_a_dropped_paste() {
+    let mut mock = MockTmuxOperations::new();
+    let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let pastes_c = pastes.clone();
+    mock.expect_send_key().returning(|_, _| Ok(()));
+    mock.expect_paste_text().returning(move |_, text| {
+        pastes_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    mock.expect_capture_pane()
+        .returning(|_| Ok("Do you trust the contents of this project?".to_string()));
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    send_skill_and_prompt(
+        &tmux,
+        "sess:win",
+        &Some("/agtx-plan abc".to_string()),
+        "",
+        &None,
+        "task",
+        "antigravity",
+        &[],
+        false,
+    );
+    let pasted = pastes.lock().unwrap();
+    assert_eq!(pasted.len(), DELIVERY_ATTEMPTS as usize);
+    assert!(pasted.iter().all(|p| p.contains("/agtx-plan abc")));
+}
+
+/// A pane that never goes quiet cannot confirm delivery by "something changed" —
+/// the change is the agent's own output. Confirming on the text itself is what
+/// keeps the busy case honest; without it the first poll always says "landed",
+/// which is exactly the case the settle step was added for.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_on_a_busy_pane_confirms_on_the_text_not_the_change() {
+    let mut mock = MockTmuxOperations::new();
+    let sends = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let sends_c = sends.clone();
+    let counter = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    mock.expect_send_key().returning(|_, _| Ok(()));
+    mock.expect_paste_text().returning(move |_, _| {
+        *sends_c.lock().unwrap() += 1;
+        Ok(())
+    });
+    // Never the same twice, and never containing the message: a streaming pane
+    // that dropped what it was sent.
+    mock.expect_capture_pane().returning(move |_| {
+        let mut n = counter.lock().unwrap();
+        *n += 1;
+        Ok(format!("streaming line {n}"))
+    });
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(!deliver_message(&tmux, "sess:win", "/agtx-plan abc-123", true));
+    assert_eq!(
+        *sends.lock().unwrap(),
+        DELIVERY_ATTEMPTS as usize,
+        "a busy pane that never shows the text must still retry"
+    );
+}
+
+/// ...and once the text does appear on that busy pane, it stops.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_on_a_busy_pane_stops_once_the_text_appears() {
+    let mut mock = MockTmuxOperations::new();
+    let sends = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let sends_c = sends.clone();
+    let counter = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    mock.expect_send_key().returning(|_, _| Ok(()));
+    mock.expect_paste_text().returning(move |_, _| {
+        *sends_c.lock().unwrap() += 1;
+        Ok(())
+    });
+    mock.expect_capture_pane().returning(move |_| {
+        let mut n = counter.lock().unwrap();
+        *n += 1;
+        // Still streaming, but the composer now echoes the message — wrapped and
+        // re-indented, the way a real one does.
+        Ok(format!("streaming {n}\n  >  /agtx-plan\n     abc-123"))
+    });
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(deliver_message(&tmux, "sess:win", "/agtx-plan abc-123", true));
+    assert_eq!(*sends.lock().unwrap(), 1, "no resend once the text is visible");
+}
+
+/// A resend clears the composer first: "nothing was seen to land" is not "nothing
+/// landed", and a late redraw would otherwise leave the agent holding the message
+/// twice, concatenated.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_clears_the_composer_before_a_resend() {
+    let mut mock = MockTmuxOperations::new();
+    let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keys_c = keys.clone();
+    mock.expect_send_key().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    mock.expect_paste_text().returning(|_, _| Ok(()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("frozen".to_string()));
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(!deliver_message(&tmux, "sess:win", "hello there", true));
+    let keys = keys.lock().unwrap();
+    assert_eq!(
+        keys.iter().filter(|k| k.as_str() == "C-u").count(),
+        DELIVERY_ATTEMPTS as usize - 1,
+        "one clear before each resend, never before the first send: {keys:?}"
+    );
+}
+
+/// The needle is short and whitespace-insensitive on both sides, because a
+/// composer wraps and re-indents what it echoes.
+#[test]
+fn test_delivery_needle_survives_wrapping() {
+    let needle = delivery_needle("/agtx-plan 57d57fe8-5990\n\nSMOKE TEST").unwrap();
+    assert!(pane_shows("  >  /agtx-plan\n     57d57fe8-5990 ...", &needle));
+    assert!(!pane_shows("  >  waiting for input", &needle));
+    // Nothing distinctive enough to look for.
+    assert!(delivery_needle("hi").is_none());
+    assert!(delivery_needle("   ").is_none());
+}
+
+/// A phase advance fires as soon as the artifact appears, which can be while the
+/// agent is still writing its closing lines — and a composer mid-render may not
+/// take the message at all. Worse, a pane changing on its own makes the delivery
+/// confirmation meaningless: the change it sees is the agent's output, not the
+/// echo. So the send waits for quiet first.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deliver_message_waits_for_the_pane_to_go_quiet_first() {
+    let mut mock = MockTmuxOperations::new();
+    let captures_before_send = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counter = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let seen = captures_before_send.clone();
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let sent_c = sent.clone();
+    let counter_c = counter.clone();
+
+    mock.expect_capture_pane().returning(move |_| {
+        let mut n = counter_c.lock().unwrap();
+        *n += 1;
+        if !*sent_c.lock().unwrap() {
+            *seen.lock().unwrap() = *n;
+        }
+        // Streaming output for the first few polls, then quiet.
+        Ok(if *n <= 3 {
+            format!("streaming {n}")
+        } else if *sent_c.lock().unwrap() {
+            "echoed".to_string()
+        } else {
+            "quiet".to_string()
+        })
+    });
+    let sent_w = sent.clone();
+    mock.expect_paste_text().returning(move |_, _| {
+        *sent_w.lock().unwrap() = true;
+        Ok(())
+    });
+
+    let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
+    assert!(deliver_message(&tmux, "sess:win", "hello", true));
+    assert!(
+        *captures_before_send.lock().unwrap() > 3,
+        "the send must wait out the streaming output, not fire into it"
+    );
+}
+
+/// A `capture_pane` that models an idle pane which then echoes what was sent:
+/// quiet long enough for `wait_for_pane_settled`, then changed once, so
+/// [`deliver_message`] confirms on its first poll and does not resend.
+///
+/// The number of quiet captures is derived from the settle constants rather than
+/// hardcoded, so tuning them does not silently turn these tests into
+/// resend-three-times tests. A pane that *never* changes is what a dropped
+/// message looks like, and is covered on purpose by
+/// `test_deliver_message_resends_while_the_pane_is_unchanged`.
+#[cfg(feature = "test-mocks")]
+fn expect_echoing_pane(mock: &mut MockTmuxOperations, echoed: &'static str) {
+    // `wait_for_pane_settled` needs one baseline capture plus SETTLE_STABLE_POLLS
+    // identical ones; `deliver_message` then takes its own baseline.
+    let quiet = SETTLE_STABLE_POLLS as usize + 2;
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    mock.expect_capture_pane().returning(move |_| {
+        let mut n = calls.lock().unwrap();
+        *n += 1;
+        Ok(if *n <= quiet {
+            "idle composer".to_string()
+        } else {
+            echoed.to_string()
+        })
+    });
+}
+
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_send_skill_and_prompt_gemini_combined() {
@@ -3422,12 +3790,18 @@ fn test_send_skill_and_prompt_gemini_combined() {
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
 
-    mock.expect_send_keys_literal().returning(move |_, text| {
+    let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let pastes_c = pastes.clone();
+
+    mock.expect_send_key().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
-    mock.expect_capture_pane()
-        .returning(|_| Ok("/agtx:plan\n\nmy task".to_string()));
+    mock.expect_paste_text().returning(move |_, text| {
+        pastes_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    expect_echoing_pane(&mut mock, "/agtx:plan\n\nmy task");
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -3441,11 +3815,23 @@ fn test_send_skill_and_prompt_gemini_combined() {
         &[],
         false,
     );
+    // The message arrives as one bracketed paste, newlines intact — not as typed
+    // keystrokes, which an Ink composer would submit at the first newline.
+    let pasted = pastes.lock().unwrap();
+    assert_eq!(pasted.len(), 1, "exactly one paste");
+    assert!(pasted[0].contains("/agtx:plan") && pasted[0].contains("my task"));
+    assert!(pasted[0].contains('\n'), "newlines preserved in the paste");
+
     let calls = literal_calls.lock().unwrap();
-    assert!(calls
-        .iter()
-        .any(|c| c.contains("/agtx:plan") && c.contains("my task")));
-    assert!(calls.iter().any(|c| c == "Enter"));
+    assert!(
+        !calls.iter().any(|c| c.contains("my task")),
+        "the message must not also be typed: {calls:?}"
+    );
+    assert_eq!(
+        calls.iter().filter(|c| *c == "Enter").count(),
+        1,
+        "exactly one Enter submits it: {calls:?}"
+    );
 }
 
 #[test]
@@ -3455,12 +3841,18 @@ fn test_send_skill_and_prompt_codex_combined() {
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
 
-    mock.expect_send_keys_literal().returning(move |_, text| {
+    let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let pastes_c = pastes.clone();
+
+    mock.expect_send_key().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
-    mock.expect_capture_pane()
-        .returning(|_| Ok("$agtx-plan\n\ndo the thing".to_string()));
+    mock.expect_paste_text().returning(move |_, text| {
+        pastes_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    expect_echoing_pane(&mut mock, "$agtx-plan\n\ndo the thing");
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -3474,11 +3866,20 @@ fn test_send_skill_and_prompt_codex_combined() {
         &[],
         false,
     );
+    let pasted = pastes.lock().unwrap();
+    assert_eq!(pasted.len(), 1, "exactly one paste");
+    assert!(pasted[0].contains("$agtx-plan") && pasted[0].contains("do the thing"));
+
+    // Codex used to need a second Enter to dismiss its `$skill` command picker.
+    // That picker opens on *typing*, not on a paste, so with bracketed paste there
+    // is nothing to dismiss and a second Enter would fire into an empty composer.
+    // Verified against codex-cli 0.144.5.
     let calls = literal_calls.lock().unwrap();
-    assert!(calls
-        .iter()
-        .any(|c| c.contains("$agtx-plan") && c.contains("do the thing")));
-    assert!(calls.iter().any(|c| c == "Enter"));
+    assert_eq!(
+        calls.iter().filter(|c| *c == "Enter").count(),
+        1,
+        "codex must send exactly one Enter after a paste: {calls:?}"
+    );
 }
 
 #[test]
@@ -3492,7 +3893,7 @@ fn test_send_skill_and_prompt_claude_with_trigger() {
         keys_c.lock().unwrap().push(k.to_string());
         Ok(())
     });
-    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_send_key().returning(|_, _| Ok(()));
     // Return trigger text immediately
     mock.expect_capture_pane()
         .returning(|_| Ok("Ready for input >".to_string()));
@@ -3533,7 +3934,7 @@ fn test_send_skill_and_prompt_clear_context_claude() {
         keys_c.lock().unwrap().push(k.to_string());
         Ok(())
     });
-    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
+    mock.expect_send_key().returning(|_, _| Ok(()));
     // Simulate stable pane after /clear so the poll exits quickly.
     mock.expect_capture_pane()
         .returning(|_| Ok("✻ Welcome to Claude Code!".to_string()));
@@ -3578,9 +3979,9 @@ fn test_send_skill_and_prompt_clear_context_ignored_for_non_claude() {
         keys_c.lock().unwrap().push(k.to_string());
         Ok(())
     });
-    mock.expect_send_keys_literal().returning(|_, _| Ok(()));
-    mock.expect_capture_pane()
-        .returning(|_| Ok(String::new()));
+    mock.expect_send_key().returning(|_, _| Ok(()));
+    mock.expect_paste_text().returning(|_, _| Ok(()));
+    mock.expect_capture_pane().returning(|_| Ok(String::new()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -3634,13 +4035,17 @@ fn test_send_skill_and_prompt_prompt_only() {
 #[cfg(feature = "test-mocks")]
 fn test_send_skill_and_prompt_void_prefill() {
     let mut mock = MockTmuxOperations::new();
-    let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let literal_c = literal_calls.clone();
+    let texts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let texts_c = texts.clone();
 
-    mock.expect_send_keys_literal().returning(move |_, text| {
-        literal_c.lock().unwrap().push(text.to_string());
+    // Task-derived text goes through `send_text` (`send-keys -l`), never the
+    // key-name path — a prefill that happened to spell "Up" or "Space" would
+    // otherwise arrive as an arrow key or a bare space.
+    mock.expect_send_text().returning(move |_, text| {
+        texts_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
+    mock.expect_send_key().never();
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -3654,7 +4059,7 @@ fn test_send_skill_and_prompt_void_prefill() {
         &[],
         false,
     );
-    let calls = literal_calls.lock().unwrap();
+    let calls = texts.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0], "fix the login bug");
 }
@@ -3693,7 +4098,7 @@ fn test_wait_for_prompt_trigger_auto_dismiss_then_trigger() {
             Ok("Ready for input >".to_string())
         }
     });
-    mock.expect_send_keys_literal().returning(move |_, k| {
+    mock.expect_send_key().returning(move |_, k| {
         if k == "y" {
             dismiss_c.store(true, std::sync::atomic::Ordering::SeqCst);
         }
@@ -3724,7 +4129,7 @@ fn test_wait_for_agent_ready_detects_agent_process() {
     mock.expect_capture_pane().returning(|_| Ok(String::new()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win");
+    let result = wait_for_agent_ready(&tmux, "sess:win", None);
     assert_eq!(result, Some("sess:win".to_string()));
 }
 
@@ -3738,7 +4143,7 @@ fn test_wait_for_agent_ready_detects_ready_indicator() {
         .returning(|_| Ok("Welcome to Gemini\nType your message".to_string()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win");
+    let result = wait_for_agent_ready(&tmux, "sess:win", None);
     assert_eq!(result, Some("sess:win".to_string()));
 }
 
@@ -3753,13 +4158,13 @@ fn test_wait_for_agent_ready_claude_bypass_accept() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Do you trust this? Yes, I accept the terms".to_string()));
-    mock.expect_send_keys_literal().returning(move |_, k| {
+    mock.expect_send_key().returning(move |_, k| {
         literal_c.lock().unwrap().push(k.to_string());
         Ok(())
     });
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win");
+    let result = wait_for_agent_ready(&tmux, "sess:win", None);
     assert_eq!(result, Some("sess:win".to_string()));
     let calls = literal_calls.lock().unwrap();
     assert!(
@@ -3778,7 +4183,7 @@ fn test_write_skills_to_worktree_claude() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], false);
 
     // Canonical skills
     assert!(dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists());
@@ -3810,7 +4215,7 @@ fn test_write_skills_to_worktree_gemini_toml() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], false);
 
     let toml_path = dir.path().join(".gemini/commands/agtx/plan.toml");
     assert!(toml_path.exists());
@@ -3832,7 +4237,7 @@ fn test_write_skills_to_worktree_codex() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"], false);
 
     // Codex uses subdirectories with SKILL.md
     assert!(dir.path().join(".codex/skills/agtx-plan/SKILL.md").exists());
@@ -3847,7 +4252,7 @@ fn test_write_skills_to_worktree_opencode() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"], false);
 
     let md_path = dir.path().join(".opencode/command/agtx-plan.md");
     assert!(md_path.exists());
@@ -3863,7 +4268,7 @@ fn test_write_skills_to_worktree_mcp_claude() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], false);
 
     let mcp = dir.path().join(".mcp.json");
     assert!(mcp.exists(), ".mcp.json should be written for claude");
@@ -3878,10 +4283,13 @@ fn test_write_skills_to_worktree_mcp_gemini() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], false);
 
     let cfg = dir.path().join(".gemini/settings.json");
-    assert!(cfg.exists(), ".gemini/settings.json should be written for gemini");
+    assert!(
+        cfg.exists(),
+        ".gemini/settings.json should be written for gemini"
+    );
     let content = std::fs::read_to_string(&cfg).unwrap();
     let v: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert!(v["mcpServers"]["agtx"]["command"].is_string());
@@ -3892,10 +4300,13 @@ fn test_write_skills_to_worktree_mcp_cursor() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], false);
 
     let cfg = dir.path().join(".cursor/mcp.json");
-    assert!(cfg.exists(), ".cursor/mcp.json should be written for cursor");
+    assert!(
+        cfg.exists(),
+        ".cursor/mcp.json should be written for cursor"
+    );
     let content = std::fs::read_to_string(&cfg).unwrap();
     let v: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert!(v["mcpServers"]["agtx"]["command"].is_string());
@@ -3906,7 +4317,7 @@ fn test_write_skills_to_worktree_mcp_grok() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"], false);
 
     let cfg = dir.path().join(".grok/config.toml");
     assert!(cfg.exists(), ".grok/config.toml should be written for grok");
@@ -3927,7 +4338,7 @@ fn test_write_skills_to_worktree_mcp_grok_preserves_existing_config() {
     )
     .unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"], false);
 
     let content = std::fs::read_to_string(grok_dir.join("config.toml")).unwrap();
     assert!(
@@ -3942,12 +4353,18 @@ fn test_write_skills_to_worktree_grok_skills() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["grok"], false);
 
     let skill = dir.path().join(".grok/skills/agtx-plan/SKILL.md");
-    assert!(skill.exists(), "grok skills go to .grok/skills/<name>/SKILL.md");
+    assert!(
+        skill.exists(),
+        "grok skills go to .grok/skills/<name>/SKILL.md"
+    );
     let content = std::fs::read_to_string(&skill).unwrap();
-    assert!(content.starts_with("---"), "frontmatter must be kept for grok");
+    assert!(
+        content.starts_with("---"),
+        "frontmatter must be kept for grok"
+    );
     // Canonical copy is always written too
     assert!(dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists());
 }
@@ -3977,7 +4394,7 @@ fn test_write_skills_to_worktree_mcp_antigravity() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false);
 
     let cfg = dir.path().join(".agents/mcp_config.json");
     assert!(
@@ -4002,7 +4419,7 @@ fn test_write_skills_to_worktree_mcp_antigravity_preserves_existing_config() {
     )
     .unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false);
 
     let content = std::fs::read_to_string(agents_dir.join("mcp_config.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -4025,7 +4442,7 @@ fn test_write_skills_to_worktree_mcp_antigravity_replaces_malformed_config() {
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(agents_dir.join("mcp_config.json"), "not json at all").unwrap();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false);
 
     let content = std::fs::read_to_string(agents_dir.join("mcp_config.json")).unwrap();
     let v: serde_json::Value =
@@ -4038,7 +4455,7 @@ fn test_write_skills_to_worktree_antigravity_skills() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], false);
 
     let skill = dir.path().join(".agents/skills/agtx-plan/SKILL.md");
     assert!(
@@ -4060,10 +4477,13 @@ fn test_write_skills_to_worktree_mcp_codex() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["codex"], false);
 
     let cfg = dir.path().join(".codex/config.toml");
-    assert!(cfg.exists(), ".codex/config.toml should be written for codex");
+    assert!(
+        cfg.exists(),
+        ".codex/config.toml should be written for codex"
+    );
     let content = std::fs::read_to_string(&cfg).unwrap();
     assert!(content.contains("[mcp_servers.agtx]"));
     assert!(content.contains("mcp-serve"));
@@ -4074,7 +4494,7 @@ fn test_write_skills_to_worktree_mcp_opencode() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"], false);
 
     let cfg = dir.path().join("opencode.json");
     assert!(cfg.exists(), "opencode.json should be written for opencode");
@@ -4285,7 +4705,6 @@ fn type_str(app: &mut App, s: &str) {
         press_key(app, KeyCode::Char(c));
     }
 }
-
 
 // --- Smoke tests ---
 
@@ -5178,8 +5597,7 @@ fn assert_cursor_matches_wrap(text: &str, prefix: usize, wrap_width: usize) {
     let spans = vec![ratatui::text::Span::raw(combined)];
     let lines = super::wrap_spans(spans, wrap_width);
 
-    let (col, row) =
-        super::wrapped_cursor_pos(text, text.len(), prefix, wrap_width);
+    let (col, row) = super::wrapped_cursor_pos(text, text.len(), prefix, wrap_width);
 
     assert_eq!(
         row,
@@ -5589,7 +6007,7 @@ fn test_transition_to_planning_reuses_live_session() {
     // spawn_send_to_agent may call these; allow any number of calls
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
@@ -5711,7 +6129,7 @@ fn test_transition_to_running_with_session_returns_false() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
@@ -5752,7 +6170,7 @@ fn test_transition_to_review_no_pr_sets_review_confirm_popup() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
@@ -5792,7 +6210,7 @@ fn test_transition_to_review_existing_pr_spawns_push() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
@@ -5961,6 +6379,7 @@ fn make_session_task_status(
         task_id: task_id.to_string(),
         phase_status,
         content_hash: None,
+        hook_status: None,
         status,
         worktree_path: None,
         session_name: None,
@@ -6012,6 +6431,167 @@ fn test_apply_session_refresh_ready_inserts_cache() {
     assert!(!app.state.pane_content_hashes.contains_key("t1"));
 }
 
+// ── hook-reported status ─────────────────────────────────────────────────────
+
+#[cfg(feature = "test-mocks")]
+fn hook(state: crate::agent::hook_status::HookState) -> crate::agent::hook_status::AgentHookStatus {
+    crate::agent::hook_status::AgentHookStatus {
+        ts: 0,
+        state,
+        session_id: None,
+        transcript_path: None,
+        message: None,
+        tool: None,
+        agent: "claude".to_string(),
+    }
+}
+
+#[cfg(feature = "test-mocks")]
+fn refresh_with_hook(
+    app: &mut App,
+    hook_status: Option<crate::agent::hook_status::AgentHookStatus>,
+    content_hash: Option<u64>,
+) -> PhaseStatus {
+    let result = SessionRefreshResult {
+        statuses: vec![SessionTaskStatus {
+            task_id: "t1".to_string(),
+            phase_status: PhaseStatus::Working,
+            content_hash,
+            hook_status,
+            status: TaskStatus::Planning,
+            worktree_path: None,
+            session_name: None,
+            agent: "claude".to_string(),
+            was_ready: false,
+        }],
+    };
+    app.apply_session_refresh(result);
+    app.state.phase_status_cache["t1"].0
+}
+
+/// The regression that motivates the whole change: an agent thinking silently
+/// for longer than 15s used to be reported as Idle.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_hook_working_beats_a_stale_pane_hash() {
+    use crate::agent::hook_status::HookState;
+    let mut app = make_test_app();
+    let old = std::time::Instant::now() - std::time::Duration::from_secs(20);
+    app.state
+        .pane_content_hashes
+        .insert("t1".to_string(), (99, old));
+
+    let phase = refresh_with_hook(&mut app, Some(hook(HookState::Working)), Some(99));
+
+    assert_eq!(
+        phase,
+        PhaseStatus::Working,
+        "a hook saying Working must override 20s of unchanged pane output"
+    );
+    assert!(
+        !app.state.pane_content_hashes.contains_key("t1"),
+        "pane history should be dropped once the agent reports for itself"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_hook_blocked_maps_to_blocked_and_records_reason() {
+    use crate::agent::hook_status::HookState;
+    let mut app = make_test_app();
+    let mut h = hook(HookState::Blocked);
+    h.message = Some("Allow Bash(rm -rf /)?".to_string());
+
+    assert_eq!(
+        refresh_with_hook(&mut app, Some(h), None),
+        PhaseStatus::Blocked
+    );
+    assert_eq!(
+        app.state.blocked_reasons.get("t1").map(String::as_str),
+        Some("Allow Bash(rm -rf /)?")
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_blocked_reason_is_cleared_when_the_agent_resumes() {
+    use crate::agent::hook_status::HookState;
+    let mut app = make_test_app();
+    let mut h = hook(HookState::Blocked);
+    h.message = Some("Allow Bash?".to_string());
+    refresh_with_hook(&mut app, Some(h), None);
+
+    refresh_with_hook(&mut app, Some(hook(HookState::Working)), None);
+
+    assert!(
+        !app.state.blocked_reasons.contains_key("t1"),
+        "a stale reason must not linger on the card after the agent resumes"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_hook_waiting_maps_to_idle() {
+    use crate::agent::hook_status::HookState;
+    let mut app = make_test_app();
+    // "turn ended, no artifact yet" is what Idle has always meant, so the
+    // merge-conflict and stuck-task consumers keep working unchanged.
+    assert_eq!(
+        refresh_with_hook(&mut app, Some(hook(HookState::Waiting)), None),
+        PhaseStatus::Idle
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_hook_ended_maps_to_exited() {
+    use crate::agent::hook_status::HookState;
+    let mut app = make_test_app();
+    assert_eq!(
+        refresh_with_hook(&mut app, Some(hook(HookState::Ended)), None),
+        PhaseStatus::Exited
+    );
+}
+
+/// The fallback contract: with no hook report, behaviour is exactly as before.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_no_hook_status_keeps_the_pane_heuristic() {
+    let mut app = make_test_app();
+    let old = std::time::Instant::now() - std::time::Duration::from_secs(20);
+    app.state
+        .pane_content_hashes
+        .insert("t1".to_string(), (99, old));
+
+    assert_eq!(
+        refresh_with_hook(&mut app, None, Some(99)),
+        PhaseStatus::Idle
+    );
+}
+
+/// Artifact detection is untouched by this plan — Ready still wins.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_ready_artifact_outranks_a_working_hook() {
+    use crate::agent::hook_status::HookState;
+    let mut app = make_test_app();
+    let result = SessionRefreshResult {
+        statuses: vec![SessionTaskStatus {
+            task_id: "t1".to_string(),
+            phase_status: PhaseStatus::Ready,
+            content_hash: None,
+            hook_status: Some(hook(HookState::Working)),
+            status: TaskStatus::Planning,
+            worktree_path: None,
+            session_name: None,
+            agent: "claude".to_string(),
+            was_ready: false,
+        }],
+    };
+    app.apply_session_refresh(result);
+    assert_eq!(app.state.phase_status_cache["t1"].0, PhaseStatus::Ready);
+}
+
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_apply_session_refresh_working_becomes_idle_after_15s() {
@@ -6027,6 +6607,7 @@ fn test_apply_session_refresh_working_becomes_idle_after_15s() {
             task_id: "t1".to_string(),
             phase_status: PhaseStatus::Working,
             content_hash: Some(99), // same hash → stable
+            hook_status: None,
             status: TaskStatus::Planning,
             worktree_path: None,
             session_name: None,
@@ -6054,6 +6635,7 @@ fn test_apply_session_refresh_working_stays_working_hash_changed() {
             task_id: "t1".to_string(),
             phase_status: PhaseStatus::Working,
             content_hash: Some(100), // different hash → timer resets
+            hook_status: None,
             status: TaskStatus::Planning,
             worktree_path: None,
             session_name: None,
@@ -7343,10 +7925,12 @@ fn test_toggle_orchestrator_spawns_new_session() {
     mock_tmux.expect_create_session().returning(|_, _| Ok(()));
     mock_tmux
         .expect_create_window()
-        .withf(|_session, window_name, _dir, _cmd, keep_shell_on_exit: &bool| {
-            window_name == "orchestrator" && !keep_shell_on_exit
-        })
-        .returning(|_, _, _, _, _| Ok(()));
+        .withf(
+            |_session, window_name, _dir, _cmd, keep_shell_on_exit: &bool, _env: &[(String, String)]| {
+                window_name == "orchestrator" && !keep_shell_on_exit
+            },
+        )
+        .returning(|_, _, _, _, _, _| Ok(()));
     mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
     mock_tmux
         .expect_capture_pane_with_history()
@@ -7436,9 +8020,7 @@ fn test_toggle_orchestrator_reattaches_to_live_orchestrator_from_other_instance(
         .expect_capture_pane()
         .withf(|t| t == "test-project:orchestrator")
         .returning(|_| Ok("Claude Code\n".to_string()));
-    mock_tmux
-        .expect_resize_window()
-        .returning(|_, _, _| Ok(()));
+    mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
     mock_tmux
         .expect_capture_pane_with_history()
         .returning(|_, _| vec![]);
@@ -7482,10 +8064,12 @@ fn test_toggle_orchestrator_clears_stale_session_and_respawns() {
     // Respawn must keep `keep_shell_on_exit=false` — else zombie shell on exit.
     mock_tmux
         .expect_create_window()
-        .withf(|_session, window_name, _dir, _cmd, keep_shell_on_exit: &bool| {
-            window_name == "orchestrator" && !keep_shell_on_exit
-        })
-        .returning(|_, _, _, _, _| Ok(()));
+        .withf(
+            |_session, window_name, _dir, _cmd, keep_shell_on_exit: &bool, _env: &[(String, String)]| {
+                window_name == "orchestrator" && !keep_shell_on_exit
+            },
+        )
+        .returning(|_, _, _, _, _, _| Ok(()));
     mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
     mock_tmux
         .expect_capture_pane_with_history()
@@ -7837,13 +8421,7 @@ fn test_deliver_orchestrator_notifications_clears_state_when_window_gone() {
 
     assert!(app.state.orchestrator_session.is_none());
     assert!(!app.state.orchestrator_ready.load(Ordering::Acquire));
-    let remaining = app
-        .state
-        .db
-        .as_ref()
-        .unwrap()
-        .peek_notifications()
-        .unwrap();
+    let remaining = app.state.db.as_ref().unwrap().peek_notifications().unwrap();
     assert_eq!(remaining.len(), 1, "notifications preserved for next spawn");
 }
 
@@ -7872,7 +8450,11 @@ fn test_run_orchestrator_catchup_emits_for_planning_artifact() {
     run_orchestrator_catchup(&db, &[task.clone()], None);
 
     let notifs = db.peek_notifications().unwrap();
-    assert_eq!(notifs.len(), 1, "expected exactly one catch-up notification");
+    assert_eq!(
+        notifs.len(),
+        1,
+        "expected exactly one catch-up notification"
+    );
     assert!(
         notifs[0].message.contains("compose release notes"),
         "message should include task title, got: {}",
@@ -8013,7 +8595,11 @@ fn test_detect_existing_orchestrator_runs_catchup() {
     assert!(result.is_some());
 
     let notifs = db.peek_notifications().unwrap();
-    assert_eq!(notifs.len(), 1, "catch-up should have queued one notification");
+    assert_eq!(
+        notifs.len(),
+        1,
+        "catch-up should have queued one notification"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -8523,7 +9109,7 @@ fn test_is_agent_active_true_when_agent_process_running() {
     mock_tmux
         .expect_pane_current_command()
         .returning(|_| Some("claude".to_string()));
-    assert!(is_agent_active(&mock_tmux, "proj:task"));
+    assert!(is_agent_active(&mock_tmux, "proj:task", None));
 }
 
 #[test]
@@ -8537,7 +9123,7 @@ fn test_is_agent_active_true_when_gemini_indicator_in_pane() {
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("some output\nType your message\n".to_string()));
-    assert!(is_agent_active(&mock_tmux, "proj:task"));
+    assert!(is_agent_active(&mock_tmux, "proj:task", None));
 }
 
 #[test]
@@ -8550,7 +9136,7 @@ fn test_is_agent_active_false_when_at_shell_no_indicator() {
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("$ ".to_string()));
-    assert!(!is_agent_active(&mock_tmux, "proj:task"));
+    assert!(!is_agent_active(&mock_tmux, "proj:task", None));
 }
 
 // --- collect_task_diff ---
@@ -8673,6 +9259,45 @@ fn test_cleanup_task_for_done_no_ops_when_no_session_or_worktree() {
     assert_eq!(task.status, TaskStatus::Done);
 }
 
+/// `.agtx/status/` is runtime scratch written by agent hooks, not a phase
+/// artifact. The archive step only copies top-level `.md` files, so it is
+/// excluded today — this pins that, since a future recursive archive would
+/// otherwise start snapshotting status records.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cleanup_does_not_archive_hook_status_files() {
+    let mock_tmux = MockTmuxOperations::new();
+    let mut mock_git = MockGitOperations::new();
+    mock_git.expect_remove_worktree().returning(|_, _| Ok(()));
+
+    let wt = tempfile::tempdir().unwrap();
+    let status_dir = wt.path().join(".agtx").join("status");
+    std::fs::create_dir_all(&status_dir).unwrap();
+    std::fs::write(
+        status_dir.join("t9.json"),
+        r#"{"ts":1,"state":"working","agent":"claude"}"#,
+    )
+    .unwrap();
+
+    let project_dir = tempfile::tempdir().unwrap();
+    let mut task = make_test_task("t9", "Status task", TaskStatus::Review);
+    task.session_name = None;
+    task.worktree_path = Some(wt.path().to_string_lossy().to_string());
+    task.branch_name = Some("task/my-slug".to_string());
+
+    cleanup_task_for_done(&mut task, None, project_dir.path(), &mock_tmux, &mock_git);
+
+    let archived = project_dir
+        .path()
+        .join(".agtx")
+        .join("archive")
+        .join("my-slug");
+    assert!(
+        !archived.join("status").exists() && !archived.join("t9.json").exists(),
+        "hook status records must not be archived"
+    );
+}
+
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_cleanup_task_for_done_archives_md_files() {
@@ -8696,13 +9321,7 @@ fn test_cleanup_task_for_done_archives_md_files() {
     task.worktree_path = Some(wt.path().to_string_lossy().to_string());
     task.branch_name = Some("task/my-slug".to_string());
 
-    cleanup_task_for_done(
-        &mut task,
-        None,
-        project_dir.path(),
-        &mock_tmux,
-        &mock_git,
-    );
+    cleanup_task_for_done(&mut task, None, project_dir.path(), &mock_tmux, &mock_git);
 
     // Archived file should exist under .agtx/archive/my-slug/plan.md
     let archive = project_dir
@@ -8788,13 +9407,7 @@ fn test_delete_task_resources_kills_window_removes_worktree_and_deletes_branch()
     task.worktree_path = Some("/tmp/wt".to_string());
     task.branch_name = Some("task/my-task".to_string());
 
-    delete_task_resources(
-        &task,
-        None,
-        Path::new("/tmp/proj"),
-        &mock_tmux,
-        &mock_git,
-    );
+    delete_task_resources(&task, None, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
 }
 
 #[test]
@@ -8805,13 +9418,7 @@ fn test_delete_task_resources_noop_when_no_session_or_worktree() {
 
     let task = make_test_task("t2", "Nothing to clean", TaskStatus::Backlog);
     // session_name and worktree_path both None → no mock calls
-    delete_task_resources(
-        &task,
-        None,
-        Path::new("/tmp/proj"),
-        &mock_tmux,
-        &mock_git,
-    );
+    delete_task_resources(&task, None, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
 }
 
 // --- save_task ---
@@ -8998,9 +9605,9 @@ fn test_switch_agent_claude_sends_exit_then_new_cmd() {
 fn test_switch_agent_codex_sends_ctrl_c_not_exit() {
     // Codex has no exit command — sends C-c instead
     let mut mock_tmux = MockTmuxOperations::new();
-    // C-c via send_keys_literal (not send_keys)
+    // C-c via send_key (not send_keys)
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -9012,11 +9619,18 @@ fn test_switch_agent_codex_sends_ctrl_c_not_exit() {
         .returning(|_| Ok(String::new()));
     mock_tmux
         .expect_send_keys()
-        .withf(|_, cmd: &str| cmd == "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT codex --sandbox workspace-write")
+        .withf(|_, cmd: &str| {
+            cmd == "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT codex --sandbox workspace-write"
+        })
         .times(1)
         .returning(|_, _| Ok(()));
 
-    switch_agent_in_tmux(&mock_tmux, "proj:task", "codex", "codex --sandbox workspace-write");
+    switch_agent_in_tmux(
+        &mock_tmux,
+        "proj:task",
+        "codex",
+        "codex --sandbox workspace-write",
+    );
 }
 
 #[test]
@@ -9049,7 +9663,7 @@ fn test_switch_agent_retries_with_ctrl_c_when_shell_not_found() {
         .returning(|_| Ok(String::new()));
     // C-c sent on retry
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -9078,13 +9692,13 @@ fn test_switch_agent_sends_ctrl_d_as_last_resort() {
         .returning(|_| Some("claude".to_string()));
     // C-c on retry
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
     // C-d as last resort
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "C-d")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -9111,7 +9725,7 @@ fn test_switch_agent_always_sends_new_agent_cmd() {
         .expect_pane_current_command()
         .returning(|_| Some("claude".to_string()));
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     // This is the key assertion — new_agent_cmd must be sent exactly once
     mock_tmux
@@ -9141,6 +9755,7 @@ fn test_wait_for_agent_ready_returns_when_process_detected() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        None,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9160,6 +9775,7 @@ fn test_wait_for_agent_ready_returns_when_ready_indicator_in_pane() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        None,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9175,22 +9791,24 @@ fn test_wait_for_agent_ready_handles_claude_bypass_prompt() {
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok("Yes, I accept\nSome prompt text".to_string()));
-    // Must send "2" to accept
+    // Must send "2" to accept. The mock pane never changes, which is exactly how
+    // a dropped keystroke looks, so the answer is retried up to the cap.
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "2")
-        .times(1)
+        .times(LAUNCH_DIALOG_MAX_ATTEMPTS as usize)
         .returning(|_, _| Ok(()));
     // Must send Enter to confirm
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "Enter")
-        .times(1)
+        .times(LAUNCH_DIALOG_MAX_ATTEMPTS as usize)
         .returning(|_, _| Ok(()));
 
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        None,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9222,6 +9840,7 @@ fn test_wait_for_agent_ready_returns_when_content_stabilizes() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        None,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9247,6 +9866,7 @@ fn test_wait_for_agent_ready_always_returns_some() {
     let result = wait_for_agent_ready(
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
+        None,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9296,7 +9916,7 @@ fn test_is_agent_active_detects_claude_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("Claude Code v2.1.72\n> ".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", None),
         "Claude Code indicator should trigger is_agent_active"
     );
 }
@@ -9310,7 +9930,7 @@ fn test_is_agent_active_detects_gemini_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nType your message".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", None),
         "Gemini indicator should trigger is_agent_active"
     );
 }
@@ -9324,7 +9944,7 @@ fn test_is_agent_active_detects_opencode_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nAsk anything".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", None),
         "OpenCode indicator should trigger is_agent_active"
     );
 }
@@ -9338,7 +9958,7 @@ fn test_is_agent_active_detects_cursor_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nCursor Agent\n> ".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", None),
         "Cursor indicator should trigger is_agent_active"
     );
 }
@@ -9352,7 +9972,7 @@ fn test_is_agent_active_detects_codex_via_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("some output\nOpenAI Codex".to_string()));
     assert!(
-        is_agent_active(&mock, "t"),
+        is_agent_active(&mock, "t", None),
         "Codex indicator should trigger is_agent_active"
     );
 }
@@ -9366,7 +9986,7 @@ fn test_is_agent_active_returns_false_when_no_indicator() {
     mock.expect_capture_pane()
         .returning(|_| Ok("just some shell output".to_string()));
     assert!(
-        !is_agent_active(&mock, "t"),
+        !is_agent_active(&mock, "t", None),
         "no indicator should return false"
     );
 }
@@ -9384,7 +10004,7 @@ fn test_wait_for_agent_ready_detects_claude_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Claude Code v2.1.72\nsome context".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9396,7 +10016,7 @@ fn test_wait_for_agent_ready_detects_cursor_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Cursor Agent\n> ".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9408,7 +10028,7 @@ fn test_wait_for_agent_ready_detects_opencode_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Ask anything\n> ".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9420,7 +10040,7 @@ fn test_wait_for_agent_ready_detects_codex_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("OpenAI Codex\nsome output".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task");
+    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -9434,7 +10054,7 @@ fn test_switch_agent_cursor_sends_ctrl_c_not_exit() {
     // Cursor is an Ink/Node TUI — uses Ctrl+C to exit, no /exit command
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .withf(|_, key: &str| key == "C-c")
         .times(1)
         .returning(|_, _| Ok(()));
@@ -9460,16 +10080,14 @@ fn test_switch_agent_opencode_sends_exit() {
     let mut mock_tmux = MockTmuxOperations::new();
     let exit_sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let exit_sent_c = exit_sent.clone();
+    mock_tmux.expect_send_keys().returning(move |_, cmd| {
+        if cmd == "/exit" {
+            exit_sent_c.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    });
     mock_tmux
-        .expect_send_keys()
-        .returning(move |_, cmd| {
-            if cmd == "/exit" {
-                exit_sent_c.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-            Ok(())
-        });
-    mock_tmux
-        .expect_send_keys_literal()
+        .expect_send_key()
         .returning(|_, _| Ok(()));
     mock_tmux
         .expect_pane_current_command()
@@ -9493,14 +10111,20 @@ fn test_send_skill_and_prompt_opencode_combined_with_double_enter() {
     let mut mock = MockTmuxOperations::new();
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
+    let texts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let texts_c = texts.clone();
 
-    mock.expect_send_keys_literal().returning(move |_, text| {
+    mock.expect_send_key().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
-    // capture_pane returns content with skill+prompt text so the wait loop exits quickly
-    mock.expect_capture_pane()
-        .returning(|_| Ok("/agtx-plan\n\ndo the thing".to_string()));
+    // The message itself is text, so it goes through send_text (`send-keys -l`);
+    // only the Enters are keys.
+    mock.expect_send_text().returning(move |_, text| {
+        texts_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    expect_echoing_pane(&mut mock, "/agtx-plan\n\ndo the thing");
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -9514,14 +10138,14 @@ fn test_send_skill_and_prompt_opencode_combined_with_double_enter() {
         &[],
         false,
     );
-    let calls = literal_calls.lock().unwrap();
+    let sent = texts.lock().unwrap();
     // Combined message sent
     assert!(
-        calls
-            .iter()
+        sent.iter()
             .any(|c| c.contains("/agtx-plan") && c.contains("do the thing")),
         "skill+prompt should be combined for opencode"
     );
+    let calls = literal_calls.lock().unwrap();
     // Two Enters sent (first to close picker, second to submit)
     assert_eq!(
         calls.iter().filter(|c| c.as_str() == "Enter").count(),
@@ -9533,17 +10157,22 @@ fn test_send_skill_and_prompt_opencode_combined_with_double_enter() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_send_skill_and_prompt_cursor_combined_single_enter() {
-    // Cursor: skill+prompt combined, only one Enter needed (no command picker)
+    // Cursor: skill+prompt combined into one bracketed paste, one Enter to submit.
     let mut mock = MockTmuxOperations::new();
     let literal_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let literal_c = literal_calls.clone();
+    let pastes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let pastes_c = pastes.clone();
 
-    mock.expect_send_keys_literal().returning(move |_, text| {
+    mock.expect_send_key().returning(move |_, text| {
         literal_c.lock().unwrap().push(text.to_string());
         Ok(())
     });
-    mock.expect_capture_pane()
-        .returning(|_| Ok("/agtx-plan\n\nmy task".to_string()));
+    mock.expect_paste_text().returning(move |_, text| {
+        pastes_c.lock().unwrap().push(text.to_string());
+        Ok(())
+    });
+    expect_echoing_pane(&mut mock, "/agtx-plan\n\nmy task");
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     send_skill_and_prompt(
@@ -9557,14 +10186,14 @@ fn test_send_skill_and_prompt_cursor_combined_single_enter() {
         &[],
         false,
     );
-    let calls = literal_calls.lock().unwrap();
+    let pasted = pastes.lock().unwrap();
+    assert_eq!(pasted.len(), 1, "exactly one paste");
     assert!(
-        calls
-            .iter()
-            .any(|c| c.contains("/agtx-plan") && c.contains("my task")),
+        pasted[0].contains("/agtx-plan") && pasted[0].contains("my task"),
         "skill+prompt should be combined for cursor"
     );
     // Only one Enter (cursor has no command picker)
+    let calls = literal_calls.lock().unwrap();
     assert_eq!(
         calls.iter().filter(|c| c.as_str() == "Enter").count(),
         1,
@@ -9577,11 +10206,13 @@ fn test_write_skills_to_worktree_cursor() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
 
-    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"]);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], false);
 
     // Cursor uses subdirectories with SKILL.md (same structure as Codex)
     assert!(
-        dir.path().join(".cursor/skills/agtx-plan/SKILL.md").exists(),
+        dir.path()
+            .join(".cursor/skills/agtx-plan/SKILL.md")
+            .exists(),
         ".cursor/skills/agtx-plan/SKILL.md should exist"
     );
     assert!(
@@ -9605,11 +10236,7 @@ fn test_artifact_path_exists_zero_padded() {
     std::fs::write(phase_dir.join("PLAN.md"), "plan").unwrap();
 
     assert!(
-        artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}/PLAN.md",
-            1
-        ),
+        artifact_path_exists(&dir.path().to_string_lossy(), "{phase}/PLAN.md", 1),
         "should find zero-padded path 01/PLAN.md for cycle 1"
     );
 }
@@ -9623,11 +10250,7 @@ fn test_artifact_path_exists_non_padded_fallback() {
     std::fs::write(phase_dir.join("PLAN.md"), "plan").unwrap();
 
     assert!(
-        artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}/PLAN.md",
-            1
-        ),
+        artifact_path_exists(&dir.path().to_string_lossy(), "{phase}/PLAN.md", 1),
         "should fall back to non-padded path 1/PLAN.md when 01 is missing"
     );
 }
@@ -9641,19 +10264,11 @@ fn test_artifact_path_exists_cycle_2_zero_padded() {
     std::fs::write(phase_dir.join("PLAN.md"), "plan").unwrap();
 
     assert!(
-        artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}/PLAN.md",
-            2
-        ),
+        artifact_path_exists(&dir.path().to_string_lossy(), "{phase}/PLAN.md", 2),
         "cycle 2 should match 02/PLAN.md"
     );
     assert!(
-        !artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}/PLAN.md",
-            1
-        ),
+        !artifact_path_exists(&dir.path().to_string_lossy(), "{phase}/PLAN.md", 1),
         "cycle 1 should not match 02/PLAN.md"
     );
 }
@@ -9665,19 +10280,11 @@ fn test_artifact_path_exists_no_phase_placeholder() {
     std::fs::write(dir.path().join("CONTEXT.md"), "ctx").unwrap();
 
     assert!(
-        artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "CONTEXT.md",
-            1
-        ),
+        artifact_path_exists(&dir.path().to_string_lossy(), "CONTEXT.md", 1),
         "should find plain file with no {{phase}} placeholder"
     );
     assert!(
-        !artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "MISSING.md",
-            1
-        ),
+        !artifact_path_exists(&dir.path().to_string_lossy(), "MISSING.md", 1),
         "should return false for missing plain file"
     );
 }
@@ -9689,19 +10296,11 @@ fn test_artifact_path_exists_glob_pattern() {
     std::fs::write(dir.path().join("01-CONTEXT.md"), "ctx").unwrap();
 
     assert!(
-        artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}-CONTEXT.md",
-            1
-        ),
+        artifact_path_exists(&dir.path().to_string_lossy(), "{phase}-CONTEXT.md", 1),
         "wildcard pattern should match 01-CONTEXT.md for cycle 1"
     );
     assert!(
-        !artifact_path_exists(
-            &dir.path().to_string_lossy(),
-            "{phase}-CONTEXT.md",
-            2
-        ),
+        !artifact_path_exists(&dir.path().to_string_lossy(), "{phase}-CONTEXT.md", 2),
         "wildcard pattern should not match cycle 2 when only cycle 1 file exists"
     );
 }
@@ -9715,11 +10314,7 @@ fn test_research_artifact_exists_no_plugin() {
     // No plugin → always false
     let dir = tempfile::tempdir().unwrap();
     assert!(
-        !research_artifact_exists(
-            &dir.path().to_string_lossy(),
-            "task-123",
-            &None
-        ),
+        !research_artifact_exists(&dir.path().to_string_lossy(), "task-123", &None),
         "no plugin should return false"
     );
 }
@@ -9738,11 +10333,7 @@ fn test_research_artifact_exists_no_artifact_in_plugin() {
 
     let dir = tempfile::tempdir().unwrap();
     assert!(
-        !research_artifact_exists(
-            &dir.path().to_string_lossy(),
-            "task-123",
-            &Some(plugin)
-        ),
+        !research_artifact_exists(&dir.path().to_string_lossy(), "task-123", &Some(plugin)),
         "plugin with no research artifact should return false"
     );
 }
@@ -9766,11 +10357,7 @@ fn test_research_artifact_exists_file_present() {
     std::fs::write(planning_dir.join("task-123-CONTEXT.md"), "ctx").unwrap();
 
     assert!(
-        research_artifact_exists(
-            &dir.path().to_string_lossy(),
-            "task-123",
-            &Some(plugin)
-        ),
+        research_artifact_exists(&dir.path().to_string_lossy(), "task-123", &Some(plugin)),
         "should find artifact when file matching {{task_id}} template exists"
     );
 }
@@ -9789,11 +10376,7 @@ fn test_research_artifact_exists_file_missing() {
 
     let dir = tempfile::tempdir().unwrap();
     assert!(
-        !research_artifact_exists(
-            &dir.path().to_string_lossy(),
-            "task-123",
-            &Some(plugin)
-        ),
+        !research_artifact_exists(&dir.path().to_string_lossy(), "task-123", &Some(plugin)),
         "should return false when artifact file is missing"
     );
 }
@@ -9823,7 +10406,10 @@ fn test_deploy_skill_claude_transforms_frontmatter() {
     deploy_skill(dir.path(), "agtx-plan", content, "claude");
 
     let native = dir.path().join(".claude/commands/agtx/plan.md");
-    assert!(native.exists(), ".claude/commands/agtx/plan.md should be written");
+    assert!(
+        native.exists(),
+        ".claude/commands/agtx/plan.md should be written"
+    );
     let written = std::fs::read_to_string(&native).unwrap();
     assert!(
         written.contains("name: agtx:plan"),
@@ -9839,10 +10425,19 @@ fn test_deploy_skill_gemini_writes_toml() {
     deploy_skill(dir.path(), "agtx-plan", content, "gemini");
 
     let native = dir.path().join(".gemini/commands/agtx/plan.toml");
-    assert!(native.exists(), ".gemini/commands/agtx/plan.toml should be written");
+    assert!(
+        native.exists(),
+        ".gemini/commands/agtx/plan.toml should be written"
+    );
     let written = std::fs::read_to_string(&native).unwrap();
-    assert!(written.contains("description"), "gemini toml should have description field");
-    assert!(written.contains("prompt"), "gemini toml should have prompt field");
+    assert!(
+        written.contains("description"),
+        "gemini toml should have description field"
+    );
+    assert!(
+        written.contains("prompt"),
+        "gemini toml should have prompt field"
+    );
 }
 
 #[test]
@@ -9866,7 +10461,10 @@ fn test_deploy_skill_opencode_writes_flat_md() {
     deploy_skill(dir.path(), "agtx-plan", content, "opencode");
 
     let native = dir.path().join(".opencode/command/agtx-plan.md");
-    assert!(native.exists(), ".opencode/command/agtx-plan.md should be written");
+    assert!(
+        native.exists(),
+        ".opencode/command/agtx-plan.md should be written"
+    );
     let written = std::fs::read_to_string(&native).unwrap();
     assert!(
         written.starts_with("---\ndescription:"),
@@ -9882,7 +10480,9 @@ fn test_deploy_skill_cursor_writes_skill_subdir() {
     deploy_skill(dir.path(), "agtx-plan", content, "cursor");
 
     assert!(
-        dir.path().join(".cursor/skills/agtx-plan/SKILL.md").exists(),
+        dir.path()
+            .join(".cursor/skills/agtx-plan/SKILL.md")
+            .exists(),
         ".cursor/skills/agtx-plan/SKILL.md should be written"
     );
 }
@@ -9922,7 +10522,10 @@ fn test_load_task_plugin_supported_agent_returns_plugin() {
     task.plugin = Some("agtx".to_string());
     // "agtx" bundled plugin has empty supported_agents (all supported)
     let plugin = load_task_plugin(&task, None, "claude");
-    assert!(plugin.is_some(), "agtx plugin should be returned for claude");
+    assert!(
+        plugin.is_some(),
+        "agtx plugin should be returned for claude"
+    );
 }
 
 #[test]
@@ -9931,11 +10534,7 @@ fn test_load_task_plugin_unsupported_agent_returns_none_explicit() {
     use crate::db::Task;
 
     let dir = tempfile::tempdir().unwrap();
-    let plugin_dir = dir
-        .path()
-        .join(".agtx")
-        .join("plugins")
-        .join("gemini-only");
+    let plugin_dir = dir.path().join(".agtx").join("plugins").join("gemini-only");
     std::fs::create_dir_all(&plugin_dir).unwrap();
     std::fs::write(
         plugin_dir.join("plugin.toml"),
@@ -10042,7 +10641,12 @@ fn test_load_plugin_if_configured_unknown_plugin_falls_back_to_agtx() {
 
 #[test]
 fn test_resolve_skill_content_no_plugin_returns_default() {
-    let result = resolve_skill_content(&None, "agtx-plan", std::path::Path::new("/tmp"), "default content");
+    let result = resolve_skill_content(
+        &None,
+        "agtx-plan",
+        std::path::Path::new("/tmp"),
+        "default content",
+    );
     assert_eq!(result, "default content");
 }
 
@@ -10062,23 +10666,22 @@ fn test_resolve_skill_content_plugin_override_on_disk() {
     )
     .unwrap();
 
-    let plugin: WorkflowPlugin = toml::from_str(
-        "name = \"myplugin\"\n[commands]\n[prompts]\n[artifacts]\n",
-    )
-    .unwrap();
+    let plugin: WorkflowPlugin =
+        toml::from_str("name = \"myplugin\"\n[commands]\n[prompts]\n[artifacts]\n").unwrap();
 
     let result = resolve_skill_content(&Some(plugin), "agtx-plan", dir.path(), "default content");
-    assert_eq!(result, "custom plan skill", "plugin override should take precedence");
+    assert_eq!(
+        result, "custom plan skill",
+        "plugin override should take precedence"
+    );
 }
 
 #[test]
 fn test_resolve_skill_content_plugin_no_override_returns_default() {
     // Plugin configured but no custom skill file → returns default
     use crate::config::WorkflowPlugin;
-    let plugin: WorkflowPlugin = toml::from_str(
-        "name = \"myplugin\"\n[commands]\n[prompts]\n[artifacts]\n",
-    )
-    .unwrap();
+    let plugin: WorkflowPlugin =
+        toml::from_str("name = \"myplugin\"\n[commands]\n[prompts]\n[artifacts]\n").unwrap();
 
     let result = resolve_skill_content(
         &Some(plugin),
@@ -10086,7 +10689,10 @@ fn test_resolve_skill_content_plugin_no_override_returns_default() {
         std::path::Path::new("/nonexistent"),
         "default content",
     );
-    assert_eq!(result, "default content", "should fall back to default when no override on disk");
+    assert_eq!(
+        result, "default content",
+        "should fall back to default when no override on disk"
+    );
 }
 
 // =============================================================================
@@ -10157,7 +10763,10 @@ fn test_wait_for_prompt_trigger_returns_false_on_timeout() {
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
     // Verify that the trigger IS found when present (positive case — complements the timeout)
     let result = wait_for_prompt_trigger(&tmux, "sess:win", "no trigger here", &[]);
-    assert!(result, "trigger present in first response should return true immediately");
+    assert!(
+        result,
+        "trigger present in first response should return true immediately"
+    );
 }
 
 #[test]
@@ -10182,7 +10791,7 @@ fn test_wait_for_prompt_trigger_repeated_auto_dismiss() {
             Ok("Ready for input >".to_string())
         }
     });
-    mock.expect_send_keys_literal().returning(move |_, k| {
+    mock.expect_send_key().returning(move |_, k| {
         if k == "y" {
             dismiss_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
@@ -10287,7 +10896,7 @@ fn test_task_has_live_session_returns_false_on_tmux_error() {
 #[cfg(feature = "test-mocks")]
 fn test_handle_paste_into_shell_popup_calls_paste_text() {
     // When shell popup is open, handle_paste must call paste_text exactly once
-    // with the full pasted string (not send_keys_literal character by character).
+    // with the full pasted string (not send_key character by character).
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
@@ -10324,7 +10933,7 @@ fn test_handle_paste_into_shell_popup_calls_paste_text() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_handle_paste_into_shell_popup_does_not_call_send_keys_literal() {
+fn test_handle_paste_into_shell_popup_does_not_call_send_key() {
     // Verify the old per-character path is not taken for paste events.
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
@@ -10334,8 +10943,8 @@ fn test_handle_paste_into_shell_popup_does_not_call_send_keys_literal() {
         .expect_paste_text()
         .times(1)
         .returning(|_, _| Ok(()));
-    // send_keys_literal must NOT be called — mockall panics if an unexpected call occurs
-    mock_tmux.expect_send_keys_literal().times(0);
+    // send_key must NOT be called — mockall panics if an unexpected call occurs
+    mock_tmux.expect_send_key().times(0);
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -10420,9 +11029,7 @@ fn test_switch_to_project_reloads_config() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
-    mock_tmux
-        .expect_create_session()
-        .returning(|_, _| Ok(()));
+    mock_tmux.expect_create_session().returning(|_, _| Ok(()));
 
     // App starts with default config (no per-phase overrides)
     let mut app = App::new_for_test(
@@ -10499,4 +11106,998 @@ fn dep_scroll_handles_fewer_levels_than_viewport() {
 fn dep_scroll_zero_visible_treated_as_one() {
     // Defensive: a zero viewport width must not panic (treated as 1 column).
     assert_eq!(clamp_scroll_to_selected(0, 5, 0, 10), 5);
+}
+
+/// The generated `hooks` block must keep the MCP pre-trust key it shares the
+/// file with, and every registered event must invoke `agtx hook`.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_write_skills_emits_a_valid_claude_hook_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+
+    let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+    assert_eq!(v["enableAllProjectMcpServers"], serde_json::json!(true));
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "Notification",
+        "Stop",
+        "StopFailure",
+        "SessionEnd",
+    ] {
+        let cmd = v["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{} missing a command", event));
+        assert!(
+            cmd.contains("hook --env"),
+            "{} must use the task-agnostic form: {}",
+            event,
+            cmd
+        );
+    }
+    // Tool-scoped events need a matcher; lifecycle events must not have one.
+    assert_eq!(
+        v["hooks"]["PreToolUse"][0]["matcher"],
+        serde_json::json!("*")
+    );
+    assert!(v["hooks"]["Stop"][0]["matcher"].is_null());
+}
+
+/// The toggle must remove the hooks entirely, restoring pre-hook behaviour.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_agent_hooks_false_writes_no_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], false);
+
+    let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+    assert_eq!(v["enableAllProjectMcpServers"], serde_json::json!(true));
+    assert!(v.get("hooks").is_none());
+}
+
+// ── first-launch dialog handling (wait_for_agent_ready) ──────────────────────
+
+/// Regression: a native-binary agent changes `pane_current_command` the moment
+/// it execs, so the process check used to break out of the readiness loop before
+/// the dialog check below it ever ran. Observed live in a swebench container:
+/// Claude sat on the bypass warning for 300s and the task prompt was typed into
+/// the menu.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_answers_claude_bypass_warning() {
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = mockall::Sequence::new();
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "2")
+        .returning(|_, _| Ok(()));
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("claude"),
+        "WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n  2. Yes, I accept",
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// Claude's workspace-trust gate, shown *before* the bypass warning on the first
+/// launch in any new directory — which is every task's worktree. Pane text
+/// captured verbatim from claude 2.1.241; answered with "1" ("Yes, I trust this
+/// folder"), not the "2" the bypass warning takes.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_answers_claude_workspace_trust() {
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = mockall::Sequence::new();
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "1")
+        .returning(|_, _| Ok(()));
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("claude"),
+        "Accessing workspace:\n  /tmp/wt/task-slug\n\n\
+         Quick safety check: Is this a project you created or one you trust?\n\
+         Claude Code'll be able to read, edit, and execute files here.\n\
+         \u{276f} 1. Yes, I trust this folder\n    2. No, exit\n\
+         Enter to confirm \u{b7} Esc to cancel",
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// The two Claude gates are answered differently ("1" vs "2"), so a pane
+/// showing one must never match the other's arm.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_claude_launch_dialogs_do_not_overlap() {
+    let trust = "\u{276f} 1. Yes, I trust this folder\n    2. No, exit";
+    let bypass = "WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n  2. Yes, I accept";
+    let matches = |content: &str| -> Vec<&'static [&'static str]> {
+        LAUNCH_DIALOGS
+            .iter()
+            .filter(|d| d.matches(content))
+            .map(|d| d.answer)
+            .collect()
+    };
+    assert_eq!(matches(trust), vec![&["1", "Enter"][..]], "trust dialog");
+    assert_eq!(matches(bypass), vec![&["2", "Enter"][..]], "bypass dialog");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_answers_gemini_trust() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key()
+        .times(2)
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("gemini"),
+        "Do you trust the files in this folder?",
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// Ordinary agent output must never be mistaken for a dialog — a false positive
+/// injects a stray "2" or "1" into the agent's composer.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_ignores_normal_output() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().never();
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(!dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        None,
+        "❯ Claude Code\n  Ask anything\n✻ Cooked for 3s",
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// A dropped keystroke must be retried: an agent TUI that is not reading stdin
+/// yet silently loses the answer. Observed in an emulated swebench container,
+/// where a one-shot guard left Claude parked on the bypass warning.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_retries_while_the_pane_is_unchanged() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key()
+        .times(4) // two rounds of ("2", Enter)
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    let mut st = LaunchDialogState::default();
+    let pane = "WARNING: Bypass Permissions mode\n  2. Yes, I accept";
+
+    assert!(dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st));
+    assert!(
+        dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st),
+        "an unchanged pane means the answer was dropped — retry"
+    );
+}
+
+/// ...but once the pane redraws, the answer landed. Resending would type a
+/// stray "2" into the agent's live composer, ahead of the task prompt.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_stops_once_the_pane_redraws() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key()
+        .times(2) // exactly one round
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    let mut st = LaunchDialogState::default();
+
+    assert!(dismiss_launch_dialog(&ops, "t:1", None, "2. Yes, I accept", &mut st));
+    // Same dialog text, but the frame changed — it is the previous render.
+    assert!(!dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        None,
+        "2. Yes, I accept\n(redrawing...)",
+        &mut st
+    ));
+}
+
+/// A pattern that matches something which is not really a dialog must not
+/// hammer the pane forever.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_gives_up_after_max_attempts() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key()
+        .times((LAUNCH_DIALOG_MAX_ATTEMPTS as usize) * 2)
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    let mut st = LaunchDialogState::default();
+    let pane = "2. Yes, I accept";
+
+    for _ in 0..LAUNCH_DIALOG_MAX_ATTEMPTS {
+        assert!(dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st));
+    }
+    assert!(!dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st));
+}
+
+/// The two dialogs are tracked independently — answering Claude's must not
+/// suppress Gemini's, which can appear in the same launch after a restart.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_tracks_dialogs_independently() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key()
+        .times(4)
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    let mut answered = LaunchDialogState::default();
+    assert!(dismiss_launch_dialog(&ops, "t:1", None, "2. Yes, I accept", &mut answered));
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("gemini"),
+        "Do you trust the files in this folder?",
+        &mut answered
+    ));
+}
+
+/// A project may ship its own `.claude/settings.local.json`, and agtx copies
+/// `.claude/` into every worktree (AGENT_CONFIG_DIRS). The MCP/hook writer must
+/// merge into that file, not replace it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_write_skills_preserves_existing_claude_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    // What the user's copied-in file might contain.
+    std::fs::write(
+        claude.join("settings.local.json"),
+        r#"{
+          "permissions": { "allow": ["Bash(cargo test:*)"] },
+          "env": { "MY_VAR": "1" },
+          "hooks": { "Stop": [{"hooks":[{"type":"command","command":"my-own-hook"}]}] }
+        }"#,
+    )
+    .unwrap();
+
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+
+    let raw = std::fs::read_to_string(claude.join("settings.local.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+    assert_eq!(v["permissions"]["allow"][0], "Bash(cargo test:*)", "permissions lost");
+    assert_eq!(v["env"]["MY_VAR"], "1", "env lost");
+    assert_eq!(v["enableAllProjectMcpServers"], serde_json::json!(true));
+    // agtx's hooks must be present...
+    assert!(v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap_or("")
+        .contains("hook --env"));
+    // ...without discarding the user's own hook on an event agtx also uses.
+    let stop = v["hooks"]["Stop"].as_array().expect("Stop missing");
+    let has_user_hook = stop.iter().any(|d| {
+        d["hooks"].as_array().map_or(false, |h| {
+            h.iter().any(|x| x["command"] == "my-own-hook")
+        })
+    });
+    assert!(has_user_hook, "user's own Stop hook was discarded: {}", raw);
+}
+
+/// Re-deploying into an existing worktree (e.g. an agent switch) must replace
+/// agtx's own hook entries, not append a second copy — duplicates would fire
+/// `agtx hook` twice per event, forever.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_write_skills_is_idempotent_for_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+
+    let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    for event in ["SessionStart", "Stop", "PreToolUse"] {
+        assert_eq!(
+            v["hooks"][event].as_array().map(|a| a.len()),
+            Some(1),
+            "{} accumulated duplicate hook entries",
+            event
+        );
+    }
+}
+
+/// A corrupt settings file must not take the worktree down with it — agtx
+/// starts fresh rather than refusing to deploy.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_write_skills_survives_corrupt_claude_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    std::fs::write(claude.join("settings.local.json"), "{ not json").unwrap();
+
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+
+    let raw = std::fs::read_to_string(claude.join("settings.local.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["enableAllProjectMcpServers"], serde_json::json!(true));
+}
+
+/// Under `skip_worktree` the "worktree" IS the project root, so every task
+/// deploys into the *same* `.claude/settings.local.json`. The registered command
+/// must therefore be task-agnostic: a per-task command would mean the last
+/// deploy re-points every other task's agent at its own status file.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_skip_worktree_tasks_share_one_task_agnostic_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_string_lossy().to_string();
+
+    // Two tasks, same "worktree" (the project root).
+    write_skills_to_worktree(&root, dir.path(), &None, &["claude"], true);
+    write_skills_to_worktree(&root, dir.path(), &None, &["claude"], true);
+
+    let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let stop = v["hooks"]["Stop"].as_array().unwrap();
+
+    assert_eq!(stop.len(), 1, "deploys must not accumulate entries: {}", raw);
+    let cmd = stop[0]["hooks"][0]["command"].as_str().unwrap();
+    assert!(
+        cmd.contains("hook --env"),
+        "command must carry no task id, or tasks would clobber each other: {}",
+        cmd
+    );
+}
+
+// ── binary-path drift ────────────────────────────────────────────────────────
+
+/// Deploying records which binary did it, so the startup check is O(1) per task
+/// instead of parsing seven config formats.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_deploy_writes_a_binary_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+
+    let marker = read_deploy_marker(dir.path()).expect("marker missing");
+    let current = std::env::current_exe().unwrap().to_string_lossy().to_string();
+    assert_eq!(marker, current);
+}
+
+/// The regression this whole fix exists for: after the binary moves, agtx must
+/// still recognise its own hook entries. A path-prefix matcher would not, and a
+/// redeploy would keep the dead entry *and* add a live one.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_hooks_are_replaced_not_duplicated_after_the_binary_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    // A deployment from a binary that no longer exists at that path.
+    std::fs::write(
+        claude.join("settings.local.json"),
+        r#"{"hooks":{"Stop":[{"hooks":[{"type":"command",
+            "command":"/old/gone/agtx hook --env claude"}]}]}}"#,
+    )
+    .unwrap();
+
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+
+    let raw = std::fs::read_to_string(claude.join("settings.local.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let stop = v["hooks"]["Stop"].as_array().unwrap();
+
+    assert_eq!(stop.len(), 1, "stale entry was not replaced: {}", raw);
+    assert!(!raw.contains("/old/gone/agtx"), "dead path survived: {}", raw);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agtx_hook_command_ignores_unrelated_hooks() {
+    assert!(is_agtx_hook_command("/any/path/agtx hook --env claude"));
+    assert!(is_agtx_hook_command("agtx hook --env claude"));
+    assert!(!is_agtx_hook_command("my-own-linter --fix"));
+    // A user hook that merely mentions agtx must not be treated as ours.
+    assert!(!is_agtx_hook_command("echo agtx is running"));
+}
+
+/// Claude Code ~2.1 gates `--dangerously-skip-permissions` behind an interactive
+/// acceptance. agtx always launches with that flag and every worktree is a fresh
+/// directory, so the acceptance must be preflighted or the agent parks on the
+/// dialog and the task prompt is typed into the menu.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_claude_settings_preflight_bypass_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
+
+    let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["bypassPermissionsModeAccepted"], serde_json::json!(true));
+}
+
+/// Deploying one skill for every supported agent lands at exactly these paths.
+///
+/// `deploy_skill` and
+/// `write_skills_to_worktree` each carried their own copy of this layout branch
+/// and had already drifted apart, so the layouts are pinned as literals here
+/// rather than derived from the same table the code reads.
+#[test]
+fn test_deploy_skill_paths_for_every_agent() {
+    let expected: &[(&str, &str)] = &[
+        ("claude", ".claude/commands/agtx/plan.md"),
+        ("copilot", ".github/agents/agtx/plan.md"),
+        ("gemini", ".gemini/commands/agtx/plan.toml"),
+        ("codex", ".codex/skills/agtx-plan/SKILL.md"),
+        ("cursor", ".cursor/skills/agtx-plan/SKILL.md"),
+        ("grok", ".grok/skills/agtx-plan/SKILL.md"),
+        ("antigravity", ".agents/skills/agtx-plan/SKILL.md"),
+        ("opencode", ".opencode/command/agtx-plan.md"),
+    ];
+    let content = "---\nname: agtx-plan\ndescription: Plan the work\n---\n\nbody\n";
+
+    for (agent, rel) in expected {
+        let dir = tempfile::tempdir().unwrap();
+        deploy_skill(dir.path(), "agtx-plan", content, agent);
+
+        let native = dir.path().join(rel);
+        assert!(native.exists(), "{agent}: expected {rel}");
+        assert!(
+            !std::fs::read_to_string(&native).unwrap().is_empty(),
+            "{agent}: {rel} is empty"
+        );
+
+        // The canonical copy is written for every agent, whatever the layout.
+        assert!(
+            dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists(),
+            "{agent}: canonical copy missing"
+        );
+    }
+}
+
+/// Copilot declares `mcp_config: None` — agtx does not wire it to the MCP
+/// server, so no config file should appear anywhere in its worktree. Guards the
+/// new `Option<McpConfigKind>`: before it, "no MCP arm" and "an arm that does
+/// nothing" were indistinguishable.
+#[test]
+fn test_write_skills_to_worktree_writes_no_mcp_config_for_copilot() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["copilot"], false);
+
+    // Its skills still deploy — only the MCP wiring is absent.
+    assert!(dir.path().join(".github/agents/agtx/plan.md").exists());
+
+    for absent in [
+        ".mcp.json",
+        "opencode.json",
+        ".codex/config.toml",
+        ".gemini/settings.json",
+        ".cursor/mcp.json",
+        ".grok/config.toml",
+        ".agents/mcp_config.json",
+    ] {
+        assert!(
+            !dir.path().join(absent).exists(),
+            "copilot should get no MCP config, found {absent}"
+        );
+    }
+}
+
+/// `AGENT_COMMANDS` and `AGENT_ACTIVE_INDICATORS` are now derived from
+/// `AGENT_SPECS`. These pin the *result* against the literals they replaced, so
+/// the derivation is checked rather than assumed — a test that rebuilt them from
+/// the same table would assert nothing.
+#[test]
+fn test_agent_commands_derivation_matches_the_previous_literals() {
+    let mut got: Vec<&str> = AGENT_COMMANDS.to_vec();
+    got.sort_unstable();
+    let mut want = vec![
+        "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy",
+        // Not agent binaries, but a Python entry point must not read as "shell".
+        "python3", "python",
+    ];
+    want.sort_unstable();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn test_active_indicator_derivation_matches_the_previous_literals() {
+    let mut got: Vec<&str> = AGENT_ACTIVE_INDICATORS.to_vec();
+    got.sort_unstable();
+    let mut want = vec![
+        "Claude Code",       // Claude
+        "Type your message", // Gemini
+        "Ask anything",      // OpenCode
+        "Cursor Agent",      // Cursor
+        "OpenAI Codex",      // Codex
+        "Grok Build",        // Grok — splash/footer
+        "Shift+Tab:mode",    // Grok — session footer once a turn has run
+        // Antigravity, added after the smoke run found it had no readiness
+        // signal at all: its npm wrapper reports `bash` in pane_current_command,
+        // and its splash produces two pane changes where the stabilisation
+        // fallback needs three. Its trust dialog's footer reads
+        // "↑/↓ Navigate · enter Confirm", so this cannot fire while blocked.
+        "? for shortcuts",
+    ];
+    want.sort_unstable();
+    assert_eq!(got, want);
+}
+
+/// The arm most easily lost in migration: an agent with no exit command must get
+/// Ctrl+C, not a `/exit` typed into a TUI that does not understand it.
+#[test]
+fn test_exit_command_per_agent() {
+    for (agent, want) in [
+        ("claude", Some("/exit")),
+        ("opencode", Some("/exit")),
+        ("copilot", Some("/exit")),
+        ("antigravity", Some("/exit")),
+        ("gemini", Some("/quit")),
+        ("grok", Some("/quit")),
+        ("codex", None),
+        ("cursor", None),
+    ] {
+        assert_eq!(
+            crate::agent::spec(agent).unwrap().exit_command,
+            want,
+            "{agent}"
+        );
+    }
+    // An agent agtx has never heard of keeps the historical default.
+    assert!(crate::agent::spec("mistral").is_none());
+}
+
+/// Which send path each agent takes, pinned as literals. `Combined` is the
+/// bracketed-paste path; `OpenCodePicker` is the one flow where the text must
+/// arrive in two pieces by design.
+#[test]
+fn test_send_strategy_per_agent() {
+    use crate::agent::SendStrategy;
+    for (agent, want) in [
+        ("claude", SendStrategy::Generic),
+        ("copilot", SendStrategy::Generic),
+        ("grok", SendStrategy::Generic),
+        ("gemini", SendStrategy::Combined),
+        ("codex", SendStrategy::Combined),
+        ("cursor", SendStrategy::Combined),
+        ("antigravity", SendStrategy::Combined),
+        ("opencode", SendStrategy::OpenCodePicker),
+    ] {
+        assert_eq!(
+            crate::agent::spec(agent).unwrap().send_strategy,
+            want,
+            "{agent}"
+        );
+    }
+}
+
+/// `/clear` is Claude-only today (issue #46). An agent with `None` must fall
+/// through to a normal send rather than typing a command it does not understand
+/// into its composer.
+#[test]
+fn test_clear_context_command_is_claude_only() {
+    assert_eq!(
+        crate::agent::spec("claude").unwrap().clear_context_command,
+        Some("/clear")
+    );
+    for agent in ["codex", "gemini", "cursor", "antigravity", "opencode", "grok", "copilot"] {
+        assert_eq!(
+            crate::agent::spec(agent).unwrap().clear_context_command,
+            None,
+            "{agent}"
+        );
+    }
+}
+
+/// `LAUNCH_DIALOGS` is now derived from `AGENT_SPECS`. Pinned against the
+/// literals it replaced, and asserting `Session`-scope dialogs stay out — they
+/// are matched per agent, not against any pane.
+#[test]
+fn test_launch_dialog_derivation_matches_the_previous_literals() {
+    let mut got: Vec<(Vec<&str>, Vec<&str>)> = LAUNCH_DIALOGS
+        .iter()
+        .map(|d| (d.patterns.to_vec(), d.answer.to_vec()))
+        .collect();
+    got.sort();
+    // The first three are the literals this derivation replaced; the two codex
+    // entries were added afterwards, each verified against codex-cli 0.144.5,
+    // and antigravity's after its trust dialog was found parking every task.
+    let mut want = vec![
+        (vec!["Yes, I accept", "I accept the risk"], vec!["2", "Enter"]),
+        (vec!["Yes, I trust this folder"], vec!["1", "Enter"]),
+        (vec!["Do you trust the files in this folder?"], vec!["1", "Enter"]),
+        (
+            vec!["Do you trust the contents of this directory?"],
+            vec!["1", "Enter"],
+        ),
+        (vec!["Update now (runs"], vec!["2", "Enter"]),
+        // Enter alone: an arrow-navigated menu with the safe option preselected.
+        (
+            vec!["Do you trust the contents of this project?"],
+            vec!["Enter"],
+        ),
+        // Cursor advertises its own access key, so that is what it is sent.
+        (vec!["Workspace Trust Required"], vec!["a"]),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+
+    // Codex's MCP approval is Session-scope and must not leak into the flat list:
+    // there it would fire for any agent's pane, and during startup too.
+    assert!(
+        !LAUNCH_DIALOGS
+            .iter()
+            .any(|d| d.patterns.contains(&"MCP server to run tool")),
+        "session dialogs must not be matched against any pane"
+    );
+}
+
+/// Codex's mid-session MCP approval, previously hand-rolled in the refresh loop.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_answer_session_dialogs_handles_codex_mcp_approval() {
+    let pane = "Allow the agtx MCP server to run tool get_task?\n  1. Yes  2. No  3. Always allow";
+
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = mockall::Sequence::new();
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "3")
+        .returning(|_, _| Ok(()));
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    answer_session_dialogs(&ops, "t:1", "codex", pane);
+}
+
+/// The same pane under a different agent must be left alone — session dialogs
+/// are matched only against the agent that owns them.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_answer_session_dialogs_is_scoped_to_its_own_agent() {
+    let pane = "Allow the agtx MCP server to run tool get_task?\n  3. Always allow";
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().never();
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    answer_session_dialogs(&ops, "t:1", "claude", pane);
+    answer_session_dialogs(&ops, "t:1", "mistral", pane);
+}
+
+/// All three patterns are required for the codex prompt: none is distinctive
+/// enough alone, and a partial match would type a stray "3" into the composer.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_answer_session_dialogs_requires_every_pattern() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().never();
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    answer_session_dialogs(&ops, "t:1", "codex", "Allow the tool to run? Always allow");
+}
+
+// =============================================================================
+// Per-agent attribution of indicators and launch dialogs (open question 1)
+// =============================================================================
+
+/// Another agent's readiness string in this agent's pane no longer counts.
+/// "Ask anything" is OpenCode's; a Claude pane showing it — in conversation
+/// output, say — used to read as an agent being up.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_active_indicators_are_scoped_to_their_agent() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("zsh".to_string()));
+    mock.expect_capture_pane()
+        .returning(|_| Ok("some output mentioning Ask anything\n".to_string()));
+
+    // OpenCode's own indicator still counts in an OpenCode pane.
+    assert!(is_agent_active(&mock, "proj:task", Some("opencode")));
+    // In a Claude pane it does not.
+    assert!(!is_agent_active(&mock, "proj:task", Some("claude")));
+    // An agent agtx has no spec for keeps the historical flat match, so such a
+    // pane is not left undetectable.
+    assert!(is_agent_active(&mock, "proj:task", None));
+}
+
+/// Answering a dialog sends a menu digit. Doing that in the wrong agent's pane
+/// types a stray "1" into a live composer, so a dialog is only answered for the
+/// agent that owns it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_launch_dialogs_are_scoped_to_their_agent() {
+    let gemini_pane = "Do you trust the files in this folder?\n  1. Yes  2. No";
+
+    // In a Claude pane, Gemini's dialog is ignored.
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().never();
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(!dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("claude"),
+        gemini_pane,
+        &mut LaunchDialogState::default(),
+    ));
+
+    // In a Gemini pane it is answered.
+    let mut mock2 = MockTmuxOperations::new();
+    mock2.expect_send_key().times(2).returning(|_, _| Ok(()));
+    let ops2: Arc<dyn TmuxOperations> = Arc::new(mock2);
+    assert!(dismiss_launch_dialog(
+        &ops2,
+        "t:1",
+        Some("gemini"),
+        gemini_pane,
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// An unknown agent keeps the flat behaviour: better to answer a dialog that may
+/// not be its own than to leave the pane blocked forever.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_unknown_agent_falls_back_to_every_dialog() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().times(2).returning(|_, _| Ok(()));
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        None,
+        "Do you trust the files in this folder?",
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// Codex's own directory-trust dialog, worded differently from Claude's and
+/// Gemini's so neither of their patterns catches it. Per directory, so it fires
+/// on the first launch of every codex task. Captured verbatim from codex-cli
+/// 0.144.5.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_answers_codex_directory_trust() {
+    let pane = "> You are in /tmp/wt/task-slug\n  \
+                Do you trust the contents of this directory? Working with untrusted contents \
+                comes with higher risk of prompt injection.\n\
+                \u{203a} 1. Yes, continue\n  2. No, quit\n  Press enter to continue";
+
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = mockall::Sequence::new();
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "1")
+        .returning(|_, _| Ok(()));
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("codex"),
+        pane,
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// The update prompt is answered "Skip", never "Update now" — agtx must not
+/// upgrade a user's agent binary behind their back, but a blocked pane is worse
+/// than a skipped update.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dismiss_launch_dialog_skips_codex_update_prompt() {
+    let pane = "  \u{2728} Update available! 0.144.5 -> 0.147.0\n\
+                \u{203a} 1. Update now (runs `sh -c 'curl -fsSL https://example/install.sh | sh'`)\n\
+                  2. Skip\n  3. Skip until next version\n  Press enter to continue";
+
+    let mut mock = MockTmuxOperations::new();
+    let mut seq = mockall::Sequence::new();
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "2")
+        .returning(|_, _| Ok(()));
+    mock.expect_send_key()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("codex"),
+        pane,
+        &mut LaunchDialogState::default(),
+    ));
+}
+
+/// Antigravity's trust dialog fires on the first launch in any directory, and
+/// every task gets a new worktree. Leaving it unanswered did not leave the choice
+/// to the user in any useful sense: agtx pasted the task into a menu that ignores
+/// text, then sent the Enter that confirmed the dialog, so every antigravity task
+/// arrived at an empty composer with its prompt gone. Verified against
+/// antigravity 1.1.20.
+///
+/// It is answered with a **bare Enter**: the menu is arrow-navigated with "Yes, I
+/// trust this folder" preselected, so a digit would be typed into the composer
+/// that the Enter opens.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_antigravity_trust_dialog_is_answered_with_a_bare_enter() {
+    let pane = "Do you trust the contents of this project?\n\
+                > Yes, I trust this folder\n  No, exit\n  \u{2191}/\u{2193} Navigate \u{b7} enter Confirm";
+
+    let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keys_c = keys.clone();
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("antigravity"),
+        pane,
+        &mut LaunchDialogState::default(),
+    ));
+    assert_eq!(*keys.lock().unwrap(), vec!["Enter".to_string()]);
+}
+
+/// Cursor's workspace-trust dialog asks *the same question as codex* — "Do you
+/// trust the contents of this directory?" — so it is matched on its heading. It
+/// went undeclared until the smoke run caught agtx answering it by accident: the
+/// paste went into the menu and the follow-up Enter selected the highlighted row.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cursor_workspace_trust_is_answered_with_its_access_key() {
+    let pane = "\u{26a0} Workspace Trust Required\n\
+                Cursor Agent can execute code and access files in this directory.\n\
+                Do you trust the contents of this directory?\n\
+                \u{25b6} [a] Trust this workspace\n  [q] Quit\n\
+                Use arrow keys to navigate, Enter to select, or press the key shown";
+
+    let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keys_c = keys.clone();
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("cursor"),
+        pane,
+        &mut LaunchDialogState::default(),
+    ));
+    assert_eq!(*keys.lock().unwrap(), vec!["a".to_string()]);
+}
+
+/// ...and the shared question line must not make codex's entry fire in a cursor
+/// pane, or vice versa: codex's answer is "1", which in cursor's dialog is not
+/// an option at all.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cursor_and_codex_trust_dialogs_do_not_cross_fire() {
+    let cursor_pane = "\u{26a0} Workspace Trust Required\nDo you trust the contents of this directory?";
+    // Codex's entry matches the shared question line — and its answer is "1",
+    // which is not an option in cursor's menu at all. Scoping is what keeps it
+    // from firing here, so this must be asserted against *codex*, not against an
+    // agent that declares no matching dialog (which would pass vacuously).
+    let codex_keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let codex_keys_c = codex_keys.clone();
+    let mut cursor_mock = MockTmuxOperations::new();
+    cursor_mock.expect_send_key().returning(move |_, k| {
+        codex_keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    let cursor_ops: Arc<dyn TmuxOperations> = Arc::new(cursor_mock);
+    assert!(dismiss_launch_dialog(
+        &cursor_ops,
+        "t:1",
+        Some("cursor"),
+        cursor_pane,
+        &mut LaunchDialogState::default(),
+    ));
+    assert_eq!(
+        *codex_keys.lock().unwrap(),
+        vec!["a".to_string()],
+        "cursor's own answer, never codex's digit"
+    );
+
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().never();
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    // ...and cursor's heading is absent from codex's own dialog.
+    let codex_pane = "Do you trust the contents of this directory?\n  1. Yes\n  2. No";
+    let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let keys_c = keys.clone();
+    let mut mock2 = MockTmuxOperations::new();
+    mock2.expect_send_key().returning(move |_, k| {
+        keys_c.lock().unwrap().push(k.to_string());
+        Ok(())
+    });
+    let ops2: Arc<dyn TmuxOperations> = Arc::new(mock2);
+    assert!(dismiss_launch_dialog(
+        &ops2,
+        "t:1",
+        Some("cursor"),
+        codex_pane,
+        &mut LaunchDialogState::default(),
+    ) == false);
+}
+
+/// The reverse of the scoping guard: antigravity's own wording must not be
+/// answered in someone else's pane. Codex's differs by a single word
+/// ("directory" vs "project"), so a sloppy pattern would cross-fire.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_antigravity_trust_dialog_is_scoped_to_antigravity() {
+    let pane = "Do you trust the contents of this project?\n> Yes, I trust this folder";
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().never();
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    assert!(!dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("codex"),
+        pane,
+        &mut LaunchDialogState::default(),
+    ));
 }

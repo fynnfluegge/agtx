@@ -235,6 +235,9 @@ impl Notification {
 pub enum PhaseStatus {
     /// Agent is still working, no artifact yet
     Working,
+    /// Agent is stopped waiting on a permission prompt or a question.
+    /// Only ever set from an agent-reported hook event — never inferred.
+    Blocked,
     /// Agent output hasn't changed for 15s — may need user input
     Idle,
     /// Phase artifact detected, ready to advance
