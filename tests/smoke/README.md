@@ -145,18 +145,6 @@ skips rather than fails without a toolchain.
 5. **Agent switching is not covered.** `switch_agent_in_tmux` and its per-agent exit commands are
    the obvious next thing to add.
 
-## What it has found
-
-| Finding | Fix |
-|---|---|
-| The launch-lane prompt was mangled by double shell quoting — claude received `["--dangerously-skip-permissions", "/agtx:plan"]`, codex `["--sandbox", "workspace-write", "-plan"]` | `single_quote()` in `src/tmux/operations.rs` |
-| Antigravity parked on an undeclared trust dialog, and agtx's own Enter confirmed it *after* pasting the task into the menu — every task reached an empty composer | its dialog declared with a bare-Enter answer, plus a real readiness indicator |
-| Cursor did the same, one day later: `Workspace Trust Required` undeclared, dismissed by accident by the send's own Enter | its dialog declared, answered with the access key it advertises (`a`) |
-| A dropped paste or keystroke was silent and unrecoverable in both mid-session paths | `deliver_message()` resends while the pane is unchanged |
-| A bare `usage limit` pattern reported a healthy Codex session as QUOTA | narrowed to limits actually *hit* |
-| An opencode provider-credential error, gemini's OAuth prompt, and gemini's `API key not valid` read as undelivered prompts | `AUTH` outcome, short-circuited |
-| Grok's "You hit your free usage limit." read as a send failure | quota pattern widened to cover both wordings |
-
 ## Known limits
 
 - The matrix runs cases sequentially. Parallelism would need one tmux server and one project DB per
