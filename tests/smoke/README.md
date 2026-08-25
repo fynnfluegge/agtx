@@ -109,42 +109,6 @@ One test needs `cargo`, because it cross-checks the runner's list of dialogs *ag
 against the ones `AGENT_SPECS` declares — a pattern must not be on both lists, and it was, once. It
 skips rather than fails without a toolchain.
 
-## Design decisions
-
-1. **"Session still usable" is defined as** the agent process alive **and** no dialog matching. The
-   tempting third option — the agent's own indicator visible — does not generalise, because copilot
-   declares empty `active_indicators`. (Antigravity did too, until this runner found it had no
-   readiness signal at all and one was added.)
-
-   Liveness is read from the pane's **process tree**, not from `pane_current_command`. The latter
-   reports the pane leader, and every agent is launched as `sh -c '<agent>'` with `exec $SHELL`
-   behind it: verified against tmux 3.5a on macOS, a live Claude pane reports `bash`, and so does a
-   dead one. The hook-reported `agent_state` is folded in only as a tiebreaker when nothing landed,
-   because agtx maps Claude's `Notification` event to `blocked` and that event also means "has been
-   waiting for your input" — every completed phase would otherwise read as unusable.
-
-2. **It lives in `tests/smoke/`, as a script rather than a `#[ignore]`d integration test.** Auth and
-   quota make it fundamentally not a `cargo test`; cargo ignores the directory because it has no
-   `main.rs`, so it sits alongside the Rust suite without joining it. Python rather than shell,
-   because the MCP transport is JSON-RPC over stdio — stdlib only, no dependencies. The one piece
-   that *must* stay near the code, the agent table, is read from `agent_matrix.rs` in this same
-   directory rather than copied.
-
-3. **Quota is its own outcome**, matched on patterns that describe a limit actually being *hit*. The
-   first draft matched a bare `usage limit` and turned Codex's startup tip ("You have 1 usage limit
-   reset available") into a QUOTA row, hiding a real delivery failure underneath it.
-
-4. **Per-agent expected outcomes are encoded, narrowly — and `EXPECTED_PARK_AGENTS` is now empty.**
-   It held `antigravity` for exactly one run. Once agtx learned to answer that trust dialog the agent
-   passed cleanly, and the harness reported its own entry as stale — an expectation that encodes
-   today's behaviour has to announce itself the moment today's behaviour improves, or it quietly
-   becomes the specification. The mechanism stays, with its
-   two guards — a lost prompt is never excused as a park (only a check-4-only failure qualifies), and
-   a clean pass prints the staleness note.
-
-5. **Agent switching is not covered.** `switch_agent_in_tmux` and its per-agent exit commands are
-   the obvious next thing to add.
-
 ## Known limits
 
 - The matrix runs cases sequentially. Parallelism would need one tmux server and one project DB per
