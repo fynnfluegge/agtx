@@ -180,6 +180,21 @@ pub struct AgentSpec {
     pub binary: &'static str,
     pub description: &'static str,
     pub co_author: &'static str,
+    /// Environment variables that carry a provider API key for this agent, most
+    /// preferred first.
+    ///
+    /// This is the **headless** credential: the auth mode that works with no
+    /// browser and no keychain, which is the only kind a CI runner can use. It is
+    /// not how agtx authenticates anything — agtx never reads these — it is the
+    /// per-agent fact that the smoke harness and the CI workflow both need, kept
+    /// here so there is one copy rather than three. The trust stores went the
+    /// other way and ended up duplicated in `trust.rs`, `agent_smoke.py` and
+    /// `benchmark.py`; this is that lesson applied.
+    ///
+    /// Empty means *no verified headless credential*, which is a real answer:
+    /// such an agent cannot run unattended in CI at all. It must not be confused
+    /// with "not looked into yet" — see each entry's comment.
+    pub api_key_env: &'static [&'static str],
 
     // ── launching ────────────────────────────────────────────────────────
     /// Environment assignments prefixed to the interactive launch command.
@@ -262,6 +277,9 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "claude",
         description: "Anthropic's Claude Code CLI",
         co_author: "Claude <noreply@anthropic.com>",
+        // `claude --help`: API-key users authenticate "strictly
+        // ANTHROPIC_API_KEY or apiKeyHelper". Verified 2.1.246.
+        api_key_env: &["ANTHROPIC_API_KEY"],
         env: &[],
         base_args: &["--dangerously-skip-permissions"],
         prompt_form: PromptForm::Argv,
@@ -345,6 +363,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "codex",
         description: "OpenAI's Codex CLI",
         co_author: "Codex <noreply@openai.com>",
+        // Both names are present in the 0.144.5 binary; OPENAI_API_KEY is the
+        // documented one. Note codex otherwise authenticates from
+        // ~/.codex/auth.json, which a runner has no way to produce — the env var
+        // is the only headless path.
+        api_key_env: &["OPENAI_API_KEY", "CODEX_API_KEY"],
         env: &[],
         base_args: &["--sandbox", "workspace-write"],
         prompt_form: PromptForm::Argv,
@@ -408,6 +431,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "copilot",
         description: "GitHub Copilot CLI",
         co_author: "GitHub Copilot <noreply@github.com>",
+        // Unverified: copilot is not installed on any machine this has been
+        // measured on. Empty here means "unknown", not "none" — the only entry
+        // where those differ, and the reason not to guess at a plausible
+        // GH_TOKEN. Fill it in from the real binary, not from documentation.
+        api_key_env: &[],
         env: &[],
         base_args: &["--allow-all-tools"],
         // `-i` keeps the session interactive; `-p` is print mode and exits on
@@ -439,6 +467,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "gemini",
         description: "Google Gemini CLI",
         co_author: "Gemini <noreply@google.com>",
+        // Both documented in the gemini-cli README, 0.46.0.
+        api_key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         // Kept, but it does **not** suppress the folder-trust dialog — verified
         // against gemini 0.46.0: the dialog rendered with this set. Gemini's real
         // trust store is `~/.gemini/trustedFolders.json`, a map of
@@ -485,6 +515,15 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "opencode",
         description: "AI-powered coding assistant",
         co_author: "OpenCode <noreply@opencode.ai>",
+        // Multi-provider: the variable that matters is whichever provider the
+        // user's opencode config selects, so all four it knows about are listed.
+        // Present in the 1.18.20 binary.
+        api_key_env: &[
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_GENERATIVE_AI_API_KEY",
+        ],
         env: &[],
         base_args: &[],
         // `--prompt`, not `-p`: opencode has no `-p` short form at all, so the
@@ -516,6 +555,9 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "agent",
         description: "Cursor Agent CLI",
         co_author: "Cursor Agent <noreply@cursor.com>",
+        // `agent --help`: "--api-key <key> ... (can also use CURSOR_API_KEY env
+        // var)". Verified 2026.08.11.
+        api_key_env: &["CURSOR_API_KEY"],
         env: &[],
         // `--trust` is "trust the current workspace without prompting". It is not
         // an escalation on top of `--yolo`, which already auto-runs every tool —
@@ -567,6 +609,10 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "grok",
         description: "xAI's Grok Build CLI",
         co_author: "Grok <noreply@x.ai>",
+        // The grok README names this one for exactly this purpose: "For CI or
+        // headless environments, use an API key from console.x.ai:
+        // export XAI_API_KEY=...". The clearest headless story of any agent here.
+        api_key_env: &["XAI_API_KEY"],
         env: &[],
         // `--trust` also ungates the repo-local `.grok/config.toml` MCP server
         // and suppresses the directory-trust dialog.
@@ -597,6 +643,14 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "agy",
         description: "Google's Antigravity CLI",
         co_author: "Antigravity <noreply@google.com>",
+        // Empty on purpose. `GEMINI_API_KEY` / `GOOGLE_API_KEY` appear as
+        // strings in the 1.1.21 binary, but `agy --help` documents no auth flag
+        // at all and the CLI signs in through a browser with the token cached in
+        // the OS keychain — which is why the benchmark has never been able to
+        // carry antigravity into a container. Strings in a binary are not a
+        // supported auth path; treat this as "no verified headless credential"
+        // until someone authenticates a fresh `agy` with the variable alone.
+        api_key_env: &[],
         env: &[],
         // Two orthogonal controls: the flag governs shell/MCP/URL approvals,
         // `--mode` governs the file-edit diff review. Both are needed to run

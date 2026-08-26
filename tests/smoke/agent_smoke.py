@@ -310,6 +310,21 @@ class Case:
     skip_reason: str | None = None
 
 
+def agent_api_key_present(agent: dict) -> bool:
+    """Whether a headless credential for this agent is in the environment.
+
+    Only meaningful under `--require-api-key`, which CI passes. Locally the agents
+    authenticate from a keychain or a config file and the environment is empty, so
+    this must never gate a developer's run.
+
+    An agent with an empty `api_key_env` can never satisfy this: it has no verified
+    env-var auth path, so it cannot run unattended at all. That is a `SKIP` with a
+    reason, which is the honest outcome — better than a case that burns the whole
+    phase timeout and reports `AUTH` five minutes later.
+    """
+    return any(os.environ.get(v) for v in (agent.get("api_key_env") or []))
+
+
 def plugin_prereq(plugin: dict) -> str | None:
     """Why this plugin cannot run against a scratch repo, or None.
 
@@ -352,6 +367,7 @@ def plan_cases(
     agents_arg: str,
     plugins_arg: str,
     force: bool = False,
+    require_api_key: bool = False,
 ) -> list[Case]:
     """Build the case list, marking every excluded case with a visible reason.
 
@@ -390,6 +406,12 @@ def plan_cases(
             if not shutil.which(agent["binary"]):
                 cases.append(
                     Case(agent_name, plugin_name, f"{agent['binary']} not installed")
+                )
+                continue
+            if require_api_key and not agent_api_key_present(agent):
+                names = " / ".join(agent.get("api_key_env") or []) or "no known env var"
+                cases.append(
+                    Case(agent_name, plugin_name, f"no API key in env ({names})")
                 )
                 continue
             supported = plugin.get("supported_agents") or []
@@ -1387,6 +1409,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--keep-sessions", action="store_true", help="leave tmux sessions running")
     p.add_argument("--clean", action="store_true", help="delete scratch repos on success")
     p.add_argument(
+        "--require-api-key",
+        action="store_true",
+        help="skip agents with no provider API key in the environment "
+        "(for CI: a missing key becomes an immediate SKIP with a reason, "
+        "rather than a case that burns the phase timeout and reports AUTH)",
+    )
+    p.add_argument(
         "--force-unsupported",
         action="store_true",
         help="run plugins that need project setup (init scripts, framework dirs)",
@@ -1416,7 +1445,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     matrix = load_matrix(opts.cargo)
-    cases = plan_cases(matrix, opts.agents, opts.plugins, opts.force_unsupported)
+    cases = plan_cases(
+        matrix,
+        opts.agents,
+        opts.plugins,
+        opts.force_unsupported,
+        opts.require_api_key,
+    )
     if not cases:
         print("no cases to run", file=sys.stderr)
         return 2
