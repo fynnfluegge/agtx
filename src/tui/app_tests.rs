@@ -3784,17 +3784,34 @@ fn test_deliver_message_waits_for_the_pane_to_go_quiet_first() {
 /// `test_deliver_message_resends_while_the_pane_is_unchanged`.
 #[cfg(feature = "test-mocks")]
 fn expect_echoing_pane(mock: &mut MockTmuxOperations, echoed: &'static str) {
-    // `wait_for_pane_settled` needs one baseline capture plus SETTLE_STABLE_POLLS
-    // identical ones; `deliver_message` then takes its own baseline.
+    // A pane that goes quiet, echoes the paste, and then **submits** — three
+    // phases, because delivery and submission are two separate things the code
+    // confirms separately.
+    //
+    // 1. quiet:  `wait_for_pane_settled` needs one baseline capture plus
+    //            SETTLE_STABLE_POLLS identical ones; `deliver_message` then takes
+    //            its own baseline.
+    // 2. echoed: the paste rendered. `deliver_message` sees the change and
+    //            returns; `submit_message` then takes its baseline from it.
+    // 3. cleared: the Enter took effect. Submitting moves the message up and
+    //            empties the composer, which is a visible change — that is how
+    //            `submit_message` knows the keystroke was not dropped.
+    //
+    // Phase 3 is what makes "exactly one Enter" true. Without it the pane looks
+    // frozen after the paste, which is precisely the dropped-Enter case, and
+    // retrying is then the correct behaviour rather than a bug.
     let quiet = SETTLE_STABLE_POLLS as usize + 2;
+    let echo_end = quiet + 2; // deliver_message's confirming poll, then submit_message's baseline
     let calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
     mock.expect_capture_pane().returning(move |_| {
         let mut n = calls.lock().unwrap();
         *n += 1;
         Ok(if *n <= quiet {
             "idle composer".to_string()
-        } else {
+        } else if *n <= echo_end {
             echoed.to_string()
+        } else {
+            "composer cleared, message submitted".to_string()
         })
     });
 }
