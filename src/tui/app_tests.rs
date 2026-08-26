@@ -12428,3 +12428,125 @@ fn test_submit_message_stops_once_the_pane_changes() {
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
     submit_message(&ops, "t:1");
 }
+
+// === Update notice ===
+
+#[cfg(feature = "test-mocks")]
+fn an_update() -> crate::update::UpdateInfo {
+    crate::update::UpdateInfo {
+        current: crate::update::Version::parse("0.2.7").unwrap(),
+        latest: crate::update::Version::parse("0.2.8").unwrap(),
+        tag: "v0.2.8".to_string(),
+        html_url: "https://github.com/fynnfluegge/agtx/releases/tag/v0.2.8".to_string(),
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_u_does_nothing_without_an_available_update() {
+    // `u` is only a binding when there is something to install. Without the
+    // guard it would swallow a keystroke the board may want later.
+    let mut app = make_test_app();
+    assert!(app.state.update_available.is_none());
+    press_key(&mut app, KeyCode::Char('u'));
+    assert!(app.state.update_popup.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_u_opens_the_update_popup() {
+    let mut app = make_test_app();
+    app.state.update_available = Some(an_update());
+    press_key(&mut app, KeyCode::Char('u'));
+
+    let popup = app.state.update_popup.as_ref().expect("popup should open");
+    assert_eq!(popup.info.tag, "v0.2.8");
+    assert!(!popup.installing);
+    assert!(popup.status.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_esc_closes_the_update_popup() {
+    let mut app = make_test_app();
+    app.state.update_available = Some(an_update());
+    press_key(&mut app, KeyCode::Char('u'));
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.update_popup.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_keys_are_ignored_while_the_install_is_in_flight() {
+    // A second Enter would start a competing download into the same staging
+    // directory, and Esc would leave a thread writing into the binary the user
+    // just walked away from.
+    let mut app = make_test_app();
+    app.state.update_available = Some(an_update());
+    press_key(&mut app, KeyCode::Char('u'));
+    app.state.update_popup.as_mut().unwrap().installing = true;
+
+    press_key(&mut app, KeyCode::Esc);
+    assert!(
+        app.state.update_popup.is_some(),
+        "Esc must not close mid-install"
+    );
+    press_key(&mut app, KeyCode::Enter);
+    assert!(app.state.update_install_rx.is_none(), "no second download");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_enter_closes_a_finished_popup_rather_than_reinstalling() {
+    let mut app = make_test_app();
+    app.state.update_available = Some(an_update());
+    press_key(&mut app, KeyCode::Char('u'));
+    app.state.update_popup.as_mut().unwrap().status =
+        Some("agtx 0.2.8 installed — restart agtx to apply".to_string());
+
+    press_key(&mut app, KeyCode::Enter);
+    assert!(app.state.update_popup.is_none());
+    assert!(app.state.update_install_rx.is_none());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_board_and_popup_draw_with_an_update_available() {
+    // The header notice adds a multi-byte span ("⬆") to the right-aligned
+    // group, whose padding is computed from the span widths.
+    let mut app = make_test_app();
+    app.state.update_available = Some(an_update());
+    assert!(app.draw().is_ok());
+
+    press_key(&mut app, KeyCode::Char('u'));
+    assert!(app.draw().is_ok());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_dashboard_draws_with_an_update_available() {
+    let mut app = App::new_for_test(
+        None,
+        Arc::new(MockTmuxOperations::new()),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+    app.state.update_available = Some(an_update());
+    assert!(app.draw().is_ok());
+
+    press_key(&mut app, KeyCode::Char('u'));
+    assert!(app.state.update_popup.is_some());
+    assert!(app.draw().is_ok());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_no_release_check_runs_in_tests() {
+    // `new_for_test` must never spawn the network thread — the suite runs
+    // offline and in CI, and a check per constructed App would be both slow and
+    // a live dependency on GitHub.
+    let app = make_test_app();
+    assert!(app.state.update_rx.is_none());
+}

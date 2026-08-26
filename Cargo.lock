@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agtx"
-version = "0.1.0"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "chrono",

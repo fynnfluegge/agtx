@@ -28,6 +28,10 @@ cargo build --release
 
 # Record an agent lifecycle event (invoked by agent hooks, not by hand)
 ./target/release/agtx hook <task-id> <worktree> [agent] < payload.json
+
+# Version, and self-update to the latest GitHub release
+./target/release/agtx --version
+./target/release/agtx update [--check]
 ```
 
 Logs are written as JSON to `~/.config/agtx/logs/agtx.log` (daily rotation, `RUST_LOG` respected).
@@ -70,6 +74,13 @@ src/
 ├── mcp/
 │   ├── mod.rs        # Re-exports
 │   └── server.rs     # MCP server (JSON-RPC over stdio) — global and project-scoped modes
+├── update/
+│   ├── mod.rs        # check_for_update() — the whole background check
+│   ├── version.rs    # Semver-lite parse/compare + the prerelease policy (pure)
+│   ├── check.rs      # Cache TTL, should_check, available (pure but for the file)
+│   ├── github.rs     # releases/latest over curl
+│   ├── release.rs    # Repo slug + archive naming, shared with install.sh/release.yml
+│   └── install.rs    # Download, verify sha256, atomic in-place binary swap
 └── config/
     └── mod.rs        # GlobalConfig, ProjectConfig, MergedConfig, PhaseAgentsConfig,
                       # WorktreeConfig, ThemeConfig, WorkflowPlugin, TrustStore
@@ -115,6 +126,7 @@ tests/
 ├── agent_parity_tests.rs # Per-agent behaviour lock (launch/resume/skill paths/syntax)
 ├── hook_status_tests.rs  # Agent lifecycle-hook status reporting
 ├── mcp_tests.rs       # MCP server tests
+├── update_tests.rs    # Version policy, cache TTL, artifact naming parity, binary swap
 ├── mock_infrastructure_tests.rs # Mock infrastructure tests
 ├── shell_popup_tests.rs         # Shell popup logic tests
 └── smoke/             # Per-agent smoke tests — real binaries, no mocks, opt-in
@@ -314,6 +326,63 @@ phase transition gets to have. Same reasoning as never choosing codex's "Update 
 - Resume from Review simply changes status back to Running (window already exists)
 - No special resume logic needed - the session just stays alive in tmux
 
+### Self-Update
+agtx tells the user when a newer release exists and replaces its own binary on request.
+
+```
+  startup ──► background thread ──► curl api.github.com/…/releases/latest
+                     │                        │
+                     │                  cache 24h  →  ~/.config/agtx/update.json
+                     ▼
+              mpsc::Receiver  ──► event loop try_recv ──► header: "⬆ 0.2.8 [u]"
+                                                                     │
+                                                             [u] popup ──► install_release()
+```
+
+- **The binary must know its own version.** `env!("CARGO_PKG_VERSION")` is the only source, and
+  `release.yml`'s *Tag matches Cargo.toml* step fails the build when the pushed tag disagrees with
+  the manifest. Before this existed the tags had reached `v0.2.7` while `Cargo.toml` still said
+  `0.1.0` — a released binary could not answer the question every part of this feature compares
+  against
+- `--version` / `-V` / `version` and `update` are handled in the **early fast path** in `main.rs`,
+  beside the `hook` arm, for two reasons: neither wants a daily log appender built for it, and the
+  `mode` match below filters out every `--`-prefixed argument, so `--version` would otherwise fall
+  through and open the current directory as a project
+- **The cache is not an optimisation.** Unauthenticated GitHub allows 60 requests/hour *per IP* and
+  agtx is launched dozens of times a day across project directories. 24h TTL; a stale cache is still
+  served when the network is down, because a week-old "0.2.8 is out" is still true
+- **Cache path gotcha:** built from `GlobalConfig::config_path()`'s parent, **not** `directories`'
+  `config_dir()` — see the config-path split under *Database Storage*. The latter would put it in
+  `~/Library/Application Support/` on macOS, away from the `config.toml` and `logs/` it belongs with
+- **`curl`, not an HTTP crate.** One GET per day does not justify adding a TLS stack to a binary
+  that has none; `curl` is already required by `install.sh`, and it honours `HTTPS_PROXY`/`NO_PROXY`
+  and the system CA store, which is what corporate networks need. `src/update/github.rs` is the only
+  file that would change if that stops being true
+- **Failure is always a missing notice**, never an error: no network, no `curl`, a rate-limit body,
+  an unparseable tag — all yield "no update". A version check must not be able to make the TUI shout
+- **The swap** is `rename(target, target.old)` → `rename(new, target)` → unlink, staged inside the
+  *target's own directory* so the rename is same-filesystem (`/tmp` often is not). Renaming over a
+  running binary is legal on Unix — `ETXTBSY` applies to writing into the busy inode, not to
+  replacing the directory entry. The `.old` step means a failure between the two renames leaves a
+  recoverable file rather than no `agtx` at all
+- **Replacing in place is what keeps worktrees valid.** The absolute `agtx` path is baked into every
+  worktree's hook command and MCP configs (*Binary-path drift* below); an in-place swap keeps that
+  path identical, so nothing needs re-deploying. Installing to a new location would invalidate every
+  existing worktree
+- **A package-managed binary is refused**, not overwritten: `/nix/store/…` and Homebrew prefixes get
+  the right command for that manager instead. Silently replacing a file a manager believes it owns
+  breaks the machine in a way that is hard to diagnose later
+- **Never automatic.** agtx already refuses to answer codex's "Update now" dialog on the principle
+  that it must not upgrade an agent binary behind the user's back; swapping its own would be
+  incoherent. Two opt-outs for the *check*: `update_check = false` and `AGTX_NO_UPDATE_CHECK=1`
+  (set in `docker/Dockerfile`, and what CI and the smoke runner should use)
+- **Three files must agree on artifact naming** — `src/update/release.rs`, `install.sh` and
+  `release.yml` — or `agtx update` 404s. `tests/update_tests.rs` greps the other two and asserts the
+  match, because the alternative is finding the drift in a user's failed update
+- `release.yml` publishes `<archive>.sha256` alongside each tarball. `install.sh` had fetched and
+  verified them since it was written, but none were ever published, so its verification had never
+  once run
+
 ### Database Storage
 All databases stored centrally (not in project directories), in the platform data dir (`GlobalConfig::data_dir`, via the `directories` crate):
 - macOS: `~/Library/Application Support/agtx/`
@@ -407,6 +476,7 @@ default_agent = "claude"
 fullscreen_on_enter = false  # When true, Enter on a task attaches to tmux directly instead of opening the in-TUI popup
 agent_hooks = true           # Write agent lifecycle-hook configs into worktrees (see Hook-Based Phase Status)
 auto_trust = false           # Answer agents' trust / bypass-permission prompts by reading the pane (see First-Launch Dialogs)
+update_check = true          # Daily GitHub release check + header notice (see Self-Update)
 
 [agents]                     # Per-phase agent overrides (PhaseAgentsConfig)
 research = "claude"
@@ -482,6 +552,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `p` | Cyclic plugins only: Review → Planning (next phase) |
 | `/` | Search tasks (jumps to and opens task) |
 | `P` | Select workflow plugin |
+| `u` | Update agtx (only bound when a newer release was found) |
 | `O` | Toggle orchestrator agent (experimental) |
 | `e` | Toggle project sidebar (`h`/`Left` from the Backlog column focuses it) |
 | `q` | Quit |

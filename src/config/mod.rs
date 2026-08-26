@@ -48,6 +48,16 @@ pub struct GlobalConfig {
     /// user already gave the project (see `agent::trust`).
     #[serde(default)]
     pub auto_trust: bool,
+
+    /// Check GitHub once a day for a newer agtx release and show a notice in
+    /// the header. Set false to never ask; `AGTX_NO_UPDATE_CHECK=1` is the
+    /// per-invocation equivalent, for CI and containers.
+    #[serde(default = "default_update_check")]
+    pub update_check: bool,
+}
+
+fn default_update_check() -> bool {
+    true
 }
 
 fn default_agent_hooks() -> bool {
@@ -64,6 +74,7 @@ impl Default for GlobalConfig {
             fullscreen_on_enter: false,
             agent_hooks: default_agent_hooks(),
             auto_trust: false,
+            update_check: default_update_check(),
         }
     }
 }
@@ -400,6 +411,9 @@ pub struct MergedConfig {
     pub branch_prefix: String,
     pub agent_hooks: bool,
     pub auto_trust: bool,
+    /// Global-only: a project does not get to decide whether the user is told
+    /// about agtx releases.
+    pub update_check: bool,
 }
 
 impl MergedConfig {
@@ -437,6 +451,7 @@ impl MergedConfig {
             fullscreen_on_enter: global.fullscreen_on_enter,
             agent_hooks: global.agent_hooks,
             auto_trust: global.auto_trust,
+            update_check: global.update_check,
             branch_prefix: project
                 .branch_prefix
                 .clone()

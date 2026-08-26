@@ -18,6 +18,11 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh \
     | AGTX_INSTALL_DIR=/usr/local/bin bash
 
+# The container's agtx is baked into the image; a release-check notice inside it
+# would point at an update the user cannot apply from here, and every container
+# start would spend a request against the shared-IP GitHub rate limit.
+ENV AGTX_NO_UPDATE_CHECK=1
+
 # Non-root user — UID/GID match the host user so bind-mounted files stay correctly owned
 ARG UID=1000
 ARG GID=1000

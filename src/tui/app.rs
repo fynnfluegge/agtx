@@ -321,6 +321,15 @@ struct AppState {
     orchestrator_last_check: Instant,
     // Background session refresh channel (non-blocking phase status polling)
     session_refresh_rx: Option<mpsc::Receiver<SessionRefreshResult>>,
+    // Release check: spawned once at startup, consumed non-blocking like the
+    // session refresh above. `None` in the receiver means "no newer release" —
+    // every failure (offline, no curl, rate limit) arrives that way too, so a
+    // missing notice is the only symptom a broken check can have.
+    update_rx: Option<mpsc::Receiver<Option<crate::update::UpdateInfo>>>,
+    update_available: Option<crate::update::UpdateInfo>,
+    // Update popup ([u]) and the background install it can start
+    update_popup: Option<UpdatePopup>,
+    update_install_rx: Option<mpsc::Receiver<Result<String, String>>>,
     // Cache of dependency satisfaction per task ID (refreshed with tasks)
     deps_satisfied_cache: HashMap<String, bool>,
     // Full-screen dependency-graph overlay (Shift+D)
@@ -546,6 +555,17 @@ struct PluginSelectPopup {
     options: Vec<PluginOption>,
 }
 
+/// The `[u]` popup: what is available, and one key to install it.
+#[derive(Debug, Clone)]
+struct UpdatePopup {
+    info: crate::update::UpdateInfo,
+    /// The last line `install_release` reported, or the final outcome. The
+    /// install runs on a background thread; this is the only thing the draw
+    /// path reads.
+    status: Option<String>,
+    installing: bool,
+}
+
 #[derive(Debug, Clone)]
 struct PluginOption {
     name: String,        // "" for none, "gsd", "spec-kit", etc.
@@ -731,6 +751,10 @@ impl App {
                 orchestrator_stable_since: None,
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
+                update_rx: None,
+                update_available: None,
+                update_popup: None,
+                update_install_rx: None,
                 deps_satisfied_cache: HashMap::new(),
                 dep_graph_popup: None,
                 setup_queue: VecDeque::new(),
@@ -820,6 +844,17 @@ impl App {
                 {
                     ready_flag.store(true, Ordering::Release);
                 }
+            });
+        }
+
+        // Release check, on a background thread so a slow or hung network never
+        // delays the first frame. Deliberately not in `new_for_test`: the test
+        // suite must not make network calls.
+        if crate::update::check::checks_enabled(app.state.config.update_check) {
+            let (tx, rx) = mpsc::channel();
+            app.state.update_rx = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::update::check_for_update().unwrap_or(None));
             });
         }
 
@@ -940,6 +975,10 @@ impl App {
                 orchestrator_stable_since: None,
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
+                update_rx: None,
+                update_available: None,
+                update_popup: None,
+                update_install_rx: None,
                 deps_satisfied_cache: HashMap::new(),
                 dep_graph_popup: None,
                 setup_queue: VecDeque::new(),
@@ -1055,6 +1094,44 @@ impl App {
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }
             }
+            // Release check result (arrives once, then the channel is dropped)
+            if let Some(ref rx) = self.state.update_rx {
+                match rx.try_recv() {
+                    Ok(info) => {
+                        self.state.update_rx = None;
+                        self.state.update_available = info;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.state.update_rx = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+
+            // Result of an install started from the update popup
+            if let Some(ref rx) = self.state.update_install_rx {
+                match rx.try_recv() {
+                    Ok(result) => {
+                        self.state.update_install_rx = None;
+                        if let Some(popup) = self.state.update_popup.as_mut() {
+                            popup.installing = false;
+                            popup.status = Some(match result {
+                                Ok(msg) => msg,
+                                Err(e) => format!("failed: {e}"),
+                            });
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.state.update_install_rx = None;
+                        if let Some(popup) = self.state.update_popup.as_mut() {
+                            popup.installing = false;
+                            popup.status = Some("failed: the update thread stopped".to_string());
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+
             // Spawn background refresh if not already running and cache expired
             self.maybe_spawn_session_refresh();
 
@@ -1146,6 +1223,19 @@ impl App {
                 Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
             ));
         }
+        if let Some(ref update) = state.update_available {
+            // color_selected, not a warning color: this is an affordance, not a
+            // fault. `[u]` is the discovery point — the footer is already dense
+            // enough that another hint there would be lost.
+            right_spans.push(Span::styled(
+                format!("⬆ {} ", update.latest),
+                Style::default().fg(hex_to_color(&state.config.theme.color_selected)),
+            ));
+            right_spans.push(Span::styled(
+                "[u] ",
+                Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
+            ));
+        }
         right_spans.extend([
             Span::styled(
                 format!("{} ", plugin_label),
@@ -1157,7 +1247,9 @@ impl App {
             ),
         ]);
         let left_len = state.project_name.len() + 2;
-        let right_len: usize = right_spans.iter().map(|s| s.content.len()).sum();
+        // Character count, not byte count: the update notice's "⬆" is 3 bytes
+        // and one column, and a byte-based width would over-pad the header.
+        let right_len: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
         let padding = (chunks[0].width as usize).saturating_sub(left_len + right_len + 2); // 2 for borders
         let mut spans = vec![left, Span::raw(" ".repeat(padding))];
         spans.extend(right_spans);
@@ -2177,6 +2269,64 @@ impl App {
             frame.render_widget(content, inner);
         }
 
+        // Update popup ([u])
+        if let Some(ref popup) = state.update_popup {
+            let popup_area = centered_rect(60, 30, area);
+            frame.render_widget(Clear, popup_area);
+
+            let main_block = Block::default()
+                .title(" Update Available ")
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)),
+                );
+            frame.render_widget(main_block, popup_area);
+
+            let inner = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 1,
+            });
+
+            let selected = hex_to_color(&state.config.theme.color_selected);
+            let dimmed = hex_to_color(&state.config.theme.color_dimmed);
+            let mut lines: Vec<Line> = vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  current ", Style::default().fg(dimmed)),
+                    Span::styled(popup.info.current.to_string(), Style::default()),
+                    Span::styled("  →  latest ", Style::default().fg(dimmed)),
+                    Span::styled(
+                        popup.info.latest.to_string(),
+                        Style::default().fg(selected).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+            ];
+            if !popup.info.html_url.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", popup.info.html_url),
+                    Style::default().fg(dimmed),
+                )));
+            }
+            lines.push(Line::from(""));
+            match (&popup.status, popup.installing) {
+                (Some(status), _) => lines.push(Line::from(Span::styled(
+                    format!("  {}", status),
+                    Style::default().fg(selected),
+                ))),
+                (None, true) => lines.push(Line::from(Span::styled(
+                    "  installing…",
+                    Style::default().fg(selected),
+                ))),
+                (None, false) => lines.push(Line::from(Span::styled(
+                    "  [Enter] install    [Esc] close",
+                    Style::default().fg(dimmed),
+                ))),
+            }
+            let content = Paragraph::new(lines).wrap(Wrap { trim: false });
+            frame.render_widget(content, inner);
+        }
+
         // Plugin selection popup
         if let Some(ref popup) = state.plugin_select_popup {
             let popup_area = centered_rect(50, 40, area);
@@ -2855,6 +3005,18 @@ impl App {
                 Style::default().fg(dimmed_color),
             )),
         ];
+        // A user in dashboard mode is between projects, which is the best
+        // moment there is to be told. The logo block has exactly one spare row.
+        let mut logo = logo;
+        if let Some(ref update) = state.update_available {
+            logo.push(Line::from(vec![
+                Span::styled(
+                    format!("⬆ agtx {} available ", update.latest),
+                    Style::default().fg(selected_color),
+                ),
+                Span::styled("[u]", Style::default().fg(dimmed_color)),
+            ]));
+        }
         let logo_widget = Paragraph::new(logo).alignment(Alignment::Center);
         frame.render_widget(logo_widget, chunks[0]);
 
@@ -2896,7 +3058,12 @@ impl App {
         }
 
         // Footer
-        let footer = Paragraph::new(" [p] projects  [n] new project  [q] quit ")
+        let footer_text = if state.update_available.is_some() {
+            " [p] projects  [n] new project  [u] update  [q] quit "
+        } else {
+            " [p] projects  [n] new project  [q] quit "
+        };
+        let footer = Paragraph::new(footer_text)
             .style(Style::default().fg(dimmed_color))
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, chunks[2]);
@@ -2934,6 +3101,11 @@ impl App {
         // Handle Review confirmation popup if open
         if self.state.review_confirm_popup.is_some() {
             return self.handle_review_confirm_key(key);
+        }
+
+        // Handle update popup if open
+        if self.state.update_popup.is_some() {
+            return self.handle_update_popup_key(key);
         }
 
         // Handle trust confirmation popup if open
@@ -3072,6 +3244,61 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    fn open_update_popup(&mut self) {
+        if let Some(info) = self.state.update_available.clone() {
+            self.state.update_popup = Some(UpdatePopup {
+                info,
+                status: None,
+                installing: false,
+            });
+        }
+    }
+
+    /// `[u]` popup: Enter installs, Esc closes.
+    ///
+    /// The install runs on a background thread — it downloads and verifies a
+    /// tarball, which must not block the event loop — and reports through
+    /// `update_install_rx` like every other background operation here.
+    fn handle_update_popup_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let Some(popup) = self.state.update_popup.as_mut() else {
+            return Ok(());
+        };
+        // Ignore everything while the swap is in flight: a second Enter would
+        // start a competing download into the same staging directory.
+        if popup.installing {
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state.update_popup = None;
+            }
+            KeyCode::Enter => {
+                // Already finished (success or failure) — Enter closes.
+                if popup.status.is_some() {
+                    self.state.update_popup = None;
+                    return Ok(());
+                }
+                let tag = popup.info.tag.clone();
+                let latest = popup.info.latest.to_string();
+                popup.installing = true;
+                let (tx, rx) = mpsc::channel();
+                self.state.update_install_rx = Some(rx);
+                std::thread::spawn(move || {
+                    let result = crate::update::install::install_release(&tag, &mut |_| {})
+                        .map(|_| {
+                            // The running process still holds the old inode;
+                            // tmux sessions and their agents are untouched.
+                            format!("agtx {latest} installed — restart agtx to apply")
+                        })
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(result);
+                });
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -3744,6 +3971,9 @@ impl App {
                 KeyCode::Char('p') => {
                     self.state.show_project_list = true;
                 }
+                KeyCode::Char('u') if self.state.update_available.is_some() => {
+                    self.open_update_popup();
+                }
                 KeyCode::Char('n') => {
                     let current_dir = std::env::current_dir()?;
                     if crate::git::is_git_repo(&current_dir) {
@@ -3924,6 +4154,9 @@ impl App {
             KeyCode::Char('P') => {
                 // Open plugin selection popup
                 self.open_plugin_select_popup();
+            }
+            KeyCode::Char('u') if self.state.update_available.is_some() => {
+                self.open_update_popup();
             }
             KeyCode::Char('O') if self.state.flags.experimental => {
                 // Toggle orchestrator agent (experimental)

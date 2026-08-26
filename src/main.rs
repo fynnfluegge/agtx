@@ -3,7 +3,7 @@ use agtx::{
     config::{self, GlobalConfig},
     git, tui, AppMode, FeatureFlags,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode},
@@ -23,6 +23,19 @@ async fn main() -> Result<()> {
         let raw: Vec<String> = std::env::args().collect();
         if raw.get(1).map(String::as_str) == Some("hook") {
             return agtx::agent::hook_status::run_hook_cli(&raw[2..]);
+        }
+        // Same reasoning for the version/update commands: they print a line or
+        // two and exit, and neither wants a daily log file created for it. They
+        // are handled here rather than in the `mode` match below because that
+        // match filters out every `--`-prefixed argument, so `--version` would
+        // otherwise fall through and open the current directory as a project.
+        match raw.get(1).map(String::as_str) {
+            Some("--version" | "-V" | "version") => {
+                println!("agtx {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            Some("update") => return run_update(&raw[2..]),
+            _ => {}
         }
     }
 
@@ -262,4 +275,47 @@ fn prompt_agent_selection(agents: &[agent::Agent]) -> Result<&agent::Agent> {
     let idx = result?;
     println!("\n  Selected: {}\n", agents[idx].name);
     Ok(&agents[idx])
+}
+
+/// `agtx update [--check]`
+///
+/// The dedicated command the header notice points at. `--check` only reports,
+/// and exits 1 when an update is available so it can drive a script.
+fn run_update(args: &[String]) -> Result<()> {
+    use agtx::update;
+
+    let check_only = args.iter().any(|a| a == "--check");
+    let current = update::Version::current();
+
+    // Ask GitHub directly rather than going through the cached path: someone
+    // typing `agtx update` wants the answer now, not yesterday's answer.
+    let release = update::github::fetch_latest_release(&update::release::repo())
+        .context("could not reach GitHub to check for a new release")?;
+    let latest = update::Version::parse(&release.tag_name)
+        .with_context(|| format!("unrecognised release tag: {}", release.tag_name))?;
+
+    if !latest.supersedes(&current) {
+        println!("agtx {current} is up to date (latest release: {latest})");
+        return Ok(());
+    }
+
+    println!("  current {current}  →  latest {latest}");
+    if check_only {
+        if !release.html_url.is_empty() {
+            println!("  {}", release.html_url);
+        }
+        println!("  run `agtx update` to install it");
+        std::process::exit(1);
+    }
+
+    let installed = update::install::install_release(&release.tag_name, &mut |step| {
+        println!("  {step}");
+    })?;
+
+    println!();
+    println!("  agtx {latest} installed to {}", installed.path.display());
+    // The running process still holds the old inode; tmux sessions and their
+    // agents are untouched. Say so rather than implying the swap took effect.
+    println!("  restart any running agtx to pick it up");
+    Ok(())
 }
