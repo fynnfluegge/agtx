@@ -423,3 +423,40 @@ fn target_path_resolves_to_a_real_file() {
         path.display()
     );
 }
+
+/// A verification that passes against a real release proves only the happy
+/// path — a real release always matches. That a *corrupted* download aborts
+/// can only be shown here.
+#[test]
+fn a_corrupted_archive_is_rejected() {
+    // The real v1.0.0 x86_64-darwin checksum file, verbatim.
+    let published = "b169b83adb8e837f8d5d8f6eb77d15101848109ec6f45217b5d32d6a77445dd3  agtx-v1.0.0-x86_64-darwin.tar.gz\n";
+    let archive = "agtx-v1.0.0-x86_64-darwin.tar.gz";
+
+    let err = install::verify_checksum(b"not the release tarball", published, archive)
+        .expect_err("a body that does not hash to the published digest must abort");
+    let msg = err.to_string();
+    assert!(msg.contains("checksum mismatch"), "{msg}");
+    assert!(
+        msg.contains("b169b83adb8e837f8d5d8f6eb77d15101848109ec6f45217b5d32d6a77445dd3"),
+        "the message must name the expected digest: {msg}"
+    );
+}
+
+#[test]
+fn a_matching_archive_passes() {
+    let body = b"pretend tarball";
+    let sums = format!(
+        "{}  agtx-v1.0.0-x86_64-linux.tar.gz\n",
+        install::sha256_hex(body)
+    );
+    install::verify_checksum(body, &sums, "agtx-v1.0.0-x86_64-linux.tar.gz").unwrap();
+}
+
+#[test]
+fn a_checksum_file_that_is_not_one_aborts_rather_than_skipping() {
+    // A 404 body reaching this point means the file existed but is garbage.
+    // Skipping verification on unreadable input would defeat the check.
+    assert!(install::verify_checksum(b"x", "Not Found", "a.tar.gz").is_err());
+    assert!(install::verify_checksum(b"x", "", "a.tar.gz").is_err());
+}

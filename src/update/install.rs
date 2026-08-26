@@ -72,6 +72,22 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Compare a downloaded archive against its published `.sha256`.
+///
+/// Extracted from `install_release` so the **rejecting** branch is testable.
+/// A passing verification against a real release proves only that the happy
+/// path works; that a corrupted download actually aborts cannot be shown by
+/// any real release, because a real release matches. It has to be a test.
+pub fn verify_checksum(bytes: &[u8], sums_body: &str, archive: &str) -> Result<()> {
+    let expected = parse_sha256_file(sums_body)
+        .with_context(|| format!("malformed checksum file for {archive}"))?;
+    let actual = sha256_hex(bytes);
+    if actual != expected {
+        bail!("checksum mismatch for {archive}: expected {expected}, got {actual}");
+    }
+    Ok(())
+}
+
 /// What `agtx update` reports back, so the CLI and the TUI can render the same
 /// outcome differently.
 pub struct Installed {
@@ -152,14 +168,7 @@ pub fn install_release(tag: &str, progress: &mut dyn FnMut(&str)) -> Result<Inst
     progress("verifying checksum");
     let bytes = std::fs::read(&archive_path)?;
     match curl_to_string(&format!("{url}.sha256")) {
-        Ok(sums) => {
-            let expected = parse_sha256_file(&sums)
-                .with_context(|| format!("malformed checksum file for {archive}"))?;
-            let actual = sha256_hex(&bytes);
-            if actual != expected {
-                bail!("checksum mismatch for {archive}: expected {expected}, got {actual}");
-            }
-        }
+        Ok(sums) => verify_checksum(&bytes, &sums, &archive)?,
         // Releases before the workflow published checksums have none. Warn
         // rather than refuse, matching install.sh — but say so, so it is
         // visible rather than silent.
