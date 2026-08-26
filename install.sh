@@ -78,15 +78,21 @@ main() {
         error "curl is required but not installed"
     fi
 
-    # Get latest version
-    info "Fetching latest version..."
-    VERSION=$(get_latest_version)
+    # Version: AGTX_VERSION pins one (e.g. AGTX_VERSION=v0.2.6), which is the
+    # downgrade path when a release goes wrong. Otherwise take the latest.
+    if [ -n "${AGTX_VERSION:-}" ]; then
+        VERSION="${AGTX_VERSION}"
+        info "Pinned version: ${VERSION}"
+    else
+        info "Fetching latest version..."
+        VERSION=$(get_latest_version)
 
-    if [ -z "$VERSION" ]; then
-        error "Could not determine latest version. Check https://github.com/${REPO}/releases"
+        if [ -z "$VERSION" ]; then
+            error "Could not determine latest version. Check https://github.com/${REPO}/releases"
+        fi
+
+        info "Latest version: ${VERSION}"
     fi
-
-    info "Latest version: ${VERSION}"
 
     # Construct download URL
     ARCHIVE_NAME="${BINARY_NAME}-${VERSION}-${ARCH}-${OS}.tar.gz"

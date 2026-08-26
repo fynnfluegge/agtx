@@ -100,6 +100,30 @@ cargo build --release
 cp target/release/agtx ~/.local/bin/
 ```
 
+### Updating
+
+agtx checks GitHub once a day for a newer release and shows `⬆ 0.2.8 [u]` in the
+board header when there is one. Press **`u`** for the details and one key to
+install it, or from a shell:
+
+```bash
+agtx update          # download, verify and replace this binary in place
+agtx update --check  # report only; exits 1 when an update is available
+agtx --version
+```
+
+The running agtx keeps the old binary until you restart it; open tmux sessions
+and their agents are untouched.
+
+To never check, set `update_check = false` in `~/.config/agtx/config.toml`, or
+export `AGTX_NO_UPDATE_CHECK=1` for a single run (CI, containers). To pin or roll
+back to a specific release, re-run the installer with `AGTX_VERSION`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh \
+  | AGTX_VERSION=v0.2.6 bash
+```
+
 ### Requirements
 
 - **tmux** — agent sessions run in a dedicated tmux server
@@ -156,6 +180,7 @@ reason, and you answer it in the agent's own pane (`↩` to open the task).
 | `x` | Delete task |
 | `/` | Search tasks |
 | `P` | Select spec-driven workflow plugin |
+| `u` | Update agtx (only shown when a new release is available) |
 | `O` | Toggle orchestrator agent (`--experimental`) |
 | `e` | Toggle project sidebar |
 | `q` | Quit |
@@ -316,6 +341,16 @@ Register `agtx mcp-serve` as an MCP server, then copy `skills/sweep/SKILL.md` in
 ## Configuration
 
 Config file location: `~/.config/agtx/config.toml`
+
+### General
+
+```toml
+default_agent = "claude"
+fullscreen_on_enter = false  # Enter attaches to tmux directly instead of the in-TUI popup
+agent_hooks = true           # Let agents report their own phase status via lifecycle hooks
+auto_trust = false           # Answer agents' trust prompts on your behalf
+update_check = true          # Check GitHub daily for a new release (see Updating)
+```
 
 ### Worktree Base Branch
 
