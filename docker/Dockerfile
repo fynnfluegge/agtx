@@ -21,9 +21,14 @@ RUN curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.s
 # Non-root user — UID/GID match the host user so bind-mounted files stay correctly owned
 ARG UID=1000
 ARG GID=1000
+# `groupadd -g` fails (exit 4) when the GID is already taken, which it is for
+# every macOS user: `id -g` is 20 there, and GID 20 is `dialout` in Ubuntu 24.04.
+# Reuse whatever group already owns the GID instead — the point is only that
+# bind-mounted files come out owned by the host user, and the group's *name* is
+# irrelevant to that.
 RUN userdel -r ubuntu 2>/dev/null || true && \
     groupdel ubuntu 2>/dev/null || true && \
-    groupadd -g "${GID}" sandbox && \
+    groupadd -g "${GID}" sandbox 2>/dev/null || true && \
     useradd -m -u "${UID}" -g "${GID}" -s /bin/bash sandbox
 
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh

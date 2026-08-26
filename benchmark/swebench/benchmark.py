@@ -602,6 +602,61 @@ def start_docker_container(
     return container_id
 
 
+def seed_agent_trust(container_id: str, agent: str, *, verbose: bool = False) -> None:
+    """Record /testbed as trusted for `agent`, the way the user would by hand.
+
+    Trust records are **path-keyed**, and the repo lands at /testbed inside the
+    container. Copying the host's ~/.claude.json (below) therefore does *not*
+    prevent the trust dialog: no entry matches that path. Until now the run
+    depended on agtx clearing the dialog by reading the pane, which is no longer
+    the default.
+
+    Deterministic and done up front, because here a stuck dialog costs a whole
+    instance run rather than one task.
+    """
+    py = {
+        "claude": (
+            "import json,os;p='/home/bench/.claude.json';"
+            "d=json.load(open(p)) if os.path.exists(p) else {};"
+            "d.setdefault('projects',{}).setdefault('/testbed',{})"
+            "['hasTrustDialogAccepted']=True;"
+            "json.dump(d,open(p,'w'))"
+        ),
+        "codex": (
+            "import os;p='/home/bench/.codex/config.toml';"
+            "os.makedirs(os.path.dirname(p),exist_ok=True);"
+            "s=open(p).read() if os.path.exists(p) else '';"
+            "s+='\\n[projects.\"/testbed\"]\\ntrust_level = \"trusted\"\\n' "
+            "if '[projects.\"/testbed\"]' not in s else '';"
+            "open(p,'w').write(s)"
+        ),
+        "gemini": (
+            "import json,os;p='/home/bench/.gemini/trustedFolders.json';"
+            "os.makedirs(os.path.dirname(p),exist_ok=True);"
+            "d=json.load(open(p)) if os.path.exists(p) else {};"
+            "d['/testbed']='TRUST_FOLDER';json.dump(d,open(p,'w'))"
+        ),
+        "antigravity": (
+            "import json,os;p='/home/bench/.gemini/antigravity-cli/settings.json';"
+            "os.makedirs(os.path.dirname(p),exist_ok=True);"
+            "d=json.load(open(p)) if os.path.exists(p) else {};"
+            "w=d.setdefault('trustedWorkspaces',[]);"
+            "w.append('/testbed') if '/testbed' not in w else None;"
+            "json.dump(d,open(p,'w'))"
+        ),
+    }.get(agent)
+    # cursor and grok pass --trust at launch; opencode has no trust gate; copilot
+    # is unmeasured. Nothing to seed, and nothing to guess at.
+    if py is None:
+        return
+    if verbose:
+        print(f"  [docker] Seeding {agent} trust for /testbed...", file=sys.stderr)
+    subprocess.run(
+        ["docker", "exec", container_id, "python3", "-c", py],
+        check=False, capture_output=not verbose,
+    )
+
+
 def setup_container(
     container_id: str, config_path: Path, base_commit: str, verbose: bool = False,
     tools_container_id: str | None = None,
@@ -711,6 +766,8 @@ def setup_container(
                     check=True, capture_output=not verbose,
                 )
 
+    seed_agent_trust(container_id, default_agent, verbose=verbose)
+
     # Copy extra directories into the container (e.g. third-party plugin skill dirs).
     for src, dst in (extra_dirs or []):
         if not src.exists():
@@ -762,8 +819,14 @@ def setup_container(
         capture_output=not verbose,
     )
 
-    # Write global agtx config for bench user so the TUI skips the agent-selection wizard
-    global_config_content = f'default_agent = "{default_agent}"\n'
+    # Write global agtx config for bench user so the TUI skips the agent-selection wizard.
+    #
+    # `auto_trust = true` because a benchmark container has no human at the board.
+    # agtx's default is off — a trust prompt surfaces as a Blocked card and waits
+    # for a person — which here would stall the instance until its timeout. Same
+    # reasoning as docker/entrypoint.sh: disposable container, nothing in it but
+    # the repo under test.
+    global_config_content = f'default_agent = "{default_agent}"\nauto_trust = true\n'
     if verbose:
         print(f"  [docker] Writing global agtx config (default_agent={default_agent})...", file=sys.stderr)
     subprocess.run(

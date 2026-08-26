@@ -17,6 +17,7 @@ Everything here is deterministic — no tmux, no agent binaries, no auth.
 """
 
 import argparse
+import json
 import os
 import shutil
 import tempfile
@@ -569,6 +570,127 @@ class Args(unittest.TestCase):
             ["planning", "review"],
         )
 
+
+
+class AgentTrustSetup(unittest.TestCase):
+    """`setup_agent_trust` writes the store each agent actually reads.
+
+    Written against the shapes measured on a live machine, and against a fake
+    HOME so a test run never edits the developer's real agent config.
+    """
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self._real_home = os.environ.get("HOME")
+        os.environ["HOME"] = self.home
+        self.repo = Path(tempfile.mkdtemp()) / "proj"
+        self.repo.mkdir(parents=True)
+
+    def tearDown(self):
+        if self._real_home is not None:
+            os.environ["HOME"] = self._real_home
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_claude_records_the_project_root(self):
+        self.assertTrue(smoke.setup_agent_trust("claude", self.repo))
+        data = json.loads((Path(self.home) / ".claude.json").read_text())
+        entry = data["projects"][str(self.repo.resolve())]
+        self.assertTrue(entry["hasTrustDialogAccepted"])
+
+    def test_gemini_stores_a_lowercased_path(self):
+        self.assertTrue(smoke.setup_agent_trust("gemini", self.repo))
+        data = json.loads((Path(self.home) / ".gemini" / "trustedFolders.json").read_text())
+        self.assertEqual(data[str(self.repo.resolve()).lower()], "TRUST_FOLDER")
+
+    def test_codex_appends_a_trusted_project_section(self):
+        self.assertTrue(smoke.setup_agent_trust("codex", self.repo))
+        body = (Path(self.home) / ".codex" / "config.toml").read_text()
+        self.assertIn(f'[projects."{self.repo.resolve()}"]', body)
+        self.assertIn('trust_level = "trusted"', body)
+
+    def test_antigravity_appends_to_the_workspace_list(self):
+        self.assertTrue(smoke.setup_agent_trust("antigravity", self.repo))
+        p = Path(self.home) / ".gemini" / "antigravity-cli" / "settings.json"
+        self.assertIn(str(self.repo.resolve()), json.loads(p.read_text())["trustedWorkspaces"])
+
+    def test_it_is_idempotent(self):
+        smoke.setup_agent_trust("antigravity", self.repo)
+        smoke.setup_agent_trust("antigravity", self.repo)
+        p = Path(self.home) / ".gemini" / "antigravity-cli" / "settings.json"
+        entries = json.loads(p.read_text())["trustedWorkspaces"]
+        self.assertEqual(entries.count(str(self.repo.resolve())), 1)
+
+    def test_existing_entries_survive(self):
+        p = Path(self.home) / ".gemini" / "antigravity-cli" / "settings.json"
+        p.parent.mkdir(parents=True)
+        p.write_text(json.dumps({"trustedWorkspaces": ["/somewhere/else"]}))
+        smoke.setup_agent_trust("antigravity", self.repo)
+        entries = json.loads(p.read_text())["trustedWorkspaces"]
+        self.assertIn("/somewhere/else", entries)
+
+    def test_flag_based_and_unmeasured_agents_write_nothing(self):
+        for agent in ("cursor", "grok", "opencode", "copilot"):
+            with self.subTest(agent=agent):
+                self.assertFalse(smoke.setup_agent_trust(agent, self.repo))
+        self.assertEqual(os.listdir(self.home), [])
+
+    def test_the_store_table_covers_every_agent_agtx_seeds(self):
+        """Kept in step with `src/agent/trust.rs` — a new store there needs one here."""
+        self.assertEqual(
+            set(smoke.AGENT_TRUST_STORES),
+            {"claude", "codex", "gemini", "antigravity"},
+        )
+
+
+
+class RetireAndPrune(unittest.TestCase):
+    """Retiring the task to Done is what exercises `agent::trust::forget`.
+
+    Deleting the scratch repo is not the same as finishing a task: worktree
+    removal, `cleanup_script` and the trust prune all hang off
+    `cleanup_task_for_done`. Before this the runner exercised none of them, and
+    every smoke run left a seeded entry behind in antigravity's store.
+    """
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self._real_home = os.environ.get("HOME")
+        os.environ["HOME"] = self.home
+        self.wt = Path(tempfile.mkdtemp()) / "wt"
+        self.wt.mkdir(parents=True)
+
+    def tearDown(self):
+        if self._real_home is not None:
+            os.environ["HOME"] = self._real_home
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _write_workspaces(self, entries):
+        p = Path(self.home) / ".gemini" / "antigravity-cli" / "settings.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"trustedWorkspaces": entries}))
+
+    def test_it_sees_a_seeded_entry(self):
+        self._write_workspaces([str(self.wt.resolve())])
+        self.assertTrue(smoke.trust_store_lists("antigravity", self.wt))
+
+    def test_it_sees_a_pruned_entry_is_gone(self):
+        self._write_workspaces(["/somewhere/else"])
+        self.assertFalse(smoke.trust_store_lists("antigravity", self.wt))
+
+    def test_a_missing_store_is_not_an_error(self):
+        self.assertFalse(smoke.trust_store_lists("antigravity", self.wt))
+
+    def test_a_corrupt_store_is_not_an_error(self):
+        p = Path(self.home) / ".gemini" / "antigravity-cli" / "settings.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{not json")
+        self.assertFalse(smoke.trust_store_lists("antigravity", self.wt))
+
+    def test_inheriting_agents_have_nothing_to_check(self):
+        """agtx never wrote their entries, so it must not claim to prune them."""
+        for agent in ("claude", "codex", "gemini", "cursor", "grok", "opencode"):
+            with self.subTest(agent=agent):
+                self.assertIsNone(smoke.trust_store_lists(agent, self.wt))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

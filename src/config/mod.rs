@@ -30,6 +30,24 @@ pub struct GlobalConfig {
     /// tmux pane output.
     #[serde(default = "default_agent_hooks")]
     pub agent_hooks: bool,
+    /// Answer agents' trust and permission-bypass prompts on the user's behalf.
+    ///
+    /// Off by default: those prompts ask the user to vouch for a directory or to
+    /// accept unattended tool execution, and that is their decision. With this
+    /// off a task whose agent is waiting on one shows as `Blocked` with the reason
+    /// on the card, and the user answers in the agent's own pane.
+    ///
+    /// Turning it on restores the historical behaviour — agtx reads the pane and
+    /// sends the answer — which is what unattended runs want. It is already
+    /// effectively on inside the Docker sandbox and the benchmark, where the
+    /// container is disposable and pre-accepting is the documented policy.
+    ///
+    /// Most users never need it: trust is inherited from the project root for
+    /// claude, codex and gemini, `--trust` covers cursor and grok, opencode never
+    /// asks, and antigravity's per-worktree entry is seeded from the consent the
+    /// user already gave the project (see `agent::trust`).
+    #[serde(default)]
+    pub auto_trust: bool,
 }
 
 fn default_agent_hooks() -> bool {
@@ -45,6 +63,7 @@ impl Default for GlobalConfig {
             theme: ThemeConfig::default(),
             fullscreen_on_enter: false,
             agent_hooks: default_agent_hooks(),
+            auto_trust: false,
         }
     }
 }
@@ -380,6 +399,7 @@ pub struct MergedConfig {
     pub fullscreen_on_enter: bool,
     pub branch_prefix: String,
     pub agent_hooks: bool,
+    pub auto_trust: bool,
 }
 
 impl MergedConfig {
@@ -416,6 +436,7 @@ impl MergedConfig {
             workflow_plugin: project.workflow_plugin.clone(),
             fullscreen_on_enter: global.fullscreen_on_enter,
             agent_hooks: global.agent_hooks,
+            auto_trust: global.auto_trust,
             branch_prefix: project
                 .branch_prefix
                 .clone()

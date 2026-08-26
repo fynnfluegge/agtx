@@ -353,7 +353,10 @@ mod tests {
         let cmd = dump_argv_command(&["--dangerously-skip-permissions", prompt]);
         assert_eq!(
             argv_delivered_by(&cmd),
-            vec!["--dangerously-skip-permissions".to_string(), prompt.to_string()],
+            vec![
+                "--dangerously-skip-permissions".to_string(),
+                prompt.to_string()
+            ],
         );
     }
 
@@ -426,7 +429,8 @@ mod tests {
         let agent = crate::agent::Agent::new("claude", "claude", "", "");
         let ops = crate::agent::CodingAgent::new(agent);
         let json = r#"{"type":"stdio","command":"/bin/agtx","args":["mcp-serve","/tmp/repo"]}"#;
-        let cmd = crate::agent::AgentOperations::build_orchestrator_command(&ops, json, "/bin/agtx");
+        let cmd =
+            crate::agent::AgentOperations::build_orchestrator_command(&ops, json, "/bin/agtx");
         let (ok, seen) = argv_seen_by_fake_claude(&cmd);
         assert!(ok, "the wrapped orchestrator command must run: {seen}");
         assert!(

@@ -333,7 +333,9 @@ fn test_claim_transition_request_fails_if_already_processed() {
 #[test]
 fn test_claim_transition_request_fails_for_unknown_id() {
     let db = Database::open_in_memory_project().unwrap();
-    assert!(!db.claim_transition_request("does-not-exist", "agtx-A").unwrap());
+    assert!(!db
+        .claim_transition_request("does-not-exist", "agtx-A")
+        .unwrap());
 }
 
 #[test]
@@ -347,16 +349,28 @@ fn test_cleanup_old_transition_requests_sweeps_stale_claims() {
     db.create_transition_request(&stale_claim).unwrap();
     db.create_transition_request(&fresh_unclaimed).unwrap();
 
-    db.claim_transition_request(&fresh_claim.id, "agtx-A").unwrap();
-    db.claim_transition_request(&stale_claim.id, "agtx-A").unwrap();
+    db.claim_transition_request(&fresh_claim.id, "agtx-A")
+        .unwrap();
+    db.claim_transition_request(&stale_claim.id, "agtx-A")
+        .unwrap();
     let two_hours_ago = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
-    db.backdate_transition_requested_at(&stale_claim.id, &two_hours_ago).unwrap();
+    db.backdate_transition_requested_at(&stale_claim.id, &two_hours_ago)
+        .unwrap();
 
     db.cleanup_old_transition_requests().unwrap();
 
-    assert!(db.get_transition_request(&stale_claim.id).unwrap().is_none());
-    assert!(db.get_transition_request(&fresh_claim.id).unwrap().is_some());
-    assert!(db.get_transition_request(&fresh_unclaimed.id).unwrap().is_some());
+    assert!(db
+        .get_transition_request(&stale_claim.id)
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get_transition_request(&fresh_claim.id)
+        .unwrap()
+        .is_some());
+    assert!(db
+        .get_transition_request(&fresh_unclaimed.id)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -367,7 +381,8 @@ fn test_get_pending_transition_requests_excludes_claimed() {
     let req_b = TransitionRequest::new("task-b", "move_forward");
     db.create_transition_request(&req_a).unwrap();
     db.create_transition_request(&req_b).unwrap();
-    db.claim_transition_request(&req_a.id, "other-instance").unwrap();
+    db.claim_transition_request(&req_a.id, "other-instance")
+        .unwrap();
 
     let pending = db.get_pending_transition_requests().unwrap();
     let ids: Vec<&str> = pending.iter().map(|r| r.id.as_str()).collect();
@@ -406,17 +421,26 @@ fn test_claim_transition_request_atomic_under_concurrent_claims() {
         }));
     }
 
-    let wins: usize = handles.into_iter().filter_map(|h| h.join().ok()).filter(|w| *w).count();
+    let wins: usize = handles
+        .into_iter()
+        .filter_map(|h| h.join().ok())
+        .filter(|w| *w)
+        .count();
     assert_eq!(wins, 1, "exactly one thread must win the claim; got {wins}");
 
     // Row must now be excluded from pending — a late claim must also fail.
     let followup = Database::open_project_at_path(&db_path).unwrap();
     assert!(
-        followup.get_pending_transition_requests().unwrap().is_empty(),
+        followup
+            .get_pending_transition_requests()
+            .unwrap()
+            .is_empty(),
         "claimed request must be filtered from pending"
     );
     assert!(
-        !followup.claim_transition_request(&req.id, "late-comer").unwrap(),
+        !followup
+            .claim_transition_request(&req.id, "late-comer")
+            .unwrap(),
         "a later claim after the race must return false"
     );
 }
@@ -435,7 +459,9 @@ fn test_consume_notifications_atomic_under_concurrent_consumers() {
     const NOTIFS: usize = 64;
     let setup = Database::open_project_at_path(&db_path).unwrap();
     for i in 0..NOTIFS {
-        setup.create_notification(&Notification::new(format!("msg-{i}"))).unwrap();
+        setup
+            .create_notification(&Notification::new(format!("msg-{i}")))
+            .unwrap();
     }
     drop(setup);
 
@@ -457,7 +483,11 @@ fn test_consume_notifications_atomic_under_concurrent_consumers() {
         seen.extend(h.join().unwrap());
     }
 
-    assert_eq!(seen.len(), NOTIFS, "total consumed must equal total created");
+    assert_eq!(
+        seen.len(),
+        NOTIFS,
+        "total consumed must equal total created"
+    );
     let unique_ids: HashSet<&str> = seen.iter().map(|n| n.id.as_str()).collect();
     assert_eq!(
         unique_ids.len(),
@@ -476,8 +506,8 @@ fn test_consume_notifications_atomic_under_concurrent_consumers() {
 
 // === Stable Hash and DB Permissions Tests (Fix 3, Fix 7) ===
 
-use tempfile::TempDir;
 use std::path::Path;
+use tempfile::TempDir;
 
 #[test]
 fn test_open_project_same_path_returns_same_db() {
@@ -527,7 +557,10 @@ fn test_project_db_file_permissions_are_0600() {
     let mut hasher = Sha256::new();
     hasher.update(path_str.as_bytes());
     let result = hasher.finalize();
-    let path_hash = format!("{:016x}", u64::from_be_bytes(result[..8].try_into().unwrap()));
+    let path_hash = format!(
+        "{:016x}",
+        u64::from_be_bytes(result[..8].try_into().unwrap())
+    );
 
     let config_dir = directories::ProjectDirs::from("", "", "agtx").unwrap();
     let db_path = config_dir
@@ -535,7 +568,11 @@ fn test_project_db_file_permissions_are_0600() {
         .join("projects")
         .join(format!("{}.db", path_hash));
 
-    assert!(db_path.exists(), "Expected DB file not found at {:?}", db_path);
+    assert!(
+        db_path.exists(),
+        "Expected DB file not found at {:?}",
+        db_path
+    );
     let perms = std::fs::metadata(&db_path).unwrap().permissions();
     let mode = perms.mode() & 0o777;
     assert_eq!(mode, 0o600, "DB file should be owner-only read/write");
@@ -548,14 +585,16 @@ fn test_global_db_file_permissions_are_0600() {
 
     let _db = Database::open_global().unwrap();
 
-    let config_dir = directories::ProjectDirs::from("", "", "agtx")
-        .unwrap();
+    let config_dir = directories::ProjectDirs::from("", "", "agtx").unwrap();
     let db_path = config_dir.config_dir().join("index.db");
 
     if db_path.exists() {
         let perms = std::fs::metadata(&db_path).unwrap().permissions();
         let mode = perms.mode() & 0o777;
-        assert_eq!(mode, 0o600, "Global DB file should be owner-only read/write");
+        assert_eq!(
+            mode, 0o600,
+            "Global DB file should be owner-only read/write"
+        );
     }
 }
 

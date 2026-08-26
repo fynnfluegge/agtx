@@ -59,12 +59,15 @@ impl Database {
     /// Create a stable hash from a path string for database filename.
     /// Uses SHA-256 (truncated to 16 hex chars) for cross-version stability.
     fn hash_path(path: &str) -> String {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(path.as_bytes());
         let result = hasher.finalize();
         // Take first 8 bytes (16 hex chars) — same length as the old DefaultHasher output
-        format!("{:016x}", u64::from_be_bytes(result[..8].try_into().unwrap()))
+        format!(
+            "{:016x}",
+            u64::from_be_bytes(result[..8].try_into().unwrap())
+        )
     }
 
     /// Legacy hash function (DefaultHasher). Used only for migration from pre-SHA256 databases.
@@ -439,10 +442,9 @@ impl Database {
             _ => return true,
         };
         refs_str.split(',').filter(|s| !s.is_empty()).all(|ref_id| {
-            self.get_task(ref_id)
-                .ok()
-                .flatten()
-                .map_or(true, |t| matches!(t.status, TaskStatus::Review | TaskStatus::Done))
+            self.get_task(ref_id).ok().flatten().map_or(true, |t| {
+                matches!(t.status, TaskStatus::Review | TaskStatus::Done)
+            })
         })
     }
 
@@ -472,9 +474,7 @@ impl Database {
     }
 
     pub fn get_project_by_id(&self, id: &str) -> Result<Option<Project>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM projects WHERE id = ?1")?;
+        let mut stmt = self.conn.prepare("SELECT * FROM projects WHERE id = ?1")?;
 
         let project = stmt
             .query_row(params![id], |row| {
