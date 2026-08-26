@@ -20,9 +20,18 @@ Check 4 is the one that matters most: antigravity's skill *ran* and wrote its
 file while the session sat blocked on an unanswered trust dialog. A harness that
 only asserts output would have certified it green.
 
-Never pre-answers dialogs and never pre-seeds trust for the agent under test.
-All three bugs were dialog bugs; a harness that made itself reliable by writing
-`hasTrustDialogAccepted` would have been green through every one of them.
+Never pre-answers a dialog. It *does* trust the scratch repo **root** for the agent
+first (`setup_agent_trust`), which is what a user does once before using agtx — and
+that is what gives Check 4 its teeth. Every scratch repo is a fresh mkdtemp path, so
+without it every agent opens on its trust dialog and "parked on a dialog" is the
+expected state: exactly the noise two undeclared-dialog bugs hid in. With the root
+trusted, a dialog during a *task* is a real defect.
+
+It also makes the run a test of the inheritance property itself. claude, codex and
+gemini inherit the root's trust into their worktrees, so a dialog there means that
+stopped being true. antigravity matches paths exactly and never inherits, so agtx
+must seed each worktree from that consent — if the seeding breaks, its cases park
+and the run says so.
 
 Usage:
     tests/smoke/agent_smoke.py                      # installed agents x agtx plugin
@@ -301,6 +310,21 @@ class Case:
     skip_reason: str | None = None
 
 
+def agent_api_key_present(agent: dict) -> bool:
+    """Whether a headless credential for this agent is in the environment.
+
+    Only meaningful under `--require-api-key`, which CI passes. Locally the agents
+    authenticate from a keychain or a config file and the environment is empty, so
+    this must never gate a developer's run.
+
+    An agent with an empty `api_key_env` can never satisfy this: it has no verified
+    env-var auth path, so it cannot run unattended at all. That is a `SKIP` with a
+    reason, which is the honest outcome — better than a case that burns the whole
+    phase timeout and reports `AUTH` five minutes later.
+    """
+    return any(os.environ.get(v) for v in (agent.get("api_key_env") or []))
+
+
 def plugin_prereq(plugin: dict) -> str | None:
     """Why this plugin cannot run against a scratch repo, or None.
 
@@ -343,6 +367,7 @@ def plan_cases(
     agents_arg: str,
     plugins_arg: str,
     force: bool = False,
+    require_api_key: bool = False,
 ) -> list[Case]:
     """Build the case list, marking every excluded case with a visible reason.
 
@@ -381,6 +406,12 @@ def plan_cases(
             if not shutil.which(agent["binary"]):
                 cases.append(
                     Case(agent_name, plugin_name, f"{agent['binary']} not installed")
+                )
+                continue
+            if require_api_key and not agent_api_key_present(agent):
+                names = " / ".join(agent.get("api_key_env") or []) or "no known env var"
+                cases.append(
+                    Case(agent_name, plugin_name, f"no API key in env ({names})")
                 )
                 continue
             supported = plugin.get("supported_agents") or []
@@ -452,10 +483,105 @@ def trust_project(agtx_bin: str, repo: Path) -> None:
     """Trust the scratch repo's own config.
 
     This trusts *agtx's* project config, which is what gates plugin init scripts
-    and copy_files. It deliberately does **not** touch any agent's trust state —
-    the agent dialogs are the thing under test.
+    and copy_files. Agent trust is a separate thing — see `setup_agent_trust`.
     """
     run([agtx_bin, "trust"], cwd=repo)
+
+
+# How each agent records that a directory is trusted, and whether a trusted
+# ancestor covers what lies beneath it. Mirrors `src/agent/trust.rs`; the runner
+# writes these directly rather than driving each agent's dialog, because this is
+# **setup**, not the thing under test.
+AGENT_TRUST_STORES = {
+    "claude": "claude",
+    "codex": "codex",
+    "gemini": "gemini",
+    "antigravity": "antigravity",
+}
+
+
+def setup_agent_trust(agent: str, repo: Path) -> bool:
+    """Trust the scratch repo *root* for `agent`, as a user would before using agtx.
+
+    This is the step that makes Check 4 mean something. Every scratch repo is a
+    fresh `mkdtemp` path, so without it every agent opens on its first-launch
+    trust dialog and "parked on a dialog" is the expected state — which is exactly
+    the noise that let two undeclared-dialog bugs hide. With the root trusted, a
+    dialog appearing during a *task* is a real defect.
+
+    It also turns the run into a test of the inheritance property itself: claude,
+    codex and gemini trust the root and their worktrees inherit it, so a dialog in
+    a worktree means that stopped being true. antigravity matches exactly and never
+    inherits, so agtx must seed each worktree from this consent — if that seeding
+    breaks, its cases park and the run says so.
+
+    Returns whether anything was written. cursor and grok pass `--trust` at launch,
+    opencode has no trust gate, and copilot is unmeasured — nothing to set up, and
+    nothing to guess at.
+    """
+    kind = AGENT_TRUST_STORES.get(agent)
+    if kind is None:
+        return False
+    home = Path.home()
+    root = str(repo.resolve())
+    if kind == "claude":
+        path = home / ".claude.json"
+        data = json.loads(path.read_text()) if path.exists() else {}
+        data.setdefault("projects", {}).setdefault(root, {})["hasTrustDialogAccepted"] = True
+        atomic_write_json(path, data)
+    elif kind == "codex":
+        path = home / ".codex" / "config.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = path.read_text() if path.exists() else ""
+        header = f'[projects."{root}"]'
+        if header not in body:
+            path.write_text(body + f'\n{header}\ntrust_level = "trusted"\n')
+    elif kind == "gemini":
+        path = home / ".gemini" / "trustedFolders.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(path.read_text()) if path.exists() else {}
+        # gemini lowercases what it stores.
+        data[root.lower()] = "TRUST_FOLDER"
+        atomic_write_json(path, data)
+    elif kind == "antigravity":
+        path = home / ".gemini" / "antigravity-cli" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(path.read_text()) if path.exists() else {}
+        entries = data.setdefault("trustedWorkspaces", [])
+        if root not in entries:
+            entries.append(root)
+        atomic_write_json(path, data)
+    return True
+
+
+def trust_store_lists(agent: str, path: Path) -> bool | None:
+    """Whether `agent`'s trust store still lists `path` exactly.
+
+    `None` for agents with no store agtx seeds. Only the exact-match store
+    (antigravity) is meaningful here: the others record an ancestor, which agtx
+    neither wrote nor prunes.
+    """
+    if AGENT_TRUST_STORES.get(agent) != "antigravity":
+        return None
+    store = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+    if not store.exists():
+        return False
+    try:
+        entries = json.loads(store.read_text()).get("trustedWorkspaces", [])
+    except (json.JSONDecodeError, OSError):
+        return False
+    return str(path.resolve()) in entries or str(path) in entries
+
+
+def atomic_write_json(path: Path, data) -> None:
+    """Write JSON via a temp file and a rename.
+
+    These are live config files the agents rewrite wholesale; a partial write is
+    visible to them.
+    """
+    tmp = path.with_suffix(path.suffix + f".agtx-smoke{os.getpid()}")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(path)
 
 
 # ---------------------------------------------------------------------------
@@ -842,6 +968,9 @@ class CaseResult:
     phases: list[PhaseResult] = field(default_factory=list)
     seconds: float = 0.0
     workdir: str = ""
+    # Set when retiring the task to Done went wrong — reported, but never allowed
+    # to overwrite the phase outcome the case is actually about.
+    cleanup_note: str = ""
 
     @property
     def phase_reached(self) -> str:
@@ -1005,12 +1134,18 @@ class CaseRunner:
     def run(self) -> CaseResult:
         started = time.monotonic()
         res = CaseResult(self.case.agent, self.case.plugin, PASS)
+        # Bound before the try so teardown can still retire a task created just
+        # before something threw.
+        task_id: str | None = None
+        worktree: Path | None = None
         try:
             slug = f"{self.case.agent}-{self.case.plugin}"
             self.repo = make_scratch_repo(self.workdir, slug)
             res.workdir = str(self.repo)
             write_project_config(self.repo, self.case.agent, self.case.plugin)
             trust_project(self.opts.agtx_bin, self.repo)
+            if setup_agent_trust(self.case.agent, self.repo):
+                self.log(f"trusted repo root for {self.case.agent} (setup, not under test)")
             self.log(f"scratch repo at {self.repo}")
 
             start_tui(self.session, self.repo, self.opts.agtx_bin)
@@ -1073,12 +1208,52 @@ class CaseRunner:
             res.outcome = ERROR
             res.reason = f"{type(exc).__name__}: {exc}"
         finally:
+            # Retire before tearing anything down: the TUI has to be alive to
+            # process the transition, and the MCP client is how it is asked.
+            if self.mcp and task_id and not self.opts.keep_sessions:
+                note = self.retire_task(task_id, worktree)
+                if note:
+                    self.log(f"cleanup: {note}")
+                    res.cleanup_note = note
             if self.mcp:
                 self.mcp.close()
             if not self.opts.keep_sessions and self.repo:
                 stop_tui(self.session, self.repo)
             res.seconds = time.monotonic() - started
         return res
+
+    def retire_task(self, task_id: str, worktree: Path | None) -> str | None:
+        """Drive the task to Done, so the real cleanup path runs.
+
+        Deleting the scratch repo is not the same as finishing a task: worktree
+        removal, `cleanup_script` and the agent-trust prune all hang off
+        `cleanup_task_for_done`. Without this the runner exercised none of them,
+        and every run left the seeded worktree behind in antigravity's
+        `trustedWorkspaces` — which is how the omission was noticed.
+
+        Returns a note when something looks wrong, otherwise `None`. Never raises:
+        a problem here is worth reporting but must not overwrite the outcome of
+        the phases, which are what the case is actually about.
+        """
+        seeded_before = worktree is not None and trust_store_lists(self.case.agent, worktree)
+        try:
+            for _ in range(len(PHASE_STATUS) + 1):
+                task = self.mcp.call("get_task", task_id=task_id)
+                if task.get("status") == "done":
+                    break
+                self.move_forward(task_id)
+            else:
+                return "task never reached done"
+        except (McpError, TimeoutError, RuntimeError, OSError) as exc:
+            return f"retire failed: {type(exc).__name__}: {exc}"
+
+        # The prune only means something where agtx seeded in the first place.
+        if seeded_before and trust_store_lists(self.case.agent, worktree):
+            return (
+                f"{self.case.agent} trust entry for the worktree survived Done — "
+                "agent::trust::forget did not prune it"
+            )
+        return None
 
     def apply_park_expectation(self, res: CaseResult) -> CaseResult:
         """Re-label the antigravity-shaped outcome: delivered, then parked."""
@@ -1136,6 +1311,10 @@ def report(results: list[CaseResult]) -> None:
         )
         if r.reason:
             print(f"    {r.reason}")
+        if r.cleanup_note:
+            # Separate from the outcome on purpose: the phases passed, but
+            # finishing the task did not do what it should.
+            print(f"    cleanup: {r.cleanup_note}")
     print()
     print("checks: 1 submitted  2 skill-ran  3 artifact  4 usable   "
           "(✓ pass  ✗ fail  ? unknown  – n/a)")
@@ -1230,6 +1409,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--keep-sessions", action="store_true", help="leave tmux sessions running")
     p.add_argument("--clean", action="store_true", help="delete scratch repos on success")
     p.add_argument(
+        "--require-api-key",
+        action="store_true",
+        help="skip agents with no provider API key in the environment "
+        "(for CI: a missing key becomes an immediate SKIP with a reason, "
+        "rather than a case that burns the phase timeout and reports AUTH)",
+    )
+    p.add_argument(
         "--force-unsupported",
         action="store_true",
         help="run plugins that need project setup (init scripts, framework dirs)",
@@ -1259,7 +1445,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     matrix = load_matrix(opts.cargo)
-    cases = plan_cases(matrix, opts.agents, opts.plugins, opts.force_unsupported)
+    cases = plan_cases(
+        matrix,
+        opts.agents,
+        opts.plugins,
+        opts.force_unsupported,
+        opts.require_api_key,
+    )
     if not cases:
         print("no cases to run", file=sys.stderr)
         return 2

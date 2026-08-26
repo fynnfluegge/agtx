@@ -78,7 +78,7 @@ fn test_known_agents_includes_all_expected() {
 fn test_build_interactive_command_cursor_no_prompt() {
     let agents = known_agents();
     let cursor = agents.iter().find(|a| a.name == "cursor").unwrap();
-    assert_eq!(cursor.build_interactive_command(""), "agent --yolo");
+    assert_eq!(cursor.build_interactive_command(""), "agent --yolo --trust");
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn test_build_interactive_command_cursor_with_prompt() {
     let cursor = agents.iter().find(|a| a.name == "cursor").unwrap();
     assert_eq!(
         cursor.build_interactive_command("do something"),
-        "agent --yolo 'do something'"
+        "agent --yolo --trust 'do something'"
     );
 }
 
@@ -153,7 +153,7 @@ fn test_build_resume_command_all_agents() {
     );
     assert_eq!(
         by_name("cursor").build_resume_command(),
-        "agent --yolo --continue"
+        "agent --yolo --trust --continue"
     );
     assert_eq!(
         by_name("grok").build_resume_command(),
@@ -168,9 +168,17 @@ fn test_build_resume_command_all_agents() {
 #[test]
 fn test_build_resume_command_unknown_agent_falls_back_to_interactive() {
     use agtx::agent::Agent;
-    let agent = Agent::new("custom-agent", "my-agent", "A custom agent", "Custom <noreply@example.com>");
+    let agent = Agent::new(
+        "custom-agent",
+        "my-agent",
+        "A custom agent",
+        "Custom <noreply@example.com>",
+    );
     // Unknown agent should fall back to build_interactive_command("")
-    assert_eq!(agent.build_resume_command(), agent.build_interactive_command(""));
+    assert_eq!(
+        agent.build_resume_command(),
+        agent.build_interactive_command("")
+    );
 }
 
 // === build_orchestrator_command ===
@@ -188,7 +196,10 @@ fn test_build_orchestrator_command_claude_is_idempotent() {
     let add_idx = cmd
         .find("claude mcp add-json agtx-orchestrator")
         .expect("register MCP");
-    assert!(pre_remove_idx < add_idx, "pre-remove must precede add-json:\n{cmd}");
+    assert!(
+        pre_remove_idx < add_idx,
+        "pre-remove must precede add-json:\n{cmd}"
+    );
 
     // Must NOT register under the bare `agtx` name: that collides with an `agtx`
     // server defined in another scope (plugin / user / .mcp.json) and makes
@@ -219,7 +230,10 @@ fn test_build_orchestrator_command_claude_is_idempotent() {
         pre_section.contains("|| true") || pre_section.contains("2>/dev/null"),
         "pre-remove must tolerate missing prior state:\n{cmd}"
     );
-    assert!(cmd.contains("&& claude"), "&& must gate interactive claude:\n{cmd}");
+    assert!(
+        cmd.contains("&& claude"),
+        "&& must gate interactive claude:\n{cmd}"
+    );
 }
 
 // =============================================================================
@@ -296,9 +310,15 @@ fn test_build_interactive_command_grok_escapes_single_quotes() {
     let agents = known_agents();
     let grok = agents.iter().find(|a| a.name == "grok").unwrap();
     let cmd = grok.build_interactive_command("it's a test");
-    assert!(cmd.starts_with("grok --yolo --trust "), "should use grok --yolo --trust: {cmd}");
+    assert!(
+        cmd.starts_with("grok --yolo --trust "),
+        "should use grok --yolo --trust: {cmd}"
+    );
     // The quote must be escaped for the outer sh -c wrapper, not left bare.
-    assert!(cmd.contains("'\"'\"'"), "single quote must be escaped: {cmd}");
+    assert!(
+        cmd.contains("'\"'\"'"),
+        "single quote must be escaped: {cmd}"
+    );
 }
 
 #[test]
@@ -366,7 +386,10 @@ fn test_build_interactive_command_antigravity_escapes_single_quotes() {
         cmd.starts_with("agy --dangerously-skip-permissions --mode accept-edits -i "),
         "should use the agy flags: {cmd}"
     );
-    assert!(cmd.contains("'\"'\"'"), "single quote must be escaped: {cmd}");
+    assert!(
+        cmd.contains("'\"'\"'"),
+        "single quote must be escaped: {cmd}"
+    );
 }
 
 #[test]

@@ -163,7 +163,10 @@ fn test_create_task_with_description_and_plugin() {
 
     let fetched = db.get_task(&task.id).unwrap().unwrap();
     assert_eq!(fetched.title, "Add OAuth");
-    assert_eq!(fetched.description.as_deref(), Some("Implement OAuth with Google"));
+    assert_eq!(
+        fetched.description.as_deref(),
+        Some("Implement OAuth with Google")
+    );
     assert_eq!(fetched.plugin.as_deref(), Some("agtx"));
     assert_eq!(fetched.status, TaskStatus::Backlog);
 }
@@ -393,8 +396,10 @@ fn test_upsert_project_on_conflict_updates_name() {
 fn test_peek_notifications_does_not_consume() {
     let db = Database::open_in_memory_project().unwrap();
 
-    db.create_notification(&Notification::new("phase completed")).unwrap();
-    db.create_notification(&Notification::new("task ready")).unwrap();
+    db.create_notification(&Notification::new("phase completed"))
+        .unwrap();
+    db.create_notification(&Notification::new("task ready"))
+        .unwrap();
 
     let first_peek = db.peek_notifications().unwrap();
     assert_eq!(first_peek.len(), 2);
@@ -409,8 +414,10 @@ fn test_peek_notifications_does_not_consume() {
 fn test_consume_notifications_clears_table() {
     let db = Database::open_in_memory_project().unwrap();
 
-    db.create_notification(&Notification::new("event A")).unwrap();
-    db.create_notification(&Notification::new("event B")).unwrap();
+    db.create_notification(&Notification::new("event A"))
+        .unwrap();
+    db.create_notification(&Notification::new("event B"))
+        .unwrap();
 
     let consumed = db.consume_notifications().unwrap();
     assert_eq!(consumed.len(), 2);
@@ -426,7 +433,8 @@ fn test_consume_notifications_returns_in_order() {
     let db = Database::open_in_memory_project().unwrap();
 
     db.create_notification(&Notification::new("first")).unwrap();
-    db.create_notification(&Notification::new("second")).unwrap();
+    db.create_notification(&Notification::new("second"))
+        .unwrap();
     db.create_notification(&Notification::new("third")).unwrap();
 
     let consumed = db.consume_notifications().unwrap();
@@ -447,7 +455,8 @@ fn test_cleanup_deletes_old_processed_requests() {
 
     // Backdate processed_at to 2 hours ago directly via SQL
     let two_hours_ago = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
-    db.backdate_transition_processed_at(&req.id, &two_hours_ago).unwrap();
+    db.backdate_transition_processed_at(&req.id, &two_hours_ago)
+        .unwrap();
 
     db.cleanup_old_transition_requests().unwrap();
 
@@ -467,7 +476,10 @@ fn test_cleanup_keeps_recently_processed_requests() {
     db.cleanup_old_transition_requests().unwrap();
 
     let fetched = db.get_transition_request(&req.id).unwrap();
-    assert!(fetched.is_some(), "recently processed request should be kept");
+    assert!(
+        fetched.is_some(),
+        "recently processed request should be kept"
+    );
 }
 
 // === send_to_task Input Validation Tests (Fix 5) ===
@@ -516,7 +528,10 @@ fn test_normal_messages_pass_validation() {
 
     for msg in messages {
         assert!(msg.len() <= 4096, "Message should be within length limit");
-        assert!(!msg.contains('\x00'), "Message should not contain null bytes");
+        assert!(
+            !msg.contains('\x00'),
+            "Message should not contain null bytes"
+        );
     }
 }
 

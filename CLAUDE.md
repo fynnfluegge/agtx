@@ -64,6 +64,8 @@ src/
 ├── agent/
 │   ├── mod.rs        # Agent struct, detection, command builders (all derived from spec.rs)
 │   ├── spec.rs       # AgentSpec table — one declarative record per agent + kind enums
+│   ├── trust.rs      # Reads each agent's own workspace-trust store; seeds antigravity's
+│   ├── trust_tests.rs # Unit tests for trust.rs (included via #[path])
 │   └── operations.rs # AgentOperations/CodingAgent traits (mockable)
 ├── mcp/
 │   ├── mod.rs        # Re-exports
@@ -195,7 +197,11 @@ Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
 
 Two writers **merge** instead of overwriting, because their file may already be tracked in the repo: grok appends `[mcp_servers.agtx]` to any existing `.grok/config.toml`, and antigravity parses `.agents/mcp_config.json`, inserts `mcpServers.agtx`, and writes it back — preserving other servers and top-level sibling keys. (`.agents/` is vendor-neutral, so a project is more likely to ship one.)
 
-Two agents need an extra trust side-effect to avoid an interactive dialog on first open: Claude gets `.claude/settings.local.json` with `enableAllProjectMcpServers: true`, and Codex gets a `[projects."<worktree>"] trust_level = "trusted"` entry appended to the user's global `~/.codex/config.toml`. Both writes resolve the home directory through `agent_trust_home()`, which honours `AGTX_AGENT_HOME` so the test suite does not append temp-dir trust entries to the real user's config.
+Claude needs an extra side-effect to avoid an interactive dialog on first open: `.claude/settings.local.json` gets `enableAllProjectMcpServers: true` plus `skipDangerousModePermissionPrompt: true`, which is what actually preflights the bypass-permissions warning (see the dialog table).
+
+agtx used to append a `[projects."<worktree>"] trust_level = "trusted"` entry to the user's global `~/.codex/config.toml` here too. **Removed, measured:** codex resolves trust to the *git repository root*, and a worktree under a trusted root both skips the dialog and loads its own `.codex/config.toml` — `/mcp` listed agtx with and without the entry. It bought nothing and accumulated one entry per worktree.
+
+`write_skills_to_worktree` also seeds antigravity's `trustedWorkspaces` for the new worktree, when the project root is already trusted there (`agent::trust`). It is the right call site for both worktree creation *and* an agent switch: with a per-phase agent config, the switched-in agent sees the worktree for the first time at switch time. Home-directory lookups go through `agent_trust_home()`, which honours `AGTX_AGENT_HOME` so the test suite never touches the real user's config.
 
 ### MCP pre-handshake filter
 `agtx mcp-serve` does not hand raw stdio to rmcp. Antigravity probes every stdio server with a custom `server/discover` request *before* `initialize`, and rmcp treats a non-`initialize` first message as fatal (`ExpectedInitializeRequest`) and exits — so the follow-up `initialize` hits a closed pipe. `src/mcp/prehandshake.rs` answers pre-handshake requests with JSON-RPC `-32601` and keeps the connection open; once `initialize` is forwarded it is a pass-through. Two background tasks pump real stdin/stdout through in-memory duplex pipes (`filtered_stdio()` in `src/mcp/server.rs`).
@@ -209,7 +215,11 @@ Commands are written once in canonical format (`/ns:command`) and auto-translate
 ### Sending Skills & Prompts to Agents
 Prompt delivery has **two lanes**. Getting this wrong is the usual cause of "the agent started but never got the task".
 
-**Launch lane — the first message of a task's life.** The skill command and prompt are composed by `compose_launch_text()` and handed to the process in **argv**, so the agent starts with the task already in hand: no readiness polling, no window in which a keystroke can be dropped. Gated by `spec::can_launch_with_prompt()`, which requires both an agent whose launch form is *verified* (`AgentSpec::launch_prompt_verified` — Claude only today) and a prompt under `MAX_LAUNCH_PROMPT_BYTES` (128 KiB; `execve` counts bytes). Anything else falls through to the mid-session lane. `setup_task_worktree` returns `(target, launched_with_prompt)` and its callers skip the send entirely when true.
+**Launch lane — the first message of a task's life.** The skill command and prompt are composed by `compose_launch_text()` and handed to the process in **argv**, so the agent starts with the task already in hand: no readiness polling, no window in which a keystroke can be dropped. Gated by `spec::can_launch_with_prompt()`, which requires both an agent whose launch form is *verified* (`AgentSpec::launch_prompt_verified` — all but copilot, which is unmeasured) and a prompt under `MAX_LAUNCH_PROMPT_BYTES` (128 KiB; `execve` counts bytes). Anything else falls through to the mid-session lane.
+
+**An agent switch takes this lane too.** The rule is *whenever agtx starts a new agent process and has a prompt for it, the prompt goes in argv* — a switch is the same act as a first launch, just into an existing window. `spawn_send_to_agent` and the cyclic Review→Planning path compose the launch text and skip the send when it lands; the two resume-style switches carry no prompt. A **same-agent** advance cannot use it: that process is already running, so the typed lane is correct there.
+
+One trap: `create_window` nests its command inside `sh -c '…'`, so a prompt going that way is quoted **twice** (`wrap_launch_command` + `compose_command`). The switch path types a command line into the window's *already-running* shell — **one** level. Adding `single_quote` again there would deliver visible backslashes into the composer. A multi-line launch text is sent with `paste_text` + `Enter` rather than `send_keys`, because a newline typed at a shell prompt submits the line. `setup_task_worktree` returns `(target, launched_with_prompt)` and its callers skip the send entirely when true.
 
 Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used here, so `{task}` keeps its paragraphs and lists (the typed path must flatten them); and `spec::normalize_prompt()` strips NUL, `\r` and other control characters that cannot survive argv, keeping `\n` and `\t`.
 
@@ -237,10 +247,29 @@ Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used
 Without `-l`, tmux resolves an argument that matches a key name *as that key*: `"Space"` arrives as `0x20`, `"Escape"` as `ESC`, `"Up"` as `\033[A` (tmux 3.5a). So `send_key` must never carry task-derived text — that is what `send_text` is for.
 
 ### First-Launch Dialogs
-Agents gate a brand-new directory behind an interactive dialog, and every task gets a brand-new
-worktree — so these fire on the *first* launch of nearly every task, not just in containers.
-`LAUNCH_DIALOGS` (`src/tui/app.rs`) is the table of `(patterns, answer)`; `dismiss_launch_dialog`
-answers any that is visible.
+Agents gate a directory they have not seen behind an interactive dialog. `LAUNCH_DIALOGS`
+(`src/tui/app.rs`) is the table, derived from `AgentSpec::dialogs`; `dismiss_launch_dialog` answers
+what it is allowed to.
+
+**These mostly do not fire any more, and by default agtx does not answer the ones that do.**
+Measured per agent (see `src/agent/trust.rs` for the table and the versions):
+
+- **Trust is inherited from the project root** for claude, codex and gemini — the default
+  `worktree_dir` is inside the project, so a user who opened the agent there once never sees the
+  prompt again. cursor and grok are launched with `--trust`; opencode has no trust gate.
+- **antigravity is the exception**: it matches trusted paths *exactly*, at any depth. agtx seeds
+  each new worktree into its `trustedWorkspaces` — but only when the project root is already there,
+  so it replays a consent the user gave rather than creating one.
+- **`AgentDialog::security` splits the table.** Trust prompts and the bypass-permissions warning are
+  the user's decision: with `auto_trust = false` (the default) agtx *detects* them — that is what
+  turns the card `Blocked`, with the reason and the fix — and leaves them unanswered. Prompts that
+  decide nothing about safety (codex's update prompt, its MCP tool approval) are answered either
+  way, since leaving them up only wedges the pane.
+- **Nothing is lost by waiting.** An argv-delivered prompt is *queued behind* a dialog, not eaten by
+  it — verified for claude, cursor, gemini and antigravity. `wait_for_agent_ready` returns `None`
+  when parked on an unanswered security dialog, so the typed fallback never sends into a menu.
+- `auto_trust = true` restores the historical behaviour, and is set by `docker/entrypoint.sh` and
+  the benchmark, where the container is disposable and nobody is at the board.
 
 Dialogs are declared per agent on `AgentSpec::dialogs` and **matched against the running agent's own entries** — a stray digit typed into another agent's live composer is real corruption. An agent with no spec falls back to matching every known dialog, which beats leaving its pane blocked forever.
 
@@ -248,8 +277,8 @@ Dialogs are declared per agent on `AgentSpec::dialogs` and **matched against the
 
 | Agent | Dialog | Match | Answer | Scope |
 |---|---|---|---|---|
-| claude | workspace trust | `Yes, I trust this folder` | `1` `Enter` | Launch — per directory, `projects."<dir>".hasTrustDialogAccepted` in `~/.claude.json` |
-| claude | bypass-permissions warning | `Yes, I accept` / `I accept the risk` | `2` `Enter` | Launch — the `bypassPermissionsModeAccepted` preflight does **not** reliably suppress it |
+| claude | workspace trust | `Yes, I trust this folder` | `1` `Enter` | Launch — `projects."<dir>".hasTrustDialogAccepted` in `~/.claude.json`, **inherited from a trusted ancestor**, so with the default in-project `worktree_dir` this does not fire once the project is trusted |
+| claude | bypass-permissions warning | `Yes, I accept` / `I accept the risk` | `2` `Enter` | Launch — suppressed by the `skipDangerousModePermissionPrompt` preflight; backstop only. Options are inverted (`1. No, exit`), so never a lone Enter |
 | codex | directory trust | `Do you trust the contents of this directory?` | `1` `Enter` | Launch — per directory. Worded unlike Claude's *and* Gemini's, so neither pattern catches it |
 | codex | update prompt | `Update now (runs` | `2` `Enter` (Skip) | Launch — never "Update now": agtx must not upgrade an agent binary behind the user's back |
 | codex | MCP tool approval | `Allow the` + `MCP server to run tool` + `Always allow` | `3` `Enter` | **Session** — mid-session, matched only against a codex pane |
@@ -257,7 +286,7 @@ Dialogs are declared per agent on `AgentSpec::dialogs` and **matched against the
 | cursor | workspace trust | `Workspace Trust Required` | `a` alone | Launch — its question line is *identical* to codex's, so it is matched on the heading. Answered with the access key the dialog advertises, which survives an option being added above the highlighted row |
 | antigravity | project trust | `Do you trust the contents of this project?` | `Enter` alone | Launch — arrow-navigated with "Yes, I trust this folder" preselected, so a digit would land in the composer. Its own wording, not Claude's; codex's differs by one word (`directory`) |
 
-`require_all` distinguishes alternatives (several wordings of one prompt) from conjunctions (a prompt identified only by a combination of phrases).
+`require_all` distinguishes alternatives (several wordings of one prompt) from conjunctions (a prompt identified only by a combination of phrases). `security` marks the rows agtx will not answer unless `auto_trust` is on.
 
 It runs in **both** `wait_for_agent_ready` loops *and* the session-refresh loop: the readiness
 budget expires after ~60s and a slow agent can render its dialog later than that. A retry only
@@ -377,6 +406,7 @@ Global config lives at `~/.config/agtx/config.toml` (`GlobalConfig`):
 default_agent = "claude"
 fullscreen_on_enter = false  # When true, Enter on a task attaches to tmux directly instead of opening the in-TUI popup
 agent_hooks = true           # Write agent lifecycle-hook configs into worktrees (see Hook-Based Phase Status)
+auto_trust = false           # Answer agents' trust / bypass-permission prompts by reading the pane (see First-Launch Dialogs)
 
 [agents]                     # Per-phase agent overrides (PhaseAgentsConfig)
 research = "claude"

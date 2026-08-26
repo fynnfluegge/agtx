@@ -197,7 +197,10 @@ mod tests {
     fn unparseable_line_does_not_flip_the_initialized_flag() {
         let mut filter = HandshakeFilter::new();
         // Contains the word but is not a handshake — must not open the gate.
-        assert_eq!(filter.next(r#"garbage "initialize" garbage"#), PreInitAction::Forward);
+        assert_eq!(
+            filter.next(r#"garbage "initialize" garbage"#),
+            PreInitAction::Forward
+        );
         assert!(matches!(
             filter.next(r#"{"jsonrpc":"2.0","id":9,"method":"server/discover"}"#),
             PreInitAction::Reject(_)

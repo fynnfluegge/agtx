@@ -108,6 +108,11 @@ fn main() {
             "name": s.name,
             "binary": s.binary,
             "description": s.description,
+            // The headless credential, for the CI workflow and for the runner's
+            // own "is this agent runnable here?" check. Empty means no verified
+            // env-var auth path — see the spec entry's comment for whether that
+            // is "none" or "not measured yet".
+            "api_key_env": s.api_key_env,
             "launch_prompt_verified": s.launch_prompt_verified,
             "prompt_form": match s.prompt_form {
                 spec::PromptForm::Argv => Value::String("argv".into()),

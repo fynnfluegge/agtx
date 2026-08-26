@@ -66,7 +66,7 @@ fn interactive_command_parity_without_prompt() {
             "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo",
         ),
         ("opencode", "opencode"),
-        ("cursor", "agent --yolo"),
+        ("cursor", "agent --yolo --trust"),
         ("grok", "grok --yolo --trust"),
         (
             "antigravity",
@@ -92,8 +92,8 @@ fn interactive_command_parity_with_prompt() {
             "gemini",
             "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo -i 'hi'",
         ),
-        ("opencode", "opencode -p 'hi'"),
-        ("cursor", "agent --yolo 'hi'"),
+        ("opencode", "opencode --prompt 'hi'"),
+        ("cursor", "agent --yolo --trust 'hi'"),
         ("grok", "grok --yolo --trust 'hi'"),
         (
             "antigravity",
@@ -142,7 +142,7 @@ fn resume_command_parity() {
             "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo --resume",
         ),
         ("opencode", "opencode --continue"),
-        ("cursor", "agent --yolo --continue"),
+        ("cursor", "agent --yolo --trust --continue"),
         ("grok", "grok --yolo --trust --continue"),
         (
             "antigravity",
@@ -215,12 +215,24 @@ fn prompt_injection_parity() {
         ("codex", PromptInjection::Argv),
         // Grok 4.6
         ("grok", PromptInjection::Argv),
+        // cursor-agent 2026.08.11, with `--trust` so no dialog intervenes
+        ("cursor", PromptInjection::Argv),
+        // gemini 0.46.0 — survives the restart that answering folder-trust causes
+        ("gemini", PromptInjection::FlagInteractive("-i")),
+        // opencode 1.18.20 — `--prompt`, and it stays interactive
+        ("opencode", PromptInjection::FlagInteractive("--prompt")),
+        // agy 1.1.21 — an argv prompt is queued behind the trust dialog, not eaten
+        ("antigravity", PromptInjection::FlagInteractive("-i")),
     ];
     for (name, want) in verified {
         assert_eq!(agent(name).prompt_injection(), *want, "{name}");
     }
 
-    let unverified = ["copilot", "gemini", "opencode", "cursor", "antigravity"];
+    // copilot is not installed on any machine this has been measured on: no known
+    // dialogs, no located trust store, `-i` unchecked. It must stay unverified
+    // rather than inherit a neighbour's behaviour — assuming that is what produced
+    // the antigravity and cursor dialog bugs in the first place.
+    let unverified = ["copilot"];
     for name in unverified {
         assert_eq!(
             agent(name).prompt_injection(),
@@ -228,9 +240,6 @@ fn prompt_injection_parity() {
             "{name} must stay unverified until checked against the real binary"
         );
     }
-    // antigravity is the interesting one: `agy … -i` *does* deliver the prompt,
-    // but the session is then parked on its trust dialog, which agtx does not
-    // answer by design. Delivering into a blocked session is not a working lane.
 
     assert_eq!(
         verified.len() + unverified.len(),

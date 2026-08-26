@@ -86,8 +86,10 @@ fn parse_refs(refs: &Option<String>) -> Vec<String> {
 pub fn build_dep_graph(tasks: &[Task], deps_satisfied: impl Fn(&Task) -> bool) -> DepGraph {
     // Known task ids, so we can drop dangling references.
     let known: HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
-    let title_of: HashMap<&str, &str> =
-        tasks.iter().map(|t| (t.id.as_str(), t.title.as_str())).collect();
+    let title_of: HashMap<&str, &str> = tasks
+        .iter()
+        .map(|t| (t.id.as_str(), t.title.as_str()))
+        .collect();
 
     // dependency_id -> dependent_id edges, restricted to known tasks.
     let mut edges: Vec<(String, String)> = Vec::new();
@@ -110,7 +112,10 @@ pub fn build_dep_graph(tasks: &[Task], deps_satisfied: impl Fn(&Task) -> bool) -
     // dependency_id -> dependents, to decrement when a dependency is resolved.
     let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
     for (dep, dependent) in &edges {
-        dependents.entry(dep.clone()).or_default().push(dependent.clone());
+        dependents
+            .entry(dep.clone())
+            .or_default()
+            .push(dependent.clone());
     }
 
     let mut level_of: HashMap<String, usize> = HashMap::new();
@@ -159,8 +164,7 @@ pub fn build_dep_graph(tasks: &[Task], deps_satisfied: impl Fn(&Task) -> bool) -
         .iter()
         .map(|task| {
             let level = *level_of.get(&task.id).unwrap_or(&0);
-            let unblocked =
-                task.status == TaskStatus::Backlog && deps_satisfied(task);
+            let unblocked = task.status == TaskStatus::Backlog && deps_satisfied(task);
             let dep_titles = deps
                 .get(&task.id)
                 .map(|d| {
@@ -190,12 +194,17 @@ pub fn build_dep_graph(tasks: &[Task], deps_satisfied: impl Fn(&Task) -> bool) -
 
     // Group indices by level.
     let max_level = nodes.iter().map(|n| n.level).max().unwrap_or(0);
-    let mut levels: Vec<Vec<usize>> = vec![Vec::new(); if nodes.is_empty() { 0 } else { max_level + 1 }];
+    let mut levels: Vec<Vec<usize>> =
+        vec![Vec::new(); if nodes.is_empty() { 0 } else { max_level + 1 }];
     for (idx, node) in nodes.iter().enumerate() {
         levels[node.level].push(idx);
     }
 
-    DepGraph { nodes, edges, levels }
+    DepGraph {
+        nodes,
+        edges,
+        levels,
+    }
 }
 
 #[cfg(test)]
@@ -232,18 +241,18 @@ mod tests {
         move |t: &Task| {
             let refs = parse_refs(&t.referenced_tasks);
             refs.iter().all(|rid| {
-                tasks
-                    .iter()
-                    .find(|x| &x.id == rid)
-                    .map_or(true, |dep| {
-                        matches!(dep.status, TaskStatus::Review | TaskStatus::Done)
-                    })
+                tasks.iter().find(|x| &x.id == rid).map_or(true, |dep| {
+                    matches!(dep.status, TaskStatus::Review | TaskStatus::Done)
+                })
             })
         }
     }
 
     fn node<'a>(g: &'a DepGraph, id: &str) -> &'a DepNode {
-        g.nodes.iter().find(|n| n.task_id == id).expect("node exists")
+        g.nodes
+            .iter()
+            .find(|n| n.task_id == id)
+            .expect("node exists")
     }
 
     #[test]
@@ -350,7 +359,11 @@ mod tests {
         unblocked.sort();
         assert_eq!(
             unblocked,
-            vec!["free".to_string(), "open_dep".to_string(), "ready".to_string()]
+            vec![
+                "free".to_string(),
+                "open_dep".to_string(),
+                "ready".to_string()
+            ]
         );
     }
 

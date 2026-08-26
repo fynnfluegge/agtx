@@ -29,9 +29,7 @@ pub fn create_worktree_with_prefix(
     worktree_dir: &str,
     branch_prefix: &str,
 ) -> Result<PathBuf> {
-    let worktree_path = project_path
-        .join(worktree_dir)
-        .join(task_slug);
+    let worktree_path = project_path.join(worktree_dir).join(task_slug);
 
     // If worktree already exists and is valid, return it
     if worktree_path.exists() && worktree_path.join(".git").exists() {
@@ -380,8 +378,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let envs = vec![("AGTX_TASK_ID".to_string(), "task-123".to_string())];
 
-        let output =
-            run_worktree_script("echo $AGTX_TASK_ID", temp_dir.path(), &envs).unwrap();
+        let output = run_worktree_script("echo $AGTX_TASK_ID", temp_dir.path(), &envs).unwrap();
 
         assert!(output.status.success());
         assert_eq!(output.stdout.trim(), "task-123");

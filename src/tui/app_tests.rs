@@ -3257,8 +3257,7 @@ fn test_resolve_skill_command_collapse_controls_task_structure() {
     let collapsed =
         resolve_skill_command(&plugin, "planning", "claude", task, 1, "id-1", true).unwrap();
     assert_eq!(
-        collapsed,
-        "/speckit.specify Add a login form. - email field - password field",
+        collapsed, "/speckit.specify Add a login form. - email field - password field",
         "typed path must stay on one line"
     );
     assert!(!collapsed.contains('\n'));
@@ -3639,7 +3638,12 @@ fn test_deliver_message_on_a_busy_pane_confirms_on_the_text_not_the_change() {
     });
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    assert!(!deliver_message(&tmux, "sess:win", "/agtx-plan abc-123", true));
+    assert!(!deliver_message(
+        &tmux,
+        "sess:win",
+        "/agtx-plan abc-123",
+        true
+    ));
     assert_eq!(
         *sends.lock().unwrap(),
         DELIVERY_ATTEMPTS as usize,
@@ -3669,8 +3673,17 @@ fn test_deliver_message_on_a_busy_pane_stops_once_the_text_appears() {
     });
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    assert!(deliver_message(&tmux, "sess:win", "/agtx-plan abc-123", true));
-    assert_eq!(*sends.lock().unwrap(), 1, "no resend once the text is visible");
+    assert!(deliver_message(
+        &tmux,
+        "sess:win",
+        "/agtx-plan abc-123",
+        true
+    ));
+    assert_eq!(
+        *sends.lock().unwrap(),
+        1,
+        "no resend once the text is visible"
+    );
 }
 
 /// A resend clears the composer first: "nothing was seen to land" is not "nothing
@@ -3705,7 +3718,10 @@ fn test_deliver_message_clears_the_composer_before_a_resend() {
 #[test]
 fn test_delivery_needle_survives_wrapping() {
     let needle = delivery_needle("/agtx-plan 57d57fe8-5990\n\nSMOKE TEST").unwrap();
-    assert!(pane_shows("  >  /agtx-plan\n     57d57fe8-5990 ...", &needle));
+    assert!(pane_shows(
+        "  >  /agtx-plan\n     57d57fe8-5990 ...",
+        &needle
+    ));
     assert!(!pane_shows("  >  waiting for input", &needle));
     // Nothing distinctive enough to look for.
     assert!(delivery_needle("hi").is_none());
@@ -3768,17 +3784,34 @@ fn test_deliver_message_waits_for_the_pane_to_go_quiet_first() {
 /// `test_deliver_message_resends_while_the_pane_is_unchanged`.
 #[cfg(feature = "test-mocks")]
 fn expect_echoing_pane(mock: &mut MockTmuxOperations, echoed: &'static str) {
-    // `wait_for_pane_settled` needs one baseline capture plus SETTLE_STABLE_POLLS
-    // identical ones; `deliver_message` then takes its own baseline.
+    // A pane that goes quiet, echoes the paste, and then **submits** — three
+    // phases, because delivery and submission are two separate things the code
+    // confirms separately.
+    //
+    // 1. quiet:  `wait_for_pane_settled` needs one baseline capture plus
+    //            SETTLE_STABLE_POLLS identical ones; `deliver_message` then takes
+    //            its own baseline.
+    // 2. echoed: the paste rendered. `deliver_message` sees the change and
+    //            returns; `submit_message` then takes its baseline from it.
+    // 3. cleared: the Enter took effect. Submitting moves the message up and
+    //            empties the composer, which is a visible change — that is how
+    //            `submit_message` knows the keystroke was not dropped.
+    //
+    // Phase 3 is what makes "exactly one Enter" true. Without it the pane looks
+    // frozen after the paste, which is precisely the dropped-Enter case, and
+    // retrying is then the correct behaviour rather than a bug.
     let quiet = SETTLE_STABLE_POLLS as usize + 2;
+    let echo_end = quiet + 2; // deliver_message's confirming poll, then submit_message's baseline
     let calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
     mock.expect_capture_pane().returning(move |_| {
         let mut n = calls.lock().unwrap();
         *n += 1;
         Ok(if *n <= quiet {
             "idle composer".to_string()
-        } else {
+        } else if *n <= echo_end {
             echoed.to_string()
+        } else {
+            "composer cleared, message submitted".to_string()
         })
     });
 }
@@ -4129,7 +4162,7 @@ fn test_wait_for_agent_ready_detects_agent_process() {
     mock.expect_capture_pane().returning(|_| Ok(String::new()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win", None);
+    let result = wait_for_agent_ready(&tmux, "sess:win", None, true);
     assert_eq!(result, Some("sess:win".to_string()));
 }
 
@@ -4143,7 +4176,7 @@ fn test_wait_for_agent_ready_detects_ready_indicator() {
         .returning(|_| Ok("Welcome to Gemini\nType your message".to_string()));
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win", None);
+    let result = wait_for_agent_ready(&tmux, "sess:win", None, true);
     assert_eq!(result, Some("sess:win".to_string()));
 }
 
@@ -4164,7 +4197,7 @@ fn test_wait_for_agent_ready_claude_bypass_accept() {
     });
 
     let tmux: std::sync::Arc<dyn TmuxOperations> = std::sync::Arc::new(mock);
-    let result = wait_for_agent_ready(&tmux, "sess:win", None);
+    let result = wait_for_agent_ready(&tmux, "sess:win", None, true);
     assert_eq!(result, Some("sess:win".to_string()));
     let calls = literal_calls.lock().unwrap();
     assert!(
@@ -6006,9 +6039,7 @@ fn test_transition_to_planning_reuses_live_session() {
     mock_tmux.expect_window_exists().returning(|_| Ok(true));
     // spawn_send_to_agent may call these; allow any number of calls
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
-    mock_tmux
-        .expect_send_key()
-        .returning(|_, _| Ok(()));
+    mock_tmux.expect_send_key().returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok(String::new()));
@@ -6128,9 +6159,7 @@ fn test_transition_to_running_with_session_returns_false() {
     // Task has a session → spawns send_to_agent (background), still returns Ok(false)
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
-    mock_tmux
-        .expect_send_key()
-        .returning(|_, _| Ok(()));
+    mock_tmux.expect_send_key().returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok(String::new()));
@@ -6169,9 +6198,7 @@ fn test_transition_to_review_no_pr_sets_review_confirm_popup() {
     // No existing PR → shows review confirm popup (to ask if user wants to create PR)
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
-    mock_tmux
-        .expect_send_key()
-        .returning(|_, _| Ok(()));
+    mock_tmux.expect_send_key().returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok(String::new()));
@@ -6209,9 +6236,7 @@ fn test_transition_to_review_existing_pr_spawns_push() {
     // PR already exists → sets pr_status_popup (Pushing) and spawns push thread
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_send_keys().returning(|_, _| Ok(()));
-    mock_tmux
-        .expect_send_key()
-        .returning(|_, _| Ok(()));
+    mock_tmux.expect_send_key().returning(|_, _| Ok(()));
     mock_tmux
         .expect_capture_pane()
         .returning(|_| Ok(String::new()));
@@ -6380,6 +6405,7 @@ fn make_session_task_status(
         phase_status,
         content_hash: None,
         hook_status: None,
+        awaiting_trust: None,
         status,
         worktree_path: None,
         session_name: None,
@@ -6458,6 +6484,7 @@ fn refresh_with_hook(
             phase_status: PhaseStatus::Working,
             content_hash,
             hook_status,
+            awaiting_trust: None,
             status: TaskStatus::Planning,
             worktree_path: None,
             session_name: None,
@@ -6581,6 +6608,7 @@ fn test_ready_artifact_outranks_a_working_hook() {
             phase_status: PhaseStatus::Ready,
             content_hash: None,
             hook_status: Some(hook(HookState::Working)),
+            awaiting_trust: None,
             status: TaskStatus::Planning,
             worktree_path: None,
             session_name: None,
@@ -6608,6 +6636,7 @@ fn test_apply_session_refresh_working_becomes_idle_after_15s() {
             phase_status: PhaseStatus::Working,
             content_hash: Some(99), // same hash → stable
             hook_status: None,
+            awaiting_trust: None,
             status: TaskStatus::Planning,
             worktree_path: None,
             session_name: None,
@@ -6636,6 +6665,7 @@ fn test_apply_session_refresh_working_stays_working_hash_changed() {
             phase_status: PhaseStatus::Working,
             content_hash: Some(100), // different hash → timer resets
             hook_status: None,
+            awaiting_trust: None,
             status: TaskStatus::Planning,
             worktree_path: None,
             session_name: None,
@@ -7926,7 +7956,12 @@ fn test_toggle_orchestrator_spawns_new_session() {
     mock_tmux
         .expect_create_window()
         .withf(
-            |_session, window_name, _dir, _cmd, keep_shell_on_exit: &bool, _env: &[(String, String)]| {
+            |_session,
+             window_name,
+             _dir,
+             _cmd,
+             keep_shell_on_exit: &bool,
+             _env: &[(String, String)]| {
                 window_name == "orchestrator" && !keep_shell_on_exit
             },
         )
@@ -8065,7 +8100,12 @@ fn test_toggle_orchestrator_clears_stale_session_and_respawns() {
     mock_tmux
         .expect_create_window()
         .withf(
-            |_session, window_name, _dir, _cmd, keep_shell_on_exit: &bool, _env: &[(String, String)]| {
+            |_session,
+             window_name,
+             _dir,
+             _cmd,
+             keep_shell_on_exit: &bool,
+             _env: &[(String, String)]| {
                 window_name == "orchestrator" && !keep_shell_on_exit
             },
         )
@@ -9352,6 +9392,7 @@ fn test_cleanup_task_resources_kills_window_and_removes_worktree() {
 
     cleanup_task_resources(
         "task-id",
+        "claude",
         &Some("task/branch".to_string()),
         &Some("proj:task-win".to_string()),
         &Some("/tmp/wt".to_string()),
@@ -9370,6 +9411,7 @@ fn test_cleanup_task_resources_noop_when_no_session_or_worktree() {
 
     cleanup_task_resources(
         "task-id",
+        "claude",
         &None,
         &None,
         &None,
@@ -9724,9 +9766,7 @@ fn test_switch_agent_always_sends_new_agent_cmd() {
     mock_tmux
         .expect_pane_current_command()
         .returning(|_| Some("claude".to_string()));
-    mock_tmux
-        .expect_send_key()
-        .returning(|_, _| Ok(()));
+    mock_tmux.expect_send_key().returning(|_, _| Ok(()));
     // This is the key assertion — new_agent_cmd must be sent exactly once
     mock_tmux
         .expect_send_keys()
@@ -9756,6 +9796,7 @@ fn test_wait_for_agent_ready_returns_when_process_detected() {
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
         None,
+        true,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9776,6 +9817,7 @@ fn test_wait_for_agent_ready_returns_when_ready_indicator_in_pane() {
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
         None,
+        true,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9809,6 +9851,7 @@ fn test_wait_for_agent_ready_handles_claude_bypass_prompt() {
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
         None,
+        true,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9841,6 +9884,7 @@ fn test_wait_for_agent_ready_returns_when_content_stabilizes() {
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
         None,
+        true,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -9867,6 +9911,7 @@ fn test_wait_for_agent_ready_always_returns_some() {
         &(Arc::new(mock_tmux) as Arc<dyn TmuxOperations>),
         "proj:task",
         None,
+        true,
     );
     assert_eq!(result, Some("proj:task".to_string()));
 }
@@ -10004,7 +10049,12 @@ fn test_wait_for_agent_ready_detects_claude_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Claude Code v2.1.72\nsome context".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock) as Arc<dyn TmuxOperations>),
+        "proj:task",
+        None,
+        true,
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -10016,7 +10066,12 @@ fn test_wait_for_agent_ready_detects_cursor_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Cursor Agent\n> ".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock) as Arc<dyn TmuxOperations>),
+        "proj:task",
+        None,
+        true,
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -10028,7 +10083,12 @@ fn test_wait_for_agent_ready_detects_opencode_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("Ask anything\n> ".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock) as Arc<dyn TmuxOperations>),
+        "proj:task",
+        None,
+        true,
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -10040,7 +10100,12 @@ fn test_wait_for_agent_ready_detects_codex_via_banner() {
         .returning(|_| Some("bash".to_string()));
     mock.expect_capture_pane()
         .returning(|_| Ok("OpenAI Codex\nsome output".to_string()));
-    let result = wait_for_agent_ready(&(Arc::new(mock) as Arc<dyn TmuxOperations>), "proj:task", None);
+    let result = wait_for_agent_ready(
+        &(Arc::new(mock) as Arc<dyn TmuxOperations>),
+        "proj:task",
+        None,
+        true,
+    );
     assert_eq!(result, Some("proj:task".to_string()));
 }
 
@@ -10086,9 +10151,7 @@ fn test_switch_agent_opencode_sends_exit() {
         }
         Ok(())
     });
-    mock_tmux
-        .expect_send_key()
-        .returning(|_, _| Ok(()));
+    mock_tmux.expect_send_key().returning(|_, _| Ok(()));
     mock_tmux
         .expect_pane_current_command()
         .returning(|_| Some("bash".to_string()));
@@ -11194,6 +11257,7 @@ fn test_dismiss_launch_dialog_answers_claude_bypass_warning() {
         Some("claude"),
         "WARNING: Claude Code running in Bypass Permissions mode\n  1. No, exit\n  2. Yes, I accept",
         &mut LaunchDialogState::default(),
+        true,
     ));
 }
 
@@ -11228,6 +11292,7 @@ fn test_dismiss_launch_dialog_answers_claude_workspace_trust() {
          \u{276f} 1. Yes, I trust this folder\n    2. No, exit\n\
          Enter to confirm \u{b7} Esc to cancel",
         &mut LaunchDialogState::default(),
+        true,
     ));
 }
 
@@ -11253,9 +11318,7 @@ fn test_claude_launch_dialogs_do_not_overlap() {
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_answers_gemini_trust() {
     let mut mock = MockTmuxOperations::new();
-    mock.expect_send_key()
-        .times(2)
-        .returning(|_, _| Ok(()));
+    mock.expect_send_key().times(2).returning(|_, _| Ok(()));
 
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
     assert!(dismiss_launch_dialog(
@@ -11264,6 +11327,7 @@ fn test_dismiss_launch_dialog_answers_gemini_trust() {
         Some("gemini"),
         "Do you trust the files in this folder?",
         &mut LaunchDialogState::default(),
+        true,
     ));
 }
 
@@ -11282,6 +11346,7 @@ fn test_dismiss_launch_dialog_ignores_normal_output() {
         None,
         "❯ Claude Code\n  Ask anything\n✻ Cooked for 3s",
         &mut LaunchDialogState::default(),
+        true,
     ));
 }
 
@@ -11300,9 +11365,11 @@ fn test_dismiss_launch_dialog_retries_while_the_pane_is_unchanged() {
     let mut st = LaunchDialogState::default();
     let pane = "WARNING: Bypass Permissions mode\n  2. Yes, I accept";
 
-    assert!(dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st));
+    assert!(dismiss_launch_dialog(
+        &ops, "t:1", None, pane, &mut st, true
+    ));
     assert!(
-        dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st),
+        dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st, true),
         "an unchanged pane means the answer was dropped — retry"
     );
 }
@@ -11320,14 +11387,22 @@ fn test_dismiss_launch_dialog_stops_once_the_pane_redraws() {
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
     let mut st = LaunchDialogState::default();
 
-    assert!(dismiss_launch_dialog(&ops, "t:1", None, "2. Yes, I accept", &mut st));
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        None,
+        "2. Yes, I accept",
+        &mut st,
+        true
+    ));
     // Same dialog text, but the frame changed — it is the previous render.
     assert!(!dismiss_launch_dialog(
         &ops,
         "t:1",
         None,
         "2. Yes, I accept\n(redrawing...)",
-        &mut st
+        &mut st,
+        true
     ));
 }
 
@@ -11346,9 +11421,13 @@ fn test_dismiss_launch_dialog_gives_up_after_max_attempts() {
     let pane = "2. Yes, I accept";
 
     for _ in 0..LAUNCH_DIALOG_MAX_ATTEMPTS {
-        assert!(dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st));
+        assert!(dismiss_launch_dialog(
+            &ops, "t:1", None, pane, &mut st, true
+        ));
     }
-    assert!(!dismiss_launch_dialog(&ops, "t:1", None, pane, &mut st));
+    assert!(!dismiss_launch_dialog(
+        &ops, "t:1", None, pane, &mut st, true
+    ));
 }
 
 /// The two dialogs are tracked independently — answering Claude's must not
@@ -11357,19 +11436,25 @@ fn test_dismiss_launch_dialog_gives_up_after_max_attempts() {
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_tracks_dialogs_independently() {
     let mut mock = MockTmuxOperations::new();
-    mock.expect_send_key()
-        .times(4)
-        .returning(|_, _| Ok(()));
+    mock.expect_send_key().times(4).returning(|_, _| Ok(()));
 
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
     let mut answered = LaunchDialogState::default();
-    assert!(dismiss_launch_dialog(&ops, "t:1", None, "2. Yes, I accept", &mut answered));
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        None,
+        "2. Yes, I accept",
+        &mut answered,
+        true
+    ));
     assert!(dismiss_launch_dialog(
         &ops,
         "t:1",
         Some("gemini"),
         "Do you trust the files in this folder?",
-        &mut answered
+        &mut answered,
+        true
     ));
 }
 
@@ -11399,7 +11484,10 @@ fn test_write_skills_preserves_existing_claude_settings() {
     let raw = std::fs::read_to_string(claude.join("settings.local.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
 
-    assert_eq!(v["permissions"]["allow"][0], "Bash(cargo test:*)", "permissions lost");
+    assert_eq!(
+        v["permissions"]["allow"][0], "Bash(cargo test:*)",
+        "permissions lost"
+    );
     assert_eq!(v["env"]["MY_VAR"], "1", "env lost");
     assert_eq!(v["enableAllProjectMcpServers"], serde_json::json!(true));
     // agtx's hooks must be present...
@@ -11410,9 +11498,9 @@ fn test_write_skills_preserves_existing_claude_settings() {
     // ...without discarding the user's own hook on an event agtx also uses.
     let stop = v["hooks"]["Stop"].as_array().expect("Stop missing");
     let has_user_hook = stop.iter().any(|d| {
-        d["hooks"].as_array().map_or(false, |h| {
-            h.iter().any(|x| x["command"] == "my-own-hook")
-        })
+        d["hooks"]
+            .as_array()
+            .map_or(false, |h| h.iter().any(|x| x["command"] == "my-own-hook"))
     });
     assert!(has_user_hook, "user's own Stop hook was discarded: {}", raw);
 }
@@ -11478,7 +11566,12 @@ fn test_skip_worktree_tasks_share_one_task_agnostic_hook() {
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let stop = v["hooks"]["Stop"].as_array().unwrap();
 
-    assert_eq!(stop.len(), 1, "deploys must not accumulate entries: {}", raw);
+    assert_eq!(
+        stop.len(),
+        1,
+        "deploys must not accumulate entries: {}",
+        raw
+    );
     let cmd = stop[0]["hooks"][0]["command"].as_str().unwrap();
     assert!(
         cmd.contains("hook --env"),
@@ -11499,7 +11592,10 @@ fn test_deploy_writes_a_binary_marker() {
     write_skills_to_worktree(&wt, dir.path(), &None, &["claude"], true);
 
     let marker = read_deploy_marker(dir.path()).expect("marker missing");
-    let current = std::env::current_exe().unwrap().to_string_lossy().to_string();
+    let current = std::env::current_exe()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     assert_eq!(marker, current);
 }
 
@@ -11528,7 +11624,11 @@ fn test_hooks_are_replaced_not_duplicated_after_the_binary_moves() {
     let stop = v["hooks"]["Stop"].as_array().unwrap();
 
     assert_eq!(stop.len(), 1, "stale entry was not replaced: {}", raw);
-    assert!(!raw.contains("/old/gone/agtx"), "dead path survived: {}", raw);
+    assert!(
+        !raw.contains("/old/gone/agtx"),
+        "dead path survived: {}",
+        raw
+    );
 }
 
 #[test]
@@ -11554,7 +11654,10 @@ fn test_claude_settings_preflight_bypass_acceptance() {
 
     let raw = std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(v["bypassPermissionsModeAccepted"], serde_json::json!(true));
+    assert_eq!(
+        v["skipDangerousModePermissionPrompt"],
+        serde_json::json!(true)
+    );
 }
 
 /// Deploying one skill for every supported agent lands at exactly these paths.
@@ -11723,7 +11826,15 @@ fn test_clear_context_command_is_claude_only() {
         crate::agent::spec("claude").unwrap().clear_context_command,
         Some("/clear")
     );
-    for agent in ["codex", "gemini", "cursor", "antigravity", "opencode", "grok", "copilot"] {
+    for agent in [
+        "codex",
+        "gemini",
+        "cursor",
+        "antigravity",
+        "opencode",
+        "grok",
+        "copilot",
+    ] {
         assert_eq!(
             crate::agent::spec(agent).unwrap().clear_context_command,
             None,
@@ -11746,9 +11857,15 @@ fn test_launch_dialog_derivation_matches_the_previous_literals() {
     // entries were added afterwards, each verified against codex-cli 0.144.5,
     // and antigravity's after its trust dialog was found parking every task.
     let mut want = vec![
-        (vec!["Yes, I accept", "I accept the risk"], vec!["2", "Enter"]),
+        (
+            vec!["Yes, I accept", "I accept the risk"],
+            vec!["2", "Enter"],
+        ),
         (vec!["Yes, I trust this folder"], vec!["1", "Enter"]),
-        (vec!["Do you trust the files in this folder?"], vec!["1", "Enter"]),
+        (
+            vec!["Do you trust the files in this folder?"],
+            vec!["1", "Enter"],
+        ),
         (
             vec!["Do you trust the contents of this directory?"],
             vec!["1", "Enter"],
@@ -11864,6 +11981,7 @@ fn test_launch_dialogs_are_scoped_to_their_agent() {
         Some("claude"),
         gemini_pane,
         &mut LaunchDialogState::default(),
+        true,
     ));
 
     // In a Gemini pane it is answered.
@@ -11876,6 +11994,7 @@ fn test_launch_dialogs_are_scoped_to_their_agent() {
         Some("gemini"),
         gemini_pane,
         &mut LaunchDialogState::default(),
+        true,
     ));
 }
 
@@ -11893,6 +12012,7 @@ fn test_unknown_agent_falls_back_to_every_dialog() {
         None,
         "Do you trust the files in this folder?",
         &mut LaunchDialogState::default(),
+        true,
     ));
 }
 
@@ -11928,6 +12048,7 @@ fn test_dismiss_launch_dialog_answers_codex_directory_trust() {
         Some("codex"),
         pane,
         &mut LaunchDialogState::default(),
+        true,
     ));
 }
 
@@ -11961,6 +12082,7 @@ fn test_dismiss_launch_dialog_skips_codex_update_prompt() {
         Some("codex"),
         pane,
         &mut LaunchDialogState::default(),
+        true,
     ));
 }
 
@@ -11994,6 +12116,7 @@ fn test_antigravity_trust_dialog_is_answered_with_a_bare_enter() {
         Some("antigravity"),
         pane,
         &mut LaunchDialogState::default(),
+        true,
     ));
     assert_eq!(*keys.lock().unwrap(), vec!["Enter".to_string()]);
 }
@@ -12025,6 +12148,7 @@ fn test_cursor_workspace_trust_is_answered_with_its_access_key() {
         Some("cursor"),
         pane,
         &mut LaunchDialogState::default(),
+        true,
     ));
     assert_eq!(*keys.lock().unwrap(), vec!["a".to_string()]);
 }
@@ -12035,7 +12159,8 @@ fn test_cursor_workspace_trust_is_answered_with_its_access_key() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_cursor_and_codex_trust_dialogs_do_not_cross_fire() {
-    let cursor_pane = "\u{26a0} Workspace Trust Required\nDo you trust the contents of this directory?";
+    let cursor_pane =
+        "\u{26a0} Workspace Trust Required\nDo you trust the contents of this directory?";
     // Codex's entry matches the shared question line — and its answer is "1",
     // which is not an option in cursor's menu at all. Scoping is what keeps it
     // from firing here, so this must be asserted against *codex*, not against an
@@ -12054,6 +12179,7 @@ fn test_cursor_and_codex_trust_dialogs_do_not_cross_fire() {
         Some("cursor"),
         cursor_pane,
         &mut LaunchDialogState::default(),
+        true,
     ));
     assert_eq!(
         *codex_keys.lock().unwrap(),
@@ -12074,13 +12200,16 @@ fn test_cursor_and_codex_trust_dialogs_do_not_cross_fire() {
         Ok(())
     });
     let ops2: Arc<dyn TmuxOperations> = Arc::new(mock2);
-    assert!(dismiss_launch_dialog(
-        &ops2,
-        "t:1",
-        Some("cursor"),
-        codex_pane,
-        &mut LaunchDialogState::default(),
-    ) == false);
+    assert!(
+        dismiss_launch_dialog(
+            &ops2,
+            "t:1",
+            Some("cursor"),
+            codex_pane,
+            &mut LaunchDialogState::default(),
+            true,
+        ) == false
+    );
 }
 
 /// The reverse of the scoping guard: antigravity's own wording must not be
@@ -12099,5 +12228,203 @@ fn test_antigravity_trust_dialog_is_scoped_to_antigravity() {
         Some("codex"),
         pane,
         &mut LaunchDialogState::default(),
+        true,
     ));
+}
+
+// ===========================================================================
+// auto_trust: agtx stops answering security prompts
+// ===========================================================================
+
+/// With `auto_trust` off, a trust prompt is recognised but **not** answered.
+///
+/// The distinction is the whole design: detection is what turns the card
+/// `Blocked`; answering is the security decision agtx hands back to the user.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_security_dialogs_are_not_answered_when_auto_trust_is_off() {
+    let mut mock = MockTmuxOperations::new();
+    // No keystroke may reach the pane: asserting on the mock is the point.
+    mock.expect_send_key().times(0);
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    let pane = "❯ 1. Yes, I trust this folder\n  2. No, exit";
+    let mut st = LaunchDialogState::default();
+    assert!(!dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("claude"),
+        pane,
+        &mut st,
+        false
+    ));
+    assert!(visible_security_dialog(Some("claude"), pane).is_some());
+}
+
+/// A prompt that decides nothing about safety is still answered — leaving it up
+/// only wedges the pane, and agtx picks "Skip" either way.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_non_security_dialogs_are_still_answered_when_auto_trust_is_off() {
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_send_key().returning(|_, _| Ok(()));
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    let pane = "✨ Update available!\n› 1. Update now (runs `sh -c ...`)\n  2. Skip";
+    let mut st = LaunchDialogState::default();
+    assert!(dismiss_launch_dialog(
+        &ops,
+        "t:1",
+        Some("codex"),
+        pane,
+        &mut st,
+        false
+    ));
+    assert!(visible_security_dialog(Some("codex"), pane).is_none());
+}
+
+/// Every trust and permission-bypass prompt must be classified as a security
+/// decision, and the two nuisance prompts must not be. Getting this backwards
+/// either hands the user a prompt agtx should just skip, or answers a security
+/// question on their behalf.
+#[test]
+fn test_dialog_security_classification() {
+    let secure: &[(&str, &str)] = &[
+        ("claude", "Yes, I trust this folder"),
+        ("claude", "Yes, I accept"),
+        ("codex", "Do you trust the contents of this directory?"),
+        ("gemini", "Do you trust the files in this folder?"),
+        ("cursor", "Workspace Trust Required"),
+        ("antigravity", "Do you trust the contents of this project?"),
+    ];
+    for (agent, pattern) in secure {
+        let d = agent::spec(agent)
+            .unwrap()
+            .dialogs
+            .iter()
+            .find(|d| d.patterns.contains(pattern))
+            .unwrap_or_else(|| panic!("{agent}: no dialog matching {pattern}"));
+        assert!(d.security, "{agent}: {pattern} must be a security decision");
+    }
+    for (agent, pattern) in [("codex", "Update now (runs"), ("codex", "Allow the")] {
+        let d = agent::spec(agent)
+            .unwrap()
+            .dialogs
+            .iter()
+            .find(|d| d.patterns.contains(&pattern))
+            .unwrap();
+        assert!(
+            !d.security,
+            "{agent}: {pattern} decides nothing about safety"
+        );
+    }
+}
+
+/// A pane showing a trust prompt outranks every liveness signal: the agent is
+/// idle by any measure, but it is waiting on a person.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_awaiting_trust_forces_blocked_over_working() {
+    let mut app = make_test_app();
+    let result = SessionRefreshResult {
+        statuses: vec![SessionTaskStatus {
+            task_id: "t1".to_string(),
+            phase_status: PhaseStatus::Working,
+            content_hash: Some(7),
+            hook_status: None,
+            awaiting_trust: Some("Yes, I trust this folder".to_string()),
+            status: TaskStatus::Planning,
+            worktree_path: None,
+            session_name: None,
+            agent: "claude".to_string(),
+            was_ready: false,
+        }],
+    };
+    app.apply_session_refresh(result);
+    assert_eq!(
+        app.state.phase_status_cache.get("t1").map(|(p, _)| *p),
+        Some(PhaseStatus::Blocked)
+    );
+    // The reason names the agent and the way out, because agtx cannot fix it.
+    let reason = app
+        .state
+        .blocked_reasons
+        .get("t1")
+        .expect("reason recorded");
+    assert!(reason.contains("claude"), "{reason}");
+    assert!(reason.contains("project root"), "{reason}");
+    // And it is tracked separately, so the orchestrator leaves it alone.
+    assert!(app.state.trust_blocked.contains("t1"));
+}
+
+/// Once the user answers, the flag clears and the task resumes its normal
+/// status — no stale `Blocked` badge left behind.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_trust_block_clears_once_the_dialog_is_gone() {
+    let mut app = make_test_app();
+    let blocked = |awaiting: Option<String>| SessionRefreshResult {
+        statuses: vec![SessionTaskStatus {
+            task_id: "t1".to_string(),
+            phase_status: PhaseStatus::Working,
+            content_hash: Some(7),
+            hook_status: None,
+            awaiting_trust: awaiting,
+            status: TaskStatus::Planning,
+            worktree_path: None,
+            session_name: None,
+            agent: "claude".to_string(),
+            was_ready: false,
+        }],
+    };
+    app.apply_session_refresh(blocked(Some("Yes, I trust this folder".to_string())));
+    assert!(app.state.trust_blocked.contains("t1"));
+    app.apply_session_refresh(blocked(None));
+    assert!(!app.state.trust_blocked.contains("t1"));
+    assert!(app.state.blocked_reasons.get("t1").is_none());
+}
+
+// ===========================================================================
+// submit_message — the Enter that submits is its own delivery problem
+// ===========================================================================
+
+/// A dropped Enter is retried, because an unchanged pane means the composer
+/// never took it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_submit_message_retries_while_the_pane_is_unchanged() {
+    let mut mock = MockTmuxOperations::new();
+    // Same frame every time: nothing ever submits.
+    mock.expect_capture_pane()
+        .returning(|_| Ok("* /agtx:execute abc".to_string()));
+    mock.expect_send_key()
+        .times(SUBMIT_ATTEMPTS as usize)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    submit_message(&ops, "t:1");
+}
+
+/// One Enter is enough when the composer clears — a second would fire into an
+/// empty composer, which is the bug codex's double-Enter used to be.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_submit_message_stops_once_the_pane_changes() {
+    let mut mock = MockTmuxOperations::new();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c = std::sync::Arc::clone(&calls);
+    mock.expect_capture_pane().returning(move |_| {
+        // First read is the pre-Enter baseline; everything after shows a
+        // submitted, cleared composer.
+        let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(if n == 0 {
+            "* /agtx:execute abc".to_string()
+        } else {
+            "✦ Working…".to_string()
+        })
+    });
+    mock.expect_send_key()
+        .times(1)
+        .withf(|_, k| k == "Enter")
+        .returning(|_, _| Ok(()));
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    submit_message(&ops, "t:1");
 }

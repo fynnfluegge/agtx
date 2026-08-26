@@ -105,6 +105,37 @@ cp target/release/agtx ~/.local/bin/
 - **tmux** — agent sessions run in a dedicated tmux server
 - **gh** (optional) — GitHub CLI for PR operations
 
+### First run: trust your project in the agent
+
+Coding agents gate a directory they have not seen behind a trust prompt, and agtx
+gives every task its own git worktree. **Launch your agent once in the project root
+and confirm its prompt** before using agtx there:
+
+```bash
+cd your-project && claude   # or codex / gemini — confirm the trust prompt, then quit
+```
+
+One time per project. Trust is inherited from the project root, so every worktree
+agtx creates underneath it is covered:
+
+| Agent | First-run prompt |
+|-------|------------------|
+| Claude, Codex, Gemini | trust the project root once — worktrees inherit it |
+| Cursor, Grok | none — agtx launches them with `--trust` |
+| OpenCode | none |
+| Antigravity | trust the project root once — agtx copies that consent to each new worktree, because antigravity matches paths exactly and never inherits |
+
+If a task's agent is waiting on a trust prompt, its card shows **`?`** with the
+reason, and you answer it in the agent's own pane (`↩` to open the task).
+
+> [!NOTE]
+> By default agtx does **not** answer these prompts for you — vouching for a
+> directory, or accepting unattended tool execution, is your decision. For
+> unattended runs set `auto_trust = true` in `~/.config/agtx/config.toml` and agtx
+> will read the pane and answer them. It is already enabled inside the
+> [Docker sandbox](#docker-sandbox) and the benchmark, where the container is
+> disposable and nobody is at the board.
+
 ## Usage
 
 <details>

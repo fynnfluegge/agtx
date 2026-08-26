@@ -83,6 +83,15 @@ pub enum DialogScope {
 pub struct AgentDialog {
     /// Text to look for in the pane. Combined per [`require_all`](Self::require_all).
     pub patterns: &'static [&'static str],
+    /// Whether answering this is a **security decision** rather than a nuisance.
+    ///
+    /// A trust prompt asks the user to vouch for a directory's contents; a
+    /// permission-bypass warning asks them to accept unattended tool execution.
+    /// Those are the user's to make, and `auto_trust = false` (the default) stops
+    /// agtx answering them — the task is surfaced as `Blocked` instead. Prompts
+    /// that decide nothing about safety (codex's "an update is available") stay
+    /// answered either way, because leaving them up only wedges the pane.
+    pub security: bool,
     /// When false the patterns are **alternatives**: any one matching is enough,
     /// which is how a dialog whose wording varies between versions is caught.
     /// When true they are a **conjunction**: all must be present, for a prompt
@@ -171,6 +180,21 @@ pub struct AgentSpec {
     pub binary: &'static str,
     pub description: &'static str,
     pub co_author: &'static str,
+    /// Environment variables that carry a provider API key for this agent, most
+    /// preferred first.
+    ///
+    /// This is the **headless** credential: the auth mode that works with no
+    /// browser and no keychain, which is the only kind a CI runner can use. It is
+    /// not how agtx authenticates anything — agtx never reads these — it is the
+    /// per-agent fact that the smoke harness and the CI workflow both need, kept
+    /// here so there is one copy rather than three. The trust stores went the
+    /// other way and ended up duplicated in `trust.rs`, `agent_smoke.py` and
+    /// `benchmark.py`; this is that lesson applied.
+    ///
+    /// Empty means *no verified headless credential*, which is a real answer:
+    /// such an agent cannot run unattended in CI at all. It must not be confused
+    /// with "not looked into yet" — see each entry's comment.
+    pub api_key_env: &'static [&'static str],
 
     // ── launching ────────────────────────────────────────────────────────
     /// Environment assignments prefixed to the interactive launch command.
@@ -253,6 +277,9 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "claude",
         description: "Anthropic's Claude Code CLI",
         co_author: "Claude <noreply@anthropic.com>",
+        // `claude --help`: API-key users authenticate "strictly
+        // ANTHROPIC_API_KEY or apiKeyHelper". Verified 2.1.246.
+        api_key_env: &["ANTHROPIC_API_KEY"],
         env: &[],
         base_args: &["--dangerously-skip-permissions"],
         prompt_form: PromptForm::Argv,
@@ -275,23 +302,56 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         send_strategy: SendStrategy::Generic,
         clear_context_command: Some("/clear"),
         dialogs: &[
-            // Workspace trust, shown before the bypass warning in any directory
-            // Claude has not seen. Recorded per directory as
-            // `projects."<dir>".hasTrustDialogAccepted` in ~/.claude.json, and
-            // every task gets a new worktree — so this fires on the first launch
-            // of nearly every Claude task, not just in containers.
+            // Workspace trust, shown before the bypass warning in a directory
+            // with no trusted ancestor. Recorded as
+            // `projects."<dir>".hasTrustDialogAccepted` in ~/.claude.json.
+            //
+            // Trust is **inherited from a parent directory**. Verified against
+            // claude 2.1.246: a fresh `git worktree add` under an already-trusted
+            // project opened straight at the composer — no dialog, and no new
+            // `projects` entry for the worktree path — while a fresh `git init`
+            // repo with no trusted ancestor showed the dialog under the same
+            // launch flags and the same timing. So with the default
+            // `worktree_dir` (`.agtx/worktrees`, inside the project root) this
+            // does *not* fire once the user has trusted the project once.
+            //
+            // It still fires wherever a worktree has no trusted ancestor: a
+            // `worktree_dir` pointing outside the project, the smoke runner's
+            // temp repos, and the swebench containers (~/.claude.json is copied
+            // in, but the repo lands at a different path). Treat it as a
+            // container/edge-case handler, not the common path.
+            //
+            // Contrast antigravity, where trust is per-directory and is *not*
+            // inherited (also verified). Do not generalise one agent's rule to
+            // another — this comment previously did, and was wrong.
             AgentDialog {
                 patterns: &["Yes, I trust this folder"],
+                security: true,
                 require_all: false,
                 answer: &["1", "Enter"],
                 scope: DialogScope::Launch,
             },
-            // `--dangerously-skip-permissions` acceptance. Not covered by
-            // hasTrustDialogAccepted, so copying ~/.claude.json (as the swebench
-            // harness does) does not suppress it.
+            // `--dangerously-skip-permissions` acceptance, shown right after the
+            // trust dialog. Not covered by `hasTrustDialogAccepted` — verified
+            // against claude 2.1.246 by pre-seeding that record for the exact
+            // directory: the trust dialog was skipped and this one still
+            // rendered. So copying ~/.claude.json (as the swebench harness does)
+            // cannot suppress it.
+            //
+            // What does suppress it is the `skipDangerousModePermissionPrompt`
+            // *settings* key, which `write_skills_to_worktree` now writes into
+            // each worktree's `.claude/settings.local.json`. This arm stays as
+            // the backstop for wherever that file does not reach the agent.
+            //
+            // Note the option order is inverted relative to the trust dialog:
+            // `1. No, exit` / `2. Yes, I accept`. A bare Enter on the default
+            // quits the agent — which is exactly what happened when a stray
+            // Enter reached it during testing. Hence `2` then `Enter`, never a
+            // lone Enter.
             AgentDialog {
                 // Alternatives: the wording has varied across Claude versions.
                 patterns: &["Yes, I accept", "I accept the risk"],
+                security: true,
                 require_all: false,
                 answer: &["2", "Enter"],
                 scope: DialogScope::Launch,
@@ -303,6 +363,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "codex",
         description: "OpenAI's Codex CLI",
         co_author: "Codex <noreply@openai.com>",
+        // Both names are present in the 0.144.5 binary; OPENAI_API_KEY is the
+        // documented one. Note codex otherwise authenticates from
+        // ~/.codex/auth.json, which a runner has no way to produce — the env var
+        // is the only headless path.
+        api_key_env: &["OPENAI_API_KEY", "CODEX_API_KEY"],
         env: &[],
         base_args: &["--sandbox", "workspace-write"],
         prompt_form: PromptForm::Argv,
@@ -333,6 +398,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             // codex-cli 0.144.5.
             AgentDialog {
                 patterns: &["Do you trust the contents of this directory?"],
+                security: true,
                 require_all: false,
                 answer: &["1", "Enter"],
                 scope: DialogScope::Launch,
@@ -342,6 +408,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             // binary behind their back, but leaving the pane blocked is worse.
             AgentDialog {
                 patterns: &["Update now (runs"],
+                security: false,
                 require_all: false,
                 answer: &["2", "Enter"],
                 scope: DialogScope::Launch,
@@ -352,6 +419,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             AgentDialog {
                 // A conjunction: none of these three is distinctive alone.
                 patterns: &["Allow the", "MCP server to run tool", "Always allow"],
+                security: false,
                 require_all: true,
                 answer: &["3", "Enter"],
                 scope: DialogScope::Session,
@@ -363,6 +431,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "copilot",
         description: "GitHub Copilot CLI",
         co_author: "GitHub Copilot <noreply@github.com>",
+        // Unverified: copilot is not installed on any machine this has been
+        // measured on. Empty here means "unknown", not "none" — the only entry
+        // where those differ, and the reason not to guess at a plausible
+        // GH_TOKEN. Fill it in from the real binary, not from documentation.
+        api_key_env: &[],
         env: &[],
         base_args: &["--allow-all-tools"],
         // `-i` keeps the session interactive; `-p` is print mode and exits on
@@ -394,10 +467,24 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "gemini",
         description: "Google Gemini CLI",
         co_author: "Gemini <noreply@google.com>",
+        // Both documented in the gemini-cli README, 0.46.0.
+        api_key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        // Kept, but it does **not** suppress the folder-trust dialog — verified
+        // against gemini 0.46.0: the dialog rendered with this set. Gemini's real
+        // trust store is `~/.gemini/trustedFolders.json`, a map of
+        // path -> "TRUST_FOLDER" with **lowercased** paths and ancestor
+        // semantics (`/users/fynn` covers everything beneath), which is why gemini
+        // inherits a trusted project root and why its dialog offers "Trust parent
+        // folder". The variable is left in place because it is untested for the
+        // *other* things it may gate; the comment no longer claims it does this one.
         env: &[("GEMINI_TRUST_WORKSPACE", "true")],
         base_args: &["--approval-mode", "yolo"],
         prompt_form: PromptForm::Flag("-i"),
-        launch_prompt_verified: false,
+        // Verified against gemini 0.46.0: `gemini … -i '<prompt>'` delivers the
+        // prompt and continues interactively. It also survives the process restart
+        // that answering the folder-trust dialog triggers — the prompt still
+        // reached the model afterwards.
+        launch_prompt_verified: true,
         resume: ResumeArgs::Append(&["--resume"]),
         headless_args: &["-p"],
         skill_dir: Some((".gemini/commands", "agtx")),
@@ -416,6 +503,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             // Answering this restarts the process.
             AgentDialog {
                 patterns: &["Do you trust the files in this folder?"],
+                security: true,
                 require_all: false,
                 answer: &["1", "Enter"],
                 scope: DialogScope::Launch,
@@ -427,10 +515,23 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "opencode",
         description: "AI-powered coding assistant",
         co_author: "OpenCode <noreply@opencode.ai>",
+        // Multi-provider: the variable that matters is whichever provider the
+        // user's opencode config selects, so all four it knows about are listed.
+        // Present in the 1.18.20 binary.
+        api_key_env: &[
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_GENERATIVE_AI_API_KEY",
+        ],
         env: &[],
         base_args: &[],
-        prompt_form: PromptForm::Flag("-p"),
-        launch_prompt_verified: false,
+        // `--prompt`, not `-p`: opencode has no `-p` short form at all, so the
+        // previous value would have failed the moment it was used. Verified
+        // against opencode 1.18.20: `opencode --prompt '<prompt>'` submits the
+        // prompt as a user message and stays interactive.
+        prompt_form: PromptForm::Flag("--prompt"),
+        launch_prompt_verified: true,
         resume: ResumeArgs::Append(&["--continue"]),
         headless_args: &[],
         skill_dir: Some((".opencode/command", "")),
@@ -454,10 +555,20 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "agent",
         description: "Cursor Agent CLI",
         co_author: "Cursor Agent <noreply@cursor.com>",
+        // `agent --help`: "--api-key <key> ... (can also use CURSOR_API_KEY env
+        // var)". Verified 2026.08.11.
+        api_key_env: &["CURSOR_API_KEY"],
         env: &[],
-        base_args: &["--yolo"],
+        // `--trust` is "trust the current workspace without prompting". It is not
+        // an escalation on top of `--yolo`, which already auto-runs every tool —
+        // refusing the narrower flag while passing the broader one would be
+        // incoherent. Verified against cursor-agent 2026.08.11: no
+        // `Workspace Trust Required` dialog, prompt delivered, session usable.
+        base_args: &["--yolo", "--trust"],
         prompt_form: PromptForm::Argv,
-        launch_prompt_verified: false,
+        // Verified against cursor-agent 2026.08.11 together with `--trust`:
+        // `agent --yolo --trust '<prompt>'` submitted the prompt and answered it.
+        launch_prompt_verified: true,
         resume: ResumeArgs::Append(&["--continue"]),
         headless_args: &["--print", "--yolo"],
         skill_dir: Some((".cursor/skills", "")),
@@ -486,6 +597,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             // restarting the process, and a paste lands immediately after.
             AgentDialog {
                 patterns: &["Workspace Trust Required"],
+                security: true,
                 require_all: false,
                 answer: &["a"],
                 scope: DialogScope::Launch,
@@ -497,6 +609,10 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "grok",
         description: "xAI's Grok Build CLI",
         co_author: "Grok <noreply@x.ai>",
+        // The grok README names this one for exactly this purpose: "For CI or
+        // headless environments, use an API key from console.x.ai:
+        // export XAI_API_KEY=...". The clearest headless story of any agent here.
+        api_key_env: &["XAI_API_KEY"],
         env: &[],
         // `--trust` also ungates the repo-local `.grok/config.toml` MCP server
         // and suppresses the directory-trust dialog.
@@ -527,22 +643,27 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         binary: "agy",
         description: "Google's Antigravity CLI",
         co_author: "Antigravity <noreply@google.com>",
+        // Empty on purpose. `GEMINI_API_KEY` / `GOOGLE_API_KEY` appear as
+        // strings in the 1.1.21 binary, but `agy --help` documents no auth flag
+        // at all and the CLI signs in through a browser with the token cached in
+        // the OS keychain — which is why the benchmark has never been able to
+        // carry antigravity into a container. Strings in a binary are not a
+        // supported auth path; treat this as "no verified headless credential"
+        // until someone authenticates a fresh `agy` with the variable alone.
+        api_key_env: &[],
         env: &[],
         // Two orthogonal controls: the flag governs shell/MCP/URL approvals,
         // `--mode` governs the file-edit diff review. Both are needed to run
         // unattended.
         base_args: &["--dangerously-skip-permissions", "--mode", "accept-edits"],
         prompt_form: PromptForm::Flag("-i"),
-        // Deliberately still false, for a narrower reason than before. `agy … -i
-        // '<prompt>'` *does* deliver — the skill ran and wrote its file — and the
-        // trust dialog that used to strand the session afterwards is now answered
-        // (see `dialogs` below). What is unverified is the *ordering*: on a first
-        // launch the dialog is up before the composer exists, and whether an
-        // argv-delivered prompt survives being handed to a menu has not been
-        // checked against the real binary. The mid-session lane works, so this
-        // stays off until someone measures it — flipping it wrong swallows the
-        // task silently.
-        launch_prompt_verified: false,
+        // The ordering question this used to be blocked on is answered. Measured
+        // against agy 1.1.21 in an untrusted repo: `agy … -i '<prompt>'` launched
+        // with the project-trust dialog up, and once the dialog was answered the
+        // prompt was submitted and answered normally. An argv prompt is *queued*
+        // behind a dialog, not handed to the menu — the dialog delays it, it does
+        // not eat it. Same result for claude, cursor and gemini.
+        launch_prompt_verified: true,
         resume: ResumeArgs::Append(&["--continue"]),
         headless_args: &["-p"],
         // Antigravity reads workspace skills from the vendor-neutral `.agents/`
@@ -584,6 +705,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
                 // Its own wording, not Claude's. Codex's differs by one word
                 // ("directory"), which is why each is matched separately.
                 patterns: &["Do you trust the contents of this project?"],
+                security: true,
                 require_all: false,
                 answer: &["Enter"],
                 scope: DialogScope::Launch,

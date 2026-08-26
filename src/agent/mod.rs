@@ -1,6 +1,7 @@
 pub mod hook_status;
 mod operations;
 pub mod spec;
+pub mod trust;
 
 pub use operations::{AgentOperations, AgentRegistry, CodingAgent, RealAgentRegistry};
 pub use spec::{
