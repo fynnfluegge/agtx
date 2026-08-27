@@ -10748,40 +10748,46 @@ fn agent_trust_home() -> Option<PathBuf> {
 /// Write skill files to a worktree's .agtx/skills/ directory and agent-native discovery paths.
 /// `agent_names` determines which native paths to use (e.g. `.claude/commands/agtx/` for Claude).
 /// When multiple agents are configured for different phases, skills are deployed for all of them.
+/// The `agtx hook` invocation registered for one agent.
+///
+/// Task-agnostic: the hook reads AGTX_TASK_ID / AGTX_WORKTREE from the window
+/// env. Baking the task id in breaks `skip_worktree`, where every task shares one
+/// config file.
+fn hook_command(agtx_bin: &str, agent: &str) -> String {
+    format!("{} hook --env {}", agtx_bin, agent)
+}
+
 /// Build the `hooks` block for a worktree's `.claude/settings.local.json`.
 ///
-/// Every registered event invokes `agtx hook <task-id> <worktree>`, which writes
-/// the agent's own view of its state to `.agtx/status/{task_id}.json`. Event
-/// names were verified against Claude Code 2.1.241; unregistered names are
-/// ignored by older builds, so listing one Claude does not know is harmless.
+/// Event names verified against claude 2.1.247. Unregistered names are ignored,
+/// so listing one an older build does not know is harmless.
 fn claude_hook_settings(agtx_bin: &str) -> serde_json::Value {
-    // Task-agnostic on purpose: the hook reads AGTX_TASK_ID / AGTX_WORKTREE from
-    // the window env. Baking the task id in here would break `skip_worktree`,
-    // where every task shares one settings file and the last deploy would
-    // re-point every other task's agent at its own status file.
-    let command = format!("{} hook --env claude", agtx_bin);
-    let entry = |matcher: Option<&str>| {
-        let mut e = serde_json::json!({
+    claude_shaped_hooks(agtx_bin, "claude", agent::HookConfigKind::ClaudeSettings)
+}
+
+/// The `{Event: [{matcher, hooks: [{type, command}]}]}` shape, which four of the
+/// six agents share. Where the object goes and what the events are called still
+/// differ — that is `write_hook_config` and [`hook_events`].
+fn claude_shaped_hooks(
+    agtx_bin: &str,
+    agent_name: &str,
+    kind: agent::HookConfigKind,
+) -> serde_json::Value {
+    let command = hook_command(agtx_bin, agent_name);
+    let mut out = serde_json::Map::new();
+    for (event, matcher) in hook_status::hook_events(kind) {
+        let mut group = serde_json::json!({
             "hooks": [{ "type": "command", "command": command }]
         });
-        if let (Some(m), Some(obj)) = (matcher, e.as_object_mut()) {
+        if let (Some(m), Some(obj)) = (matcher, group.as_object_mut()) {
             obj.insert("matcher".to_string(), serde_json::json!(m));
         }
-        serde_json::json!([e])
-    };
-    serde_json::json!({
-        // Liveness: a turn started, or a tool is about to run (heartbeat).
-        "SessionStart": entry(None),
-        "UserPromptSubmit": entry(None),
-        "PreToolUse": entry(Some("*")),
-        // Blocked: the agent is stopped waiting on a human.
-        "PermissionRequest": entry(Some("*")),
-        "Notification": entry(None),
-        // Turn over / session over.
-        "Stop": entry(None),
-        "StopFailure": entry(None),
-        "SessionEnd": entry(None),
-    })
+        out.insert(
+            (*event).to_string(),
+            serde_json::Value::Array(vec![group]),
+        );
+    }
+    serde_json::Value::Object(out)
 }
 
 /// Re-deploy agent configs for worktrees that were set up by a different agtx
@@ -11018,6 +11024,12 @@ fn write_skills_to_worktree(
                 &agtx_bin,
                 agent_hooks,
             );
+            // After the MCP writer, never before: two agents keep their hooks in
+            // the same file as their MCP config, and both writers
+            // read-modify-write it.
+            if agent_hooks {
+                write_hook_config(spec, worktree_path, &agtx_bin);
+            }
         }
     }
 
@@ -11042,6 +11054,143 @@ fn write_skills_to_worktree(
             }
         }
     }
+}
+
+/// Write one agent's lifecycle-hook config into its worktree.
+///
+/// Selected by [`HookConfigKind`](agent::HookConfigKind); `None` means the agent
+/// reports nothing and the pane-hash heuristic runs unchanged.
+///
+/// Every path here is inside the worktree — all six agents accept a project-local
+/// hook config, so agtx never writes into `~/.codex`, `~/.gemini` or `~/.cursor`
+/// and removing the worktree removes the registration.
+///
+/// The writers whose file is shared with an MCP config, or may be committed,
+/// merge; the rest own their file and are written outright.
+fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &str) {
+    let Some(kind) = spec.hook_config else {
+        return;
+    };
+    let wt = Path::new(worktree_path);
+    let ours = claude_shaped_hooks(agtx_bin, spec.name, kind);
+
+    match kind {
+        // Shares `.claude/settings.local.json` with the MCP preflight keys
+        // `write_mcp_config` just wrote.
+        agent::HookConfigKind::ClaudeSettings => {
+            merge_hooks_into_json_settings(&wt.join(".claude").join("settings.local.json"), ours);
+        }
+        // Same shape; `.gemini/settings.json` also carries `mcpServers` and
+        // `trust: true`.
+        agent::HookConfigKind::GeminiSettings => {
+            merge_hooks_into_json_settings(&wt.join(".gemini").join("settings.json"), ours);
+        }
+        // `.codex/hooks.json` is auto-discovered — no pointer in
+        // `.codex/config.toml`, whose `hooks` key is a table, not a path;
+        // assigning a string to it makes codex reject the entire config with
+        // "invalid type: string, expected struct HooksToml" and lose its MCP
+        // server with it. The events sit under a `hooks` object beside an
+        // optional `description`. codex-cli 0.144.5.
+        agent::HookConfigKind::CodexHooksJson => {
+            let dir = wt.join(".codex");
+            let _ = std::fs::create_dir_all(&dir);
+            write_json(
+                &dir.join("hooks.json"),
+                &serde_json::json!({ "description": "agtx phase status", "hooks": ours }),
+            );
+        }
+        // `{version, hooks: {event: [{command}]}}`. The one agent that does not
+        // take the Claude-shaped `{hooks: [{type, command}]}` wrapper — its
+        // handlers are a flat list of `{command}`, and written the other way the
+        // file parses, loads, and fires nothing. cursor-agent 2026.08.25.
+        agent::HookConfigKind::CursorHooksJson => {
+            let command = hook_command(agtx_bin, spec.name);
+            let mut hooks = serde_json::Map::new();
+            for (event, _) in hook_status::hook_events(kind) {
+                hooks.insert(
+                    (*event).to_string(),
+                    serde_json::json!([{ "command": command }]),
+                );
+            }
+            let dir = wt.join(".cursor");
+            let _ = std::fs::create_dir_all(&dir);
+            write_json(
+                &dir.join("hooks.json"),
+                &serde_json::json!({ "version": 1, "hooks": hooks }),
+            );
+        }
+        // Grok scans the directory, so agtx owns one file in it and never merges.
+        agent::HookConfigKind::GrokHooksJson => {
+            let dir = wt.join(".grok").join("hooks");
+            let _ = std::fs::create_dir_all(&dir);
+            write_json(&dir.join("agtx.json"), &serde_json::json!({ "hooks": ours }));
+        }
+        // Keyed by hook *name* first, event second; every handler carries its own
+        // `--event` because the payload has no event name. `.agents/` is
+        // vendor-neutral and may be committed, so this merges.
+        agent::HookConfigKind::AntigravityHooksJson => {
+            let dir = wt.join(".agents");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join("hooks.json");
+            let mut root = read_json_object(&path);
+            root.insert(
+                AGTX_HOOK_NAME.to_string(),
+                antigravity_hook_spec(agtx_bin, spec.name),
+            );
+            write_json(&path, &serde_json::Value::Object(root));
+        }
+    }
+}
+
+/// The name agtx registers its hooks under, where the format is keyed by name.
+const AGTX_HOOK_NAME: &str = "agtx";
+
+/// Antigravity's per-event handlers, each carrying its own `--event`.
+///
+/// Its two event shapes are not interchangeable: tool events are grouped under a
+/// `matcher`, the rest are a flat list of handlers, and the wrong shape is
+/// silently ignored.
+fn antigravity_hook_spec(agtx_bin: &str, agent_name: &str) -> serde_json::Value {
+    let handler = |event: &str| {
+        serde_json::json!({
+            "type": "command",
+            "command": format!("{} --event {}", hook_command(agtx_bin, agent_name), event),
+        })
+    };
+    let mut out = serde_json::Map::new();
+    for (event, matcher) in hook_status::hook_events(agent::HookConfigKind::AntigravityHooksJson) {
+        let entry = match matcher {
+            Some(m) => serde_json::json!([{ "matcher": m, "hooks": [handler(event)] }]),
+            None => serde_json::json!([handler(event)]),
+        };
+        out.insert((*event).to_string(), entry);
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Read a JSON file as an object, or an empty one if it is missing or not an
+/// object. Never an error: a config the user can fix is not a reason to refuse to
+/// set up their worktree.
+fn read_json_object(path: &Path) -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_json(path: &Path, value: &serde_json::Value) {
+    let _ = std::fs::write(path, serde_json::to_string_pretty(value).unwrap_or_default());
+}
+
+/// Merge agtx's hooks into a settings file it shares with other keys.
+fn merge_hooks_into_json_settings(path: &Path, ours: serde_json::Value) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut settings = read_json_object(path);
+    merge_claude_hooks(&mut settings, ours);
+    write_json(path, &serde_json::Value::Object(settings));
 }
 
 /// Write the project-scoped MCP server config for one agent into its worktree.
@@ -11110,9 +11259,6 @@ fn write_mcp_config(
                     "skipDangerousModePermissionPrompt".to_string(),
                     serde_json::json!(true),
                 );
-                if agent_hooks {
-                    merge_claude_hooks(obj, claude_hook_settings(&agtx_bin));
-                }
             }
             let _ = std::fs::write(
                 &settings_path,
@@ -11146,17 +11292,31 @@ fn write_mcp_config(
             // see `agent_trust`.
         }
         agent::McpConfigKind::GeminiJson => {
-            let cfg = serde_json::json!({
-                "mcpServers": {
-                    "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str], "trust": true }
-                }
-            });
+            // Merge, don't overwrite. `.gemini` is in AGENT_CONFIG_DIRS, so a
+            // project shipping its own settings.json has it copied into every
+            // worktree, and a plain write drops the user's theme, model and any
+            // `mcpServers` besides agtx. Same rule as the Claude writer above.
             let dir = Path::new(worktree_path).join(".gemini");
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(
-                dir.join("settings.json"),
-                serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+            let path = dir.join("settings.json");
+            let mut settings = read_json_object(&path);
+            let mut servers = settings
+                .get("mcpServers")
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            servers.insert(
+                "agtx".to_string(),
+                serde_json::json!({
+                    "command": agtx_bin,
+                    "args": ["mcp-serve", &project_path_str],
+                    "trust": true
+                }),
             );
+            settings.insert(
+                "mcpServers".to_string(),
+                serde_json::Value::Object(servers),
+            );
+            write_json(&path, &serde_json::Value::Object(settings));
         }
         agent::McpConfigKind::CursorJson => {
             let cfg = serde_json::json!({

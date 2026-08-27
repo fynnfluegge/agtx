@@ -11227,6 +11227,185 @@ fn test_agent_hooks_false_writes_no_hooks() {
     assert!(v.get("hooks").is_none());
 }
 
+// ── hook configs for the other five agents ──────────────────────────────────
+//
+// Formats and paths were read off each agent's own binary or bundled docs; see
+// `HookConfigKind` for the versions. What these tests actually protect is the
+// merge discipline: three of the six files may already exist in the user's repo,
+// and a plain write would destroy settings agtx does not own.
+
+/// Every agent with hook support must land a config the agent can find, with a
+/// task-agnostic `agtx hook --env <agent>` command in it. A missing file is the
+/// silent-failure mode: the board just keeps guessing from pane hashes.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_hook_config_is_written_for_every_hook_capable_agent() {
+    let expected: &[(&str, &str)] = &[
+        ("claude", ".claude/settings.local.json"),
+        ("gemini", ".gemini/settings.json"),
+        ("codex", ".codex/hooks.json"),
+        ("cursor", ".cursor/hooks.json"),
+        ("grok", ".grok/hooks/agtx.json"),
+        ("antigravity", ".agents/hooks.json"),
+    ];
+    for (name, rel) in expected {
+        let spec = crate::agent::spec(name).unwrap();
+        if spec.hook_config.is_none() {
+            continue; // codex is off pending its hook-trust review; see spec.rs
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().to_string_lossy().to_string();
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+
+        let raw = std::fs::read_to_string(dir.path().join(rel))
+            .unwrap_or_else(|e| panic!("{name}: no hook config at {rel}: {e}"));
+        assert!(
+            raw.contains(&format!("hook --env {name}")),
+            "{name}: {rel} must register the task-agnostic command, got {raw}"
+        );
+    }
+}
+
+/// The agents whose hook file is shared with something else must merge. Gemini's
+/// `.gemini/settings.json` also carries `mcpServers` and `trust`, and the user's
+/// own hooks may already be in it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_gemini_hooks_merge_with_existing_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    std::fs::create_dir_all(dir.path().join(".gemini")).unwrap();
+    std::fs::write(
+        dir.path().join(".gemini/settings.json"),
+        r#"{"theme":"Dracula","hooks":{"BeforeTool":[{"hooks":[{"type":"command","command":"mine.sh"}]}]}}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], true);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".gemini/settings.json")).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(v["theme"], serde_json::json!("Dracula"), "user key survived");
+    assert_eq!(v["mcpServers"]["agtx"]["command"].is_string(), true);
+    let before_tool = v["hooks"]["BeforeTool"].as_array().unwrap();
+    assert_eq!(before_tool.len(), 2, "user hook kept, agtx hook appended");
+    assert_eq!(before_tool[0]["hooks"][0]["command"], "mine.sh");
+    assert_eq!(v["hooks"]["AfterAgent"][0]["hooks"][0]["command"].is_string(), true);
+}
+
+/// Redeploying must replace agtx's entries rather than accumulate them —
+/// otherwise the hook fires N times per event, once per deploy. Matched on the
+/// `hook --env` invocation, not the binary path, so a moved agtx still
+/// recognises its own work.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_redeploying_hooks_is_idempotent_for_every_agent() {
+    for name in ["claude", "gemini", "cursor", "grok", "antigravity"] {
+        if crate::agent::spec(name).unwrap().hook_config.is_none() {
+            continue;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().to_string_lossy().to_string();
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+        let once = read_all_configs(dir.path());
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+        let twice = read_all_configs(dir.path());
+        assert_eq!(once, twice, "{name}: second deploy changed the config");
+    }
+}
+
+fn read_all_configs(root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for rel in [
+        ".claude/settings.local.json",
+        ".gemini/settings.json",
+        ".codex/hooks.json",
+        ".codex/config.toml",
+        ".cursor/hooks.json",
+        ".grok/hooks/agtx.json",
+        ".agents/hooks.json",
+    ] {
+        if let Ok(body) = std::fs::read_to_string(root.join(rel)) {
+            out.push((rel.to_string(), body));
+        }
+    }
+    out
+}
+
+/// `.agents/` is vendor-neutral and a project may well ship one, so this file
+/// must survive agtx writing into it — the same rule the antigravity MCP writer
+/// follows next door.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_antigravity_hooks_preserve_a_projects_own_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    std::fs::create_dir_all(dir.path().join(".agents")).unwrap();
+    std::fs::write(
+        dir.path().join(".agents/hooks.json"),
+        r#"{"lint-checker":{"PostToolUse":[{"matcher":"run_command","hooks":[{"command":"./lint.sh"}]}]}}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], true);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".agents/hooks.json")).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(v["lint-checker"]["PostToolUse"][0]["hooks"][0]["command"], "./lint.sh");
+    // Its payload carries no event name, so every handler must name its own.
+    assert!(v["agtx"]["Stop"][0]["command"]
+        .as_str()
+        .unwrap()
+        .ends_with("--event Stop"));
+    assert!(v["agtx"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .ends_with("--event PostToolUse"));
+    // Grouped vs flat is not cosmetic: antigravity ignores the wrong shape.
+    assert!(v["agtx"]["PostToolUse"][0]["matcher"].is_string());
+    assert!(v["agtx"]["Stop"][0]["matcher"].is_null());
+    // The gating hook must stay unsubscribed; see hook_status_tests.
+    assert!(v["agtx"]["PreToolUse"].is_null());
+}
+
+/// Cursor rejects a hooks file with no version envelope.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cursor_hooks_carry_the_version_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap())
+            .unwrap();
+    assert_eq!(v["version"], serde_json::json!(1));
+    // Flat `{command}`, not the Claude `{hooks:[{type,command}]}` wrapper —
+    // cursor loads the wrapped form without complaint and never fires it.
+    assert!(v["hooks"]["stop"][0]["command"].is_string());
+    assert!(v["hooks"]["stop"][0]["hooks"].is_null());
+}
+
+/// The toggle has to reach every agent, not just Claude.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_agent_hooks_false_writes_no_hooks_for_any_agent() {
+    for name in ["claude", "gemini", "cursor", "grok", "antigravity"] {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().to_string_lossy().to_string();
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], false);
+        for (rel, body) in read_all_configs(dir.path()) {
+            assert!(
+                !body.contains("hook --env"),
+                "{name}: agent_hooks=false still wrote hooks into {rel}"
+            );
+        }
+    }
+}
+
 // ── first-launch dialog handling (wait_for_agent_ready) ──────────────────────
 
 /// Regression: a native-binary agent changes `pane_current_command` the moment
@@ -11871,6 +12050,9 @@ fn test_launch_dialog_derivation_matches_the_previous_literals() {
             vec!["1", "Enter"],
         ),
         (vec!["Update now (runs"], vec!["2", "Enter"]),
+        // "Continue without trusting" — declines rather than grants, so it is
+        // answered like the update prompt above rather than left to the user.
+        (vec!["Hooks need review"], vec!["3", "Enter"]),
         // Enter alone: an arrow-navigated menu with the safe option preselected.
         (
             vec!["Do you trust the contents of this project?"],

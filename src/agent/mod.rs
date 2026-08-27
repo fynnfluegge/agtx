@@ -5,8 +5,8 @@ pub mod trust;
 
 pub use operations::{AgentOperations, AgentRegistry, CodingAgent, RealAgentRegistry};
 pub use spec::{
-    spec, AgentDialog, AgentSpec, CommandSyntax, DialogScope, McpConfigKind, PromptForm,
-    ResumeArgs, SendStrategy, SkillLayout, AGENT_SPECS,
+    spec, AgentDialog, AgentSpec, CommandSyntax, DialogScope, HookConfigKind, HookEventSource,
+    McpConfigKind, PromptForm, ResumeArgs, SendStrategy, SkillLayout, AGENT_SPECS,
 };
 
 #[cfg(feature = "test-mocks")]
