@@ -11406,6 +11406,93 @@ fn test_agent_hooks_false_writes_no_hooks_for_any_agent() {
     }
 }
 
+// ── submitting a message ────────────────────────────────────────────────────
+//
+// Pane text below is captured verbatim from live sessions. The bare-command case
+// is the one that mattered: a repaint used to count as a submit, so a command
+// parked in a picker looked delivered and the phase never advanced.
+
+/// codex 0.144.5, after pasting a bare `$agtx-review`: the picker is open and the
+/// command is still in the composer. Enter here *inserts*; it does not submit.
+const CODEX_PARKED: &str = "\
+• You have 1 usage limit reset available. Run /usage to use one.
+› $agtx-review
+  agtx-review  [Skill] Self-review completed work. Check for correctness…
+  Press enter to insert or esc to close";
+
+/// The same session after the command was actually submitted: the composer is
+/// back to its placeholder and the text has moved into the scrollback.
+const CODEX_SUBMITTED: &str = "\
+• I'm using the agtx-review skill to inspect the task's diff and commits.
+• Ran sed -n '1,240p' .codex/skills/agtx-review/SKILL.md
+• Working (6s • esc to interrupt)
+› Use /skills to list available skills
+  gpt-5.6-sol default · /private/tmp/…";
+
+/// cursor-agent 2026.08.25, parked with its picker open — the state
+/// `submit_message` actually sees, not the tidied one left behind afterwards.
+/// The suggestion renders *below* the composer box and the footer wraps the
+/// worktree path, so the text being submitted sits eight lines off the bottom.
+const CURSOR_PARKED: &str = "\
+ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+  → /agtx-review
+ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   → /agtx-review        Self-review completed work. Check for correctness…
+  Auto · 9.6% · 4 files edited                          Run Everything
+  /private/tmp/claude-501/-Users-fynn-workspace-agtx/69231794-89a8-48a
+  5da1fead47/scratchpad/fixrun/cursor-agtx/.agtx/worktrees/21edaf6d-sm
+  r-agtx · task/21edaf6d-smoke-cursor-agtx";
+
+#[test]
+fn test_composer_holds_sees_a_parked_command() {
+    assert!(
+        composer_holds(CODEX_PARKED, "$agtx-review"),
+        "a command sitting in the composer must not read as submitted"
+    );
+    assert!(
+        composer_holds(CURSOR_PARKED, "/agtx-review"),
+        "an open picker and a wrapped footer put the text eight lines up; \
+         the window must still reach it"
+    );
+}
+
+#[test]
+fn test_composer_holds_ignores_the_scrollback() {
+    // The skill name appears in the agent's own narration above the composer.
+    // Finding it there is proof the message went, not that it stayed.
+    assert!(
+        !composer_holds(CODEX_SUBMITTED, "$agtx-review"),
+        "text echoed into the scrollback must not read as still-pending"
+    );
+}
+
+/// The regression itself: a bare command needs a second Enter, and the first
+/// one's repaint must not be mistaken for success.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_submit_message_presses_enter_again_when_the_picker_ate_the_first() {
+    let mut mock = MockTmuxOperations::new();
+    let seq = Arc::new(std::sync::Mutex::new(0usize));
+    let c = seq.clone();
+    // Parked before and after the first Enter — a repaint, not a submit — then
+    // submitted once the second lands.
+    mock.expect_capture_pane().returning(move |_| {
+        let n = *c.lock().unwrap();
+        Ok(if n < 2 { CODEX_PARKED } else { CODEX_SUBMITTED }.to_string())
+    });
+    let c2 = seq.clone();
+    mock.expect_send_key()
+        .times(2)
+        .withf(|_, k| k == "Enter")
+        .returning(move |_, _| {
+            *c2.lock().unwrap() += 1;
+            Ok(())
+        });
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    submit_message(&ops, "t:1", "$agtx-review");
+}
+
 // ── first-launch dialog handling (wait_for_agent_ready) ──────────────────────
 
 /// Regression: a native-binary agent changes `pane_current_command` the moment
@@ -12568,11 +12655,12 @@ fn test_trust_block_clears_once_the_dialog_is_gone() {
 // submit_message — the Enter that submits is its own delivery problem
 // ===========================================================================
 
-/// A dropped Enter is retried, because an unchanged pane means the composer
-/// never took it.
+/// A dropped Enter is retried while the message is still in the composer, and
+/// the retries are bounded — an agent that never submits must cost a fixed
+/// number of keypresses, not an unbounded stream into its composer.
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_submit_message_retries_while_the_pane_is_unchanged() {
+fn test_submit_message_retries_while_the_composer_still_holds_it() {
     let mut mock = MockTmuxOperations::new();
     // Same frame every time: nothing ever submits.
     mock.expect_capture_pane()
@@ -12582,14 +12670,14 @@ fn test_submit_message_retries_while_the_pane_is_unchanged() {
         .withf(|_, k| k == "Enter")
         .returning(|_, _| Ok(()));
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
-    submit_message(&ops, "t:1");
+    submit_message(&ops, "t:1", "/agtx:execute abc");
 }
 
 /// One Enter is enough when the composer clears — a second would fire into an
-/// empty composer, which is the bug codex's double-Enter used to be.
+/// already-empty composer.
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_submit_message_stops_once_the_pane_changes() {
+fn test_submit_message_stops_once_the_composer_clears() {
     let mut mock = MockTmuxOperations::new();
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let c = std::sync::Arc::clone(&calls);
@@ -12608,7 +12696,7 @@ fn test_submit_message_stops_once_the_pane_changes() {
         .withf(|_, k| k == "Enter")
         .returning(|_, _| Ok(()));
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
-    submit_message(&ops, "t:1");
+    submit_message(&ops, "t:1", "/agtx:execute abc");
 }
 
 // === Update notice ===

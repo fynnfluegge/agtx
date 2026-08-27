@@ -9446,16 +9446,63 @@ fn wait_for_pane_settled(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> bo
 /// which is a visible change; an unchanged pane means the Enter was dropped.
 /// Never retried blindly: a stray Enter into an already-empty composer is its own
 /// bug, and is exactly why codex stopped getting a second one.
-fn submit_message(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) {
+/// Lines at the bottom of a pane treated as the composer.
+///
+/// Sized from the worst real layout, not from the composer alone: while the
+/// command picker is open the agent draws its suggestions *below* the composer,
+/// and cursor's footer wraps the worktree path over three more lines. That puts
+/// the text being submitted eight or more lines off the bottom — a snugger
+/// window reads it as already gone and stops pressing Enter after one.
+///
+/// The cost of erring wide is one extra Enter into a composer that already
+/// submitted, which is inert; the cost of erring narrow is a command parked
+/// forever.
+const COMPOSER_TAIL_LINES: usize = 14;
+
+/// Whether the message is still sitting in the composer rather than submitted.
+///
+/// Only the bottom of the pane is examined: after a submit the text moves up into
+/// the scrollback, and finding it *there* is proof it went, not that it stayed.
+fn composer_holds(pane: &str, needle: &str) -> bool {
+    let lines: Vec<&str> = pane.lines().collect();
+    let start = lines.len().saturating_sub(COMPOSER_TAIL_LINES);
+    pane_shows(&lines[start..].join("\n"), needle)
+}
+
+/// Press Enter until the message actually leaves the composer.
+///
+/// The check is "the text is gone from the composer", not "the pane changed".
+/// A repaint is not a submit: a **bare skill command** — one with no prompt after
+/// it, which is what a phase whose command carries no `{task}`/`{task_id}` sends —
+/// exactly matches a skill name, so the composer's command picker opens *on the
+/// paste*. Enter is then consumed by the picker ("Press enter to insert"), which
+/// inserts the command and repaints. The old change-detector read that repaint as
+/// success and returned, leaving the command parked in the composer forever.
+///
+/// Measured against codex-cli 0.144.5 and cursor-agent 2026.08.25: both open the
+/// picker on a pasted bare command, both need the second Enter, and both run the
+/// skill once it arrives.
+///
+/// Falls back to the change-detector when the text is too short to track, and is
+/// bounded either way — an agent that never submits costs `SUBMIT_ATTEMPTS`
+/// keypresses, not an unbounded stream.
+fn submit_message(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, text: &str) {
+    let needle = delivery_needle(text);
     for _ in 0..SUBMIT_ATTEMPTS {
         let before = tmux_ops.capture_pane(target).unwrap_or_default();
         let _ = tmux_ops.send_key(target, "Enter");
         for _ in 0..SUBMIT_CONFIRM_POLLS {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            if let Ok(now) = tmux_ops.capture_pane(target) {
-                if now != before {
-                    return;
-                }
+            let Ok(now) = tmux_ops.capture_pane(target) else {
+                continue;
+            };
+            match needle.as_deref() {
+                Some(n) if !composer_holds(&now, n) => return,
+                Some(_) => {}
+                // Nothing distinctive enough to look for; the pane moving is all
+                // there is to go on.
+                None if now != before => return,
+                None => {}
             }
         }
     }
@@ -9687,16 +9734,11 @@ fn send_skill_and_prompt(
             // is unchanged, and only then is it submitted.
             deliver_message(tmux_ops, target, &text, true);
             std::thread::sleep(std::time::Duration::from_millis(150));
-            submit_message(tmux_ops, target);
-
-            // No second Enter for Codex any more. Its command picker ("Press enter
-            // to insert") opens in response to *typing* a `$skill`, not to a paste,
-            // so with bracketed paste there is no picker to dismiss and the first
-            // Enter submits. Verified against codex-cli 0.144.5: pasting
-            // "$agtx-plan <id>\n\n<task>" put both lines in the composer with the
-            // newlines intact, no picker appeared, and a single Enter submitted —
-            // the skill resolved and ran. A second Enter here would fire into an
-            // already-empty composer.
+            // How many Enters this takes is not fixed. A message with a prompt
+            // after the command submits on the first; a bare command opens the
+            // command picker on the paste and needs a second. `submit_message`
+            // decides by watching the composer rather than counting keypresses.
+            submit_message(tmux_ops, target, &text);
         }
         return;
     }
