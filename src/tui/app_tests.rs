@@ -4422,6 +4422,25 @@ fn redirect_agent_home() -> (std::path::PathBuf, std::sync::MutexGuard<'static, 
     (dir.path().to_path_buf(), guard)
 }
 
+/// Point `Database` at a throwaway data root.
+///
+/// `switch_to_project_keep_sidebar` opens a *real* project database for the path
+/// it is handed. Without the redirect every run of the suite leaves an orphan
+/// `projects/<hash>.db` in the user's own store, keyed by a temp dir that is
+/// gone by the time the test returns. Same reasoning as `redirect_agent_home`,
+/// and the lock is needed for the same reason: the target is process-global.
+///
+/// Hold the returned guard for the duration of the test.
+fn redirect_data_dir() -> std::sync::MutexGuard<'static, ()> {
+    static DATA_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking test poisons the lock; the data is unit, so recover and carry on.
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = DATA_DIR.get_or_init(|| tempfile::tempdir().unwrap());
+    std::env::set_var("AGTX_DATA_DIR", dir.path());
+    guard
+}
+
 #[test]
 fn test_write_skills_to_worktree_mcp_antigravity() {
     let dir = tempfile::tempdir().unwrap();
@@ -11078,6 +11097,8 @@ fn test_handle_paste_noop_in_normal_mode() {
 fn test_switch_to_project_reloads_config() {
     use std::fs;
     use tempfile::TempDir;
+
+    let _data_dir = redirect_data_dir();
 
     // Create a temp dir simulating a project with review = "codex"
     let project_dir = TempDir::new().unwrap();

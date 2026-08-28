@@ -592,6 +592,27 @@ def tmux(server: str, *args: str, check: bool = False) -> subprocess.CompletedPr
     return run(["tmux", "-L", server, *args], check=check)
 
 
+def isolate_agtx_store(workdir: Path) -> Path:
+    """Point agtx's databases at the scratch workdir for this run.
+
+    Every scratch repo agtx opens is upserted into the global project index, and
+    nothing ever removes a row — so without this each run permanently adds one
+    sidebar entry per case, pointing at a mkdtemp path that is deleted minutes
+    later. A single run of the full matrix adds seven.
+
+    Set in `os.environ` so `agtx trust` and `agtx mcp-serve` inherit it; the TUI
+    gets it explicitly via `new-session -e`, because a tmux server left running
+    by an earlier run would otherwise hand the new session that run's environment.
+    """
+    store = workdir / "agtx-store"
+    store.mkdir(parents=True, exist_ok=True)
+    os.environ["AGTX_DATA_DIR"] = str(store)
+    # A smoke run must not spend a GitHub API call, nor render an update notice
+    # over the pane content the checks read.
+    os.environ["AGTX_NO_UPDATE_CHECK"] = "1"
+    return store
+
+
 def start_tui(session: str, repo: Path, agtx_bin: str) -> None:
     tmux(TUI_SERVER, "kill-session", "-t", session)
     tmux(AGENT_SERVER, "kill-session", "-t", repo.name)
@@ -600,6 +621,8 @@ def start_tui(session: str, repo: Path, agtx_bin: str) -> None:
     # failure would surface much later as "no worktree" with no obvious cause.
     proc = tmux(
         TUI_SERVER, "new-session", "-d", "-s", session, "-x", "200", "-y", "50",
+        "-e", f"AGTX_DATA_DIR={os.environ['AGTX_DATA_DIR']}",
+        "-e", "AGTX_NO_UPDATE_CHECK=1",
         f"{shlex.quote(str(agtx_bin))} {shlex.quote(str(repo))}",
     )
     if proc.returncode != 0:
@@ -1521,9 +1544,11 @@ def main(argv: list[str] | None = None) -> int:
         tempfile.mkdtemp(prefix="agtx-smoke-")
     )
     workdir.mkdir(parents=True, exist_ok=True)
+    isolate_agtx_store(workdir)
     runnable = [c for c in cases if not c.skip_reason]
     print(f"agtx smoke: {len(runnable)} case(s) to run, {len(cases) - len(runnable)} skipped")
     print(f"scratch: {workdir}")
+    print(f"agtx store: {os.environ['AGTX_DATA_DIR']}")
 
     results: list[CaseResult] = []
     for case in cases:
