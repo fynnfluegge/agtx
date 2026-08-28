@@ -1,16 +1,23 @@
 //! Agent-reported lifecycle status, written by agent hooks and read by the TUI.
 //!
-//! Agents that support lifecycle hooks (currently Claude Code) are configured to
-//! invoke `agtx hook <task-id> <worktree>` on session/turn/tool events. That
-//! subcommand parses the hook's JSON payload from stdin and writes
-//! `.agtx/status/{task_id}.json` inside the worktree. The board's session-refresh
-//! thread reads that file instead of guessing liveness from `tmux capture-pane`
-//! output.
+//! Agents that support lifecycle hooks are configured to invoke `agtx hook --env
+//! <agent>` on session/turn/tool events. That subcommand parses the hook's JSON
+//! payload from stdin and writes `.agtx/status/{task_id}.json` inside the
+//! worktree. The board's session-refresh thread reads that file instead of
+//! guessing liveness from `tmux capture-pane` output.
+//!
+//! Which agents, and where their config goes, is [`HookConfigKind`]; every one
+//! of them is project-local, so registration lives and dies with the worktree.
+//!
+//! Two things here are per-agent: [`map_hook_event`], because the vocabularies
+//! differ, and where the event name comes from ([`super::spec::HookEventSource`]).
+//! Merging, staleness, the `Blocked` guard and the atomic write are shared.
 //!
 //! This module is deliberately free of tmux, database and TUI types so the event
 //! mapping and staleness rules can be unit-tested in isolation — the same
 //! precedent as `src/tui/dep_graph.rs`.
 
+use crate::agent::spec::HookConfigKind;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -26,8 +33,8 @@ pub const STATUS_DIR: &str = ".agtx/status";
 pub const HOOK_STALE_SECS: i64 = 300;
 
 /// How long a `Blocked` record is protected from being overwritten by a
-/// `Working` event. Claude can emit a `PreToolUse` for the very tool it is
-/// asking permission for, which would otherwise clear the block immediately.
+/// `Working` event. An agent can emit its tool heartbeat for the very tool it is
+/// requesting permission for, which would otherwise clear the block instantly.
 pub const BLOCKED_GUARD_SECS: i64 = 2;
 
 /// Maximum stdin payload accepted from a hook invocation.
@@ -72,17 +79,163 @@ pub enum HookState {
     Ended,
 }
 
-/// Map a Claude Code `hook_event_name` to a state.
+/// Map one agent's lifecycle event name to a state.
 ///
-/// `None` means the event carries no state transition and any stored record
-/// should be left alone rather than overwritten.
-pub fn map_claude_event(event: &str) -> Option<HookState> {
-    match event {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" => Some(HookState::Working),
-        "PermissionRequest" | "Notification" => Some(HookState::Blocked),
-        "Stop" | "StopFailure" => Some(HookState::Waiting),
-        "SessionEnd" => Some(HookState::Ended),
-        _ => None,
+/// `None` means the event carries no transition and the stored record is left
+/// alone. An event from another agent's vocabulary also returns `None`: the kind
+/// is a parameter, not a fallback chain, so a registration typo cannot resolve
+/// against the wrong agent's arm. `Stop` means "turn over" to four agents while
+/// Gemini's equivalent is `AfterAgent` and Cursor's is lowercase `stop`.
+///
+/// Each arm names the version it was read from.
+pub fn map_hook_event(kind: HookConfigKind, event: &str) -> Option<HookState> {
+    use HookConfigKind::*;
+    match kind {
+        // claude 2.1.247.
+        ClaudeSettings => match event {
+            "SessionStart" | "UserPromptSubmit" | "PreToolUse" => Some(HookState::Working),
+            "PermissionRequest" | "Notification" => Some(HookState::Blocked),
+            "Stop" | "StopFailure" => Some(HookState::Waiting),
+            "SessionEnd" => Some(HookState::Ended),
+            _ => None,
+        },
+        // codex-cli 0.144.5. Claude's schema minus `SessionEnd` (window-gone
+        // detection covers Exited) and `Notification`.
+        CodexHooksJson => match event {
+            "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
+                Some(HookState::Working)
+            }
+            "PermissionRequest" => Some(HookState::Blocked),
+            "Stop" => Some(HookState::Waiting),
+            _ => None,
+        },
+        // gemini-cli 0.46.0. Its own vocabulary: the turn boundary is
+        // `BeforeAgent`/`AfterAgent` and the tool heartbeat is `BeforeTool`.
+        // `Notification` fires on a ToolPermission alert and carries `message`.
+        GeminiSettings => match event {
+            "SessionStart" | "BeforeAgent" | "BeforeTool" | "AfterTool" => {
+                Some(HookState::Working)
+            }
+            "Notification" => Some(HookState::Blocked),
+            "AfterAgent" => Some(HookState::Waiting),
+            "SessionEnd" => Some(HookState::Ended),
+            _ => None,
+        },
+        // cursor-agent 2026.08.25. camelCase, and no event for a human-blocking
+        // prompt: the `beforeShellExecution` family are policy gates that decide,
+        // not prompts that wait. Cursor never reports Blocked.
+        CursorHooksJson => match event {
+            "sessionStart" | "beforeSubmitPrompt" | "preToolUse" | "postToolUse" => {
+                Some(HookState::Working)
+            }
+            "stop" => Some(HookState::Waiting),
+            "sessionEnd" => Some(HookState::Ended),
+            _ => None,
+        },
+        // grok 1.0.5. Config and payload disagree about spelling: hooks are
+        // registered under `PreToolUse` and arrive as `"pre_tool_use"`, so both
+        // must map — hence `squash`.
+        //
+        // `notification` counts as Blocked only because the registration pins
+        // `matcher: "permission_prompt"`; unscoped it also fires for
+        // `idle_prompt` and `task_complete`.
+        GrokHooksJson => match squash(event).as_str() {
+            "sessionstart" | "userpromptsubmit" | "pretooluse" => Some(HookState::Working),
+            "notification" => Some(HookState::Blocked),
+            "stop" | "stopfailure" | "stopcancelled" => Some(HookState::Waiting),
+            "sessionend" => Some(HookState::Ended),
+            _ => None,
+        },
+        // agy 1.1.21. Five events, no session lifecycle and no permission event.
+        // `PreInvocation` fires before each model call — its nearest thing to a
+        // turn start; `Stop` ends the execution loop, not the session.
+        AntigravityHooksJson => match event {
+            "PreInvocation" | "PostInvocation" | "PostToolUse" => Some(HookState::Working),
+            "Stop" => Some(HookState::Waiting),
+            _ => None,
+        },
+    }
+}
+
+/// Lowercase and drop underscores, so one arm accepts both spellings grok uses
+/// for an event: `PreToolUse` when registered, `pre_tool_use` when reported.
+fn squash(event: &str) -> String {
+    event.chars().filter(|c| *c != '_').flat_map(char::to_lowercase).collect()
+}
+
+/// The events agtx registers for one agent.
+///
+/// The write half of the pair whose read half is [`map_hook_event`]. A name
+/// listed here but not mapped there is a hook that fires and reports nothing, so
+/// `tests/hook_status_tests.rs` asserts the two agree in both directions.
+///
+/// The second element is the event's tool matcher, or `None` when the event is
+/// not tool-scoped.
+pub fn hook_events(kind: HookConfigKind) -> &'static [(&'static str, Option<&'static str>)] {
+    use HookConfigKind::*;
+    match kind {
+        ClaudeSettings => &[
+            // Liveness: a turn started, or a tool is about to run (heartbeat).
+            ("SessionStart", None),
+            ("UserPromptSubmit", None),
+            ("PreToolUse", Some("*")),
+            // Blocked: the agent is stopped waiting on a human.
+            ("PermissionRequest", Some("*")),
+            ("Notification", None),
+            // Turn over / session over.
+            ("Stop", None),
+            ("StopFailure", None),
+            ("SessionEnd", None),
+        ],
+        CodexHooksJson => &[
+            ("SessionStart", None),
+            ("UserPromptSubmit", None),
+            ("PreToolUse", Some("*")),
+            ("PostToolUse", Some("*")),
+            ("PermissionRequest", Some("*")),
+            ("Stop", None),
+        ],
+        GeminiSettings => &[
+            ("SessionStart", Some("*")),
+            ("BeforeAgent", Some("*")),
+            ("BeforeTool", Some("*")),
+            ("AfterTool", Some("*")),
+            ("Notification", Some("*")),
+            ("AfterAgent", Some("*")),
+            ("SessionEnd", Some("*")),
+        ],
+        CursorHooksJson => &[
+            ("sessionStart", None),
+            ("beforeSubmitPrompt", None),
+            ("preToolUse", None),
+            ("postToolUse", None),
+            ("stop", None),
+            ("sessionEnd", None),
+        ],
+        // Registered in PascalCase, reported in snake_case; see the grok arm of
+        // `map_hook_event`.
+        GrokHooksJson => &[
+            ("SessionStart", None),
+            ("UserPromptSubmit", None),
+            ("PreToolUse", Some("*")),
+            // Scoped: unmatched, this also fires on idle and task-complete.
+            ("Notification", Some("permission_prompt")),
+            ("Stop", None),
+            ("StopFailure", None),
+            ("StopCancelled", None),
+            ("SessionEnd", None),
+        ],
+        // No `PreToolUse`, deliberately: antigravity makes that hook's
+        // `decision` output *required* and reads anything else as a refusal, so
+        // subscribing blocks every tool call. Answering `"allow"` would make a
+        // liveness reporter into a permission granter. `PostToolUse` carries the
+        // heartbeat instead and wants exactly the `{}` this hook prints.
+        AntigravityHooksJson => &[
+            ("PreInvocation", None),
+            ("PostInvocation", None),
+            ("PostToolUse", Some("*")),
+            ("Stop", None),
+        ],
     }
 }
 
@@ -125,11 +278,11 @@ pub fn write_status(worktree: &Path, task_id: &str, status: &AgentHookStatus) ->
 /// Decide the record to persist given an incoming event and whatever is stored.
 ///
 /// Returns `None` when the event should not change the stored record. Two rules:
-/// an event with no state mapping is ignored, and a `Working` event is dropped
-/// while a fresh `Blocked` record stands — Claude emits `PreToolUse` for the very
-/// tool it is requesting permission for, which would otherwise clear the block.
+/// an event with no mapping *for this agent* is ignored, and a `Working` event is
+/// dropped while a fresh `Blocked` record stands (see [`BLOCKED_GUARD_SECS`]).
 pub fn merge_event(
     previous: Option<&AgentHookStatus>,
+    kind: HookConfigKind,
     event: &str,
     now: i64,
     agent: &str,
@@ -138,7 +291,7 @@ pub fn merge_event(
     message: Option<String>,
     tool: Option<String>,
 ) -> Option<AgentHookStatus> {
-    let state = map_claude_event(event)?;
+    let state = map_hook_event(kind, event)?;
 
     if state == HookState::Working {
         if let Some(prev) = previous {
@@ -182,15 +335,33 @@ fn truncate(s: &str) -> String {
     trimmed.chars().take(MAX_FIELD_CHARS).collect()
 }
 
-/// Fields lifted from a hook's JSON payload. Every field is optional — agents
+/// Fields lifted from a hook's JSON payload. Every field is optional: agents
 /// disagree about which they send, and a missing field must never be fatal.
+///
+/// The aliases carry the two agents that do not send `snake_case`.
 #[derive(Debug, Default, Deserialize)]
 struct HookPayload {
+    /// Grok spells this `hookEventName`, with a snake_case value.
+    #[serde(alias = "hookEventName")]
     hook_event_name: Option<String>,
+    #[serde(alias = "sessionId")]
     session_id: Option<String>,
+    /// `conversationId` is antigravity's session identifier.
+    #[serde(alias = "conversationId")]
+    conversation_id: Option<String>,
+    #[serde(alias = "transcriptPath")]
     transcript_path: Option<String>,
     message: Option<String>,
+    #[serde(alias = "toolName")]
     tool_name: Option<String>,
+    /// Antigravity's `PreToolUse` payload nests the tool under `toolCall.name`.
+    #[serde(alias = "toolCall")]
+    tool_call: Option<ToolCall>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ToolCall {
+    name: Option<String>,
 }
 
 /// Environment variables identifying the task a hook is reporting about, set on
@@ -198,24 +369,36 @@ struct HookPayload {
 pub const ENV_TASK_ID: &str = "AGTX_TASK_ID";
 pub const ENV_WORKTREE: &str = "AGTX_WORKTREE";
 
-/// Entry point for `agtx hook --env` (preferred) or `agtx hook <task-id> <worktree> [agent]`.
+/// Entry point for `agtx hook --env <agent> [--event <Name>]` (preferred) or the
+/// legacy `agtx hook <task-id> <worktree> [agent]`.
 ///
-/// `--env` reads the task from the process environment instead of argv, so the
-/// registered hook command is identical for every task. That matters because a
-/// single config file can serve several tasks — under `skip_worktree` they all
-/// share the project's `.claude/settings.local.json` — and because a
-/// task-agnostic command is what a future user-global install would need.
+/// `--env` reads the task from the process environment, so one registered command
+/// serves every task — necessary under `skip_worktree`, where all of them share
+/// the project's agent config.
 ///
-/// If the variables are absent the hook exits silently: a globally registered
-/// hook must be inert in the user's own sessions outside agtx.
+/// `--event` names the firing event for an agent whose payload does not
+/// ([`super::spec::HookEventSource::Argv`]). The payload wins when it has one, so
+/// an agent that starts sending an event name is not shadowed by a stale argv
+/// value.
 ///
-/// Always succeeds. A hook that reports an error can break the agent's turn, and
-/// no status update is worth that — every failure path here is a silent no-op
-/// after the mandatory `{}` on stdout.
+/// If the task variables are absent the hook exits silently, so a registration
+/// stays inert outside agtx.
+///
+/// Always succeeds. A hook that reports an error can break the agent's turn, so
+/// every failure path is a silent no-op after the mandatory `{}` on stdout.
 pub fn run_hook_cli(args: &[String]) -> Result<()> {
     // Claude-compatible permission hooks fail closed on empty stdout, so this
     // must be printed before any early return.
     println!("{{}}");
+
+    // Lifted out first so the positional parsing below is unaffected.
+    let mut argv_event: Option<String> = None;
+    let mut args: Vec<String> = args.to_vec();
+    if let Some(i) = args.iter().position(|a| a == "--event") {
+        argv_event = args.get(i + 1).cloned();
+        args.drain(i..=(i + 1).min(args.len() - 1));
+    }
+    let args = &args[..];
 
     let from_env = args.first().map(String::as_str) == Some("--env");
     let (task_id, worktree, agent);
@@ -252,9 +435,37 @@ pub fn run_hook_cli(args: &[String]) -> Result<()> {
     {
         return Ok(());
     }
-    let payload: HookPayload = serde_json::from_slice(&buf).unwrap_or_default();
-    let Some(event) = payload.hook_event_name.as_deref() else {
-        return Ok(());
+    record_hook_event(task_id, worktree, agent, argv_event.as_deref(), &buf);
+    Ok(())
+}
+
+/// Everything after the argv and stdin plumbing: decide what the payload means
+/// and persist it. Split out so tests can supply a payload without real stdin.
+///
+/// `argv_event` names the firing event for an agent whose payload does not carry
+/// one; it is consulted only when the payload has no `hook_event_name`.
+pub fn record_hook_event(
+    task_id: &str,
+    worktree: &str,
+    agent: &str,
+    argv_event: Option<&str>,
+    payload: &[u8],
+) {
+    // An unknown agent name — a typo, or a spec removed under a live worktree —
+    // must not borrow another agent's vocabulary. See `map_hook_event`.
+    let Some(kind) = crate::agent::spec(agent).and_then(|s| s.hook_config) else {
+        return;
+    };
+
+    let payload: HookPayload = serde_json::from_slice(payload).unwrap_or_default();
+    // Payload first: an agent that sends an event name outranks the registration.
+    let Some(event) = payload
+        .hook_event_name
+        .as_deref()
+        .or(argv_event)
+        .filter(|e| !e.is_empty())
+    else {
+        return;
     };
 
     let worktree = Path::new(worktree);
@@ -263,15 +474,15 @@ pub fn run_hook_cli(args: &[String]) -> Result<()> {
 
     if let Some(next) = merge_event(
         previous.as_ref(),
+        kind,
         event,
         now,
         agent,
-        payload.session_id,
+        payload.session_id.or(payload.conversation_id),
         payload.transcript_path,
         payload.message,
-        payload.tool_name,
+        payload.tool_name.or(payload.tool_call.and_then(|t| t.name)),
     ) {
         let _ = write_status(worktree, task_id, &next);
     }
-    Ok(())
 }

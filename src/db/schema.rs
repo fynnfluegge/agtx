@@ -10,17 +10,33 @@ pub struct Database {
 }
 
 impl Database {
+    /// Root directory holding `index.db` and `projects/`.
+    ///
+    /// `AGTX_DATA_DIR` overrides it so tests (and the smoke runner) can open real
+    /// databases without writing into the user's own store — otherwise every
+    /// `Database::open_project(TempDir)` in the suite leaves an orphan DB behind,
+    /// keyed by a temp path that no longer exists. Same reasoning as
+    /// `AGTX_AGENT_HOME`.
+    pub fn data_root() -> Result<std::path::PathBuf> {
+        if let Ok(dir) = std::env::var("AGTX_DATA_DIR") {
+            if !dir.is_empty() {
+                return Ok(std::path::PathBuf::from(dir));
+            }
+        }
+        let dirs = directories::ProjectDirs::from("", "", "agtx")
+            .context("Could not determine config directory")?;
+        Ok(dirs.config_dir().to_path_buf())
+    }
+
     /// Open or create a project database (stored centrally in config dir)
     pub fn open_project(project_path: &Path) -> Result<Self> {
-        let config_dir = directories::ProjectDirs::from("", "", "agtx")
-            .context("Could not determine config directory")?;
+        let config_dir = Self::data_root()?;
 
         // Create a stable ID from the project path using a hash
         let path_str = project_path.to_string_lossy();
         let path_hash = Self::hash_path(&path_str);
 
         let db_path = config_dir
-            .config_dir()
             .join("projects")
             .join(format!("{}.db", path_hash));
 
@@ -33,7 +49,6 @@ impl Database {
         if !db_path.exists() {
             let old_hash = Self::hash_path_legacy(&path_str);
             let old_db_path = config_dir
-                .config_dir()
                 .join("projects")
                 .join(format!("{}.db", old_hash));
             if old_db_path.exists() {
@@ -82,9 +97,7 @@ impl Database {
 
     /// Open or create the global index database
     pub fn open_global() -> Result<Self> {
-        let config_dir = directories::ProjectDirs::from("", "", "agtx")
-            .context("Could not determine config directory")?;
-        let db_path = config_dir.config_dir().join("index.db");
+        let db_path = Self::data_root()?.join("index.db");
 
         // Ensure config directory exists
         if let Some(parent) = db_path.parent() {

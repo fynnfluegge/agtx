@@ -509,8 +509,28 @@ fn test_consume_notifications_atomic_under_concurrent_consumers() {
 use std::path::Path;
 use tempfile::TempDir;
 
+/// Point `Database` at a throwaway data root for the tests below.
+///
+/// These are the only tests that open a *real* database rather than an
+/// in-memory one. Without the redirect each run leaves an orphan
+/// `projects/<hash>.db` in the user's own store, keyed by a temp path that no
+/// longer exists — nothing ever collects them. The lock is needed because the
+/// redirect target is process-global.
+///
+/// Hold the returned guard for the duration of the test.
+fn redirect_data_dir() -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
+    static DATA_DIR: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking test poisons the lock; the data is unit, so recover and carry on.
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = DATA_DIR.get_or_init(|| TempDir::new().unwrap());
+    std::env::set_var("AGTX_DATA_DIR", dir.path());
+    (dir.path().to_path_buf(), guard)
+}
+
 #[test]
 fn test_open_project_same_path_returns_same_db() {
+    let (_data_dir, _guard) = redirect_data_dir();
     let temp_dir = TempDir::new().unwrap();
     let project_path = temp_dir.path();
 
@@ -528,6 +548,7 @@ fn test_open_project_same_path_returns_same_db() {
 
 #[test]
 fn test_open_project_different_paths_are_isolated() {
+    let (_data_dir, _guard) = redirect_data_dir();
     let temp1 = TempDir::new().unwrap();
     let temp2 = TempDir::new().unwrap();
 
@@ -547,6 +568,7 @@ fn test_project_db_file_permissions_are_0600() {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
 
+    let (data_dir, _guard) = redirect_data_dir();
     let temp_dir = TempDir::new().unwrap();
     let _db = Database::open_project(temp_dir.path()).unwrap();
 
@@ -562,11 +584,7 @@ fn test_project_db_file_permissions_are_0600() {
         u64::from_be_bytes(result[..8].try_into().unwrap())
     );
 
-    let config_dir = directories::ProjectDirs::from("", "", "agtx").unwrap();
-    let db_path = config_dir
-        .config_dir()
-        .join("projects")
-        .join(format!("{}.db", path_hash));
+    let db_path = data_dir.join("projects").join(format!("{}.db", path_hash));
 
     assert!(
         db_path.exists(),
@@ -583,19 +601,21 @@ fn test_project_db_file_permissions_are_0600() {
 fn test_global_db_file_permissions_are_0600() {
     use std::os::unix::fs::PermissionsExt;
 
+    let (data_dir, _guard) = redirect_data_dir();
     let _db = Database::open_global().unwrap();
 
-    let config_dir = directories::ProjectDirs::from("", "", "agtx").unwrap();
-    let db_path = config_dir.config_dir().join("index.db");
+    // The redirect makes this unconditional: before it, the test opened the
+    // user's own index.db and skipped the assertion when it happened not to
+    // exist yet.
+    let db_path = data_dir.join("index.db");
+    assert!(db_path.exists(), "Expected index.db at {:?}", db_path);
 
-    if db_path.exists() {
-        let perms = std::fs::metadata(&db_path).unwrap().permissions();
-        let mode = perms.mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "Global DB file should be owner-only read/write"
-        );
-    }
+    let perms = std::fs::metadata(&db_path).unwrap().permissions();
+    let mode = perms.mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "Global DB file should be owner-only read/write"
+    );
 }
 
 // === Dependency-graph integration tests (real Database + deps_satisfied) ===

@@ -170,6 +170,48 @@ pub enum McpConfigKind {
     OpenCode,
 }
 
+/// Where and how an agent's lifecycle-hook config is written, and which event
+/// vocabulary its payloads speak.
+///
+/// One kind per agent, like [`McpConfigKind`], because the formats differ. The
+/// location does not: every variant is **project-local**, so agtx writes into
+/// the worktree and never into the user's global agent config. Removing the
+/// worktree removes the registration.
+///
+/// `hook_config: None` — opencode, copilot — keeps the pane-hash heuristic,
+/// which is a supported state, not a degraded one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookConfigKind {
+    /// `.claude/settings.local.json`, `hooks` key. Shared with the MCP preflight
+    /// keys, so the writer merges.
+    ClaudeSettings,
+    /// `.codex/hooks.json`, auto-discovered: `{description, hooks: {…}}` with
+    /// PascalCase event keys. The `hooks` key in `.codex/config.toml` is a table,
+    /// not a path, and pointing it at a file makes codex reject the whole config.
+    CodexHooksJson,
+    /// `.gemini/settings.json`, `hooks` key. Shared with gemini's MCP config, so
+    /// the writer merges.
+    GeminiSettings,
+    /// `.cursor/hooks.json`, `{version, hooks: {…}}`, camelCase event names.
+    CursorHooksJson,
+    /// `.grok/hooks/agtx.json`. Grok scans the whole directory, so agtx owns one
+    /// file in it and never merges.
+    GrokHooksJson,
+    /// `.agents/hooks.json`, keyed by hook *name* first and event second. The
+    /// payload carries no event name, so the event is passed in argv.
+    AntigravityHooksJson,
+}
+
+/// How the firing event reaches `agtx hook`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEventSource {
+    /// The payload names the event, so one command serves every event.
+    Payload,
+    /// The payload has no event field, so each event registers its own command
+    /// with `--event <Name>`. Antigravity only.
+    Argv,
+}
+
 /// Everything agtx knows about one coding agent.
 #[derive(Debug, Clone, Copy)]
 pub struct AgentSpec {
@@ -231,6 +273,12 @@ pub struct AgentSpec {
     /// How this agent's project-scoped MCP config is written, or `None` for an
     /// agent agtx does not wire up to the MCP server.
     pub mcp_config: Option<McpConfigKind>,
+    /// How this agent's lifecycle-hook config is written, or `None` for an agent
+    /// that reports nothing and falls back to the pane-hash heuristic.
+    pub hook_config: Option<HookConfigKind>,
+    /// Where `agtx hook` learns which event fired. Ignored when `hook_config` is
+    /// `None`.
+    pub hook_event_source: HookEventSource,
 
     // ── process / liveness ───────────────────────────────────────────────
     /// Process names this agent may appear as in `pane_current_command`.
@@ -294,6 +342,9 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".claude/commands"),
         command_syntax: CommandSyntax::Colon,
         mcp_config: Some(McpConfigKind::ClaudeJson),
+        // Verified against claude 2.1.247.
+        hook_config: Some(HookConfigKind::ClaudeSettings),
+        hook_event_source: HookEventSource::Payload,
         process_names: &["claude"],
         active_indicators: &["Claude Code"],
         exit_command: Some("/exit"),
@@ -383,6 +434,14 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".codex/skills"),
         command_syntax: CommandSyntax::Dollar,
         mcp_config: Some(McpConfigKind::CodexToml),
+        // Off: codex gates project hooks behind a startup trust review whose only
+        // enabling answers ("Trust all and continue", or
+        // `--dangerously-bypass-hook-trust`) trust *every* hook the repo ships,
+        // not just agtx's. That is the user's decision. The vocabulary is mapped
+        // and the writer exists, so enabling it is one field once codex offers
+        // per-hook trust. codex-cli 0.144.5.
+        hook_config: None,
+        hook_event_source: HookEventSource::Payload,
         process_names: &["codex"],
         active_indicators: &["OpenAI Codex"],
         exit_command: None,
@@ -411,6 +470,23 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
                 security: false,
                 require_all: false,
                 answer: &["2", "Enter"],
+                scope: DialogScope::Launch,
+            },
+            // Hook review, shown at launch when the project ships a
+            // `.codex/hooks.json` codex has not seen. Options are `1. Review
+            // hooks` / `2. Trust all and continue` / `3. Continue without
+            // trusting`.
+            //
+            // `3` and `security: false`, for the same reason as the update prompt
+            // above: declining grants nothing and decides nothing about safety,
+            // where `2` would trust every hook the repo ships. Fires whether or
+            // not agtx writes hooks for codex — the project's own file is enough.
+            // codex-cli 0.144.5.
+            AgentDialog {
+                patterns: &["Hooks need review"],
+                security: false,
+                require_all: false,
+                answer: &["3", "Enter"],
                 scope: DialogScope::Launch,
             },
             // MCP tool approval, shown mid-session the first time the agent calls
@@ -453,6 +529,10 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         command_syntax: CommandSyntax::None,
         // Copilot is not wired to the MCP server.
         mcp_config: None,
+        // Unknown, not absent — copilot has never been measured. Same rule as
+        // `api_key_env` above: fill this in from the real binary, not from docs.
+        hook_config: None,
+        hook_event_source: HookEventSource::Payload,
         process_names: &["copilot"],
         active_indicators: &[],
         exit_command: Some("/exit"),
@@ -492,6 +572,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".gemini/commands"),
         command_syntax: CommandSyntax::Colon,
         mcp_config: Some(McpConfigKind::GeminiJson),
+        hook_config: Some(HookConfigKind::GeminiSettings),
+        hook_event_source: HookEventSource::Payload,
         process_names: &["gemini"],
         active_indicators: &["Type your message"],
         exit_command: Some("/quit"),
@@ -541,6 +623,11 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".config/opencode/command"),
         command_syntax: CommandSyntax::Hyphen,
         mcp_config: Some(McpConfigKind::OpenCode),
+        // OpenCode's lifecycle callbacks are a TypeScript plugin API
+        // (`.opencode/plugin/*.ts`), not shell commands in a config file — there
+        // is no `hooks` key to write. opencode 1.18.20.
+        hook_config: None,
+        hook_event_source: HookEventSource::Payload,
         process_names: &["opencode"],
         active_indicators: &["Ask anything"],
         exit_command: Some("/exit"),
@@ -576,6 +663,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".cursor/skills"),
         command_syntax: CommandSyntax::Hyphen,
         mcp_config: Some(McpConfigKind::CursorJson),
+        hook_config: Some(HookConfigKind::CursorHooksJson),
+        hook_event_source: HookEventSource::Payload,
         process_names: &["agent"],
         active_indicators: &["Cursor Agent"],
         exit_command: None,
@@ -629,6 +718,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".grok/skills"),
         command_syntax: CommandSyntax::Hyphen,
         mcp_config: Some(McpConfigKind::GrokTomlMerge),
+        hook_config: Some(HookConfigKind::GrokHooksJson),
+        hook_event_source: HookEventSource::Payload,
         process_names: &["grok"],
         active_indicators: &["Grok Build", "Shift+Tab:mode"],
         exit_command: Some("/quit"),
@@ -673,6 +764,10 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".agents/skills"),
         command_syntax: CommandSyntax::Hyphen,
         mcp_config: Some(McpConfigKind::AntigravityJsonMerge),
+        // Its payload is protojson camelCase (`conversationId`, `stepIdx`) with
+        // no event key, so each event registers its own `--event`. agy 1.1.21.
+        hook_config: Some(HookConfigKind::AntigravityHooksJson),
+        hook_event_source: HookEventSource::Argv,
         process_names: &["agy"],
         // Shown only once the session is interactive: the trust dialog's own
         // footer reads "↑/↓ Navigate · enter Confirm" instead, so this cannot

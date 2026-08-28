@@ -323,7 +323,16 @@ impl GlobalConfig {
     }
 
     /// Get the path to the global data directory
+    ///
+    /// Honours `AGTX_DATA_DIR` like `Database::data_root`, so a test or smoke run
+    /// that redirects the databases also redirects the first-run probe that looks
+    /// for `index.db` beside them.
     pub fn data_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("AGTX_DATA_DIR") {
+            if !dir.is_empty() {
+                return Ok(PathBuf::from(dir));
+            }
+        }
         let dirs = directories::ProjectDirs::from("", "", "agtx")
             .context("Could not determine data directory")?;
         Ok(dirs.data_dir().to_path_buf())

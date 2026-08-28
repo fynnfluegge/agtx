@@ -4422,6 +4422,25 @@ fn redirect_agent_home() -> (std::path::PathBuf, std::sync::MutexGuard<'static, 
     (dir.path().to_path_buf(), guard)
 }
 
+/// Point `Database` at a throwaway data root.
+///
+/// `switch_to_project_keep_sidebar` opens a *real* project database for the path
+/// it is handed. Without the redirect every run of the suite leaves an orphan
+/// `projects/<hash>.db` in the user's own store, keyed by a temp dir that is
+/// gone by the time the test returns. Same reasoning as `redirect_agent_home`,
+/// and the lock is needed for the same reason: the target is process-global.
+///
+/// Hold the returned guard for the duration of the test.
+fn redirect_data_dir() -> std::sync::MutexGuard<'static, ()> {
+    static DATA_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking test poisons the lock; the data is unit, so recover and carry on.
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = DATA_DIR.get_or_init(|| tempfile::tempdir().unwrap());
+    std::env::set_var("AGTX_DATA_DIR", dir.path());
+    guard
+}
+
 #[test]
 fn test_write_skills_to_worktree_mcp_antigravity() {
     let dir = tempfile::tempdir().unwrap();
@@ -11079,6 +11098,8 @@ fn test_switch_to_project_reloads_config() {
     use std::fs;
     use tempfile::TempDir;
 
+    let _data_dir = redirect_data_dir();
+
     // Create a temp dir simulating a project with review = "codex"
     let project_dir = TempDir::new().unwrap();
     let agtx_dir = project_dir.path().join(".agtx");
@@ -11225,6 +11246,406 @@ fn test_agent_hooks_false_writes_no_hooks() {
 
     assert_eq!(v["enableAllProjectMcpServers"], serde_json::json!(true));
     assert!(v.get("hooks").is_none());
+}
+
+// ── hook configs for the other five agents ──────────────────────────────────
+//
+// Formats and paths were read off each agent's own binary or bundled docs; see
+// `HookConfigKind` for the versions. What these tests actually protect is the
+// merge discipline: three of the six files may already exist in the user's repo,
+// and a plain write would destroy settings agtx does not own.
+
+/// Every agent with hook support must land a config the agent can find, with a
+/// task-agnostic `agtx hook --env <agent>` command in it. A missing file is the
+/// silent-failure mode: the board just keeps guessing from pane hashes.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_hook_config_is_written_for_every_hook_capable_agent() {
+    let expected: &[(&str, &str)] = &[
+        ("claude", ".claude/settings.local.json"),
+        ("gemini", ".gemini/settings.json"),
+        ("codex", ".codex/hooks.json"),
+        ("cursor", ".cursor/hooks.json"),
+        ("grok", ".grok/hooks/agtx.json"),
+        ("antigravity", ".agents/hooks.json"),
+    ];
+    for (name, rel) in expected {
+        let spec = crate::agent::spec(name).unwrap();
+        if spec.hook_config.is_none() {
+            continue; // codex is off pending its hook-trust review; see spec.rs
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().to_string_lossy().to_string();
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+
+        let raw = std::fs::read_to_string(dir.path().join(rel))
+            .unwrap_or_else(|e| panic!("{name}: no hook config at {rel}: {e}"));
+        assert!(
+            raw.contains(&format!("hook --env {name}")),
+            "{name}: {rel} must register the task-agnostic command, got {raw}"
+        );
+    }
+}
+
+/// The agents whose hook file is shared with something else must merge. Gemini's
+/// `.gemini/settings.json` also carries `mcpServers` and `trust`, and the user's
+/// own hooks may already be in it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_gemini_hooks_merge_with_existing_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    std::fs::create_dir_all(dir.path().join(".gemini")).unwrap();
+    std::fs::write(
+        dir.path().join(".gemini/settings.json"),
+        r#"{"theme":"Dracula","hooks":{"BeforeTool":[{"hooks":[{"type":"command","command":"mine.sh"}]}]}}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["gemini"], true);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".gemini/settings.json")).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(v["theme"], serde_json::json!("Dracula"), "user key survived");
+    assert_eq!(v["mcpServers"]["agtx"]["command"].is_string(), true);
+    let before_tool = v["hooks"]["BeforeTool"].as_array().unwrap();
+    assert_eq!(before_tool.len(), 2, "user hook kept, agtx hook appended");
+    assert_eq!(before_tool[0]["hooks"][0]["command"], "mine.sh");
+    assert_eq!(v["hooks"]["AfterAgent"][0]["hooks"][0]["command"].is_string(), true);
+}
+
+/// Redeploying must replace agtx's entries rather than accumulate them —
+/// otherwise the hook fires N times per event, once per deploy. Matched on the
+/// `hook --env` invocation, not the binary path, so a moved agtx still
+/// recognises its own work.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_redeploying_hooks_is_idempotent_for_every_agent() {
+    for name in ["claude", "gemini", "cursor", "grok", "antigravity"] {
+        if crate::agent::spec(name).unwrap().hook_config.is_none() {
+            continue;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().to_string_lossy().to_string();
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+        let once = read_all_configs(dir.path());
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+        let twice = read_all_configs(dir.path());
+        assert_eq!(once, twice, "{name}: second deploy changed the config");
+    }
+}
+
+fn read_all_configs(root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for rel in [
+        ".claude/settings.local.json",
+        ".gemini/settings.json",
+        ".codex/hooks.json",
+        ".codex/config.toml",
+        ".cursor/hooks.json",
+        ".grok/hooks/agtx.json",
+        ".agents/hooks.json",
+    ] {
+        if let Ok(body) = std::fs::read_to_string(root.join(rel)) {
+            out.push((rel.to_string(), body));
+        }
+    }
+    out
+}
+
+/// `.agents/` is vendor-neutral and a project may well ship one, so this file
+/// must survive agtx writing into it — the same rule the antigravity MCP writer
+/// follows next door.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_antigravity_hooks_preserve_a_projects_own_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    std::fs::create_dir_all(dir.path().join(".agents")).unwrap();
+    std::fs::write(
+        dir.path().join(".agents/hooks.json"),
+        r#"{"lint-checker":{"PostToolUse":[{"matcher":"run_command","hooks":[{"command":"./lint.sh"}]}]}}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["antigravity"], true);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".agents/hooks.json")).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(v["lint-checker"]["PostToolUse"][0]["hooks"][0]["command"], "./lint.sh");
+    // Its payload carries no event name, so every handler must name its own.
+    assert!(v["agtx"]["Stop"][0]["command"]
+        .as_str()
+        .unwrap()
+        .ends_with("--event Stop"));
+    assert!(v["agtx"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .ends_with("--event PostToolUse"));
+    // Grouped vs flat is not cosmetic: antigravity ignores the wrong shape.
+    assert!(v["agtx"]["PostToolUse"][0]["matcher"].is_string());
+    assert!(v["agtx"]["Stop"][0]["matcher"].is_null());
+    // The gating hook must stay unsubscribed; see hook_status_tests.
+    assert!(v["agtx"]["PreToolUse"].is_null());
+}
+
+/// Cursor rejects a hooks file with no version envelope.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cursor_hooks_carry_the_version_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap())
+            .unwrap();
+    assert_eq!(v["version"], serde_json::json!(1));
+    // Flat `{command}`, not the Claude `{hooks:[{type,command}]}` wrapper —
+    // cursor loads the wrapped form without complaint and never fires it.
+    assert!(v["hooks"]["stop"][0]["command"].is_string());
+    assert!(v["hooks"]["stop"][0]["hooks"].is_null());
+}
+
+/// The toggle has to reach every agent, not just Claude.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_agent_hooks_false_writes_no_hooks_for_any_agent() {
+    for name in ["claude", "gemini", "cursor", "grok", "antigravity"] {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().to_string_lossy().to_string();
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], false);
+        for (rel, body) in read_all_configs(dir.path()) {
+            assert!(
+                !body.contains("hook --env"),
+                "{name}: agent_hooks=false still wrote hooks into {rel}"
+            );
+        }
+    }
+}
+
+/// `capture-pane -p` pads its output to the pane height, so a composer that has
+/// not been pushed to the bottom yet sits above a block of empty rows. Anchoring
+/// the window to the raw end finds nothing there and stops after one Enter —
+/// the park this exists to catch, reintroduced silently.
+#[test]
+fn test_composer_holds_looks_past_trailing_blank_rows() {
+    let padded = format!("› $agtx-review\n{}", "\n".repeat(30));
+    assert!(
+        composer_holds(&padded, "$agtx-review"),
+        "trailing pane padding must not push the composer out of the window"
+    );
+}
+
+// ── hook configs the project may already ship ───────────────────────────────
+
+/// A worktree is a full checkout, so a repo that tracks `.cursor/hooks.json` has
+/// it here. Overwriting destroys the user's hooks *and* leaves a modified tracked
+/// file on the task branch for the agent to commit.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cursor_hooks_preserve_a_projects_own_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    std::fs::create_dir_all(dir.path().join(".cursor")).unwrap();
+    std::fs::write(
+        dir.path().join(".cursor/hooks.json"),
+        r#"{"version":1,"hooks":{"stop":[{"command":"./mine.sh"}],"afterFileEdit":[{"command":"./fmt.sh"}]}}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
+    )
+    .unwrap();
+
+    // An event agtx does not touch survives untouched.
+    assert_eq!(v["hooks"]["afterFileEdit"][0]["command"], "./fmt.sh");
+    // An event agtx shares keeps the user's handler and gains agtx's.
+    let stop = v["hooks"]["stop"].as_array().unwrap();
+    assert_eq!(stop.len(), 2);
+    assert_eq!(stop[0]["command"], "./mine.sh");
+    assert!(stop[1]["command"].as_str().unwrap().contains("hook --env cursor"));
+}
+
+/// Redeploying must replace agtx's own flat `{command}` entries, not stack them.
+/// The Claude-shaped matcher looks inside a `hooks` array that cursor's entries
+/// do not have, so a shape-blind match would duplicate on every deploy.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cursor_hooks_do_not_accumulate_across_deploys() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["hooks"]["stop"].as_array().unwrap().len(), 1);
+}
+
+/// Turning hooks off has to reach worktrees that already have them, or they keep
+/// firing `agtx hook` for the life of the task.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_turning_hooks_off_unregisters_an_existing_worktree() {
+    for name in ["claude", "gemini", "cursor", "grok", "antigravity"] {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().to_string_lossy().to_string();
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+        assert!(
+            read_all_configs(dir.path())
+                .iter()
+                .any(|(_, b)| b.contains("hook --env")),
+            "{name}: nothing was deployed to un-deploy"
+        );
+
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], false);
+        for (rel, body) in read_all_configs(dir.path()) {
+            assert!(
+                !body.contains("hook --env"),
+                "{name}: {rel} still fires agtx hook after agent_hooks was turned off"
+            );
+        }
+    }
+}
+
+/// The user's own hooks must survive that un-deploy — pruning removes agtx's
+/// entries, not the file.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_turning_hooks_off_leaves_the_users_own_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    std::fs::create_dir_all(dir.path().join(".cursor")).unwrap();
+    std::fs::write(
+        dir.path().join(".cursor/hooks.json"),
+        r#"{"version":1,"hooks":{"stop":[{"command":"./mine.sh"}]}}"#,
+    )
+    .unwrap();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], false);
+
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["hooks"]["stop"].as_array().unwrap().len(), 1);
+    assert_eq!(v["hooks"]["stop"][0]["command"], "./mine.sh");
+}
+
+/// `--event` is driven by the spec, not by the agent's name, so an agent that
+/// later needs it gets it from one field.
+#[test]
+fn test_argv_event_agents_carry_their_event_in_the_command() {
+    for spec in agent::AGENT_SPECS {
+        let Some(kind) = spec.hook_config else {
+            continue;
+        };
+        let json = claude_shaped_hooks("/bin/agtx", spec.name, kind);
+        for (event, _) in hook_status::hook_events(kind) {
+            let cmd = json[event][0]["hooks"][0]["command"].as_str().unwrap_or("");
+            let wants_argv = spec.hook_event_source == agent::HookEventSource::Argv;
+            assert_eq!(
+                cmd.contains("--event"),
+                wants_argv,
+                "{}: {event} command disagrees with hook_event_source",
+                spec.name
+            );
+        }
+    }
+}
+
+// ── submitting a message ────────────────────────────────────────────────────
+//
+// Pane text below is captured verbatim from live sessions. The bare-command case
+// is the one that mattered: a repaint used to count as a submit, so a command
+// parked in a picker looked delivered and the phase never advanced.
+
+/// codex 0.144.5, after pasting a bare `$agtx-review`: the picker is open and the
+/// command is still in the composer. Enter here *inserts*; it does not submit.
+const CODEX_PARKED: &str = "\
+• You have 1 usage limit reset available. Run /usage to use one.
+› $agtx-review
+  agtx-review  [Skill] Self-review completed work. Check for correctness…
+  Press enter to insert or esc to close";
+
+/// The same session after the command was actually submitted: the composer is
+/// back to its placeholder and the text has moved into the scrollback.
+const CODEX_SUBMITTED: &str = "\
+• I'm using the agtx-review skill to inspect the task's diff and commits.
+• Ran sed -n '1,240p' .codex/skills/agtx-review/SKILL.md
+• Working (6s • esc to interrupt)
+› Use /skills to list available skills
+  gpt-5.6-sol default · /private/tmp/…";
+
+/// cursor-agent 2026.08.25, parked with its picker open — the state
+/// `submit_message` actually sees, not the tidied one left behind afterwards.
+/// The suggestion renders *below* the composer box and the footer wraps the
+/// worktree path, so the text being submitted sits eight lines off the bottom.
+const CURSOR_PARKED: &str = "\
+ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+  → /agtx-review
+ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   → /agtx-review        Self-review completed work. Check for correctness…
+  Auto · 9.6% · 4 files edited                          Run Everything
+  /private/tmp/claude-501/-Users-fynn-workspace-agtx/69231794-89a8-48a
+  5da1fead47/scratchpad/fixrun/cursor-agtx/.agtx/worktrees/21edaf6d-sm
+  r-agtx · task/21edaf6d-smoke-cursor-agtx";
+
+#[test]
+fn test_composer_holds_sees_a_parked_command() {
+    assert!(
+        composer_holds(CODEX_PARKED, "$agtx-review"),
+        "a command sitting in the composer must not read as submitted"
+    );
+    assert!(
+        composer_holds(CURSOR_PARKED, "/agtx-review"),
+        "an open picker and a wrapped footer put the text eight lines up; \
+         the window must still reach it"
+    );
+}
+
+#[test]
+fn test_composer_holds_ignores_the_scrollback() {
+    // The skill name appears in the agent's own narration above the composer.
+    // Finding it there is proof the message went, not that it stayed.
+    assert!(
+        !composer_holds(CODEX_SUBMITTED, "$agtx-review"),
+        "text echoed into the scrollback must not read as still-pending"
+    );
+}
+
+/// The regression itself: a bare command needs a second Enter, and the first
+/// one's repaint must not be mistaken for success.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_submit_message_presses_enter_again_when_the_picker_ate_the_first() {
+    let mut mock = MockTmuxOperations::new();
+    let seq = Arc::new(std::sync::Mutex::new(0usize));
+    let c = seq.clone();
+    // Parked before and after the first Enter — a repaint, not a submit — then
+    // submitted once the second lands.
+    mock.expect_capture_pane().returning(move |_| {
+        let n = *c.lock().unwrap();
+        Ok(if n < 2 { CODEX_PARKED } else { CODEX_SUBMITTED }.to_string())
+    });
+    let c2 = seq.clone();
+    mock.expect_send_key()
+        .times(2)
+        .withf(|_, k| k == "Enter")
+        .returning(move |_, _| {
+            *c2.lock().unwrap() += 1;
+            Ok(())
+        });
+
+    let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
+    submit_message(&ops, "t:1", "$agtx-review");
 }
 
 // ── first-launch dialog handling (wait_for_agent_ready) ──────────────────────
@@ -11871,6 +12292,9 @@ fn test_launch_dialog_derivation_matches_the_previous_literals() {
             vec!["1", "Enter"],
         ),
         (vec!["Update now (runs"], vec!["2", "Enter"]),
+        // "Continue without trusting" — declines rather than grants, so it is
+        // answered like the update prompt above rather than left to the user.
+        (vec!["Hooks need review"], vec!["3", "Enter"]),
         // Enter alone: an arrow-navigated menu with the safe option preselected.
         (
             vec!["Do you trust the contents of this project?"],
@@ -12386,11 +12810,12 @@ fn test_trust_block_clears_once_the_dialog_is_gone() {
 // submit_message — the Enter that submits is its own delivery problem
 // ===========================================================================
 
-/// A dropped Enter is retried, because an unchanged pane means the composer
-/// never took it.
+/// A dropped Enter is retried while the message is still in the composer, and
+/// the retries are bounded — an agent that never submits must cost a fixed
+/// number of keypresses, not an unbounded stream into its composer.
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_submit_message_retries_while_the_pane_is_unchanged() {
+fn test_submit_message_retries_while_the_composer_still_holds_it() {
     let mut mock = MockTmuxOperations::new();
     // Same frame every time: nothing ever submits.
     mock.expect_capture_pane()
@@ -12400,14 +12825,14 @@ fn test_submit_message_retries_while_the_pane_is_unchanged() {
         .withf(|_, k| k == "Enter")
         .returning(|_, _| Ok(()));
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
-    submit_message(&ops, "t:1");
+    submit_message(&ops, "t:1", "/agtx:execute abc");
 }
 
 /// One Enter is enough when the composer clears — a second would fire into an
-/// empty composer, which is the bug codex's double-Enter used to be.
+/// already-empty composer.
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_submit_message_stops_once_the_pane_changes() {
+fn test_submit_message_stops_once_the_composer_clears() {
     let mut mock = MockTmuxOperations::new();
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let c = std::sync::Arc::clone(&calls);
@@ -12426,7 +12851,7 @@ fn test_submit_message_stops_once_the_pane_changes() {
         .withf(|_, k| k == "Enter")
         .returning(|_, _| Ok(()));
     let ops: Arc<dyn TmuxOperations> = Arc::new(mock);
-    submit_message(&ops, "t:1");
+    submit_message(&ops, "t:1", "/agtx:execute abc");
 }
 
 // === Update notice ===

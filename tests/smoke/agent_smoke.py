@@ -592,6 +592,27 @@ def tmux(server: str, *args: str, check: bool = False) -> subprocess.CompletedPr
     return run(["tmux", "-L", server, *args], check=check)
 
 
+def isolate_agtx_store(workdir: Path) -> Path:
+    """Point agtx's databases at the scratch workdir for this run.
+
+    Every scratch repo agtx opens is upserted into the global project index, and
+    nothing ever removes a row — so without this each run permanently adds one
+    sidebar entry per case, pointing at a mkdtemp path that is deleted minutes
+    later. A single run of the full matrix adds seven.
+
+    Set in `os.environ` so `agtx trust` and `agtx mcp-serve` inherit it; the TUI
+    gets it explicitly via `new-session -e`, because a tmux server left running
+    by an earlier run would otherwise hand the new session that run's environment.
+    """
+    store = workdir / "agtx-store"
+    store.mkdir(parents=True, exist_ok=True)
+    os.environ["AGTX_DATA_DIR"] = str(store)
+    # A smoke run must not spend a GitHub API call, nor render an update notice
+    # over the pane content the checks read.
+    os.environ["AGTX_NO_UPDATE_CHECK"] = "1"
+    return store
+
+
 def start_tui(session: str, repo: Path, agtx_bin: str) -> None:
     tmux(TUI_SERVER, "kill-session", "-t", session)
     tmux(AGENT_SERVER, "kill-session", "-t", repo.name)
@@ -600,6 +621,8 @@ def start_tui(session: str, repo: Path, agtx_bin: str) -> None:
     # failure would surface much later as "no worktree" with no obvious cause.
     proc = tmux(
         TUI_SERVER, "new-session", "-d", "-s", session, "-x", "200", "-y", "50",
+        "-e", f"AGTX_DATA_DIR={os.environ['AGTX_DATA_DIR']}",
+        "-e", "AGTX_NO_UPDATE_CHECK=1",
         f"{shlex.quote(str(agtx_bin))} {shlex.quote(str(repo))}",
     )
     if proc.returncode != 0:
@@ -856,13 +879,34 @@ def agent_is_live(target: str, pane: str, agent: dict) -> bool:
     return False
 
 
-def check_command_submitted(pane: str, command: str | None, work_landed: bool) -> Check:
+def check_command_submitted(
+    pane: str, command: str | None, work_landed: bool, pane_before: str = ""
+) -> Check:
     """Check 1: the command was submitted, not left sitting in a composer.
 
     This is the check that separates "agtx typed something" from "the agent
-    understood it". A submitted message has the agent's response rendered under
-    it; a command parked in a composer is the last thing on screen with nothing
-    below.
+    understood it", and it is the one that has to be hard to fool: a command the
+    agent never read looks, from the outside, exactly like one it read and
+    ignored.
+
+    **How a park is recognised.** A submitted command has the agent's response
+    rendered under it. A parked one has nothing under it but the composer's own
+    furniture — box borders, a status bar, the worktree path, a picker
+    suggestion. Distance from the bottom cannot tell those apart: a genuinely
+    submitted command can sit four lines up with its output below, and a parked
+    one five lines up behind cursor's wrapped footer. So the test is whether
+    anything below the command is *new* — absent from `pane_before`, the pane as
+    it looked before this phase was requested. Furniture is identical across the
+    two; agent output is not.
+
+    `pane_before` is empty for the first phase, whose command is handed over in
+    argv at launch and so cannot park in a composer at all. That case keeps the
+    older rule: a command with nothing under it at all.
+
+    Known limit: a picker that is still *open* at capture time renders its own
+    hint line, which reads as output. Not worth pattern-matching per agent — the
+    pane is captured long after the phase settles, and by then the picker has
+    closed and the command is parked, which is the state these fixtures pin.
 
     Two deliberate softenings, both because the pane is a rendered TUI rather
     than a log:
@@ -870,10 +914,11 @@ def check_command_submitted(pane: str, command: str | None, work_landed: bool) -
     - the command not appearing at all is `unknown`, not a failure — several
       TUIs redraw their scrollback, and check 2 catches a genuinely undelivered
       command anyway;
-    - the command at the bottom of the screen only fails when nothing landed.
+    - a command with no new output under it only fails when nothing landed.
       Claude Code renders a dim *suggestion* for the next phase's command in its
       empty composer (verified against 2.1.245: the line carries SGR 2, which
-      `capture-pane -p` strips), so the bottom line is not proof of a park.
+      `capture-pane -p` strips), so a bare command on screen is not proof of a
+      park.
     """
     if not command:
         return Check("submitted", "n/a", "agent has no interactive command syntax")
@@ -886,9 +931,32 @@ def check_command_submitted(pane: str, command: str | None, work_landed: bool) -
         hits = [i for i, l in enumerate(lines) if head in l]
         if not hits:
             return Check("submitted", "unknown", "command text not visible in pane")
-    non_empty = [i for i, l in enumerate(lines) if l.strip()]
-    last = non_empty[-1] if non_empty else 0
-    if last - hits[-1] <= 1 and not work_landed:
+
+    below = [l.strip() for l in lines[hits[-1] + 1 :] if l.strip()]
+    if pane_before:
+        furniture = {l.strip() for l in pane_before.splitlines() if l.strip()}
+        # An echo of the command is not evidence it ran. A picker renders the
+        # skill under the composer *without* the sigil agtx sent it with
+        # (`$agtx-review` is offered as `agtx-review`), so the sigil is stripped
+        # before matching. This also swallows narration that merely names the
+        # skill, which is deliberate: a phase that really ran leaves more behind
+        # than its own name, and over-filtering here can only mislabel a phase
+        # that has already failed — `work_landed` short-circuits the rest.
+        echo = needle.split()[0].lstrip("/$@!:")
+        produced = [
+            l for l in below if l not in furniture and echo not in l and needle not in l
+        ]
+        if produced:
+            return Check("submitted", "pass")
+        if not work_landed:
+            return Check(
+                "submitted",
+                "fail",
+                "command is parked in the composer — nothing new rendered under it",
+            )
+        return Check("submitted", "pass")
+
+    if not below and not work_landed:
         return Check(
             "submitted", "fail", "command is the last thing on screen and nothing ran"
         )
@@ -1032,7 +1100,14 @@ class CaseRunner:
         raise TimeoutError(f"{what} not reached within {timeout}s")
 
     # -- phases ----------------------------------------------------------
-    def drive_phase(self, task_id: str, phase: str, worktree: Path, cycle: int) -> PhaseResult:
+    def drive_phase(
+        self,
+        task_id: str,
+        phase: str,
+        worktree: Path,
+        cycle: int,
+        pane_before: str = "",
+    ) -> PhaseResult:
         """Wait for the phase to land, then run the four checks.
 
         The wait ends early on a dialog or a quota park: both mean nothing more
@@ -1091,7 +1166,7 @@ class CaseRunner:
 
         result = PhaseResult(phase=phase, pane_tail=tail(pane, 20))
         result.checks = [
-            check_command_submitted(pane, command, work_landed),
+            check_command_submitted(pane, command, work_landed, pane_before),
             marker_check,
             artifact_check,
             check_usable(
@@ -1181,8 +1256,14 @@ class CaseRunner:
             write_fixture(worktree, task_id, artifacts, self.opts.phases)
             self.log(f"worktree {worktree}")
 
+            # What the pane looked like before each phase was requested. Check 1
+            # subtracts it to tell the agent's output from the composer's own
+            # furniture; the first phase has none, and needs none.
+            pane_before = ""
             for index, phase in enumerate(self.opts.phases):
-                phase_res = self.drive_phase(task_id, phase, worktree, task.get("cycle", 1))
+                phase_res = self.drive_phase(
+                    task_id, phase, worktree, task.get("cycle", 1), pane_before
+                )
                 res.phases.append(phase_res)
                 if phase_res.outcome != PASS:
                     res.outcome = phase_res.outcome
@@ -1192,6 +1273,9 @@ class CaseRunner:
                     )
                     break
                 if index + 1 < len(self.opts.phases):
+                    # Captured before the transition, so the next phase's command
+                    # has not been sent yet and anything under it will be new.
+                    pane_before = self.pane(task_id)
                     self.move_forward(task_id)
                     nxt = self.opts.phases[index + 1]
                     task = self.wait_for(
@@ -1460,9 +1544,11 @@ def main(argv: list[str] | None = None) -> int:
         tempfile.mkdtemp(prefix="agtx-smoke-")
     )
     workdir.mkdir(parents=True, exist_ok=True)
+    isolate_agtx_store(workdir)
     runnable = [c for c in cases if not c.skip_reason]
     print(f"agtx smoke: {len(runnable)} case(s) to run, {len(cases) - len(runnable)} skipped")
     print(f"scratch: {workdir}")
+    print(f"agtx store: {os.environ['AGTX_DATA_DIR']}")
 
     results: list[CaseResult] = []
     for case in cases:

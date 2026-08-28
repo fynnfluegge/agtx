@@ -27,7 +27,7 @@ cargo build --release
 ./target/release/agtx mcp-serve [path]
 
 # Record an agent lifecycle event (invoked by agent hooks, not by hand)
-./target/release/agtx hook <task-id> <worktree> [agent] < payload.json
+./target/release/agtx hook --env <agent> [--event <Name>] < payload.json
 
 # Version, and self-update to the latest GitHub release
 ./target/release/agtx --version
@@ -68,6 +68,8 @@ src/
 ├── agent/
 │   ├── mod.rs        # Agent struct, detection, command builders (all derived from spec.rs)
 │   ├── spec.rs       # AgentSpec table — one declarative record per agent + kind enums
+│   ├── hook_status.rs # Agent-reported liveness: per-agent event vocabularies,
+│                     # what agtx registers, atomic status writes, staleness
 │   ├── trust.rs      # Reads each agent's own workspace-trust store; seeds antigravity's
 │   ├── trust_tests.rs # Unit tests for trust.rs (included via #[path])
 │   └── operations.rs # AgentOperations/CodingAgent traits (mockable)
@@ -207,7 +209,7 @@ Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
 | antigravity | `.agents/mcp_config.json` | JSON, `mcpServers` |
 | opencode | opencode config | JSON, `mcp` |
 
-Two writers **merge** instead of overwriting, because their file may already be tracked in the repo: grok appends `[mcp_servers.agtx]` to any existing `.grok/config.toml`, and antigravity parses `.agents/mcp_config.json`, inserts `mcpServers.agtx`, and writes it back — preserving other servers and top-level sibling keys. (`.agents/` is vendor-neutral, so a project is more likely to ship one.)
+Three writers **merge** instead of overwriting, because their file may already exist in the worktree — either tracked in the repo, or copied in from the project root by `AGENT_CONFIG_DIRS`. Grok appends `[mcp_servers.agtx]` to any existing `.grok/config.toml`; antigravity parses `.agents/mcp_config.json` and inserts `mcpServers.agtx`, preserving other servers and top-level sibling keys (`.agents/` is vendor-neutral, so a project is more likely to ship one); gemini inserts into `.gemini/settings.json`, which otherwise loses the user's theme, model and any other `mcpServers`. Claude's `settings.local.json` side-effect below merges for the same reason.
 
 Claude needs an extra side-effect to avoid an interactive dialog on first open: `.claude/settings.local.json` gets `enableAllProjectMcpServers: true` plus `skipDangerousModePermissionPrompt: true`, which is what actually preflights the bypass-permissions warning (see the dialog table).
 
@@ -240,8 +242,12 @@ Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used
 **Mid-session lane — phase advances into an already-running agent.** `send_skill_and_prompt()`, three paths, because agent TUIs disagree about how a slash command plus arguments must arrive:
 
 1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter. Still on the typed path: it is the one flow where the text has to arrive in two pieces by design
-2. **gemini / codex / cursor / antigravity** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. **No second Enter for Codex**: its command picker opens on *typing*, not on a paste (verified against codex-cli 0.144.5), so there is nothing to dismiss
+2. **gemini / codex / cursor / antigravity** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. **How many Enters this takes is not fixed** — see *Submitting is its own delivery problem* below
 3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
+
+**Submitting is its own delivery problem.** A message with a prompt after the command submits on the first Enter. A **bare skill command** — what a phase whose command carries no `{task}`/`{task_id}` sends, which is `review` — exactly matches a skill name, so the composer's command picker opens *on the paste*. That Enter is then consumed by the picker ("Press enter to insert"), which inserts the command and repaints, leaving it parked. Measured against codex-cli 0.144.5 and cursor-agent 2026.08.25: both open the picker on a pasted bare command, and both submit on the second Enter.
+
+So `submit_message()` counts nothing and watches the composer instead: it presses Enter until the text is **gone from the bottom `COMPOSER_TAIL_LINES` of the pane**, bounded by `SUBMIT_ATTEMPTS`. A repaint is not a submit — that was the old test, and a picker opening satisfies it. The window is 14 lines because the picker draws its suggestions *below* the composer and cursor's footer wraps the worktree path, putting the text eight or more lines off the bottom; sizing it from the tidy pane left behind *after* a failure is how a too-narrow window looks correct. Erring wide costs one inert Enter into a submitted composer; erring narrow parks the command forever.
 
 **Atomic is not the same as delivered.** An agent TUI that has not attached its stdin reader yet discards what it is sent — bracketed paste included, because the discard happens in the application, not in the pty — and `wait_for_agent_ready` cannot prove otherwise. So paths 1 and 2 go through `deliver_message()`, which resends **while the pane is unchanged** (three attempts, 2s each) and stops the moment it redraws, on the same reasoning `dismiss_launch_dialog` uses: a redraw means it landed, and resending would double the message. Landing is judged by the pane changing rather than by finding the text, because a composer wraps, re-indents and box-draws what it echoes.
 
@@ -293,6 +299,7 @@ Dialogs are declared per agent on `AgentSpec::dialogs` and **matched against the
 | claude | bypass-permissions warning | `Yes, I accept` / `I accept the risk` | `2` `Enter` | Launch — suppressed by the `skipDangerousModePermissionPrompt` preflight; backstop only. Options are inverted (`1. No, exit`), so never a lone Enter |
 | codex | directory trust | `Do you trust the contents of this directory?` | `1` `Enter` | Launch — per directory. Worded unlike Claude's *and* Gemini's, so neither pattern catches it |
 | codex | update prompt | `Update now (runs` | `2` `Enter` (Skip) | Launch — never "Update now": agtx must not upgrade an agent binary behind the user's back |
+| codex | hook review | `Hooks need review` | `3` `Enter` (Continue without trusting) | Launch — fires when the project ships a `.codex/hooks.json` codex has not seen. Answered because option 3 *declines*; option 2 would trust every hook in the repo |
 | codex | MCP tool approval | `Allow the` + `MCP server to run tool` + `Always allow` | `3` `Enter` | **Session** — mid-session, matched only against a codex pane |
 | gemini | folder trust | `Do you trust the files in this folder?` | `1` `Enter` | Launch — answering it restarts the process |
 | cursor | workspace trust | `Workspace Trust Required` | `a` alone | Launch — its question line is *identical* to codex's, so it is matched on the heading. Answered with the access key the dialog advertises, which survives an option being added above the highlighted row |
@@ -661,30 +668,89 @@ Agents that support lifecycle hooks report their own state instead of agtx guess
 output.
 
 ```
-Claude Code ──hook──► agtx hook <task-id> <worktree> ──► {worktree}/.agtx/status/{task_id}.json
-                                                                   │
-                                        maybe_spawn_session_refresh ┘──► apply_session_refresh
+agent ──hook──► agtx hook --env <agent> ──► {worktree}/.agtx/status/{task_id}.json
+                                                       │
+                            maybe_spawn_session_refresh ┘──► apply_session_refresh
 ```
 
-- **Writing the config**: `write_skills_to_worktree()` merges a `hooks` block into the worktree's
-  `.claude/settings.local.json` (the same file that carries `enableAllProjectMcpServers`). Built by
-  `claude_hook_settings()`. Gated on `config.agent_hooks`; Claude-only today
-- **The Claude settings writer merges, it does not overwrite.** `.claude` is in
-  `AGENT_CONFIG_DIRS`, so a project shipping its own `settings.local.json` has it copied into every
-  worktree — a plain write would drop the user's `permissions`/`env`/`hooks`. `merge_claude_hooks()`
-  keeps user entries on the same events and replaces only agtx's own (matched by the agtx binary
-  path in the command), so redeploying is idempotent instead of accumulating duplicate hooks. Same
-  merge-don't-overwrite rule as the grok and antigravity MCP writers
-- **The hook command is task-agnostic**: `agtx hook --env claude`. The task is read from
+**Five of eight agents report their own state.** Every one of them takes a **project-local** hook
+config, so agtx writes into the worktree and never into the user's global agent config; removing the
+worktree removes the registration, and there is nothing to uninstall. `write_hook_config()` is the
+writer, selected by `AgentSpec::hook_config` (`HookConfigKind`). `None` — no hooks, keep the
+pane-hash heuristic — is a supported state, not a degraded one.
+
+| Agent | Config file | Handler shape | Payload event key | Can report `Blocked` |
+|---|---|---|---|---|
+| claude | `.claude/settings.local.json` | `{hooks:[{type,command}]}` | `hook_event_name`, PascalCase | yes — `PermissionRequest`, `Notification` |
+| gemini | `.gemini/settings.json` | same | `hook_event_name`, PascalCase | yes — `Notification` |
+| cursor | `.cursor/hooks.json` | **flat `{command}`** | `hook_event_name`, camelCase | no |
+| grok | `.grok/hooks/agtx.json` | `{hooks:[{type,command}]}` | `hookEventName`, **snake_case value** | yes — `Notification` scoped to `permission_prompt` |
+| antigravity | `.agents/hooks.json` | keyed by hook *name*, then event | **none** — passed as `--event` | no |
+| codex | `.codex/hooks.json` | `{description, hooks:{…}}` | `hook_event_name`, PascalCase | mapped, **not deployed** |
+| opencode, copilot | — | — | — | no hooks; see `HookConfigKind` |
+
+The formats are **not interchangeable**, and every mismatch below fails silently — a valid-looking
+config in the worktree and no status file ever written. This is why `tests/smoke/agent_smoke.py` is
+the gate: the unit suite cannot see "the agent ignored it".
+
+- **cursor** takes a flat `[{command}]` list; with Claude's `{hooks:[{type,command}]}` wrapper the
+  file parses, loads, and fires nothing
+- **grok** registers `PreToolUse` and reports `pre_tool_use`, so both spellings must map — that is
+  `squash()`. It also sends `hookEventName`/`sessionId`/`transcriptPath` in camelCase, hence the
+  serde aliases on `HookPayload`
+- **antigravity's `PreToolUse` is not subscribable.** Its `decision` output is *required* and
+  anything else reads as a refusal, so registering it blocks every tool call. Answering `"allow"`
+  would make a liveness reporter into a permission granter — the line agtx declines to cross with
+  trust dialogs. `PostToolUse` carries the heartbeat instead, and does include the tool name despite
+  its docs. Its two event shapes also differ: tool events group under a `matcher`, the rest are a
+  flat handler list, and the wrong shape is ignored
+- **codex's `hooks` key in `.codex/config.toml` is a table, not a path.** `hooks.json` is
+  auto-discovered; assigning a string to that key makes codex reject the whole config
+  (`invalid type: string, expected struct HooksToml`) and lose its MCP server with it
+
+**Codex is off, deliberately.** Its hooks work and speak Claude's schema, but a project-local
+`.codex/hooks.json` triggers a startup review — *"N hooks are new or changed. Hooks can run outside
+the sandbox after you trust them."* — whose only enabling answer trusts **every** hook the repo
+ships, as does `--dangerously-bypass-hook-trust`. Not agtx's decision, on the same reasoning as
+never choosing codex's "Update now". The vocabulary is mapped and the writer exists, so enabling it
+is one field if codex gains per-hook trust. The dialog is in `AgentSpec::dialogs` regardless
+(answered `3`, *Continue without trusting*, `security: false` because it declines rather than
+grants) — a project shipping its own hooks file parks every codex task there whether or not agtx
+writes one.
+
+- **Writers merge where the file is shared.** Claude's and Gemini's hooks live in the same file as
+  their MCP config, and `.claude`/`.gemini`/`.codex` are in `AGENT_CONFIG_DIRS`, so a project
+  shipping its own settings has them copied into every worktree. `merge_claude_hooks()` keeps user
+  entries on the same events and replaces only agtx's own, matched on the `" hook --env"` invocation
+  rather than the binary path, so redeploying is idempotent and a moved agtx still recognises its own
+  work. `write_hook_config` runs **after** `write_mcp_config` because both read-modify-write those
+  two files
+- **The hook command is task-agnostic**: `agtx hook --env <agent>`. The task comes from
   `AGTX_TASK_ID` / `AGTX_WORKTREE`, set on the tmux **window** by `create_window` (tmux `-e`, so a
-  resumed or switched agent inherits them). Baking the task id into the command breaks
-  `skip_worktree`, where every task shares the project's `.claude/settings.local.json` and the last
-  deploy would re-point every other task's agent at its own status file. The hook exits silently
-  when the variables are absent, so a future user-global registration stays inert outside agtx, and
-  when `CLAUDE_JOB_DIR` is set, since a backgrounded task inherits its parent's env
-- **Registered events** (verified against Claude Code 2.1.241): `SessionStart`, `UserPromptSubmit`,
-  `PreToolUse` (heartbeat) → `working`; `PermissionRequest`, `Notification` → `blocked`; `Stop`,
-  `StopFailure` → `waiting`; `SessionEnd` → `ended`. Unregistered names are ignored by the agent
+  resumed or switched agent inherits them). Baking the task id in breaks `skip_worktree`, where every
+  task shares one settings file. The hook exits silently when those are absent, so a registration
+  stays inert outside agtx, and when `CLAUDE_JOB_DIR` is set, since a backgrounded task inherits its
+  parent's env
+- **`--event <Name>`** supplies the event for an agent whose payload carries none
+  (`HookEventSource::Argv`, antigravity only). The payload wins when it has one
+- **`hook_events(kind)` and `map_hook_event(kind, …)` are the two halves of one contract** and live
+  in the same file so a test can guard the drift. An event registered but unmapped fires and reports
+  nothing; an event mapped but unregistered pays a process spawn to decide nothing. Both directions
+  are asserted. The kind is a *parameter*, not a fallback chain: `Stop` means "turn over" to four
+  agents while Gemini's equivalent is `AfterAgent` and Cursor's is lowercase `stop`, so one shared
+  table would let a registration typo succeed against the wrong agent's arm
+- **Grok also scans `.claude/settings*.json` and `.cursor/hooks.json`** for vendor compatibility, so
+  in a multi-phase-agent worktree it fires agtx's Claude- and cursor-registered hooks too. Mostly
+  inert: the vocabulary is chosen by the agent named in the command agtx wrote, and grok's snake_case
+  payloads do not resolve against Claude's PascalCase arm. **Cursor's arm is the exception** — it is
+  lowercase and contains `stop`, which is exactly what grok reports, so a grok turn can write a
+  record labelled `agent: "cursor"`. The *state* is right either way (both map `stop` to `Waiting`)
+  and nothing reads that label, so this is a wrong name on a correct record rather than a wrong
+  status
+- **Claude's registered events** (verified against Claude Code 2.1.247): `SessionStart`,
+  `UserPromptSubmit`, `PreToolUse` (heartbeat) → `working`; `PermissionRequest`, `Notification` →
+  `blocked`; `Stop`, `StopFailure` → `waiting`; `SessionEnd` → `ended`. Unregistered names are
+  ignored by the agent
 - **`src/agent/hook_status.rs`** is pure (no tmux/DB/TUI types): event mapping, atomic
   write-then-rename, staleness, and `merge_event`'s guard preventing a late `PreToolUse` from
   clearing a fresh `Blocked`
@@ -692,21 +758,30 @@ Claude Code ──hook──► agtx hook <task-id> <worktree> ──► {worktr
   pane-hash heuristic. Only *liveness* is replaced; artifact detection is untouched
 - **Purely additive**: no status file means the pre-existing 15s pane-hash heuristic runs unchanged.
   A `working` record older than `HOOK_STALE_SECS` (300s) is distrusted and also falls back
-- The pane is **not** captured when a hook report exists — one fewer `capture-pane` per task per
-  refresh. Codex's MCP approval auto-dismiss runs outside that branch so it fires either way
-- **Consumers**: `Blocked` fires the orchestrator stuck-task notification *immediately* (with the
-  reason text from `blocked_reasons`) rather than after 60s of `Idle`; the merge-conflict trigger
-  skips `Blocked` entirely. MCP `get_task` exposes `agent_state` + `blocked_reason`, read straight
-  from the file — it works cross-process precisely because it is a file, not TUI state
+- The pane capture is skipped only on a **fresh `Working`** report — one fewer `capture-pane` per
+  task per refresh, and proof the pane is past whatever gated startup. A `waiting`/`ended` record
+  never expires, so letting one suppress the capture would hide a dialog rendered after a relaunch,
+  which is exactly the resume path. Codex's MCP approval auto-dismiss runs outside that branch so it
+  fires either way
+- **Consumers**: an agent-reported `Blocked` fires the orchestrator stuck-task notification
+  *immediately* (with the reason text from `blocked_reasons`), where `Idle` keeps its 60s settle
+  because it is still a guess. A **trust-blocked** task is excluded from that notification
+  altogether: the orchestrator's only remedies are a nudge — which would be typed into the dialog —
+  and escalation, and only the user can answer it. The merge-conflict trigger fires on `Ready` and
+  `Idle` only, so it never sends into a `Blocked` pane. MCP `get_task` exposes `agent_state` +
+  `blocked_reason`, read straight from the file — it works cross-process precisely because it is a
+  file, not TUI state
 - **Binary-path drift**: the absolute `agtx` path from `current_exe()` is baked into the hook command
   *and* every MCP config a worktree gets, so moving or reinstalling agtx would silently break both
   for worktrees created earlier. `write_skills_to_worktree` records the deploying binary in
   `.agtx/deployed-by`; `refresh_stale_worktree_configs` re-deploys mismatched worktrees on a
   background thread at startup. `is_agtx_hook_command` matches on the `" hook --env"` invocation
   rather than the binary path so the merge still recognises its own entries across a move
-- Not yet wired for Codex/Gemini/Cursor: those read hooks from user-global paths
-  (`~/.codex/hooks.json`, `~/.gemini/settings.json`, `~/.cursor/hooks.json`) and need an
-  install/uninstall lifecycle plus `cwd`-based routing
+- **Not wired**: codex (hook-trust review, above); opencode, whose lifecycle callbacks are a
+  TypeScript plugin API rather than shell commands, so it would need agtx to ship a JS shim; and
+  copilot, whose hook support is *unknown* rather than absent — it is not installed on any machine
+  this was measured on, and that distinction is recorded in its spec so it is not filled in from
+  documentation
 
 ### Task References & Dependencies
 - In description input, type `!` (at start of line or after space) to search existing tasks
@@ -816,7 +891,11 @@ Half of this is now one table entry; the other half is still per-agent match arm
 7. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
 8. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok"` for SKILL.md subdirectories)
 9. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`)
-9b. If the agent supports lifecycle hooks, register them so it reports its own phase status (see *Hook-Based Phase Status*); otherwise it falls back to the pane-hash heuristic
+9b. Set `hook_config` / `hook_event_source` on the spec if the agent supports lifecycle hooks, add
+   its `HookConfigKind` arm to `write_hook_config`, `hook_events` and `map_hook_event`, and extend
+   `vocabulary()` in `tests/hook_status_tests.rs`. Leave `hook_config: None` until a real run writes
+   a `.agtx/status/*.json`: a wrong handler shape or event spelling fails silently (see
+   *Hook-Based Phase Status*), and `None` is a supported state, not a failure
 10. Add an agent label color in the task-card footer `match task.agent.as_str()`
 11. If Ink/Node TUI: add to the combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
 

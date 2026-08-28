@@ -236,7 +236,12 @@ pub enum PhaseStatus {
     /// Agent is still working, no artifact yet
     Working,
     /// Agent is stopped waiting on a permission prompt or a question.
-    /// Only ever set from an agent-reported hook event — never inferred.
+    ///
+    /// Set from an agent-reported hook event, or from a match against that
+    /// agent's own `security` dialogs in the pane (`visible_security_dialog`,
+    /// which runs only while `auto_trust` is off). Never from silence: "no output
+    /// for 15s" is [`Idle`](Self::Idle), which guesses, where this names what the
+    /// task is waiting on.
     Blocked,
     /// Agent output hasn't changed for 15s — may need user input
     Idle,

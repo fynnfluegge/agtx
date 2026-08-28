@@ -258,6 +258,90 @@ class Checks(unittest.TestCase):
             smoke.check_command_submitted(pane, "/agtx:plan abc-123", False).state, "pass"
         )
 
+    # The two panes below are captured verbatim from live sessions where agtx
+    # pasted a bare skill command, the agent's picker ate the Enter, and the
+    # command sat unsent. Both reported `submitted=pass` under the old
+    # distance-from-the-bottom rule — the harness certified the exact failure it
+    # exists to catch. They are the regression fixtures for that.
+
+    CODEX_BEFORE = "\n".join([
+        "• Implementation complete. Summary written to .agtx/execute.md.",
+        "",
+        "› Use /skills to list available skills",
+        "  gpt-5.6-sol default · /private/tmp/…",
+    ])
+    CODEX_PARKED = "\n".join([
+        "• Implementation complete. Summary written to .agtx/execute.md.",
+        "",
+        "› $agtx-review",
+        "  gpt-5.6-sol default · /private/tmp/…",
+    ])
+    CURSOR_BEFORE = "\n".join([
+        "  Implementation complete. Summary written to .agtx/execute.md.",
+        " ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
+        "  → Add a follow-up",
+        " ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "  Auto · 9.6% · 4 files edited                  Run Everything",
+        "  /private/tmp/claude-501/-Users-fynn-workspace-agtx/69231794-89a8",
+        "  5da1fead47/scratchpad/fixrun/cursor-agtx/.agtx/worktrees/21edaf6d",
+        "  r-agtx · task/21edaf6d-smoke-cursor-agtx",
+    ])
+    CURSOR_PARKED = CURSOR_BEFORE.replace("→ Add a follow-up", "→ /agtx-review")
+
+    def test_a_parked_bare_command_is_not_reported_as_submitted(self):
+        """codex 0.144.5: two lines up, behind a status bar."""
+        check = smoke.check_command_submitted(
+            self.CODEX_PARKED, "$agtx-review", False, self.CODEX_BEFORE
+        )
+        self.assertEqual(check.state, "fail")
+        self.assertIn("parked", check.detail)
+
+    def test_a_park_behind_a_wrapped_footer_is_still_a_park(self):
+        """cursor 2026.08.25: five lines up, behind a box border and a path that
+        wraps. Distance from the bottom cannot separate this from a submitted
+        command with output under it — only the baseline can."""
+        check = smoke.check_command_submitted(
+            self.CURSOR_PARKED, "/agtx-review", False, self.CURSOR_BEFORE
+        )
+        self.assertEqual(check.state, "fail")
+        self.assertIn("parked", check.detail)
+
+    def test_output_under_the_command_still_counts_as_submitted(self):
+        """A submitted command scrolls up out of the composer with the agent's
+        response under it — the same furniture below, but no longer adjacent."""
+        pane = "\n".join([
+            "  Implementation complete. Summary written to .agtx/execute.md.",
+            "  → /agtx-review",
+            "  Reviewing the diff…",
+            "  Wrote .agtx/review.md",
+            " ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
+            "  → Add a follow-up",
+            " ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "  Auto · 9.6% · 4 files edited                  Run Everything",
+            "  r-agtx · task/21edaf6d-smoke-cursor-agtx",
+        ])
+        self.assertEqual(
+            smoke.check_command_submitted(
+                pane, "/agtx-review", False, self.CURSOR_BEFORE
+            ).state,
+            "pass",
+        )
+
+    def test_an_echo_of_the_command_is_not_evidence_it_ran(self):
+        """A picker offers the skill under the composer *without* the sigil agtx
+        sent it with, so `$agtx-review` comes back as `agtx-review`. Matching the
+        sent string alone would read that echo as the agent's output."""
+        pane = self.CODEX_PARKED.replace(
+            "  gpt-5.6-sol default · /private/tmp/…",
+            "  agtx-review  [Skill] Self-review completed work.\n"
+            "  gpt-5.6-sol default · /private/tmp/…",
+        )
+        check = smoke.check_command_submitted(
+            pane, "$agtx-review", False, self.CODEX_BEFORE
+        )
+        self.assertEqual(check.state, "fail")
+        self.assertIn("parked", check.detail)
+
     def test_invisible_command_is_unknown_not_a_failure(self):
         """Several TUIs redraw their scrollback; check 2 catches real misses."""
         self.assertEqual(
