@@ -710,3 +710,31 @@ fn antigravity_never_subscribes_to_its_gating_hook() {
          JSON object this hook already prints"
     );
 }
+
+/// Grok scans `.claude/settings*.json` and `.cursor/hooks.json` for vendor
+/// compatibility, so in a worktree configured for several phase agents it fires
+/// agtx's Claude- and cursor-registered hooks with *its own* payloads.
+///
+/// Claude's arm rejects them outright. Cursor's does not: it is lowercase and
+/// contains `stop`, which is exactly what grok reports. That is a real overlap,
+/// pinned here rather than assumed away — the state agrees (both mean the turn
+/// ended), so the cost is a record carrying a neighbouring agent's name, and
+/// nothing reads that name.
+#[test]
+fn a_grok_payload_reaching_a_neighbours_registration() {
+    for event in ["session_start", "user_prompt_submit", "pre_tool_use"] {
+        assert_eq!(
+            map_hook_event(HookConfigKind::ClaudeSettings, event),
+            None,
+            "grok's {event} must not resolve against Claude's PascalCase arm"
+        );
+        assert_eq!(map_hook_event(HookConfigKind::CursorHooksJson, event), None);
+    }
+    // The one that does overlap, and agrees.
+    assert_eq!(
+        map_hook_event(HookConfigKind::CursorHooksJson, "stop"),
+        map_hook_event(HookConfigKind::GrokHooksJson, "stop"),
+        "grok's `stop` resolves against cursor's arm; it must at least mean the same"
+    );
+    assert_eq!(map_hook_event(HookConfigKind::ClaudeSettings, "stop"), None);
+}

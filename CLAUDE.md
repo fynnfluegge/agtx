@@ -740,9 +740,13 @@ writes one.
   agents while Gemini's equivalent is `AfterAgent` and Cursor's is lowercase `stop`, so one shared
   table would let a registration typo succeed against the wrong agent's arm
 - **Grok also scans `.claude/settings*.json` and `.cursor/hooks.json`** for vendor compatibility, so
-  in a multi-phase-agent worktree it fires agtx's Claude- and cursor-registered hooks too. Inert by
-  construction: the vocabulary is chosen by the agent named in the command agtx wrote, and grok's
-  snake_case payloads do not resolve against Claude's PascalCase arm
+  in a multi-phase-agent worktree it fires agtx's Claude- and cursor-registered hooks too. Mostly
+  inert: the vocabulary is chosen by the agent named in the command agtx wrote, and grok's snake_case
+  payloads do not resolve against Claude's PascalCase arm. **Cursor's arm is the exception** — it is
+  lowercase and contains `stop`, which is exactly what grok reports, so a grok turn can write a
+  record labelled `agent: "cursor"`. The *state* is right either way (both map `stop` to `Waiting`)
+  and nothing reads that label, so this is a wrong name on a correct record rather than a wrong
+  status
 - **Claude's registered events** (verified against Claude Code 2.1.247): `SessionStart`,
   `UserPromptSubmit`, `PreToolUse` (heartbeat) → `working`; `PermissionRequest`, `Notification` →
   `blocked`; `Stop`, `StopFailure` → `waiting`; `SessionEnd` → `ended`. Unregistered names are

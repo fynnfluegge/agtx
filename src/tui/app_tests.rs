@@ -11406,6 +11406,140 @@ fn test_agent_hooks_false_writes_no_hooks_for_any_agent() {
     }
 }
 
+/// `capture-pane -p` pads its output to the pane height, so a composer that has
+/// not been pushed to the bottom yet sits above a block of empty rows. Anchoring
+/// the window to the raw end finds nothing there and stops after one Enter —
+/// the park this exists to catch, reintroduced silently.
+#[test]
+fn test_composer_holds_looks_past_trailing_blank_rows() {
+    let padded = format!("› $agtx-review\n{}", "\n".repeat(30));
+    assert!(
+        composer_holds(&padded, "$agtx-review"),
+        "trailing pane padding must not push the composer out of the window"
+    );
+}
+
+// ── hook configs the project may already ship ───────────────────────────────
+
+/// A worktree is a full checkout, so a repo that tracks `.cursor/hooks.json` has
+/// it here. Overwriting destroys the user's hooks *and* leaves a modified tracked
+/// file on the task branch for the agent to commit.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cursor_hooks_preserve_a_projects_own_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    std::fs::create_dir_all(dir.path().join(".cursor")).unwrap();
+    std::fs::write(
+        dir.path().join(".cursor/hooks.json"),
+        r#"{"version":1,"hooks":{"stop":[{"command":"./mine.sh"}],"afterFileEdit":[{"command":"./fmt.sh"}]}}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
+    )
+    .unwrap();
+
+    // An event agtx does not touch survives untouched.
+    assert_eq!(v["hooks"]["afterFileEdit"][0]["command"], "./fmt.sh");
+    // An event agtx shares keeps the user's handler and gains agtx's.
+    let stop = v["hooks"]["stop"].as_array().unwrap();
+    assert_eq!(stop.len(), 2);
+    assert_eq!(stop[0]["command"], "./mine.sh");
+    assert!(stop[1]["command"].as_str().unwrap().contains("hook --env cursor"));
+}
+
+/// Redeploying must replace agtx's own flat `{command}` entries, not stack them.
+/// The Claude-shaped matcher looks inside a `hooks` array that cursor's entries
+/// do not have, so a shape-blind match would duplicate on every deploy.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_cursor_hooks_do_not_accumulate_across_deploys() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["hooks"]["stop"].as_array().unwrap().len(), 1);
+}
+
+/// Turning hooks off has to reach worktrees that already have them, or they keep
+/// firing `agtx hook` for the life of the task.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_turning_hooks_off_unregisters_an_existing_worktree() {
+    for name in ["claude", "gemini", "cursor", "grok", "antigravity"] {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().to_string_lossy().to_string();
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], true);
+        assert!(
+            read_all_configs(dir.path())
+                .iter()
+                .any(|(_, b)| b.contains("hook --env")),
+            "{name}: nothing was deployed to un-deploy"
+        );
+
+        write_skills_to_worktree(&wt, dir.path(), &None, &[name], false);
+        for (rel, body) in read_all_configs(dir.path()) {
+            assert!(
+                !body.contains("hook --env"),
+                "{name}: {rel} still fires agtx hook after agent_hooks was turned off"
+            );
+        }
+    }
+}
+
+/// The user's own hooks must survive that un-deploy — pruning removes agtx's
+/// entries, not the file.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_turning_hooks_off_leaves_the_users_own_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    std::fs::create_dir_all(dir.path().join(".cursor")).unwrap();
+    std::fs::write(
+        dir.path().join(".cursor/hooks.json"),
+        r#"{"version":1,"hooks":{"stop":[{"command":"./mine.sh"}]}}"#,
+    )
+    .unwrap();
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
+    write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], false);
+
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["hooks"]["stop"].as_array().unwrap().len(), 1);
+    assert_eq!(v["hooks"]["stop"][0]["command"], "./mine.sh");
+}
+
+/// `--event` is driven by the spec, not by the agent's name, so an agent that
+/// later needs it gets it from one field.
+#[test]
+fn test_argv_event_agents_carry_their_event_in_the_command() {
+    for spec in agent::AGENT_SPECS {
+        let Some(kind) = spec.hook_config else {
+            continue;
+        };
+        let json = claude_shaped_hooks("/bin/agtx", spec.name, kind);
+        for (event, _) in hook_status::hook_events(kind) {
+            let cmd = json[event][0]["hooks"][0]["command"].as_str().unwrap_or("");
+            let wants_argv = spec.hook_event_source == agent::HookEventSource::Argv;
+            assert_eq!(
+                cmd.contains("--event"),
+                wants_argv,
+                "{}: {event} command disagrees with hook_event_source",
+                spec.name
+            );
+        }
+    }
+}
+
 // ── submitting a message ────────────────────────────────────────────────────
 //
 // Pane text below is captured verbatim from live sessions. The bare-command case

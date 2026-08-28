@@ -9428,24 +9428,6 @@ fn wait_for_pane_settled(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> bo
 /// Returns whether the message was seen to land. Callers submit either way,
 /// because a false negative (a pane that happened not to redraw) must not
 /// swallow the task.
-/// Press Enter, and confirm the message actually left the composer.
-///
-/// [`deliver_message`] proves the *text* arrived. It says nothing about the Enter
-/// that submits it — those are separate keystrokes into the same TUI, and an Ink
-/// composer that has just accepted a bracketed paste can still be mid-render when
-/// the Enter lands. The keystroke is dropped, the paste sits on screen, and the
-/// phase never starts.
-///
-/// Observed against gemini 0.46.0, on the first smoke run where its credentials
-/// worked well enough to reach a second phase: `/agtx:execute <id>` sat in the
-/// composer while the agent reported "Waiting for approval". The fixed 150ms
-/// sleep this replaces was the whole guarantee, and for gemini it was not enough.
-///
-/// Retried only while the pane is **unchanged** — the same rule the paste and the
-/// dialog answers use. Submitting clears the composer and moves the message up,
-/// which is a visible change; an unchanged pane means the Enter was dropped.
-/// Never retried blindly: a stray Enter into an already-empty composer is its own
-/// bug, and is exactly why codex stopped getting a second one.
 /// Lines at the bottom of a pane treated as the composer.
 ///
 /// Sized from the worst real layout, not from the composer alone: while the
@@ -9464,7 +9446,16 @@ const COMPOSER_TAIL_LINES: usize = 14;
 /// Only the bottom of the pane is examined: after a submit the text moves up into
 /// the scrollback, and finding it *there* is proof it went, not that it stayed.
 fn composer_holds(pane: &str, needle: &str) -> bool {
-    let lines: Vec<&str> = pane.lines().collect();
+    // Trailing blanks first. `capture-pane -p` emits one line per pane *row*, not
+    // per rendered line — verified against tmux 3.5a: a 20-row pane holding one
+    // word comes back as 20 lines, 19 of them empty. Anchoring the window to the
+    // raw end would put it entirely inside that padding whenever the agent's
+    // output has not yet filled the pane, find nothing, and stop pressing Enter
+    // after one — the very park this exists to catch.
+    let mut lines: Vec<&str> = pane.lines().collect();
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
     let start = lines.len().saturating_sub(COMPOSER_TAIL_LINES);
     pane_shows(&lines[start..].join("\n"), needle)
 }
@@ -9486,6 +9477,13 @@ fn composer_holds(pane: &str, needle: &str) -> bool {
 /// Falls back to the change-detector when the text is too short to track, and is
 /// bounded either way — an agent that never submits costs `SUBMIT_ATTEMPTS`
 /// keypresses, not an unbounded stream.
+///
+/// Known cost: agents echo the submitted message into the transcript just above
+/// the composer, so a *successful* submit can leave the needle inside the window
+/// and spend the remaining attempts. Those Enters land in an empty composer,
+/// which is inert — except against a dialog that renders mid-submit, where a bare
+/// Enter picks the highlighted option. `answer_session_dialogs` is what answers
+/// those, and it runs on the refresh loop rather than here.
 fn submit_message(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, text: &str) {
     let needle = delivery_needle(text);
     for _ in 0..SUBMIT_ATTEMPTS {
@@ -10803,6 +10801,7 @@ fn hook_command(agtx_bin: &str, agent: &str) -> String {
 ///
 /// Event names verified against claude 2.1.247. Unregistered names are ignored,
 /// so listing one an older build does not know is harmless.
+#[cfg(test)]
 fn claude_hook_settings(agtx_bin: &str) -> serde_json::Value {
     claude_shaped_hooks(agtx_bin, "claude", agent::HookConfigKind::ClaudeSettings)
 }
@@ -10815,9 +10814,16 @@ fn claude_shaped_hooks(
     agent_name: &str,
     kind: agent::HookConfigKind,
 ) -> serde_json::Value {
-    let command = hook_command(agtx_bin, agent_name);
+    let base = hook_command(agtx_bin, agent_name);
+    let argv_event = agent::spec(agent_name)
+        .is_some_and(|s| s.hook_event_source == agent::HookEventSource::Argv);
     let mut out = serde_json::Map::new();
     for (event, matcher) in hook_status::hook_events(kind) {
+        let command = if argv_event {
+            format!("{} --event {}", base, event)
+        } else {
+            base.clone()
+        };
         let mut group = serde_json::json!({
             "hooks": [{ "type": "command", "command": command }]
         });
@@ -10945,38 +10951,67 @@ fn merge_claude_hooks(
     settings: &mut serde_json::Map<String, serde_json::Value>,
     ours: serde_json::Value,
 ) {
-    // Match on the invocation, not the binary path: the path changes when agtx is
-    // moved or reinstalled, and a prefix match would then stop recognising our own
-    // entries — leaving the stale one behind and appending a duplicate.
-    let is_ours = |def: &serde_json::Value| -> bool {
-        def["hooks"].as_array().is_some_and(|hooks| {
-            hooks
-                .iter()
-                .any(|h| h["command"].as_str().is_some_and(is_agtx_hook_command))
-        })
-    };
-
-    let existing = settings
+    let mut hooks = settings
         .get("hooks")
         .and_then(|h| h.as_object())
         .cloned()
         .unwrap_or_default();
-    let mut merged = existing.clone();
+    merge_hook_events(&mut hooks, ours);
+    // Pruning to nothing removes the key rather than leaving `"hooks": {}`, so a
+    // worktree with hooks turned off is byte-identical to one that never had them.
+    if hooks.is_empty() {
+        settings.remove("hooks");
+    } else {
+        settings.insert("hooks".to_string(), serde_json::Value::Object(hooks));
+    }
+}
 
-    if let Some(ours) = ours.as_object() {
-        for (event, our_defs) in ours {
-            let mut defs: Vec<serde_json::Value> = existing
-                .get(event)
-                .and_then(|d| d.as_array())
-                .map(|a| a.iter().filter(|d| !is_ours(d)).cloned().collect())
-                .unwrap_or_default();
-            if let Some(arr) = our_defs.as_array() {
-                defs.extend(arr.iter().cloned());
-            }
-            merged.insert(event.clone(), serde_json::Value::Array(defs));
+/// True when a handler entry is one agtx wrote, in either shape agents accept:
+/// the Claude wrapper `{hooks: [{command}]}` or cursor's flat `{command}`.
+///
+/// Matched on the invocation, not the binary path — the path changes when agtx is
+/// moved or reinstalled, and a prefix match would then stop recognising our own
+/// entries, leaving the stale one behind and appending a duplicate.
+fn is_agtx_hook_entry(def: &serde_json::Value) -> bool {
+    if def["command"].as_str().is_some_and(is_agtx_hook_command) {
+        return true;
+    }
+    def["hooks"].as_array().is_some_and(|hooks| {
+        hooks
+            .iter()
+            .any(|h| h["command"].as_str().is_some_and(is_agtx_hook_command))
+    })
+}
+
+/// Replace agtx's handlers under each event in `ours`, leaving the user's own
+/// entries on those events untouched and every other event alone.
+///
+/// An event whose `ours` value is an empty array is *pruned*: agtx's handlers are
+/// stripped and nothing replaces them, and the key is dropped entirely when
+/// nothing else was registered under it. That is what turning `agent_hooks` off
+/// uses to unregister from a worktree that already has hooks deployed.
+fn merge_hook_events(
+    existing: &mut serde_json::Map<String, serde_json::Value>,
+    ours: serde_json::Value,
+) {
+    let Some(ours) = ours.as_object() else {
+        return;
+    };
+    for (event, our_defs) in ours {
+        let mut defs: Vec<serde_json::Value> = existing
+            .get(event)
+            .and_then(|d| d.as_array())
+            .map(|a| a.iter().filter(|d| !is_agtx_hook_entry(d)).cloned().collect())
+            .unwrap_or_default();
+        if let Some(arr) = our_defs.as_array() {
+            defs.extend(arr.iter().cloned());
+        }
+        if defs.is_empty() {
+            existing.remove(event);
+        } else {
+            existing.insert(event.clone(), serde_json::Value::Array(defs));
         }
     }
-    settings.insert("hooks".to_string(), serde_json::Value::Object(merged));
 }
 
 fn write_skills_to_worktree(
@@ -11059,19 +11094,12 @@ fn write_skills_to_worktree(
     let _ = std::fs::write(Path::new(worktree_path).join(DEPLOY_MARKER), &agtx_bin);
     for agent_name in agent_names {
         if let Some(spec) = agent::spec(agent_name) {
-            write_mcp_config(
-                spec,
-                worktree_path,
-                &project_path_str,
-                &agtx_bin,
-                agent_hooks,
-            );
+            write_mcp_config(spec, worktree_path, &project_path_str, &agtx_bin);
             // After the MCP writer, never before: two agents keep their hooks in
             // the same file as their MCP config, and both writers
-            // read-modify-write it.
-            if agent_hooks {
-                write_hook_config(spec, worktree_path, &agtx_bin);
-            }
+            // read-modify-write it. Called even when hooks are off, so a worktree
+            // deployed with them on gets them removed rather than left firing.
+            write_hook_config(spec, worktree_path, &agtx_bin, agent_hooks);
         }
     }
 
@@ -11109,12 +11137,25 @@ fn write_skills_to_worktree(
 ///
 /// The writers whose file is shared with an MCP config, or may be committed,
 /// merge; the rest own their file and are written outright.
-fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &str) {
+fn write_hook_config(
+    spec: &agent::AgentSpec,
+    worktree_path: &str,
+    agtx_bin: &str,
+    enabled: bool,
+) {
     let Some(kind) = spec.hook_config else {
         return;
     };
     let wt = Path::new(worktree_path);
-    let ours = claude_shaped_hooks(agtx_bin, spec.name, kind);
+    // When hooks are off this is an *empty* set of handlers under the same event
+    // names, which `merge_hook_events` reads as "strip agtx's and add nothing".
+    // Skipping the call instead would leave a worktree deployed while hooks were
+    // on firing `agtx hook` forever after they were turned off.
+    let ours = if enabled {
+        claude_shaped_hooks(agtx_bin, spec.name, kind)
+    } else {
+        empty_hook_events(kind)
+    };
 
     match kind {
         // Shares `.claude/settings.local.json` with the MCP preflight keys
@@ -11136,10 +11177,21 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
         agent::HookConfigKind::CodexHooksJson => {
             let dir = wt.join(".codex");
             let _ = std::fs::create_dir_all(&dir);
-            write_json(
-                &dir.join("hooks.json"),
-                &serde_json::json!({ "description": "agtx phase status", "hooks": ours }),
-            );
+            let path = dir.join("hooks.json");
+            let mut root = read_json_object(&path);
+            let mut hooks = root
+                .get("hooks")
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            merge_hook_events(&mut hooks, ours);
+            if hooks.is_empty() {
+                root.remove("hooks");
+            } else {
+                root.entry("description".to_string())
+                    .or_insert_with(|| serde_json::json!("agtx phase status"));
+                root.insert("hooks".to_string(), serde_json::Value::Object(hooks));
+            }
+            write_json(&path, &serde_json::Value::Object(root));
         }
         // `{version, hooks: {event: [{command}]}}`. The one agent that does not
         // take the Claude-shaped `{hooks: [{type, command}]}` wrapper — its
@@ -11147,19 +11199,37 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
         // file parses, loads, and fires nothing. cursor-agent 2026.08.25.
         agent::HookConfigKind::CursorHooksJson => {
             let command = hook_command(agtx_bin, spec.name);
-            let mut hooks = serde_json::Map::new();
+            let mut ours = serde_json::Map::new();
             for (event, _) in hook_status::hook_events(kind) {
-                hooks.insert(
-                    (*event).to_string(),
-                    serde_json::json!([{ "command": command }]),
-                );
+                let defs = if enabled {
+                    serde_json::json!([{ "command": command }])
+                } else {
+                    serde_json::json!([])
+                };
+                ours.insert((*event).to_string(), defs);
             }
+            // Merges, like every other writer whose file the project may ship. A
+            // worktree is a full checkout, so a repo that tracks
+            // `.cursor/hooks.json` has it here — and clobbering it would both
+            // destroy the user's hooks and leave a modified tracked file on the
+            // task branch for the agent to commit. `.cursor` is not in
+            // AGENT_CONFIG_DIRS either, so the diff view would not hide it.
             let dir = wt.join(".cursor");
             let _ = std::fs::create_dir_all(&dir);
-            write_json(
-                &dir.join("hooks.json"),
-                &serde_json::json!({ "version": 1, "hooks": hooks }),
-            );
+            let path = dir.join("hooks.json");
+            let mut root = read_json_object(&path);
+            let mut hooks = root
+                .get("hooks")
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            merge_hook_events(&mut hooks, serde_json::Value::Object(ours));
+            if hooks.is_empty() {
+                root.remove("hooks");
+            } else {
+                root.insert("version".to_string(), serde_json::json!(1));
+                root.insert("hooks".to_string(), serde_json::Value::Object(hooks));
+            }
+            write_json(&path, &serde_json::Value::Object(root));
         }
         // Grok scans the directory, so agtx owns one file in it and never merges.
         agent::HookConfigKind::GrokHooksJson => {
@@ -11175,13 +11245,28 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("hooks.json");
             let mut root = read_json_object(&path);
-            root.insert(
-                AGTX_HOOK_NAME.to_string(),
-                antigravity_hook_spec(agtx_bin, spec.name),
-            );
+            // Keyed by hook name, so agtx owns one key and pruning is a removal
+            // rather than a per-event filter.
+            if enabled {
+                root.insert(
+                    AGTX_HOOK_NAME.to_string(),
+                    antigravity_hook_spec(agtx_bin, spec, kind),
+                );
+            } else {
+                root.remove(AGTX_HOOK_NAME);
+            }
             write_json(&path, &serde_json::Value::Object(root));
         }
     }
+}
+
+/// The same event keys with no handlers, which `merge_hook_events` prunes.
+fn empty_hook_events(kind: agent::HookConfigKind) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for (event, _) in hook_status::hook_events(kind) {
+        out.insert((*event).to_string(), serde_json::json!([]));
+    }
+    serde_json::Value::Object(out)
 }
 
 /// The name agtx registers its hooks under, where the format is keyed by name.
@@ -11192,15 +11277,24 @@ const AGTX_HOOK_NAME: &str = "agtx";
 /// Its two event shapes are not interchangeable: tool events are grouped under a
 /// `matcher`, the rest are a flat list of handlers, and the wrong shape is
 /// silently ignored.
-fn antigravity_hook_spec(agtx_bin: &str, agent_name: &str) -> serde_json::Value {
+fn antigravity_hook_spec(
+    agtx_bin: &str,
+    spec: &agent::AgentSpec,
+    kind: agent::HookConfigKind,
+) -> serde_json::Value {
     let handler = |event: &str| {
-        serde_json::json!({
-            "type": "command",
-            "command": format!("{} --event {}", hook_command(agtx_bin, agent_name), event),
-        })
+        let base = hook_command(agtx_bin, spec.name);
+        // `--event` only where the agent's payload carries no event name. Read
+        // from the spec rather than assumed, so an agent that later needs the
+        // same treatment gets it by setting one field.
+        let command = match spec.hook_event_source {
+            agent::HookEventSource::Argv => format!("{} --event {}", base, event),
+            agent::HookEventSource::Payload => base,
+        };
+        serde_json::json!({ "type": "command", "command": command })
     };
     let mut out = serde_json::Map::new();
-    for (event, matcher) in hook_status::hook_events(agent::HookConfigKind::AntigravityHooksJson) {
+    for (event, matcher) in hook_status::hook_events(kind) {
         let entry = match matcher {
             Some(m) => serde_json::json!([{ "matcher": m, "hooks": [handler(event)] }]),
             None => serde_json::json!([handler(event)]),
@@ -11251,7 +11345,6 @@ fn write_mcp_config(
     worktree_path: &str,
     project_path_str: &str,
     agtx_bin: &str,
-    agent_hooks: bool,
 ) {
     let Some(kind) = spec.mcp_config else {
         return;
