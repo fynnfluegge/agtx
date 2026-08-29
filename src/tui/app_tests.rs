@@ -30,6 +30,15 @@ fn visible_columns_keep_two_usable_columns_on_narrow_terminals() {
 }
 
 #[test]
+fn card_height_tracks_width_with_practical_bounds() {
+    assert_eq!(card_height_for_width(8), 6);
+    assert_eq!(card_height_for_width(20), 10);
+    assert_eq!(card_height_for_width(28), 12);
+    assert_eq!(card_height_for_width(40), 12);
+    assert_eq!(card_height_for_width(100), 12);
+}
+
+#[test]
 fn board_scrollbar_has_visible_thumb_and_reaches_track_ends() {
     assert_eq!(board_scrollbar_metrics(10, 3, 0, 12), Some((0, 3)));
     assert_eq!(board_scrollbar_metrics(10, 3, 7, 12), Some((9, 3)));
