@@ -60,9 +60,9 @@
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching.
 - **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI.
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously.
-- **Orchestrator agent**: A dedicated AI agent that autonomously manages your kanban board via [MCP](https://modelcontextprotocol.io) — delegates to coding agents, advances phases, checks for merge conflicts ([experimental](#orchestrator-agent-experimental)).
-- **Brainstorm & Sweep skills**: Capture ideas and push them to the board from any coding agent session — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to decompose and create tasks with one confirmation step ([details](#brainstorm--sweep-skills)).
-- **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — fully customizable. Ddefine your own workflow via a single TOML file.
+- **Orchestrator agent (experimental)**: A dedicated AI agent that autonomously manages your kanban board via MCP — delegates to coding agents, advances phases, checks for merge conflicts.
+- **Brainstorm & Sweep skills**: Capture ideas and push them to the board from any coding agent session — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to decompose and create tasks with one confirmation step.
+- **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) and more — fully customizable. Ddefine your own workflow via a single TOML file. See <a href="#plugins">Plugins</a> how to create a plugin.
 
 > [!NOTE]
 > Just need a plain coding-agent session-manager with **full human-in-the-loop control** and **no spec-driven skill execution and orchestration** on advancing tasks?
@@ -135,37 +135,6 @@ curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh \
 
 - **tmux** — agent sessions run in a dedicated tmux server
 - **gh** (optional) — GitHub CLI for PR operations
-
-### First run: trust your project in the agent
-
-Coding agents gate a directory they have not seen behind a trust prompt, and agtx
-gives every task its own git worktree. **Launch your agent once in the project root
-and confirm its prompt** before using agtx there:
-
-```bash
-cd your-project && claude   # or codex / gemini — confirm the trust prompt, then quit
-```
-
-One time per project. Trust is inherited from the project root, so every worktree
-agtx creates underneath it is covered:
-
-| Agent | First-run prompt |
-|-------|------------------|
-| Claude, Codex, Gemini | trust the project root once — worktrees inherit it |
-| Cursor, Grok | none — agtx launches them with `--trust` |
-| OpenCode | none |
-| Antigravity | trust the project root once — agtx copies that consent to each new worktree, because antigravity matches paths exactly and never inherits |
-
-If a task's agent is waiting on a trust prompt, its card shows **`?`** with the
-reason, and you answer it in the agent's own pane (`↩` to open the task).
-
-> [!NOTE]
-> By default agtx does **not** answer these prompts for you — vouching for a
-> directory, or accepting unattended tool execution, is your decision. For
-> unattended runs set `auto_trust = true` in `~/.config/agtx/config.toml` and agtx
-> will read the pane and answer them. It is already enabled inside the
-> [Docker sandbox](#docker-sandbox) and the benchmark, where the container is
-> disposable and nobody is at the board.
 
 ## Usage
 
@@ -467,9 +436,6 @@ Commands are written once in canonical format and automatically translated per a
 
 <details>
 <summary><b>Creating a Plugin</b></summary>
-
-> [!TIP]
-> If you have the agtx repo open in Claude Code, run `/add-plugin <github-url>` to automatically generate a bundled `plugin.toml` from any spec-driven framework repo — including wiring up `src/skills.rs` and the README tables.
 
 Place your plugin at `.agtx/plugins/<name>/plugin.toml` in your project root (or `~/.config/agtx/plugins/<name>/plugin.toml` for global use). It will appear in the plugin selector automatically.
 
