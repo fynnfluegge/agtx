@@ -60,7 +60,7 @@
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching.
 - **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI.
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously.
-- **Orchestrator agent (experimental)**: A dedicated AI agent that autonomously manages your kanban board via MCP — delegates to coding agents, advances phases, checks for merge conflicts.
+- **Orchestrator agent (experimental)**: A dedicated agent that autonomously manages your kanban board via MCP — delegates to coding agents, advances phases, checks for merge conflicts.
 - **Brainstorm & Sweep skills**: Capture ideas and push them to the board from any coding agent session — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to decompose and create tasks with one confirmation step.
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) and more — fully customizable. Ddefine your own workflow via a single TOML file. See <a href="#plugins">Plugins</a> how to create a plugin.
 
