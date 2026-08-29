@@ -120,6 +120,13 @@ fn visible_column_range(selected: usize, width: u16) -> std::ops::Range<usize> {
     start..start + visible
 }
 
+/// Terminal cells are typically about twice as tall as they are wide, so a
+/// card needs roughly half as many rows as columns to look visually square.
+/// Bounds keep narrow cards usable and very wide cards from dominating the board.
+fn card_height_for_width(card_width: u16) -> u16 {
+    (card_width / 2).clamp(6, 12)
+}
+
 fn board_scrollbar_metrics(
     total_items: usize,
     visible_items: usize,
@@ -1405,7 +1412,7 @@ impl App {
                 height: column_area.height.saturating_sub(2),
                 ..column_area
             };
-            let card_height: u16 = if column_area.height >= 34 { 8 } else { 6 };
+            let card_height = card_height_for_width(inner_area.width);
             let max_visible_cards = (inner_area.height / card_height).max(1) as usize;
 
             // Calculate scroll offset to keep selected task visible
