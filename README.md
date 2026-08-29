@@ -346,7 +346,7 @@ Config file location: `~/.config/agtx/config.toml`
 
 ```toml
 default_agent = "claude"
-fullscreen_on_enter = false  # Enter attaches to tmux directly instead of the in-TUI popup
+fullscreen_on_enter = false  # When true, Enter opens the tmux pane fullscreen inside agtx
 agent_hooks = true           # Let agents report their own phase status via lifecycle hooks
 auto_trust = false           # Answer agents' trust prompts on your behalf
 update_check = true          # Check GitHub daily for a new release (see Updating)

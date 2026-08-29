@@ -480,7 +480,7 @@ In global mode all CRUD tools (`list_tasks`, `create_task`, etc.) require a `pro
 Global config lives at `~/.config/agtx/config.toml` (`GlobalConfig`):
 ```toml
 default_agent = "claude"
-fullscreen_on_enter = false  # When true, Enter on a task attaches to tmux directly instead of opening the in-TUI popup
+fullscreen_on_enter = false  # When true, Enter opens the task's tmux pane fullscreen inside agtx
 agent_hooks = true           # Write agent lifecycle-hook configs into worktrees (see Hook-Based Phase Status)
 auto_trust = false           # Answer agents' trust / bypass-permission prompts by reading the pane (see First-Launch Dialogs)
 update_check = true          # Daily GitHub release check + header notice (see Self-Update)

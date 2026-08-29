@@ -23,6 +23,8 @@ pub struct ShellPopup {
     pub last_content_refresh: Instant,
     /// Cursor position inside the visible tmux pane and its pane height.
     pub cursor_info: Option<(usize, usize, usize)>,
+    /// Forward the next key directly to tmux, even when agtx normally owns it.
+    pub pass_through_next_key: bool,
 }
 
 impl ShellPopup {
@@ -38,6 +40,7 @@ impl ShellPopup {
             fullscreen: false,
             last_content_refresh: Instant::now(),
             cursor_info: None,
+            pass_through_next_key: false,
         }
     }
 
@@ -143,13 +146,13 @@ fn build_footer_text_for_mode(scroll_offset: i32, start_line: usize, fullscreen:
     let view_action = if fullscreen { "windowed" } else { "fullscreen" };
     if scroll_offset < 0 {
         format!(
-            " [C-j/k] scroll [C-d/u] page [C-g] bottom [C-f] {} [C-q] close | Line {} ",
-            view_action,
-            start_line + 1
+            " Line {} | [C-g] bottom [C-f] {} [C-Space] send next [C-q] close [C-j/k] scroll [C-d/u] page ",
+            start_line + 1,
+            view_action
         )
     } else {
         format!(
-            " [C-j/k] scroll [C-d/u] page [C-f] {} [C-q] close | At bottom ",
+            " At bottom | [C-f] {} [C-Space] send next [C-q] close [C-j/k] scroll [C-d/u] page ",
             view_action
         )
     }

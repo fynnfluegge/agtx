@@ -1097,7 +1097,7 @@ impl App {
             // Process MCP transition requests from the command queue
             self.process_transition_requests()?;
 
-            if event::poll(std::time::Duration::from_millis(100))? {
+            if event::poll(main_event_poll_timeout(self.state.shell_popup.is_some()))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         self.handle_key(key)?;
@@ -1133,7 +1133,7 @@ impl App {
             // so run it in a single background worker at a responsive 20 FPS.
             if self.state.shell_refresh_rx.is_none() {
                 if let Some(popup) = self.state.shell_popup.as_mut() {
-                    if popup.content_refresh_due(std::time::Duration::from_millis(50)) {
+                    if popup.content_refresh_due(SHELL_REFRESH_INTERVAL) {
                         let window_name = popup.window_name.clone();
                         let tmux_ops = Arc::clone(&self.state.tmux_ops);
                         let (tx, rx) = mpsc::channel();
@@ -1640,6 +1640,7 @@ impl App {
             // IME composition (Korean, Japanese, Chinese) inline at the cursor
             // instead of drifting to wherever the last text was written.
             let mut cursor_display: Option<(u16, u16)> = None;
+            let mut selected_plugin_rows: Option<std::ops::Range<usize>> = None;
             let cursor_line_start = lines.len();
             match state.input_mode {
                 InputMode::InputTitle => {
@@ -1670,6 +1671,7 @@ impl App {
                 InputMode::SelectPlugin => {
                     let active_plugin = state.config.workflow_plugin.as_deref().unwrap_or("");
                     for (i, opt) in state.wizard_plugin_options.iter().enumerate() {
+                        let option_start = lines.len();
                         let is_sel = i == state.wizard_selected_plugin;
                         let marker = if is_sel { "  > " } else { "    " };
                         let is_project_default = (opt.name.is_empty() && active_plugin.is_empty())
@@ -1691,6 +1693,9 @@ impl App {
                             Style::default().fg(desc_color),
                             wrap_width,
                         ));
+                        if is_sel {
+                            selected_plugin_rows = Some(option_start..lines.len());
+                        }
                     }
                 }
                 InputMode::InputDescription => {
@@ -1739,8 +1744,13 @@ impl App {
             // No `.wrap(...)` — `lines` is already pre-wrapped by `wrap_spans`
             // to fit `wrap_width`. Letting Ratatui re-wrap would re-introduce
             // the two-source-of-truth bug between renderer and cursor.
+            let viewport_height = input_area.height.saturating_sub(2) as usize;
+            let wizard_scroll = selected_plugin_rows
+                .map(|selected| wizard_plugin_scroll_offset(lines.len(), viewport_height, selected))
+                .unwrap_or(0);
             let content = Paragraph::new(Text::from(lines))
                 .style(Style::default().fg(text_color))
+                .scroll((wizard_scroll as u16, 0))
                 .block(
                     Block::default()
                         .title(block_title)
@@ -3936,6 +3946,19 @@ impl App {
                     }
                 }
                 // Return early so the keypress only dismisses the banner, not forwarded
+                return Ok(());
+            }
+
+            // Ctrl+Space is a prefix for keys that agtx normally reserves for
+            // popup navigation (for example Ctrl+q or Ctrl+u). This preserves
+            // complete terminal access without leaving the in-app fullscreen.
+            if popup.pass_through_next_key {
+                popup.pass_through_next_key = false;
+                send_key_to_tmux(&window_name, key, self.state.tmux_ops.as_ref());
+                return Ok(());
+            }
+            if has_ctrl && matches!(key.code, KeyCode::Char(' ')) {
+                popup.pass_through_next_key = true;
                 return Ok(());
             }
 
@@ -8724,6 +8747,7 @@ fn send_key_to_tmux(
 ) {
     use crossterm::event::KeyModifiers;
     let has_alt = key.modifiers.contains(KeyModifiers::ALT);
+    let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     let base = match key.code {
         KeyCode::Char(c) => c.to_string(),
@@ -8745,9 +8769,25 @@ fn send_key_to_tmux(
         _ => return,
     };
 
-    let key_str = if has_alt { format!("M-{}", base) } else { base };
+    let key_str = match (has_ctrl, has_alt) {
+        (true, true) => format!("C-M-{}", base),
+        (true, false) => format!("C-{}", base),
+        (false, true) => format!("M-{}", base),
+        (false, false) => base,
+    };
 
     let _ = tmux_ops.send_key(window_name, &key_str);
+}
+
+const SHELL_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+const DEFAULT_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn main_event_poll_timeout(shell_popup_open: bool) -> std::time::Duration {
+    if shell_popup_open {
+        SHELL_REFRESH_INTERVAL
+    } else {
+        DEFAULT_EVENT_POLL_INTERVAL
+    }
 }
 
 /// Parse ANSI escape sequences to ratatui Lines with colors
@@ -9027,6 +9067,23 @@ fn wizard_plugin_option_lines(
         *line = Line::from(spans);
     }
     description_lines
+}
+
+/// Keep the complete selected plugin entry inside the wizard viewport while
+/// retaining as much preceding context as possible.
+fn wizard_plugin_scroll_offset(
+    total_rows: usize,
+    viewport_rows: usize,
+    selected_rows: std::ops::Range<usize>,
+) -> usize {
+    if viewport_rows == 0 || total_rows <= viewport_rows {
+        return 0;
+    }
+
+    selected_rows
+        .end
+        .saturating_sub(viewport_rows)
+        .min(total_rows.saturating_sub(viewport_rows))
 }
 
 /// Snap `pos` back to the nearest UTF-8 char boundary at or before it.

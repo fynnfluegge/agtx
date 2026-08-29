@@ -245,7 +245,9 @@ impl TmuxOperations for RealTmuxOps {
     fn capture_pane_with_history(&self, target: &str, history_lines: i32) -> Vec<u8> {
         std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
-            .args(["capture-pane", "-t", target, "-p", "-e", "-J"])
+            // Keep wrapped rows separate: tmux reports cursor_y in physical
+            // pane rows, so joining wrapped rows would misalign the cursor.
+            .args(["capture-pane", "-t", target, "-p", "-e"])
             .args(["-S", &format!("-{}", history_lines)])
             .output()
             .map(|o| o.stdout)

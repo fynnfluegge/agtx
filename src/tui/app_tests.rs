@@ -63,6 +63,13 @@ fn wizard_plugin_descriptions_wrap_and_align() {
     assert!(continuation.starts_with(&" ".repeat(20)));
 }
 
+#[test]
+fn wizard_plugin_scroll_keeps_late_selection_visible() {
+    assert_eq!(wizard_plugin_scroll_offset(30, 10, 24..27), 17);
+    assert_eq!(wizard_plugin_scroll_offset(30, 10, 4..7), 0);
+    assert_eq!(wizard_plugin_scroll_offset(8, 10, 6..8), 0);
+}
+
 /// Test that generate_pr_description correctly combines git diff and agent-generated text
 #[test]
 #[cfg(feature = "test-mocks")]
@@ -922,6 +929,57 @@ fn test_send_key_to_tmux_alt_b_f() {
         crossterm::event::KeyEvent::new(KeyCode::Char('f'), crossterm::event::KeyModifiers::ALT),
         &mock_tmux2,
     );
+}
+
+/// Control modifiers must reach the pane so terminal programs can be
+/// interrupted, suspended, or otherwise controlled from the in-app popup.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_send_key_to_tmux_control_char() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux
+        .expect_send_key()
+        .with(mockall::predicate::eq("win"), mockall::predicate::eq("C-c"))
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    send_key_to_tmux(
+        "win",
+        crossterm::event::KeyEvent::new(
+            KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+        &mock_tmux,
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_send_key_to_tmux_control_alt_char() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux
+        .expect_send_key()
+        .with(
+            mockall::predicate::eq("win"),
+            mockall::predicate::eq("C-M-x"),
+        )
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    send_key_to_tmux(
+        "win",
+        crossterm::event::KeyEvent::new(
+            KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+        ),
+        &mock_tmux,
+    );
+}
+
+#[test]
+fn shell_popup_uses_twenty_fps_poll_interval() {
+    assert_eq!(main_event_poll_timeout(true), std::time::Duration::from_millis(50));
+    assert_eq!(main_event_poll_timeout(false), std::time::Duration::from_millis(100));
 }
 
 // =============================================================================

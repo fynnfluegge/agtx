@@ -245,6 +245,12 @@ fn test_fullscreen_footer_offers_windowed_toggle() {
     assert!(content.contains("[C-f] windowed"));
 }
 
+#[test]
+fn test_footer_documents_reserved_key_passthrough() {
+    let footer = build_footer_text(0, 0);
+    assert!(footer.contains("[C-Space] send next"));
+}
+
 // === Rendering Tests ===
 
 #[test]
