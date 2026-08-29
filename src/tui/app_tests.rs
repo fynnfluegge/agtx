@@ -9,6 +9,60 @@ use crate::git::{MockGitOperations, MockGitProviderOperations};
 #[cfg(feature = "test-mocks")]
 use crate::tmux::MockTmuxOperations;
 
+#[test]
+fn visible_columns_use_all_columns_on_wide_terminals() {
+    assert_eq!(visible_column_range(0, 160), 0..5);
+    assert_eq!(visible_column_range(4, 140), 0..5);
+}
+
+#[test]
+fn visible_columns_follow_selection_on_standard_terminals() {
+    assert_eq!(visible_column_range(0, 120), 0..3);
+    assert_eq!(visible_column_range(2, 120), 1..4);
+    assert_eq!(visible_column_range(4, 120), 2..5);
+}
+
+#[test]
+fn visible_columns_keep_two_usable_columns_on_narrow_terminals() {
+    assert_eq!(visible_column_range(0, 80), 0..2);
+    assert_eq!(visible_column_range(2, 80), 1..3);
+    assert_eq!(visible_column_range(4, 80), 3..5);
+}
+
+#[test]
+fn styled_footer_emphasizes_shortcuts_without_changing_text() {
+    let styles = TuiStyles::from_theme(&ThemeConfig::default());
+    let line = styled_footer(" [o] new  [Enter] open ", styles);
+    let rendered: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+    assert_eq!(rendered, "[o] new  [Enter] open");
+    assert_eq!(line.spans[0].style.fg, Some(styles.selected));
+    assert_eq!(line.spans[1].style.fg, Some(styles.dimmed));
+}
+
+#[test]
+fn wizard_plugin_descriptions_wrap_and_align() {
+    let lines = wizard_plugin_option_lines(
+        "  > ",
+        "agtx",
+        "A deliberately long plugin description that must stay inside the wizard",
+        " ✓",
+        Style::default(),
+        Style::default(),
+        42,
+    );
+
+    assert!(lines.len() > 1);
+    for line in &lines {
+        assert!(line.width() <= 40, "line reached the right margin: {:?}", line);
+    }
+    let continuation: String = lines[1]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(continuation.starts_with(&" ".repeat(20)));
+}
+
 /// Test that generate_pr_description correctly combines git diff and agent-generated text
 #[test]
 #[cfg(feature = "test-mocks")]
@@ -891,7 +945,7 @@ fn test_capture_tmux_pane_with_history() {
     mock_tmux
         .expect_get_cursor_info()
         .with(mockall::predicate::eq("test-window"))
-        .returning(|_| Some((2, 3))); // cursor at line 2, pane has 3 lines
+        .returning(|_| Some((0, 2, 3))); // cursor at column 0, line 2, pane has 3 lines
 
     let content = capture_tmux_pane_with_history("test-window", 500, &mock_tmux);
 

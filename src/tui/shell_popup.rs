@@ -1,5 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use std::time::{Duration, Instant};
 
 /// State for the shell popup that shows a detached tmux window
 #[derive(Debug, Clone)]
@@ -15,6 +16,13 @@ pub struct ShellPopup {
     pub escalation_note: Option<String>,
     /// Task ID (used to clear escalation note on dismiss)
     pub task_id: Option<String>,
+    /// Whether the popup fills the agtx terminal instead of using a centered window.
+    pub fullscreen: bool,
+    /// Pane capture is deliberately throttled so typing never performs two
+    /// expensive tmux captures for every character.
+    pub last_content_refresh: Instant,
+    /// Cursor position inside the visible tmux pane and its pane height.
+    pub cursor_info: Option<(usize, usize, usize)>,
 }
 
 impl ShellPopup {
@@ -27,6 +35,9 @@ impl ShellPopup {
             last_pane_size: None,
             escalation_note: None,
             task_id: None,
+            fullscreen: false,
+            last_content_refresh: Instant::now(),
+            cursor_info: None,
         }
     }
 
@@ -53,6 +64,14 @@ impl ShellPopup {
     /// Check if we're at the bottom
     pub fn is_at_bottom(&self) -> bool {
         self.scroll_offset >= 0
+    }
+
+    pub fn content_refresh_due(&self, interval: Duration) -> bool {
+        self.last_content_refresh.elapsed() >= interval
+    }
+
+    pub fn mark_content_refreshed(&mut self) {
+        self.last_content_refresh = Instant::now();
     }
 }
 
@@ -117,13 +136,22 @@ pub fn compute_visible_lines<'a>(
 
 /// Build the footer text for the shell popup
 pub fn build_footer_text(scroll_offset: i32, start_line: usize) -> String {
+    build_footer_text_for_mode(scroll_offset, start_line, false)
+}
+
+fn build_footer_text_for_mode(scroll_offset: i32, start_line: usize, fullscreen: bool) -> String {
+    let view_action = if fullscreen { "windowed" } else { "fullscreen" };
     if scroll_offset < 0 {
         format!(
-            " [C-j/k] scroll [C-d/u] page [C-g] bottom [C-f] fullscreen [C-q] close | Line {} ",
+            " [C-j/k] scroll [C-d/u] page [C-g] bottom [C-f] {} [C-q] close | Line {} ",
+            view_action,
             start_line + 1
         )
     } else {
-        " [C-j/k] scroll [C-d/u] page [C-f] fullscreen [C-q] close | At bottom ".to_string()
+        format!(
+            " [C-j/k] scroll [C-d/u] page [C-f] {} [C-q] close | At bottom ",
+            view_action
+        )
     }
 }
 
@@ -255,7 +283,8 @@ pub fn render_shell_popup(
     // Draw border around the popup
     let border_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors.border));
+        .border_style(Style::default().fg(colors.border))
+        .border_type(ratatui::widgets::BorderType::Rounded);
     let inner_area = border_block.inner(popup_area);
     frame.render_widget(border_block, popup_area);
 
@@ -274,10 +303,10 @@ pub fn render_shell_popup(
         .split(inner_area);
 
     // Title bar (pad to fill width)
-    let title = format!(" {} ", popup.task_title);
+    let title = format!("  {} ", popup.task_title);
     let padded_title = format!("{:<width$}", title, width = popup_chunks[0].width as usize);
     let title_bar = Paragraph::new(padded_title)
-        .style(Style::default().fg(colors.header_fg).bg(colors.header_bg));
+        .style(Style::default().fg(colors.header_bg).bold());
     frame.render_widget(title_bar, popup_chunks[0]);
 
     // Escalation banner (if present)
@@ -306,20 +335,36 @@ pub fn render_shell_popup(
     let visible_height = popup_chunks[2].height as usize;
 
     // Use the testable helper to compute visible lines
-    let (visible_lines, start_line, _total_lines) =
+    let (visible_lines, start_line, total_lines) =
         compute_visible_lines(styled_lines, visible_height, popup.scroll_offset);
 
     let content = Paragraph::new(visible_lines);
     frame.render_widget(content, popup_chunks[2]);
 
+    // A captured pane is text-only; explicitly restore tmux's live cursor when
+    // it falls inside the current (non-scrolled) viewport.
+    if popup.scroll_offset >= 0 {
+        if let Some((cursor_x, cursor_y, pane_height)) = popup.cursor_info {
+            let pane_start = total_lines.saturating_sub(pane_height);
+            let cursor_line = pane_start.saturating_add(cursor_y);
+            if cursor_line >= start_line && cursor_line < start_line + visible_height {
+                let x = popup_chunks[2]
+                    .x
+                    .saturating_add(cursor_x.min(popup_chunks[2].width.saturating_sub(1) as usize) as u16);
+                let y = popup_chunks[2].y.saturating_add((cursor_line - start_line) as u16);
+                frame.set_cursor_position((x, y));
+            }
+        }
+    }
+
     // Footer with scroll indicator (pad to fill width)
-    let footer_text = build_footer_text(popup.scroll_offset, start_line);
+    let footer_text = build_footer_text_for_mode(popup.scroll_offset, start_line, popup.fullscreen);
     let padded_footer = format!(
         "{:<width$}",
         footer_text,
         width = popup_chunks[3].width as usize
     );
     let footer = Paragraph::new(padded_footer)
-        .style(Style::default().fg(colors.footer_fg).bg(colors.footer_bg));
+        .style(Style::default().fg(colors.footer_bg));
     frame.render_widget(footer, popup_chunks[3]);
 }

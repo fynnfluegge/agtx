@@ -549,7 +549,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `o` | Create new task |
 | `Enter` | Open task popup (tmux view) / Edit task (backlog) |
 | `x` | Delete task (with confirmation) |
-| `Ctrl+f` | Fullscreen attach to task's tmux session |
+| `Ctrl+f` | Open the task popup fullscreen; press again to return to windowed mode |
 | `d` | Show git diff for task |
 | `D` | Open dependency-graph overlay |
 | `m` | Move task forward (advance workflow) |
@@ -590,7 +590,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `Ctrl+j/k` or `Ctrl+n/p` | Scroll up/down |
 | `Ctrl+d/u` or `PageDown/PageUp` | Page down/up |
 | `Ctrl+g` | Jump to bottom |
-| `Ctrl+f` | Fullscreen attach to tmux session |
+| `Ctrl+f` | Toggle the task popup between windowed and fullscreen modes |
 | `Ctrl+q` | Close popup |
 | Other keys | Forwarded to tmux/agent (including `Esc`) |
 
