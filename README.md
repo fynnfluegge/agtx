@@ -3,12 +3,13 @@
 [//]: <img src="https://github.com/user-attachments/assets/54ac039b-085e-490b-aacc-36c8e244e313" width="428" />
 
 # 🏄🏼‍♂️ agtx
+**The terminal-native agentic development environment for 10x productivity.** 
 
 <div align="left">
     
 > **The blackboard for coding agents** - Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates to multiple coding agents running in parallel. Come back to changes ready to merge.
 >
-> **Let different AI coding agents collaborate** autonomously on the same task with automatic session switching and context awareness - e.g. **Gemini** → research | **Claude** → implement | **Codex** → review
+> **Let different coding agents collaborate** autonomously on the same task with automatic session switching and context awareness.
 >
 > **Capture ideas without leaving your agent session** — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to push the conversation to the board as tasks in one step.
 
@@ -60,7 +61,14 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 
 ## Features
 
-- **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode)  | [Cursor Agent](https://cursor.com/docs/cli/overview) | [Copilot](https://github.com/github/copilot-cli) | [Grok Build](https://docs.x.ai/build/overview) | [Antigravity](https://github.com/google-antigravity/antigravity-cli)
+- **Supported Agents**:&nbsp; <a href="https://github.com/anthropics/claude-code"><kbd><img src="docs/logos/claude.svg" width="18" valign="middle" /> Claude Code</kbd></a>
+<a href="https://github.com/openai/codex"><kbd><img src="docs/logos/codex-dark.svg" width="18" valign="middle" /> Codex</kbd></a>
+<a href="https://docs.x.ai/build/overview"><kbd><img src="docs/logos/grok-dark.svg" width="18" valign="middle" /> Grok</kbd></a>
+<a href="https://cursor.com/docs/cli/overview"><kbd><img src="docs/logos/cursor-dark.svg" width="18" valign="middle" /> Cursor</kbd></a>
+<a href="https://github.com/sst/opencode"><kbd><img src="docs/logos/opencode-dark.svg" width="18" valign="middle" /> OpenCode</kbd></a>
+<a href="https://github.com/google-antigravity/antigravity-cli"><kbd><img src="docs/logos/antigravity.png" width="18" valign="middle" /> Antigravity</kbd></a>
+<a href="https://github.com/google-gemini/gemini-cli"><kbd><img src="docs/logos/gemini.svg" width="18" valign="middle" /> Gemini CLI</kbd></a>
+<a href="https://github.com/github/copilot-cli"><kbd><img src="docs/logos/copilot-dark.svg" width="18" valign="middle" /> Copilot</kbd></a>
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching
 - **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously
@@ -71,7 +79,7 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 > [!NOTE]
 > Just need a plain coding agent session manager with **full human-in-the-loop control** and **no automatic spec-driven skill execution and orchestration** on advancing tasks?
 >
-> Choose the **`void` plugin** and enjoy the kanban coding agent board - with full human control.
+> Choose the **`void` plugin** and enjoy agtx with full human control across all agent session phases.
 
 ## Quick Start
 
