@@ -88,10 +88,9 @@ That architecture was designed for problems that are too ill-defined for a singl
 interdependent to split cleanly up front. **Shipping software with coding agents is exactly that
 problem**, so agtx implements the model directly:
 
-The dependency graph gives the blackboard its structure. Tasks reference the work they build on,
-forming a graph of partial solutions. agtx holds downstream tasks until their dependencies reach
+The dependency graph gives the blackboard its structure. Tasks references they build on,
+forming a graph of partial solutions - agtx holds downstream tasks until their dependencies reach
 Review or Done, then carries the relevant diffs and artifacts into the dependent task's context.
-This lets agents contribute independently while still building on one another's results.
 
 ```
         ┌───────────────────────────────────────────────────────────┐
