@@ -2695,6 +2695,48 @@ fn test_resolve_prompt_research_with_task() {
     assert_eq!(prompt, "Task: add tests");
 }
 
+/// The pi column of the README plugin matrix, for the half of it that is
+/// code-enforced rather than a claim about a third-party installer.
+///
+/// gsd's `init_script` passes `--{agent}` to its own installer, which has no pi
+/// target, so pi is absent from its `supported_agents` and the plugin is filtered
+/// out for a pi task entirely (❌). Every other bundled plugin leaves
+/// `supported_agents` empty and so accepts pi, and whether its commands *resolve*
+/// there is the framework's business, not agtx's (✅ / 🟡). Locked because the
+/// exclusion is a whitelist omission — nothing names pi, so nothing fails if the
+/// list later grows an entry that should not be there.
+#[test]
+fn test_bundled_plugin_support_for_pi() {
+    use crate::config::WorkflowPlugin;
+    let plugin = |name: &str| -> WorkflowPlugin {
+        let (_n, _d, content) = skills::BUNDLED_PLUGINS
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .unwrap_or_else(|| panic!("{name} plugin should be bundled"));
+        toml::from_str(content).unwrap()
+    };
+
+    assert!(
+        !plugin("gsd").supports_agent("pi"),
+        "gsd's installer has no pi target, so pi must stay out of supported_agents"
+    );
+    // The same whitelist already excludes these two; pi joins them rather than
+    // being a new kind of case.
+    assert!(!plugin("gsd").supports_agent("antigravity"));
+    assert!(!plugin("gsd").supports_agent("copilot"));
+
+    for name in ["agtx", "agtx-terse", "spec-kit", "openspec", "bmad", "void"] {
+        assert!(
+            plugin(name).supports_agent("pi"),
+            "{name} declares no supported_agents, so it must accept pi"
+        );
+    }
+    // Claude-only plugins stay claude-only.
+    for name in ["superpowers", "oh-my-claudecode"] {
+        assert!(!plugin(name).supports_agent("pi"), "{name}");
+    }
+}
+
 #[test]
 fn test_gsd_plugin_toml_has_research_command() {
     use crate::config::WorkflowPlugin;

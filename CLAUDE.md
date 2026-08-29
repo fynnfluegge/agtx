@@ -208,8 +208,9 @@ Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
 | grok | `.grok/config.toml` | TOML, `[mcp_servers.agtx]` |
 | antigravity | `.agents/mcp_config.json` | JSON, `mcpServers` |
 | opencode | opencode config | JSON, `mcp` |
+| pi | `.pi/mcp.json` | JSON, `mcpServers` |
 
-Three writers **merge** instead of overwriting, because their file may already exist in the worktree — either tracked in the repo, or copied in from the project root by `AGENT_CONFIG_DIRS`. Grok appends `[mcp_servers.agtx]` to any existing `.grok/config.toml`; antigravity parses `.agents/mcp_config.json` and inserts `mcpServers.agtx`, preserving other servers and top-level sibling keys (`.agents/` is vendor-neutral, so a project is more likely to ship one); gemini inserts into `.gemini/settings.json`, which otherwise loses the user's theme, model and any other `mcpServers`. Claude's `settings.local.json` side-effect below merges for the same reason.
+Four writers **merge** instead of overwriting, because their file may already exist in the worktree — either tracked in the repo, or copied in from the project root by `AGENT_CONFIG_DIRS`. Grok appends `[mcp_servers.agtx]` to any existing `.grok/config.toml`; antigravity parses `.agents/mcp_config.json` and inserts `mcpServers.agtx`, preserving other servers and top-level sibling keys (`.agents/` is vendor-neutral, so a project is more likely to ship one); gemini inserts into `.gemini/settings.json`, which otherwise loses the user's theme, model and any other `mcpServers`; pi's `.pi/mcp.json` is where the `pi-mcp-adapter` package persists its own per-server `disabled` flags, so clobbering it re-enables servers the user switched off. pi has no MCP client of its own — without that package the file is inert, not harmful. Claude's `settings.local.json` side-effect below merges for the same reason.
 
 Claude needs an extra side-effect to avoid an interactive dialog on first open: `.claude/settings.local.json` gets `enableAllProjectMcpServers: true` plus `skipDangerousModePermissionPrompt: true`, which is what actually preflights the bypass-permissions warning (see the dialog table).
 
@@ -242,7 +243,7 @@ Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used
 **Mid-session lane — phase advances into an already-running agent.** `send_skill_and_prompt()`, three paths, because agent TUIs disagree about how a slash command plus arguments must arrive:
 
 1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter. Still on the typed path: it is the one flow where the text has to arrive in two pieces by design
-2. **gemini / codex / cursor / antigravity** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone. **How many Enters this takes is not fixed** — see *Submitting is its own delivery problem* below
+2. **gemini / codex / cursor / antigravity / pi** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone; pi's composer takes a paste as literal text but leaves a combined text+Enter `send_keys` sitting unsent. **How many Enters this takes is not fixed** — see *Submitting is its own delivery problem* below
 3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
 
 **Submitting is its own delivery problem.** A message with a prompt after the command submits on the first Enter. A **bare skill command** — what a phase whose command carries no `{task}`/`{task_id}` sends, which is `review` — exactly matches a skill name, so the composer's command picker opens *on the paste*. That Enter is then consumed by the picker ("Press enter to insert"), which inserts the command and repaints, leaving it parked. Measured against codex-cli 0.144.5 and cursor-agent 2026.08.25: both open the picker on a pasted bare command, and both submit on the second Enter.
@@ -274,7 +275,7 @@ Measured per agent (see `src/agent/trust.rs` for the table and the versions):
 
 - **Trust is inherited from the project root** for claude, codex and gemini — the default
   `worktree_dir` is inside the project, so a user who opened the agent there once never sees the
-  prompt again. cursor and grok are launched with `--trust`; opencode has no trust gate.
+  prompt again. cursor and grok are launched with `--trust`, and pi with `--approve`; opencode has no trust gate. pi's flag does double duty: it is also what lets it load the `.pi/skills/` agtx wrote into the worktree, since pi gates project-local skills on the same trust decision.
 - **antigravity is the exception**: it matches trusted paths *exactly*, at any depth. agtx seeds
   each new worktree into its `trustedWorkspaces` — but only when the project root is already there,
   so it replays a consent the user gave rather than creating one.
@@ -687,7 +688,7 @@ pane-hash heuristic — is a supported state, not a degraded one.
 | grok | `.grok/hooks/agtx.json` | `{hooks:[{type,command}]}` | `hookEventName`, **snake_case value** | yes — `Notification` scoped to `permission_prompt` |
 | antigravity | `.agents/hooks.json` | keyed by hook *name*, then event | **none** — passed as `--event` | no |
 | codex | `.codex/hooks.json` | `{description, hooks:{…}}` | `hook_event_name`, PascalCase | mapped, **not deployed** |
-| opencode, copilot | — | — | — | no hooks; see `HookConfigKind` |
+| opencode, copilot, pi | — | — | — | no hooks; see `HookConfigKind` |
 
 The formats are **not interchangeable**, and every mismatch below fails silently — a valid-looking
 config in the worktree and no status file ever written. This is why `tests/smoke/agent_smoke.py` is

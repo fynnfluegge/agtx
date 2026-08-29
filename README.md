@@ -440,24 +440,31 @@ Press `P` to switch plugins. Ships with 10 built-in:
 
 Commands are written once in canonical format and automatically translated per agent:
 
-| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode | Cursor | Grok | Antigravity |
-|--------------------------|-----------------|-------|----------|--------|------|-------------|
-| `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` |
+| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode | Cursor | Grok | Antigravity | pi |
+|--------------------------|-----------------|-------|----------|--------|------|-------------|----|
+| `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/skill:agtx-plan` |
 
-|  | Claude | Codex | Gemini | OpenCode | Cursor | Copilot | Grok | Antigravity |
-|--|:------:|:-----:|:------:|:--------:|:------:|:-------:|:----:|:-----------:|
-| **agtx** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
-| **gsd** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ |
-| **spec-kit** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
-| **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
-| **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ |
-| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
-| **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+|  | Claude | Codex | Gemini | OpenCode | Cursor | Copilot | Grok | Antigravity | pi |
+|--|:------:|:-----:|:------:|:--------:|:------:|:-------:|:----:|:-----------:|:--:|
+| **agtx** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ |
+| **gsd** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ |
+| **spec-kit** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 |
+| **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 |
+| **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 |
+| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
+| **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
+
+pi's column follows from where each framework installs its commands, not from pi:
+agtx deploys its own skills into `.pi/skills/`, so those rows are ✅, while
+spec-kit, openspec, bmad and agent-skills are installed by their own tooling,
+which emits no pi files — the command is delivered as text and the phase runs on
+its prompt. gsd's installer takes an agent flag and has no pi target, so pi is
+absent from its `supported_agents` and the plugin is filtered out entirely.
 
 <details>
 <summary><b>Creating a Plugin</b></summary>
