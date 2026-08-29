@@ -29,6 +29,7 @@ use crate::AppMode;
 use super::board::BoardState;
 use super::input::InputMode;
 use super::shell_popup::{self, ShellPopup};
+use super::theme::TuiStyles;
 
 /// Helper to convert hex color string to ratatui Color
 fn hex_to_color(hex: &str) -> Color {
@@ -85,6 +86,66 @@ fn build_footer_text(
                 .to_string()
         }
     }
+}
+
+/// Turn the existing contextual help string into modern keycap/value spans.
+/// Keeping `build_footer_text` as the source preserves its tested behavior.
+fn styled_footer(text: &str, styles: TuiStyles) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut rest = text.trim();
+    while let Some(open) = rest.find('[') {
+        if open > 0 {
+            spans.push(Span::styled(rest[..open].to_string(), styles.muted()));
+        }
+        let Some(close) = rest[open..].find(']') else {
+            spans.push(Span::styled(rest[open..].to_string(), styles.muted()));
+            rest = "";
+            break;
+        };
+        let end = open + close + 1;
+        spans.push(Span::styled(rest[open..end].to_string(), styles.keycap()));
+        rest = &rest[end..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_string(), styles.muted()));
+    }
+    Line::from(spans)
+}
+
+fn visible_column_range(selected: usize, width: u16) -> std::ops::Range<usize> {
+    let visible = if width >= 140 { 5 } else if width >= 96 { 3 } else { 2 };
+    let start = selected
+        .saturating_sub(visible / 2)
+        .min(5usize.saturating_sub(visible));
+    start..start + visible
+}
+
+/// Terminal cells are typically about twice as tall as they are wide, so a
+/// card needs roughly half as many rows as columns to look visually square.
+/// Bounds keep narrow cards usable and very wide cards from dominating the board.
+fn card_height_for_width(card_width: u16) -> u16 {
+    (card_width / 2).clamp(6, 12)
+}
+
+fn board_scrollbar_metrics(
+    total_items: usize,
+    visible_items: usize,
+    scroll_offset: usize,
+    track_height: usize,
+) -> Option<(usize, usize)> {
+    if track_height == 0 || total_items <= visible_items || visible_items == 0 {
+        return None;
+    }
+
+    let min_thumb_height = track_height.min(2);
+    let thumb_height = (visible_items * track_height / total_items)
+        .max(min_thumb_height)
+        .min(track_height);
+    let max_thumb_pos = track_height.saturating_sub(thumb_height);
+    let max_scroll_offset = total_items.saturating_sub(visible_items);
+    let thumb_pos = scroll_offset.min(max_scroll_offset) * max_thumb_pos / max_scroll_offset;
+
+    Some((thumb_pos, thumb_height))
 }
 
 type Terminal = ratatui::Terminal<AppBackend>;
@@ -252,6 +313,9 @@ struct AppState {
     show_project_list: bool,
     // Task shell popup
     shell_popup: Option<ShellPopup>,
+    // At most one pane-history capture runs off the input thread at a time.
+    shell_refresh_rx:
+        Option<mpsc::Receiver<(String, Vec<u8>, Option<(usize, usize, usize)>)>>,
     // File search dropdown
     file_search: Option<FileSearchState>,
     // Skill search dropdown
@@ -716,6 +780,7 @@ impl App {
                 selected_project: 0,
                 show_project_list: false,
                 shell_popup: None,
+                shell_refresh_rx: None,
                 file_search: None,
                 skill_search: None,
                 task_ref_search: None,
@@ -940,6 +1005,7 @@ impl App {
                 selected_project: 0,
                 show_project_list: false,
                 shell_popup: None,
+                shell_refresh_rx: None,
                 file_search: None,
                 skill_search: None,
                 task_ref_search: None,
@@ -1059,7 +1125,7 @@ impl App {
             // Process MCP transition requests from the command queue
             self.process_transition_requests()?;
 
-            if event::poll(std::time::Duration::from_millis(100))? {
+            if event::poll(main_event_poll_timeout(self.state.shell_popup.is_some()))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         self.handle_key(key)?;
@@ -1071,13 +1137,46 @@ impl App {
                 }
             }
 
-            // Refresh shell popup content periodically (every poll cycle when open)
-            if let Some(ref mut popup) = self.state.shell_popup {
-                popup.cached_content = capture_tmux_pane_with_history(
-                    &popup.window_name,
-                    500,
-                    self.state.tmux_ops.as_ref(),
-                );
+            // Apply a completed pane capture without ever waiting for tmux on
+            // the input thread.
+            if let Some(ref rx) = self.state.shell_refresh_rx {
+                match rx.try_recv() {
+                    Ok((window_name, content, cursor_info)) => {
+                        self.state.shell_refresh_rx = None;
+                        if let Some(popup) = self.state.shell_popup.as_mut() {
+                            if popup.window_name == window_name {
+                                popup.cached_content = content;
+                                popup.cursor_info = cursor_info;
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.state.shell_refresh_rx = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+
+            // Capturing history invokes tmux twice (content + cursor metadata),
+            // so run it in a single background worker at a responsive 20 FPS.
+            if self.state.shell_refresh_rx.is_none() {
+                if let Some(popup) = self.state.shell_popup.as_mut() {
+                    if popup.content_refresh_due(SHELL_REFRESH_INTERVAL) {
+                        let window_name = popup.window_name.clone();
+                        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                        let (tx, rx) = mpsc::channel();
+                        popup.mark_content_refreshed();
+                        self.state.shell_refresh_rx = Some(rx);
+                        std::thread::spawn(move || {
+                            let (content, cursor_info) = capture_tmux_pane_snapshot(
+                                &window_name,
+                                500,
+                                tmux_ops.as_ref(),
+                            );
+                            let _ = tx.send((window_name, content, cursor_info));
+                        });
+                    }
+                }
             }
 
             // Apply results from background session refresh (non-blocking)
@@ -1192,22 +1291,21 @@ impl App {
             main_chunks[0]
         };
 
-        // Main layout: header, board, footer
+        let styles = TuiStyles::from_theme(&state.config.theme);
+
+        // Main layout: compact application bar, board, contextual command bar.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Header
+                Constraint::Length(2), // Header + divider
                 Constraint::Min(0),    // Board
-                Constraint::Length(3), // Footer
+                Constraint::Length(2), // Divider + footer
             ])
             .split(content_area);
 
         // Header
         let plugin_label = state.config.workflow_plugin.as_deref().unwrap_or("agtx");
-        let left = Span::styled(
-            format!(" {} ", state.project_name),
-            Style::default().fg(Color::Cyan).bold(),
-        );
+        let left = Span::styled(format!("  {}", state.project_name), Style::default().fg(styles.text).bold());
         let mut right_spans: Vec<Span> = Vec::new();
         if state.flags.experimental {
             let orch_active = state.orchestrator_session.is_some();
@@ -1246,30 +1344,35 @@ impl App {
                 Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
             ),
         ]);
-        let left_len = state.project_name.len() + 2;
+        let left_len = state.project_name.chars().count() + 2;
         // Character count, not byte count: the update notice's "⬆" is 3 bytes
         // and one column, and a byte-based width would over-pad the header.
         let right_len: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
-        let padding = (chunks[0].width as usize).saturating_sub(left_len + right_len + 2); // 2 for borders
+        let padding = (chunks[0].width as usize).saturating_sub(left_len + right_len + 2);
         let mut spans = vec![left, Span::raw(" ".repeat(padding))];
         spans.extend(right_spans);
-        let header =
-            Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL));
-        frame.render_widget(header, chunks[0]);
+        frame.render_widget(Paragraph::new(Line::from(spans)), Rect { height: 1, ..chunks[0] });
+        frame.render_widget(
+            Paragraph::new("─".repeat(chunks[0].width as usize)).style(styles.muted()),
+            Rect { y: chunks[0].y + 1, height: 1, ..chunks[0] },
+        );
 
-        // Board columns (5 columns: Backlog, Planning, Running, Review, Done)
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-            ])
-            .split(chunks[1]);
+        // Keep cards usable on narrow terminals by showing a window around the
+        // selected column. Navigation still spans all five workflow columns.
+        let visible_range = visible_column_range(state.board.selected_column, chunks[1].width);
+        let mut constraints = Vec::new();
+        for slot in 0..visible_range.len() {
+            if slot > 0 {
+                constraints.push(Constraint::Length(1));
+            }
+            constraints.push(Constraint::Ratio(1, visible_range.len() as u32));
+        }
+        let board_areas = Layout::horizontal(constraints).split(chunks[1]);
 
-        for (i, status) in TaskStatus::columns().iter().enumerate() {
+        let statuses = TaskStatus::columns();
+        for (slot, i) in visible_range.enumerate() {
+            let status = &statuses[i];
+            let column_area = board_areas[slot * 2];
             let tasks: Vec<&Task> = state
                 .board
                 .tasks
@@ -1279,22 +1382,38 @@ impl App {
 
             let is_selected_column = state.board.selected_column == i;
 
-            let title = format!(" {} ({}) ", status.display_name(), tasks.len());
-            let (border_style, title_style) = if is_selected_column {
-                (
-                    Style::default().fg(hex_to_color(&state.config.theme.color_selected)),
-                    Style::default().fg(hex_to_color(&state.config.theme.color_selected)),
-                )
+            let title_style = if is_selected_column {
+                Style::default().fg(styles.selected).bold()
             } else {
-                (
-                    Style::default().fg(hex_to_color(&state.config.theme.color_normal)),
-                    Style::default().fg(hex_to_color(&state.config.theme.color_column_header)),
-                )
+                Style::default().fg(styles.column_header).bold()
             };
 
-            // Calculate card height (title + preview lines + borders)
-            let card_height: u16 = 10; // 1 title + 7 preview lines + 2 borders
-            let max_visible_cards = (columns[i].height.saturating_sub(2) / card_height) as usize;
+            let header_area = Rect { height: 2, ..column_area };
+            let count = Span::styled(format!("  {}", tasks.len()), styles.muted());
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {}", status.display_name().to_uppercase()),
+                        title_style,
+                    ),
+                    count,
+                ])),
+                Rect { height: 1, ..header_area },
+            );
+            let rule_color = if is_selected_column { styles.selected } else { styles.dimmed };
+            frame.render_widget(
+                Paragraph::new("─".repeat(header_area.width as usize))
+                    .style(Style::default().fg(rule_color)),
+                Rect { y: header_area.y + 1, height: 1, ..header_area },
+            );
+
+            let inner_area = Rect {
+                y: column_area.y + 2,
+                height: column_area.height.saturating_sub(2),
+                ..column_area
+            };
+            let card_height = card_height_for_width(inner_area.width);
+            let max_visible_cards = (inner_area.height / card_height).max(1) as usize;
 
             // Calculate scroll offset to keep selected task visible
             let scroll_offset = if is_selected_column && tasks.len() > max_visible_cards {
@@ -1310,21 +1429,6 @@ impl App {
 
             // Check if we need a scrollbar
             let needs_scrollbar = tasks.len() > max_visible_cards;
-            let content_width = if needs_scrollbar {
-                columns[i].width.saturating_sub(3) // Leave room for scrollbar
-            } else {
-                columns[i].width.saturating_sub(2)
-            };
-
-            // Draw column border
-            let column_block = Block::default()
-                .title(title)
-                .title_style(title_style)
-                .borders(Borders::ALL)
-                .border_style(border_style);
-            let inner_area = column_block.inner(columns[i]);
-            frame.render_widget(column_block, columns[i]);
-
             // Render task cards with scroll offset
             let visible_tasks: Vec<_> = tasks
                 .iter()
@@ -1367,6 +1471,11 @@ impl App {
                 );
             }
 
+            if tasks.is_empty() {
+                let empty = if is_selected_column { "  No tasks · [o] new" } else { "  No tasks" };
+                frame.render_widget(Paragraph::new(empty).style(styles.muted()), inner_area);
+            }
+
             // Draw scrollbar if needed
             if needs_scrollbar {
                 let scrollbar_area = Rect {
@@ -1376,28 +1485,30 @@ impl App {
                     height: inner_area.height,
                 };
 
-                let total_tasks = tasks.len();
                 let scrollbar_height = inner_area.height as usize;
-                let thumb_height = (max_visible_cards * scrollbar_height / total_tasks).max(1);
-                let thumb_pos = (scroll_offset * scrollbar_height / total_tasks)
-                    .min(scrollbar_height - thumb_height);
-
-                for y in 0..scrollbar_height {
-                    let char = if y >= thumb_pos && y < thumb_pos + thumb_height {
-                        "█"
-                    } else {
-                        "░"
-                    };
-                    let style = Style::default().fg(hex_to_color(&state.config.theme.color_dimmed));
-                    frame.render_widget(
-                        Paragraph::new(char).style(style),
-                        Rect {
-                            x: scrollbar_area.x,
-                            y: scrollbar_area.y + y as u16,
-                            width: 1,
-                            height: 1,
-                        },
-                    );
+                if let Some((thumb_pos, thumb_height)) = board_scrollbar_metrics(
+                    tasks.len(),
+                    max_visible_cards,
+                    scroll_offset,
+                    scrollbar_height,
+                ) {
+                    for y in 0..scrollbar_height {
+                        let is_thumb = y >= thumb_pos && y < thumb_pos + thumb_height;
+                        let (glyph, style) = if is_thumb {
+                            ("┃", Style::default().fg(styles.selected).bold())
+                        } else {
+                            ("│", styles.muted())
+                        };
+                        frame.render_widget(
+                            Paragraph::new(glyph).style(style),
+                            Rect {
+                                x: scrollbar_area.x,
+                                y: scrollbar_area.y + y as u16,
+                                width: 1,
+                                height: 1,
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -1437,10 +1548,19 @@ impl App {
             )
         };
 
-        let footer = Paragraph::new(footer_text.as_str())
-            .style(footer_style)
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(footer, chunks[2]);
+        frame.render_widget(
+            Paragraph::new("─".repeat(chunks[2].width as usize)).style(styles.muted()),
+            Rect { height: 1, ..chunks[2] },
+        );
+        let footer_line = if footer_style.fg == Some(Color::Yellow) {
+            Line::from(Span::styled(format!("  {}", footer_text.trim()), footer_style))
+        } else {
+            styled_footer(&footer_text, styles)
+        };
+        frame.render_widget(
+            Paragraph::new(footer_line).alignment(Alignment::Center),
+            Rect { y: chunks[2].y + 1, height: 1, ..chunks[2] },
+        );
 
         // Input overlay if in input mode
         if matches!(
@@ -1554,6 +1674,7 @@ impl App {
             // IME composition (Korean, Japanese, Chinese) inline at the cursor
             // instead of drifting to wherever the last text was written.
             let mut cursor_display: Option<(u16, u16)> = None;
+            let mut selected_plugin_rows: Option<std::ops::Range<usize>> = None;
             let cursor_line_start = lines.len();
             match state.input_mode {
                 InputMode::InputTitle => {
@@ -1584,6 +1705,7 @@ impl App {
                 InputMode::SelectPlugin => {
                     let active_plugin = state.config.workflow_plugin.as_deref().unwrap_or("");
                     for (i, opt) in state.wizard_plugin_options.iter().enumerate() {
+                        let option_start = lines.len();
                         let is_sel = i == state.wizard_selected_plugin;
                         let marker = if is_sel { "  > " } else { "    " };
                         let is_project_default = (opt.name.is_empty() && active_plugin.is_empty())
@@ -1596,18 +1718,18 @@ impl App {
                         } else {
                             Style::default().fg(text_color)
                         };
-                        push_wrapped(
-                            &mut lines,
-                            vec![
-                                Span::styled(marker.to_string(), name_style),
-                                Span::styled(format!("{:<14}", &opt.label), name_style),
-                                Span::styled(
-                                    opt.description.clone(),
-                                    Style::default().fg(desc_color),
-                                ),
-                                Span::styled(check.to_string(), Style::default().fg(Color::Green)),
-                            ],
-                        );
+                        lines.extend(wizard_plugin_option_lines(
+                            marker,
+                            &opt.label,
+                            &opt.description,
+                            check,
+                            name_style,
+                            Style::default().fg(desc_color),
+                            wrap_width,
+                        ));
+                        if is_sel {
+                            selected_plugin_rows = Some(option_start..lines.len());
+                        }
                     }
                 }
                 InputMode::InputDescription => {
@@ -1656,8 +1778,13 @@ impl App {
             // No `.wrap(...)` — `lines` is already pre-wrapped by `wrap_spans`
             // to fit `wrap_width`. Letting Ratatui re-wrap would re-introduce
             // the two-source-of-truth bug between renderer and cursor.
+            let viewport_height = input_area.height.saturating_sub(2) as usize;
+            let wizard_scroll = selected_plugin_rows
+                .map(|selected| wizard_plugin_scroll_offset(lines.len(), viewport_height, selected))
+                .unwrap_or(0);
             let content = Paragraph::new(Text::from(lines))
                 .style(Style::default().fg(text_color))
+                .scroll((wizard_scroll as u16, 0))
                 .block(
                     Block::default()
                         .title(block_title)
@@ -2682,8 +2809,11 @@ impl App {
     }
 
     fn draw_shell_popup(popup: &ShellPopup, frame: &mut Frame, area: Rect, theme: &ThemeConfig) {
-        let popup_area =
-            centered_rect_fixed_width(SHELL_POPUP_WIDTH, SHELL_POPUP_HEIGHT_PERCENT, area);
+        let popup_area = if popup.fullscreen {
+            area
+        } else {
+            centered_rect_fixed_width(SHELL_POPUP_WIDTH, SHELL_POPUP_HEIGHT_PERCENT, area)
+        };
 
         // Parse ANSI escape sequences for colors
         let styled_lines = parse_ansi_to_lines(&popup.cached_content);
@@ -2712,10 +2842,11 @@ impl App {
         spinner_frame: usize,
         deps_blocked: bool,
     ) {
+        let styles = TuiStyles::from_theme(theme);
         let border_style = if is_selected {
-            Style::default().fg(hex_to_color(&theme.color_selected))
+            Style::default().fg(styles.selected)
         } else {
-            Style::default().fg(hex_to_color(&theme.color_normal))
+            Style::default().fg(styles.dimmed)
         };
 
         let title_style = if is_selected {
@@ -2739,18 +2870,17 @@ impl App {
             task.title.clone()
         };
 
-        let border_type = if is_selected {
-            BorderType::Thick
-        } else {
-            BorderType::Plain
-        };
-
         let card_block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .border_type(border_type);
-        let inner = card_block.inner(area);
+            .border_type(if is_selected { BorderType::Rounded } else { BorderType::Plain });
+        let block_inner = card_block.inner(area);
         frame.render_widget(card_block, area);
+        let inner = Rect {
+            x: block_inner.x.saturating_add(1),
+            width: block_inner.width.saturating_sub(2),
+            ..block_inner
+        };
 
         // Title line with optional phase indicator
         let show_indicator = matches!(
@@ -2833,7 +2963,7 @@ impl App {
             frame.render_widget(title_line, title_area);
         }
 
-        // Footer line with agent name (for active tasks)
+        // Footer line with a compact phase label and agent badge.
         let show_agent = task.status != TaskStatus::Backlog || task.session_name.is_some();
         let footer_height = if show_agent && inner.height > 2 {
             1u16
@@ -2851,7 +2981,7 @@ impl App {
             };
 
             // Show description or placeholder
-            let preview_text = task.description.as_deref().unwrap_or("No description");
+            let preview_text = task.description.as_deref().unwrap_or("");
 
             // Truncate description to fit preview area
             let max_chars = (preview_area.width as usize) * (preview_area.height as usize);
@@ -2868,11 +2998,7 @@ impl App {
             };
 
             let preview = Paragraph::new(truncated)
-                .style(
-                    Style::default()
-                        .fg(hex_to_color(&theme.color_description))
-                        .italic(),
-                )
+                .style(Style::default().fg(styles.description))
                 .wrap(Wrap { trim: true });
             frame.render_widget(preview, preview_area);
         }
@@ -2905,14 +3031,28 @@ impl App {
                 }
                 None => Style::default().fg(Color::White),
             };
-            let agent_label = Paragraph::new(format!(" {} ", task.agent))
-                .style(agent_style)
-                .alignment(Alignment::Right);
-            frame.render_widget(agent_label, footer_area);
+            let phase_label = phase_status.map(|(status, _)| match status {
+                PhaseStatus::Ready => "✓ Ready",
+                PhaseStatus::Working => "● Working",
+                PhaseStatus::Blocked => "? Blocked",
+                PhaseStatus::Idle => "Ⅱ Idle",
+                PhaseStatus::Exited => "× Exited",
+            });
+            let mut spans = Vec::new();
+            if let Some(label) = phase_label {
+                spans.push(Span::styled(label, styles.muted()));
+            }
+            let used: usize = spans.iter().map(|span| span.width()).sum();
+            let agent = format!(" {} ", task.agent);
+            let gap = (footer_area.width as usize).saturating_sub(used + agent.chars().count());
+            spans.push(Span::raw(" ".repeat(gap)));
+            spans.push(Span::styled(agent, agent_style));
+            frame.render_widget(Paragraph::new(Line::from(spans)), footer_area);
         }
     }
 
     fn draw_sidebar(state: &AppState, frame: &mut Frame, area: Rect) {
+        let styles = TuiStyles::from_theme(&state.config.theme);
         // Show projects from database
         let current_path = state
             .project_path
@@ -2937,25 +3077,42 @@ impl App {
                     Style::default().fg(hex_to_color(&state.config.theme.color_text))
                 };
 
-                let marker = if is_current { " ●" } else { "" };
-                ListItem::new(format!(" {}{}", project.name, marker)).style(style)
+                let marker = if is_current { "▌" } else { " " };
+                ListItem::new(format!("{} {}", marker, project.name)).style(style)
             })
             .collect();
 
-        let title = format!(" 📁 Projects ({}) ", state.projects.len());
-        let border_color = if state.sidebar_focused {
-            hex_to_color(&state.config.theme.color_selected)
+        let title_style = if state.sidebar_focused {
+            Style::default().fg(styles.selected).bold()
         } else {
-            hex_to_color(&state.config.theme.color_normal)
+            Style::default().fg(styles.column_header).bold()
         };
-        let list = List::new(items).block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color)),
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" PROJECTS", title_style),
+                Span::styled(format!("  {}", state.projects.len()), styles.muted()),
+            ])),
+            Rect { height: 1, ..area },
         );
-
-        frame.render_widget(list, area);
+        frame.render_widget(
+            Paragraph::new("─".repeat(area.width.saturating_sub(1) as usize)).style(styles.muted()),
+            Rect { y: area.y + 1, height: 1, ..area },
+        );
+        frame.render_widget(
+            List::new(items),
+            Rect {
+                x: area.x + 1,
+                y: area.y + 3,
+                width: area.width.saturating_sub(2),
+                height: area.height.saturating_sub(3),
+            },
+        );
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::RIGHT)
+                .border_style(styles.muted()),
+            area,
+        );
     }
 
     fn draw_dashboard(state: &AppState, frame: &mut Frame, area: Rect) {
@@ -3148,18 +3305,13 @@ impl App {
             AppMode::Dashboard => self.handle_dashboard_key(key.code),
             AppMode::Project(_) => match self.state.input_mode {
                 InputMode::Normal => {
-                    // Ctrl+f = fullscreen attach (handled here since handle_normal_key only gets KeyCode)
+                    // Ctrl+f = open the selected task in the in-app fullscreen view.
                     if key.code == KeyCode::Char('f')
                         && key
                             .modifiers
                             .contains(crossterm::event::KeyModifiers::CONTROL)
                     {
-                        if let Some(task) = self.state.board.selected_task() {
-                            if let Some(window_name) = task.session_name.clone() {
-                                self.state.shell_popup = None;
-                                return self.attach_to_tmux_fullscreen(&window_name);
-                            }
-                        }
+                        self.open_selected_task_fullscreen()?;
                         return Ok(());
                     }
                     self.handle_normal_key(key.code)
@@ -3831,6 +3983,19 @@ impl App {
                 return Ok(());
             }
 
+            // Ctrl+Space is a prefix for keys that agtx normally reserves for
+            // popup navigation (for example Ctrl+q or Ctrl+u). This preserves
+            // complete terminal access without leaving the in-app fullscreen.
+            if popup.pass_through_next_key {
+                popup.pass_through_next_key = false;
+                send_key_to_tmux(&window_name, key, self.state.tmux_ops.as_ref());
+                return Ok(());
+            }
+            if has_ctrl && matches!(key.code, KeyCode::Char(' ')) {
+                popup.pass_through_next_key = true;
+                return Ok(());
+            }
+
             match key.code {
                 // Ctrl+q = close popup
                 KeyCode::Char('q') if has_ctrl => {
@@ -3862,22 +4027,33 @@ impl App {
                 KeyCode::Char('g') if has_ctrl => {
                     popup.scroll_to_bottom();
                 }
-                // Ctrl+f = fullscreen attach to tmux session
+                // Ctrl+f toggles between centered and fullscreen in-app views.
                 KeyCode::Char('f') if has_ctrl => {
-                    // Close the popup first so the tmux window isn't stuck at popup dimensions
-                    self.state.shell_popup = None;
-                    self.attach_to_tmux_fullscreen(&window_name)?;
+                    popup.fullscreen = !popup.fullscreen;
+                    let (pane_width, pane_height) = if popup.fullscreen {
+                        crossterm::terminal::size()
+                            .map(|(width, height)| {
+                                (width.saturating_sub(2), height.saturating_sub(4))
+                            })
+                            .unwrap_or((SHELL_POPUP_CONTENT_WIDTH, 20))
+                    } else {
+                        let height = crossterm::terminal::size()
+                            .map(|(_, height)| {
+                                (height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16
+                            })
+                            .unwrap_or(24);
+                        (SHELL_POPUP_CONTENT_WIDTH, height.saturating_sub(4))
+                    };
+                    let _ = self
+                        .state
+                        .tmux_ops
+                        .resize_window(&window_name, pane_width, pane_height);
+                    popup.last_pane_size = Some((pane_width, pane_height));
                     return Ok(());
                 }
                 _ => {
                     // Forward all other keys to tmux window (including Esc)
                     send_key_to_tmux(&window_name, key, self.state.tmux_ops.as_ref());
-                    // After sending a key, refresh content to show the result
-                    popup.cached_content = capture_tmux_pane_with_history(
-                        &window_name,
-                        500,
-                        self.state.tmux_ops.as_ref(),
-                    );
                 }
             }
         }
@@ -4083,8 +4259,7 @@ impl App {
                     if task.status == TaskStatus::Backlog && task.session_name.is_some() {
                         // Backlog task with active research session
                         if self.state.config.fullscreen_on_enter {
-                            let window_name = task.session_name.clone().unwrap();
-                            self.attach_to_tmux_fullscreen(&window_name)?;
+                            self.open_selected_task_fullscreen()?;
                         } else {
                             self.open_selected_task()?;
                         }
@@ -4098,8 +4273,7 @@ impl App {
                     } else if task.session_name.is_some() {
                         // Open shell popup or fullscreen
                         if self.state.config.fullscreen_on_enter {
-                            let window_name = task.session_name.clone().unwrap();
-                            self.attach_to_tmux_fullscreen(&window_name)?;
+                            self.open_selected_task_fullscreen()?;
                         } else {
                             self.open_selected_task()?;
                         }
@@ -6999,92 +7173,20 @@ impl App {
         Ok(())
     }
 
-    /// Suspend the TUI and attach directly to a tmux window for full interaction.
-    /// Restores the TUI when the user detaches (Ctrl+b d).
-    fn attach_to_tmux_fullscreen(&mut self, window_name: &str) -> Result<()> {
-        // window_name is the full session:window target (e.g. "docugap:task-75189cbb-test")
-        // Check if the tmux window still exists before attempting to attach.
-        if !self
-            .state
-            .tmux_ops
-            .window_exists(window_name)
-            .unwrap_or(true)
-        {
-            self.state.warning_message = Some((
-                "Session window no longer exists".to_string(),
-                std::time::Instant::now(),
-            ));
-            return Ok(());
-        }
-
-        let session = &self.state.tmux_project_name;
-
-        // Check if we're already inside the agtx tmux server — if so, just
-        // switch windows instead of nesting with attach.
-        let inside_agtx = std::env::var("TMUX")
-            .map(|v| v.contains(tmux::AGENT_SERVER))
-            .unwrap_or(false);
-
-        if inside_agtx {
-            // Already inside agtx tmux — just switch to the task window.
-            // window_name is already session:window format, use it directly.
-            let _ = std::process::Command::new("tmux")
-                .args([
-                    "-L",
-                    tmux::AGENT_SERVER,
-                    "select-window",
-                    "-t",
-                    window_name,
-                    ";",
-                    "resize-window",
-                    "-A",
-                ])
-                .output();
-        } else {
-            // Leave alternate screen and disable raw mode
-            match self.terminal.backend_mut() {
-                AppBackend::Crossterm(backend) => {
-                    let _ = disable_raw_mode();
-                    let _ = execute!(backend, LeaveAlternateScreen, DisableBracketedPaste);
-                }
-                #[cfg(feature = "test-mocks")]
-                AppBackend::Test(_) => {}
+    fn open_selected_task_fullscreen(&mut self) -> Result<()> {
+        self.open_selected_task()?;
+        if let Some(popup) = self.state.shell_popup.as_mut() {
+            popup.fullscreen = true;
+            if let Ok((width, height)) = crossterm::terminal::size() {
+                let pane_size = (width.saturating_sub(2), height.saturating_sub(4));
+                let _ = self.state.tmux_ops.resize_window(
+                    &popup.window_name,
+                    pane_size.0,
+                    pane_size.1,
+                );
+                popup.last_pane_size = Some(pane_size);
             }
-
-            // Attach to the agtx tmux server, select the task window, and resize.
-            // Unset $TMUX so tmux allows attaching when inside a different tmux.
-            let _ = std::process::Command::new("tmux")
-                .args([
-                    "-L",
-                    tmux::AGENT_SERVER,
-                    "attach",
-                    "-t",
-                    session,
-                    ";",
-                    "select-window",
-                    "-t",
-                    window_name,
-                    ";",
-                    "resize-window",
-                    "-A",
-                ])
-                .env_remove("TMUX")
-                .status();
-
-            // Restore terminal
-            match self.terminal.backend_mut() {
-                AppBackend::Crossterm(backend) => {
-                    enable_raw_mode()?;
-                    execute!(backend, EnterAlternateScreen, EnableBracketedPaste)?;
-                }
-                #[cfg(feature = "test-mocks")]
-                AppBackend::Test(_) => {}
-            }
-
-            // Force full redraw
-            self.terminal.clear()?;
         }
-
         Ok(())
     }
 
@@ -8529,6 +8631,14 @@ fn capture_tmux_pane_with_history(
     history_lines: i32,
     tmux_ops: &dyn TmuxOperations,
 ) -> Vec<u8> {
+    capture_tmux_pane_snapshot(window_name, history_lines, tmux_ops).0
+}
+
+fn capture_tmux_pane_snapshot(
+    window_name: &str,
+    history_lines: i32,
+    tmux_ops: &dyn TmuxOperations,
+) -> (Vec<u8>, Option<(usize, usize, usize)>) {
     let content = tmux_ops.capture_pane_with_history(window_name, history_lines);
 
     // Get the cursor position and pane height to know where the "real" content ends
@@ -8536,7 +8646,11 @@ fn capture_tmux_pane_with_history(
     let cursor_info = tmux_ops.get_cursor_info(window_name);
 
     // Trim content to only include lines up to cursor position
-    shell_popup::trim_content_to_cursor(content, cursor_info)
+    let trim_info = cursor_info.map(|(_, y, height)| (y, height));
+    (
+        shell_popup::trim_content_to_cursor(content, trim_info),
+        cursor_info,
+    )
 }
 
 /// Generate PR title and description using the configured agent
@@ -8667,6 +8781,7 @@ fn send_key_to_tmux(
 ) {
     use crossterm::event::KeyModifiers;
     let has_alt = key.modifiers.contains(KeyModifiers::ALT);
+    let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     let base = match key.code {
         KeyCode::Char(c) => c.to_string(),
@@ -8688,9 +8803,25 @@ fn send_key_to_tmux(
         _ => return,
     };
 
-    let key_str = if has_alt { format!("M-{}", base) } else { base };
+    let key_str = match (has_ctrl, has_alt) {
+        (true, true) => format!("C-M-{}", base),
+        (true, false) => format!("C-{}", base),
+        (false, true) => format!("M-{}", base),
+        (false, false) => base,
+    };
 
     let _ = tmux_ops.send_key(window_name, &key_str);
+}
+
+const SHELL_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+const DEFAULT_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn main_event_poll_timeout(shell_popup_open: bool) -> std::time::Duration {
+    if shell_popup_open {
+        SHELL_REFRESH_INTERVAL
+    } else {
+        DEFAULT_EVENT_POLL_INTERVAL
+    }
 }
 
 /// Parse ANSI escape sequences to ratatui Lines with colors
@@ -8923,6 +9054,70 @@ fn wrap_spans(spans: Vec<Span<'static>>, wrap_width: usize) -> Vec<Line<'static>
         }
     }
     visual.into_iter().map(Line::from).collect()
+}
+
+/// Render one plugin choice with a fixed metadata column and an independently
+/// wrapped description column. Continuation rows start beneath the description
+/// rather than at the wizard's left border.
+fn wizard_plugin_option_lines(
+    marker: &str,
+    label: &str,
+    description: &str,
+    check: &str,
+    name_style: Style,
+    description_style: Style,
+    width: usize,
+) -> Vec<Line<'static>> {
+    const LABEL_WIDTH: usize = 14;
+    const CHECK_WIDTH: usize = 2;
+    const RIGHT_PADDING: usize = 2;
+
+    let marker_width = Span::raw(marker.to_string()).width();
+    let prefix_width = marker_width + LABEL_WIDTH + CHECK_WIDTH;
+    let description_width = width
+        .saturating_sub(prefix_width + RIGHT_PADDING)
+        .max(1);
+    let mut description_lines = wrap_spans(
+        vec![Span::styled(description.to_string(), description_style)],
+        description_width,
+    );
+    if description_lines.is_empty() {
+        description_lines.push(Line::default());
+    }
+
+    let short_label = truncate_str(label, LABEL_WIDTH);
+    let check = format!("{:<CHECK_WIDTH$}", check);
+    for (index, line) in description_lines.iter_mut().enumerate() {
+        let mut spans = if index == 0 {
+            vec![
+                Span::styled(marker.to_string(), name_style),
+                Span::styled(format!("{short_label:<LABEL_WIDTH$}"), name_style),
+                Span::styled(check.clone(), Style::default().fg(Color::Green)),
+            ]
+        } else {
+            vec![Span::raw(" ".repeat(prefix_width))]
+        };
+        spans.append(&mut line.spans);
+        *line = Line::from(spans);
+    }
+    description_lines
+}
+
+/// Keep the complete selected plugin entry inside the wizard viewport while
+/// retaining as much preceding context as possible.
+fn wizard_plugin_scroll_offset(
+    total_rows: usize,
+    viewport_rows: usize,
+    selected_rows: std::ops::Range<usize>,
+) -> usize {
+    if viewport_rows == 0 || total_rows <= viewport_rows {
+        return 0;
+    }
+
+    selected_rows
+        .end
+        .saturating_sub(viewport_rows)
+        .min(total_rows.saturating_sub(viewport_rows))
 }
 
 /// Snap `pos` back to the nearest UTF-8 char boundary at or before it.
