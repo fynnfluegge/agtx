@@ -92,7 +92,7 @@ problem**, so agtx implements the model directly:
         ┌───────────────────────────────────────────────────────────┐
         │  CONTROL     orchestrator agent · phase gates · dep graph │
         └─────────────────────────────┬─────────────────────────────┘
-                                      │ decides which agent acts next
+                                      │
         ┌─────────────────────────────▼─────────────────────────────┐
         │                       THE BLACKBOARD                      │
         │     backlog  →  planning  →  running  →  review  →  done  │
