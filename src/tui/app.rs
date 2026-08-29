@@ -120,6 +120,27 @@ fn visible_column_range(selected: usize, width: u16) -> std::ops::Range<usize> {
     start..start + visible
 }
 
+fn board_scrollbar_metrics(
+    total_items: usize,
+    visible_items: usize,
+    scroll_offset: usize,
+    track_height: usize,
+) -> Option<(usize, usize)> {
+    if track_height == 0 || total_items <= visible_items || visible_items == 0 {
+        return None;
+    }
+
+    let min_thumb_height = track_height.min(2);
+    let thumb_height = (visible_items * track_height / total_items)
+        .max(min_thumb_height)
+        .min(track_height);
+    let max_thumb_pos = track_height.saturating_sub(thumb_height);
+    let max_scroll_offset = total_items.saturating_sub(visible_items);
+    let thumb_pos = scroll_offset.min(max_scroll_offset) * max_thumb_pos / max_scroll_offset;
+
+    Some((thumb_pos, thumb_height))
+}
+
 type Terminal = ratatui::Terminal<AppBackend>;
 
 /// Backend abstraction: real CrosstermBackend in production, TestBackend in tests.
@@ -1457,24 +1478,30 @@ impl App {
                     height: inner_area.height,
                 };
 
-                let total_tasks = tasks.len();
                 let scrollbar_height = inner_area.height as usize;
-                let thumb_height = (max_visible_cards * scrollbar_height / total_tasks).max(1);
-                let thumb_pos = (scroll_offset * scrollbar_height / total_tasks)
-                    .min(scrollbar_height - thumb_height);
-
-                for y in 0..scrollbar_height {
-                    let char = if y >= thumb_pos && y < thumb_pos + thumb_height { "┃" } else { "│" };
-                    let style = Style::default().fg(hex_to_color(&state.config.theme.color_dimmed));
-                    frame.render_widget(
-                        Paragraph::new(char).style(style),
-                        Rect {
-                            x: scrollbar_area.x,
-                            y: scrollbar_area.y + y as u16,
-                            width: 1,
-                            height: 1,
-                        },
-                    );
+                if let Some((thumb_pos, thumb_height)) = board_scrollbar_metrics(
+                    tasks.len(),
+                    max_visible_cards,
+                    scroll_offset,
+                    scrollbar_height,
+                ) {
+                    for y in 0..scrollbar_height {
+                        let is_thumb = y >= thumb_pos && y < thumb_pos + thumb_height;
+                        let (glyph, style) = if is_thumb {
+                            ("┃", Style::default().fg(styles.selected).bold())
+                        } else {
+                            ("│", styles.muted())
+                        };
+                        frame.render_widget(
+                            Paragraph::new(glyph).style(style),
+                            Rect {
+                                x: scrollbar_area.x,
+                                y: scrollbar_area.y + y as u16,
+                                width: 1,
+                                height: 1,
+                            },
+                        );
+                    }
                 }
             }
         }

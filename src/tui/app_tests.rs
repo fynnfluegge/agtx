@@ -30,6 +30,19 @@ fn visible_columns_keep_two_usable_columns_on_narrow_terminals() {
 }
 
 #[test]
+fn board_scrollbar_has_visible_thumb_and_reaches_track_ends() {
+    assert_eq!(board_scrollbar_metrics(10, 3, 0, 12), Some((0, 3)));
+    assert_eq!(board_scrollbar_metrics(10, 3, 7, 12), Some((9, 3)));
+    assert_eq!(board_scrollbar_metrics(20, 1, 0, 8), Some((0, 2)));
+}
+
+#[test]
+fn board_scrollbar_is_hidden_without_overflow_or_height() {
+    assert_eq!(board_scrollbar_metrics(3, 3, 0, 12), None);
+    assert_eq!(board_scrollbar_metrics(10, 3, 0, 0), None);
+}
+
+#[test]
 fn styled_footer_emphasizes_shortcuts_without_changing_text() {
     let styles = TuiStyles::from_theme(&ThemeConfig::default());
     let line = styled_footer(" [o] new  [Enter] open ", styles);
