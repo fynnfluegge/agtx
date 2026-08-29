@@ -57,7 +57,7 @@
 <a href="https://github.com/google-antigravity/antigravity-cli"><kbd><img src="docs/logos/antigravity.png" width="18" valign="middle" /> Antigravity</kbd></a>
 <a href="https://github.com/google-gemini/gemini-cli"><kbd><img src="docs/logos/gemini.svg" width="18" valign="middle" /> Gemini CLI</kbd></a>
 <a href="https://github.com/github/copilot-cli"><kbd><img src="docs/logos/copilot-dark.svg" width="18" valign="middle" /> Copilot</kbd></a>
-<a href="https://github.com/earendil-works/pi"><kbd>pi</kbd></a>
+<a href="https://github.com/earendil-works/pi"><kbd><img src="docs/logos/pi-dark.svg" width="18" valign="middle" /> pi</kbd></a>
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching.
 - **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI.
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously.
@@ -487,13 +487,6 @@ Commands are written once in canonical format and automatically translated per a
 
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported
-
-pi's column follows from where each framework installs its commands, not from pi:
-agtx deploys its own skills into `.pi/skills/`, so those rows are ✅, while
-spec-kit, openspec, bmad and agent-skills are installed by their own tooling,
-which emits no pi files — the command is delivered as text and the phase runs on
-its prompt. gsd's installer takes an agent flag and has no pi target, so pi is
-absent from its `supported_agents` and the plugin is filtered out entirely.
 
 <details>
 <summary><b>Creating a Plugin</b></summary>
