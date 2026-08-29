@@ -88,6 +88,11 @@ That architecture was designed for problems that are too ill-defined for a singl
 interdependent to split cleanly up front. **Shipping software with coding agents is exactly that
 problem**, so agtx implements the model directly:
 
+The dependency graph gives the blackboard its structure. Tasks reference the work they build on,
+forming a graph of partial solutions. agtx holds downstream tasks until their dependencies reach
+Review or Done, then carries the relevant diffs and artifacts into the dependent task's context.
+This lets agents contribute independently while still building on one another's results.
+
 ```
         ┌───────────────────────────────────────────────────────────┐
         │  CONTROL     orchestrator agent · phase gates · dep graph │
@@ -96,7 +101,7 @@ problem**, so agtx implements the model directly:
         ┌─────────────────────────────▼─────────────────────────────┐
         │                       THE BLACKBOARD                      │
         │     backlog  →  planning  →  running  →  review  →  done  │
-        │     specs · plans · diffs · reviews · phase artifacts     │
+        │   dependency graph · specs · plans · diffs · reviews      │
         └────▲─────────▲─────────▲─────────▲─────────▲─────────▲────┘
              │         │         │         │         │         │
         ┌────┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐
@@ -107,9 +112,9 @@ problem**, so agtx implements the model directly:
 
 | Blackboard model | In agtx |
 |------------------|---------|
-| **The blackboard** — a shared repository of the problem, partial solutions and contributed information | The kanban board and everything the phases leave behind: specs, plans, diffs, reviews, phase artifacts. Every agent reads from and writes to the same board |
+| **The blackboard** — a shared repository of the problem, partial solutions and contributed information | The kanban board, its dependency graph, and everything the phases leave behind: specs, plans, diffs, reviews, and phase artifacts. Every agent reads from and writes to the same board |
 | **Knowledge sources** — independent specialists that never talk to each other, only to the board | Eight coding agent CLIs, each running in its **own git worktree and tmux window**. No agent can see another's context — they exchange only what lands on the board |
-| **Control shell** — decides opportunistically which specialist runs next | Phase gating derived from each plugin's artifacts, the task dependency graph, and the [orchestrator agent](#orchestrator-agent-experimental) driving the whole board over MCP |
+| **Control shell** — decides opportunistically which specialist runs next | Plugin phase gates determine when a task can advance; the dependency graph determines which tasks are ready to start; and the [orchestrator agent](#orchestrator-agent-experimental) coordinates the board over MCP |
 
 ## Quick Start
 
