@@ -58,6 +58,11 @@ pub enum CommandSyntax {
     Hyphen,
     /// `$ns-command` — Codex's inline skill reference.
     Dollar,
+    /// `/skill:ns-command` — pi's skill commands live in one `skill:` namespace
+    /// of their own, so the plugin's namespace collapses into the skill *name*
+    /// (`/agtx:plan` → `/skill:agtx-plan`) rather than staying a prefix.
+    /// Verified against pi 0.84.3.
+    PiSkill,
     /// No interactive skill invocation; callers fall back to a file-path
     /// reference. Copilot, and any agent agtx has not been taught.
     None,
@@ -168,6 +173,11 @@ pub enum McpConfigKind {
     AntigravityJsonMerge,
     /// `opencode.json`, whose key is `mcp` and whose entry shape differs.
     OpenCode,
+    /// `.pi/mcp.json` — parsed, agtx inserted, written back, so other servers
+    /// survive. pi has no MCP client of its own; the `pi-mcp-adapter` package
+    /// reads this path as its highest-precedence project layer, and without the
+    /// adapter installed the file is inert rather than harmful.
+    PiJsonMerge,
 }
 
 /// Where and how an agent's lifecycle-hook config is written, and which event
@@ -291,6 +301,16 @@ pub struct AgentSpec {
     /// Needed for agents that run inside bash/node and so never show their own
     /// name in `pane_current_command`.
     pub active_indicators: &'static [&'static str],
+    /// Readiness needles that count **only in this agent's own pane**.
+    ///
+    /// [`active_indicators`](Self::active_indicators) is also matched against
+    /// panes whose agent is unknown, flattened across every spec, so a needle
+    /// that occurs in ordinary output would report an exited agent as still
+    /// running. pi has no startup banner — the one unconditional part of its
+    /// footer is the context display (`0.0%/1.0M`), giving `%/`, which also
+    /// occurs in text like `Coverage: 85%/90%`. Such a needle goes here: used
+    /// when agtx knows the pane runs this agent, ignored otherwise.
+    pub scoped_indicators: &'static [&'static str],
     /// Command that makes the agent exit cleanly, or `None` when Ctrl+C is the
     /// only way out.
     pub exit_command: Option<&'static str>,
@@ -347,6 +367,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         hook_event_source: HookEventSource::Payload,
         process_names: &["claude"],
         active_indicators: &["Claude Code"],
+        scoped_indicators: &[],
         exit_command: Some("/exit"),
         label_fg: (227, 148, 62), // orange
         label_bg: None,
@@ -444,6 +465,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         hook_event_source: HookEventSource::Payload,
         process_names: &["codex"],
         active_indicators: &["OpenAI Codex"],
+        scoped_indicators: &[],
         exit_command: None,
         label_fg: (255, 255, 255), // white on black
         label_bg: Some((20, 20, 20)),
@@ -535,6 +557,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         hook_event_source: HookEventSource::Payload,
         process_names: &["copilot"],
         active_indicators: &[],
+        scoped_indicators: &[],
         exit_command: Some("/exit"),
         label_fg: (255, 255, 255), // default white
         label_bg: None,
@@ -576,6 +599,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         hook_event_source: HookEventSource::Payload,
         process_names: &["gemini"],
         active_indicators: &["Type your message"],
+        scoped_indicators: &[],
         exit_command: Some("/quit"),
         label_fg: (234, 130, 180), // pink
         label_bg: None,
@@ -630,6 +654,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         hook_event_source: HookEventSource::Payload,
         process_names: &["opencode"],
         active_indicators: &["Ask anything"],
+        scoped_indicators: &[],
         exit_command: Some("/exit"),
         label_fg: (255, 255, 255), // white on grey
         label_bg: Some((80, 80, 80)),
@@ -667,6 +692,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         hook_event_source: HookEventSource::Payload,
         process_names: &["agent"],
         active_indicators: &["Cursor Agent"],
+        scoped_indicators: &[],
         exit_command: None,
         label_fg: (255, 255, 255), // default white
         label_bg: None,
@@ -722,6 +748,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         hook_event_source: HookEventSource::Payload,
         process_names: &["grok"],
         active_indicators: &["Grok Build", "Shift+Tab:mode"],
+        scoped_indicators: &[],
         exit_command: Some("/quit"),
         label_fg: (20, 20, 20), // black on white
         label_bg: Some((255, 255, 255)),
@@ -776,6 +803,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // npm wrapper, and the content-stabilisation fallback needs three pane
         // changes where its splash produces two.
         active_indicators: &["? for shortcuts"],
+        scoped_indicators: &[],
         exit_command: Some("/exit"),
         label_fg: (120, 190, 255), // light blue
         label_bg: None,
@@ -806,6 +834,75 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
                 scope: DialogScope::Launch,
             },
         ],
+    },
+    AgentSpec {
+        name: "pi",
+        binary: "pi",
+        description: "Earendil's pi coding agent",
+        co_author: "Pi <noreply@earendil.works>",
+        // pi is provider-agnostic: the variable that matters is the one for the
+        // provider `settings.json` selects, and its shipped default is google.
+        // Listed default-first, then the two providers whose keys a runner is
+        // most likely to already hold. `pi auth` otherwise reads
+        // ~/.pi/agent/auth.json, which a runner has no way to produce.
+        // Verified against pi 0.84.3 (docs/providers.md).
+        api_key_env: &["GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+        env: &[],
+        // pi ships no permission system, so there is no --yolo equivalent and
+        // none is needed. What does block an unattended start is the project
+        // trust prompt, which fires in any directory carrying project-local
+        // settings, skills or extensions — i.e. every worktree agtx writes a
+        // skill into. `--approve` answers it for this run only and, unlike the
+        // codex arm, writes nothing to the user's global config.
+        base_args: &["--approve"],
+        prompt_form: PromptForm::Argv,
+        // Verified against pi 0.84.3 in tmux: `pi --approve '<prompt>'` starts
+        // interactively with the prompt submitted, and a leading
+        // `/skill:agtx-plan` still resolves as a skill command.
+        launch_prompt_verified: true,
+        resume: ResumeArgs::Append(&["--continue"]),
+        // `--no-approve` for the headless lane: a one-shot PR description has no
+        // need of the repo's own skills or extensions, so it declines them.
+        headless_args: &["--no-approve", "-p"],
+        // Project skills live in `.pi/skills/<name>/SKILL.md`, loaded only once
+        // the project is trusted — which is what `--approve` above buys.
+        skill_dir: Some((".pi/skills", "")),
+        skill_layout: SkillLayout::SkillDir,
+        skill_scan_dir: Some(".pi/skills"),
+        command_syntax: CommandSyntax::PiSkill,
+        mcp_config: Some(McpConfigKind::PiJsonMerge),
+        // pi has no lifecycle-hook mechanism, so phase status falls back to the
+        // pane-hash heuristic, as it does for opencode and copilot.
+        hook_config: None,
+        hook_event_source: HookEventSource::Payload,
+        // macOS fixes `p_comm` at exec, so the pane reports `node` however pi
+        // sets `process.title` — `scoped_indicators` is what actually detects it
+        // there. Kept because Linux does pick the rewrite up. Note `node` must
+        // NOT be added: it is every Ink agent's pane name and would make any
+        // node process read as a live agent.
+        process_names: &["pi"],
+        // Nothing distinctive enough to match in any pane: pi's last lines are
+        // editor borders, the cwd and a stats line. See `scoped_indicators`.
+        active_indicators: &[],
+        // The context display is the only unconditional part of the footer:
+        // `0.0%/1.0M (auto)` on a fresh session, `1.0%/1.0M` after a turn.
+        // Reads `?/` for a moment after a compaction, until the next response.
+        // Verified against pi 0.84.3.
+        scoped_indicators: &["%/"],
+        exit_command: Some("/quit"),
+        label_fg: (120, 220, 200), // teal
+        label_bg: None,
+        // Ink-class composer: a bracketed paste lands as literal text and a
+        // single Enter submits the whole multi-line message. Verified against pi
+        // 0.84.3 — a combined text+Enter `send-keys` leaves it unsent instead.
+        send_strategy: SendStrategy::Combined,
+        // `/new` starts a fresh session with no confirmation step; verified
+        // against pi 0.84.3 by watching the context display return to 0.0%.
+        clear_context_command: Some("/new"),
+        // None: `--approve` suppresses the only launch dialog pi has, and it is
+        // the same flag whose absence would leave the worktree's skills
+        // unloaded — so a pane that reaches the dialog is already misconfigured.
+        dialogs: &[],
     },
     // TODO: investigate CLI usage before enabling
     // aider  — "AI pair programming in your terminal", Aider <noreply@aider.chat>

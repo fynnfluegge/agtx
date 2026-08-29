@@ -127,10 +127,13 @@ fn main() {
                 spec::CommandSyntax::Colon => "colon",
                 spec::CommandSyntax::Hyphen => "hyphen",
                 spec::CommandSyntax::Dollar => "dollar",
+                spec::CommandSyntax::PiSkill => "pi_skill",
                 spec::CommandSyntax::None => "none",
             },
             "process_names": s.process_names,
             "active_indicators": s.active_indicators,
+            // Matched only in this agent's own pane — see AgentSpec.
+            "scoped_indicators": s.scoped_indicators,
             "dialogs": dialogs,
             "commands": commands,
         }));

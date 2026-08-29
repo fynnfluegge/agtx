@@ -4460,6 +4460,57 @@ fn test_write_skills_to_worktree_mcp_antigravity() {
 }
 
 #[test]
+fn test_write_skills_to_worktree_pi() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"], false);
+
+    // pi discovers `.pi/skills/<name>/SKILL.md`, and only once the project is
+    // trusted — which is what the `--approve` in its launch args buys.
+    assert!(
+        dir.path().join(".pi/skills/agtx-plan/SKILL.md").exists(),
+        ".pi/skills/agtx-plan/SKILL.md should be deployed for pi"
+    );
+
+    let cfg = dir.path().join(".pi/mcp.json");
+    assert!(cfg.exists(), ".pi/mcp.json should be written for pi");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+    assert_eq!(v["mcpServers"]["agtx"]["args"][0], "mcp-serve");
+}
+
+/// The adapter persists its own per-server `disabled` flags into this same file,
+/// so the writer must merge rather than clobber.
+#[test]
+fn test_write_skills_to_worktree_mcp_pi_preserves_existing_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let pi_dir = dir.path().join(".pi");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    std::fs::write(
+        pi_dir.join("mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"other","disabled":true}},"somethingElse":true}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"], false);
+
+    let content = std::fs::read_to_string(pi_dir.join("mcp.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        v["mcpServers"]["other"]["disabled"], true,
+        "a project's own .pi/mcp.json must not be clobbered: {content}"
+    );
+    assert_eq!(
+        v["somethingElse"], true,
+        "top-level sibling keys must survive: {content}"
+    );
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+}
+
+#[test]
 fn test_write_skills_to_worktree_mcp_antigravity_preserves_existing_config() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
@@ -9185,6 +9236,40 @@ fn test_is_agent_active_true_when_gemini_indicator_in_pane() {
     assert!(is_agent_active(&mock_tmux, "proj:task", None));
 }
 
+/// pi has no banner: the only unconditional part of its footer is the context
+/// display, so `%/` is what proves the TUI is up. It counts only in a pane agtx
+/// knows is pi's — the same string elsewhere must not.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agent_active_scoped_indicator_counts_only_for_its_own_agent() {
+    let pane = || Ok("cwd (main)\n0.0%/1.0M (auto)".to_string());
+
+    let mut as_pi = MockTmuxOperations::new();
+    as_pi
+        .expect_pane_current_command()
+        // macOS reports pi's Ink process as `node`, i.e. "at the shell".
+        .returning(|_| Some("bash".to_string()));
+    as_pi.expect_capture_pane().returning(move |_| pane());
+    assert!(is_agent_active(&as_pi, "proj:task", Some("pi")));
+
+    let mut as_claude = MockTmuxOperations::new();
+    as_claude
+        .expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    as_claude.expect_capture_pane().returning(move |_| pane());
+    assert!(!is_agent_active(&as_claude, "proj:task", Some("claude")));
+
+    let mut as_unknown = MockTmuxOperations::new();
+    as_unknown
+        .expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    as_unknown.expect_capture_pane().returning(move |_| pane());
+    assert!(
+        !is_agent_active(&as_unknown, "proj:task", None),
+        "an unknown pane must not read a bare percent-slash as a live agent"
+    );
+}
+
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_is_agent_active_false_when_at_shell_no_indicator() {
@@ -12160,6 +12245,11 @@ fn test_agent_commands_derivation_matches_the_previous_literals() {
     got.sort_unstable();
     let mut want = vec![
         "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy",
+        // pi. Only fires on Linux — macOS fixes `p_comm` at exec, so the pane
+        // reports `node` and pi's scoped indicator does the detecting there.
+        // `node` itself must never join this list: it is every Ink agent's pane
+        // name, and would make any node process read as a live agent.
+        "pi",
         // Not agent binaries, but a Python entry point must not read as "shell".
         "python3", "python",
     ];
@@ -12187,6 +12277,11 @@ fn test_active_indicator_derivation_matches_the_previous_literals() {
         "? for shortcuts",
     ];
     want.sort_unstable();
+    // pi's "%/" is deliberately absent: it lives in `scoped_indicators`, which
+    // is matched only in a pane agtx knows is running pi. In this flat list —
+    // used for panes whose agent is unknown — it would report an exited claude
+    // or codex as still running the moment output contained "85%/90%".
+    assert!(!got.contains(&"%/"));
     assert_eq!(got, want);
 }
 

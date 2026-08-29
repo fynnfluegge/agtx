@@ -10466,7 +10466,16 @@ fn launch_dialogs_for(agent_name: Option<&str>) -> Vec<&'static agent::AgentDial
 /// OpenCode being ready. Unknown agents keep the flat list.
 fn active_indicators_for(agent_name: Option<&str>) -> Vec<&'static str> {
     match agent_name.and_then(agent::spec) {
-        Some(spec) => spec.active_indicators.to_vec(),
+        // `scoped_indicators` are added only here, where the pane's agent is
+        // known. They are deliberately absent from AGENT_ACTIVE_INDICATORS: pi's
+        // `%/` occurs in ordinary output, so in the flat list it would report an
+        // exited claude or codex as still running.
+        Some(spec) => spec
+            .active_indicators
+            .iter()
+            .chain(spec.scoped_indicators.iter())
+            .copied()
+            .collect(),
         None => AGENT_ACTIVE_INDICATORS.clone(),
     }
 }
@@ -11498,6 +11507,32 @@ fn write_mcp_config(
             let dir = Path::new(worktree_path).join(".agents");
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("mcp_config.json");
+            let mut root = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .filter(|v| v.is_object())
+                .unwrap_or_else(|| serde_json::json!({}));
+            if !root["mcpServers"].is_object() {
+                root["mcpServers"] = serde_json::json!({});
+            }
+            root["mcpServers"]["agtx"] = serde_json::json!({
+                "command": &agtx_bin,
+                "args": ["mcp-serve", &project_path_str]
+            });
+            let _ = std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&root).unwrap_or_default(),
+            );
+        }
+        agent::McpConfigKind::PiJsonMerge => {
+            // pi itself has no MCP client; the `pi-mcp-adapter` package provides
+            // one and reads `.pi/mcp.json` as its highest-precedence project
+            // layer, in the standard `mcpServers` shape. Merged rather than
+            // overwritten because the adapter also persists its own per-server
+            // `disabled` flags into this file.
+            let dir = Path::new(worktree_path).join(".pi");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join("mcp.json");
             let mut root = std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())

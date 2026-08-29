@@ -66,7 +66,7 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — or define your own with a single TOML file
 - **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI
-- **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode)  | [Cursor Agent](https://cursor.com/docs/cli/overview) | [Copilot](https://github.com/github/copilot-cli) | [Grok Build](https://docs.x.ai/build/overview) | [Antigravity](https://github.com/google-antigravity/antigravity-cli)
+- **Works with**: [Claude Code](https://github.com/anthropics/claude-code) | [Codex](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [OpenCode](https://github.com/sst/opencode)  | [Cursor Agent](https://cursor.com/docs/cli/overview) | [Copilot](https://github.com/github/copilot-cli) | [Grok Build](https://docs.x.ai/build/overview) | [Antigravity](https://github.com/google-antigravity/antigravity-cli) | [pi](https://github.com/badlogic/pi-mono)
 
 > [!NOTE]
 > Just need a plain coding agent session manager with **full human-in-the-loop control** and **no automatic spec-driven skill execution and orchestration** on advancing tasks?
@@ -147,6 +147,7 @@ agtx creates underneath it is covered:
 | Claude, Codex, Gemini | trust the project root once — worktrees inherit it |
 | Cursor, Grok | none — agtx launches them with `--trust` |
 | OpenCode | none |
+| pi | none — agtx launches it with `--approve`, which trusts the worktree for that run only |
 | Antigravity | trust the project root once — agtx copies that consent to each new worktree, because antigravity matches paths exactly and never inherits |
 
 If a task's agent is waiting on a trust prompt, its card shows **`?`** with the

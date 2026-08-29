@@ -151,6 +151,8 @@ pub fn skill_dir_to_filename(skill_dir_name: &str, agent_name: &str) -> String {
 /// - `Colon` (Claude, Gemini): unchanged (`/gsd:plan-phase 1`)
 /// - `Hyphen` (OpenCode, Cursor, Grok, Antigravity): colon → hyphen (`/gsd-plan-phase 1`)
 /// - `Dollar` (Codex): slash → dollar, colon → hyphen (`$gsd-plan-phase 1`)
+/// - `PiSkill` (pi): colon → hyphen, then re-namespaced under `skill:`
+///   (`/skill:gsd-plan-phase 1`)
 /// - `None` (Copilot, unknown agents): None — callers fall back to a file-path reference
 ///
 /// Only the first colon is rewritten; arguments may legitimately contain more.
@@ -162,6 +164,16 @@ pub fn transform_plugin_command(canonical_cmd: &str, agent_name: &str) -> Option
             let transformed = canonical_cmd.replacen(':', "-", 1);
             Some(match transformed.strip_prefix('/') {
                 Some(rest) => format!("${}", rest),
+                None => transformed,
+            })
+        }
+        // pi registers every skill as `/skill:<skill-name>`, and the skill name
+        // is the hyphenated form the SKILL.md frontmatter carries. So the
+        // namespace does not survive as a prefix — it is folded into the name.
+        Some(CommandSyntax::PiSkill) => {
+            let transformed = canonical_cmd.replacen(':', "-", 1);
+            Some(match transformed.strip_prefix('/') {
+                Some(rest) => format!("/skill:{}", rest),
                 None => transformed,
             })
         }
@@ -339,10 +351,13 @@ pub fn scan_agent_skills(
         }
         // Skill subdirectories each holding a SKILL.md, invoked by directory name.
         SkillLayout::SkillDir => {
-            let prefix = if spec.command_syntax == CommandSyntax::Dollar {
-                "$"
-            } else {
-                "/"
+            // The directory name is the skill name; the prefix is how the
+            // agent's TUI invokes it. pi namespaces every skill under `skill:`,
+            // so the directory `agtx-plan` is typed as `/skill:agtx-plan`.
+            let prefix = match spec.command_syntax {
+                CommandSyntax::Dollar => "$",
+                CommandSyntax::PiSkill => "/skill:",
+                _ => "/",
             };
             scan_skill_dirs(&base, prefix)
         }
