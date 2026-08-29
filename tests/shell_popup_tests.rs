@@ -3,6 +3,7 @@ use agtx::tui::shell_popup::{
     trim_trailing_empty_lines, ShellPopup, ShellPopupColors, MAX_TRAILING_EMPTY_LINES,
 };
 use ratatui::backend::TestBackend;
+use std::time::{Duration, Instant};
 use ratatui::prelude::*;
 use ratatui::Terminal;
 
@@ -15,6 +16,18 @@ fn test_shell_popup_new() {
     assert_eq!(popup.scroll_offset, 0);
     assert!(popup.cached_content.is_empty());
     assert!(popup.last_pane_size.is_none());
+}
+
+#[test]
+fn test_content_refresh_is_throttled() {
+    let mut popup = ShellPopup::new("Task".to_string(), "window".to_string());
+    assert!(!popup.content_refresh_due(Duration::from_millis(100)));
+
+    popup.last_content_refresh = Instant::now() - Duration::from_millis(101);
+    assert!(popup.content_refresh_due(Duration::from_millis(100)));
+
+    popup.mark_content_refreshed();
+    assert!(!popup.content_refresh_due(Duration::from_millis(100)));
 }
 
 #[test]
@@ -203,6 +216,41 @@ fn test_build_footer_text_at_top() {
     assert!(footer.contains("Line 1"));
 }
 
+#[test]
+fn test_fullscreen_footer_offers_windowed_toggle() {
+    let popup = ShellPopup {
+        fullscreen: true,
+        ..ShellPopup::new("Task".to_string(), "window".to_string())
+    };
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            render_shell_popup(
+                &popup,
+                frame,
+                Rect::new(0, 0, 80, 24),
+                vec![],
+                &ShellPopupColors::default(),
+            );
+        })
+        .unwrap();
+    let content: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(content.contains("[C-f] windowed"));
+}
+
+#[test]
+fn test_footer_documents_reserved_key_passthrough() {
+    let footer = build_footer_text(0, 0);
+    assert!(footer.contains("[C-Space] send next"));
+}
+
 // === Rendering Tests ===
 
 #[test]
@@ -233,6 +281,8 @@ fn test_render_shell_popup_basic() {
     // Check that the title is rendered somewhere in the buffer
     let buffer_content: String = buffer.content().iter().map(|c| c.symbol()).collect();
     assert!(buffer_content.contains("Test Task"));
+    assert_eq!(buffer[(0, 0)].symbol(), "╭");
+    assert_eq!(buffer[(79, 0)].symbol(), "╮");
 }
 
 #[test]

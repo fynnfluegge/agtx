@@ -480,7 +480,7 @@ In global mode all CRUD tools (`list_tasks`, `create_task`, etc.) require a `pro
 Global config lives at `~/.config/agtx/config.toml` (`GlobalConfig`):
 ```toml
 default_agent = "claude"
-fullscreen_on_enter = false  # When true, Enter on a task attaches to tmux directly instead of opening the in-TUI popup
+fullscreen_on_enter = false  # When true, Enter opens the task's tmux pane fullscreen inside agtx
 agent_hooks = true           # Write agent lifecycle-hook configs into worktrees (see Hook-Based Phase Status)
 auto_trust = false           # Answer agents' trust / bypass-permission prompts by reading the pane (see First-Launch Dialogs)
 update_check = true          # Daily GitHub release check + header notice (see Self-Update)
@@ -549,7 +549,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `o` | Create new task |
 | `Enter` | Open task popup (tmux view) / Edit task (backlog) |
 | `x` | Delete task (with confirmation) |
-| `Ctrl+f` | Fullscreen attach to task's tmux session |
+| `Ctrl+f` | Open the task popup fullscreen; press again to return to windowed mode |
 | `d` | Show git diff for task |
 | `D` | Open dependency-graph overlay |
 | `m` | Move task forward (advance workflow) |
@@ -590,7 +590,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `Ctrl+j/k` or `Ctrl+n/p` | Scroll up/down |
 | `Ctrl+d/u` or `PageDown/PageUp` | Page down/up |
 | `Ctrl+g` | Jump to bottom |
-| `Ctrl+f` | Fullscreen attach to tmux session |
+| `Ctrl+f` | Toggle the task popup between windowed and fullscreen modes |
 | `Ctrl+q` | Close popup |
 | Other keys | Forwarded to tmux/agent (including `Esc`) |
 
