@@ -180,7 +180,7 @@ reason, and you answer it in the agent's own pane (`↩` to open the task).
 | `o` | Create new task |
 | `R` | Enter research mode |
 | `↩` | Open task (view agent session) |
-| `Ctrl+f` | Fullscreen attach to task's tmux session |
+| `Ctrl+f` | Open the task popup fullscreen; press again to return to windowed mode |
 | `m` | Move task forward in workflow |
 | `r` | Resume task (Review → Running) / Move back (Running → Planning) |
 | `p` | Next phase (Review → Planning, cyclic plugins only) |
@@ -222,12 +222,12 @@ When writing a task description, you can reference files, skills, and other task
 
 ### Agent Sessions
 
-Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to attach fullscreen.
+Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to open it fullscreen inside agtx.
 
 - **Persistent context**: The agent's full conversation history is preserved across Planning → Running → Review
 - **Resume from Review**: Moving a task back to Running simply reconnects to the existing session — no re-initialization needed
 - **Inline view**: Press `↩` on any active task to open a scrollable tmux view inside the TUI
-- **Fullscreen**: Press `Ctrl+f` to attach directly to the agent's tmux window
+- **Fullscreen**: Press `Ctrl+f` to expand the task popup inside agtx. Press `Ctrl+f` again for windowed mode or `Ctrl+q` to return to the board.
 - **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch using a non-destructive virtual merge (`git merge-tree`). If conflicts are detected, the agent is automatically sent the `/agtx:merge-conflicts` skill to resolve them and re-commit
 
 ## Brainstorm & Sweep Skills
@@ -354,7 +354,7 @@ Config file location: `~/.config/agtx/config.toml`
 
 ```toml
 default_agent = "claude"
-fullscreen_on_enter = false  # Enter attaches to tmux directly instead of the in-TUI popup
+fullscreen_on_enter = false  # When true, Enter opens the tmux pane fullscreen inside agtx
 agent_hooks = true           # Let agents report their own phase status via lifecycle hooks
 auto_trust = false           # Answer agents' trust prompts on your behalf
 update_check = true          # Check GitHub daily for a new release (see Updating)

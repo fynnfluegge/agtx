@@ -65,8 +65,8 @@ pub trait TmuxOperations: Send + Sync {
     /// Capture pane content with history (returns raw bytes for ANSI parsing)
     fn capture_pane_with_history(&self, target: &str, history_lines: i32) -> Vec<u8>;
 
-    /// Get cursor position and pane height: (cursor_y, pane_height)
-    fn get_cursor_info(&self, target: &str) -> Option<(usize, usize)>;
+    /// Get cursor position and pane height: (cursor_x, cursor_y, pane_height)
+    fn get_cursor_info(&self, target: &str) -> Option<(usize, usize, usize)>;
 
     /// Resize a tmux window
     fn resize_window(&self, target: &str, width: u16, height: u16) -> Result<()>;
@@ -245,27 +245,36 @@ impl TmuxOperations for RealTmuxOps {
     fn capture_pane_with_history(&self, target: &str, history_lines: i32) -> Vec<u8> {
         std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
-            .args(["capture-pane", "-t", target, "-p", "-e", "-J"])
+            // Keep wrapped rows separate: tmux reports cursor_y in physical
+            // pane rows, so joining wrapped rows would misalign the cursor.
+            .args(["capture-pane", "-t", target, "-p", "-e"])
             .args(["-S", &format!("-{}", history_lines)])
             .output()
             .map(|o| o.stdout)
             .unwrap_or_default()
     }
 
-    fn get_cursor_info(&self, target: &str) -> Option<(usize, usize)> {
+    fn get_cursor_info(&self, target: &str) -> Option<(usize, usize, usize)> {
         let output = std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
-            .args(["display", "-p", "-t", target, "#{cursor_y} #{pane_height}"])
+            .args([
+                "display",
+                "-p",
+                "-t",
+                target,
+                "#{cursor_x} #{cursor_y} #{pane_height}",
+            ])
             .output()
             .ok()?;
 
         if output.status.success() {
             let output_str = String::from_utf8_lossy(&output.stdout);
             let parts: Vec<&str> = output_str.trim().split_whitespace().collect();
-            if parts.len() == 2 {
-                let cursor_y: usize = parts[0].parse().ok()?;
-                let pane_height: usize = parts[1].parse().ok()?;
-                return Some((cursor_y, pane_height));
+            if parts.len() == 3 {
+                let cursor_x: usize = parts[0].parse().ok()?;
+                let cursor_y: usize = parts[1].parse().ok()?;
+                let pane_height: usize = parts[2].parse().ok()?;
+                return Some((cursor_x, cursor_y, pane_height));
             }
         }
         None
