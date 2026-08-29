@@ -219,7 +219,8 @@ When writing a task description, you can reference files, skills, and other task
 
 </details>
 
-### Agent Sessions
+<details>
+<summary><strong>Agent Sessions</strong></summary>
 
 Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to open it fullscreen inside agtx.
 
@@ -228,6 +229,8 @@ Each task runs in its own tmux window with a dedicated coding agent. The session
 - **Inline view**: Press `↩` on any active task to open a scrollable tmux view inside the TUI
 - **Fullscreen**: Press `Ctrl+f` to expand the task popup inside agtx. Press `Ctrl+f` again for windowed mode or `Ctrl+q` to return to the board.
 - **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch using a non-destructive virtual merge (`git merge-tree`). If conflicts are detected, the agent is automatically sent the `/agtx:merge-conflicts` skill to resolve them and re-commit
+
+</details>
 
 ## Brainstorm & Sweep Skills
 
