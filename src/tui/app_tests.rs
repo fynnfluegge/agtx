@@ -3244,6 +3244,72 @@ fn test_is_pane_at_shell_returns_false_when_none() {
     assert!(!is_pane_at_shell(&mock, "sess:win"));
 }
 
+/// A process name is matched whole, not by substring.
+///
+/// `pi` is two characters and `AGENT_COMMANDS` is flat across every agent, so a
+/// `contains` test made `pip`, `pipx`, `pipenv` and `pinentry` read as "an agent
+/// is running" in *any* task's pane — and `is_pane_at_shell` is the signal for
+/// "the agent has exited". Cursor's `agent` had the same shape.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_does_not_match_process_names_by_substring() {
+    for cmd in ["pip", "pip3", "pipx", "pipenv", "pinentry", "agentless"] {
+        let mut mock = MockTmuxOperations::new();
+        mock.expect_pane_current_command()
+            .returning(move |_| Some(cmd.to_string()));
+        assert!(
+            is_pane_at_shell(&mock, "sess:win"),
+            "{cmd} must not read as a live agent"
+        );
+    }
+
+    // The names themselves still match, surrounding whitespace included.
+    for cmd in ["pi", "agent", " claude "] {
+        let mut mock = MockTmuxOperations::new();
+        mock.expect_pane_current_command()
+            .returning(move |_| Some(cmd.to_string()));
+        assert!(!is_pane_at_shell(&mock, "sess:win"), "{cmd}");
+    }
+}
+
+// === indicator scoping tests ===
+
+/// `scoped_indicators` must be matched against the bottom of the pane only.
+///
+/// pi's `%/` is one field of its footer and also occurs in ordinary output, so
+/// over a whole capture it finds scrollback rather than a live footer. On the
+/// agent-switch path that scrollback belongs to the *previous* agent, which would
+/// end the readiness wait before the new agent had execed.
+#[test]
+fn test_scoped_indicators_are_not_found_in_scrollback() {
+    let scrollback_only = format!("Coverage: 85%/90%\n{}", "some later output\n".repeat(20));
+    let tail = pane_tail(&scrollback_only, PANE_TAIL_LINES);
+    assert!(!tail.contains("%/"), "tail was: {tail:?}");
+
+    // ...and still found where pi actually draws it.
+    let live = format!("{}0.0%/1.0M (auto)", "older output\n".repeat(20));
+    assert!(pane_tail(&live, PANE_TAIL_LINES).contains("%/"));
+}
+
+/// Trailing blank rows must not push the window off the content: `capture-pane -p`
+/// emits one line per pane *row*, so an unfilled pane ends in padding.
+#[test]
+fn test_pane_tail_ignores_trailing_blank_rows() {
+    let pane = format!("0.0%/1.0M (auto){}", "\n".repeat(30));
+    assert!(pane_tail(&pane, PANE_TAIL_LINES).contains("%/"));
+}
+
+/// The flat list is what an unknown agent's pane is matched against, and pi's
+/// `%/` must stay out of it in both directions.
+#[test]
+fn test_flat_and_scoped_indicators_are_disjoint_for_pi() {
+    assert!(!flat_indicators_for(Some("pi")).contains(&"%/"));
+    assert!(scoped_indicators_for(Some("pi")).contains(&"%/"));
+    // An unknown agent gets the flat list and no scoped strings at all.
+    assert!(scoped_indicators_for(Some("mistral")).is_empty());
+    assert!(scoped_indicators_for(None).is_empty());
+}
+
 // === kill_windows_by_name tests ===
 
 #[test]
@@ -12465,22 +12531,25 @@ fn test_active_indicator_derivation_matches_the_previous_literals() {
 /// Ctrl+C, not a `/exit` typed into a TUI that does not understand it.
 #[test]
 fn test_exit_command_per_agent() {
-    for (agent, want) in [
+    let table = [
         ("claude", Some("/exit")),
         ("opencode", Some("/exit")),
         ("copilot", Some("/exit")),
         ("antigravity", Some("/exit")),
         ("gemini", Some("/quit")),
         ("grok", Some("/quit")),
+        ("pi", Some("/quit")),
         ("codex", None),
         ("cursor", None),
-    ] {
+    ];
+    for (agent, want) in table {
         assert_eq!(
             crate::agent::spec(agent).unwrap().exit_command,
             want,
             "{agent}"
         );
     }
+    assert_covers_every_agent(&table.map(|(a, _)| a), "test_exit_command_per_agent");
     // An agent agtx has never heard of keeps the historical default.
     assert!(crate::agent::spec("mistral").is_none());
 }
@@ -12491,7 +12560,7 @@ fn test_exit_command_per_agent() {
 #[test]
 fn test_send_strategy_per_agent() {
     use crate::agent::SendStrategy;
-    for (agent, want) in [
+    let table = [
         ("claude", SendStrategy::Generic),
         ("copilot", SendStrategy::Generic),
         ("grok", SendStrategy::Generic),
@@ -12499,40 +12568,87 @@ fn test_send_strategy_per_agent() {
         ("codex", SendStrategy::Combined),
         ("cursor", SendStrategy::Combined),
         ("antigravity", SendStrategy::Combined),
+        ("pi", SendStrategy::Combined),
         ("opencode", SendStrategy::OpenCodePicker),
-    ] {
+    ];
+    for (agent, want) in table {
         assert_eq!(
             crate::agent::spec(agent).unwrap().send_strategy,
             want,
             "{agent}"
         );
     }
+    assert_covers_every_agent(&table.map(|(a, _)| a), "test_send_strategy_per_agent");
 }
 
-/// `/clear` is Claude-only today (issue #46). An agent with `None` must fall
-/// through to a normal send rather than typing a command it does not understand
-/// into its composer.
+/// Which agents have a verified clear-context command (issue #46). An agent with
+/// `None` must fall through to a normal send rather than typing a command it does
+/// not understand into its composer.
 #[test]
-fn test_clear_context_command_is_claude_only() {
-    assert_eq!(
-        crate::agent::spec("claude").unwrap().clear_context_command,
-        Some("/clear")
-    );
-    for agent in [
-        "codex",
-        "gemini",
-        "cursor",
-        "antigravity",
-        "opencode",
-        "grok",
-        "copilot",
-    ] {
+fn test_clear_context_command_per_agent() {
+    let table = [
+        ("claude", Some("/clear")),
+        ("pi", Some("/new")),
+        ("codex", None),
+        ("gemini", None),
+        ("cursor", None),
+        ("antigravity", None),
+        ("opencode", None),
+        ("grok", None),
+        ("copilot", None),
+    ];
+    for (agent, want) in table {
         assert_eq!(
             crate::agent::spec(agent).unwrap().clear_context_command,
-            None,
+            want,
             "{agent}"
         );
     }
+    assert_covers_every_agent(
+        &table.map(|(a, _)| a),
+        "test_clear_context_command_per_agent",
+    );
+}
+
+/// Every agent that *has* a clear-context command must be reachable by a delivery
+/// path that actually submits it.
+///
+/// The gap this pins cost pi its whole phase command: `/new` was declared while
+/// the send was an unconditional `send_keys`, which pi's own spec comment records
+/// as leaving the text unsent — so the skill+prompt was pasted onto the parked
+/// `/new` and submitted as one message. `SendStrategy::Combined` now takes the
+/// paste-and-confirm path and `Generic` keeps the typed one, so what is asserted
+/// is that the strategy is one the send has an arm for.
+#[test]
+fn test_clear_context_agents_have_a_delivery_path() {
+    use crate::agent::SendStrategy;
+    for spec in crate::agent::AGENT_SPECS.iter() {
+        if spec.clear_context_command.is_none() {
+            continue;
+        }
+        assert!(
+            matches!(
+                spec.send_strategy,
+                SendStrategy::Generic | SendStrategy::Combined
+            ),
+            "{}: clear_context_command is delivered by send_skill_and_prompt, \
+             which has no arm for {:?}",
+            spec.name,
+            spec.send_strategy
+        );
+    }
+}
+
+/// Helper for the per-agent literal tables: a new agent must be added to each one
+/// rather than silently escaping the lock it exists to provide. This is how pi
+/// slipped past three of them at once.
+fn assert_covers_every_agent(covered: &[&str], table: &str) {
+    let missing: Vec<&str> = crate::agent::AGENT_SPECS
+        .iter()
+        .map(|s| s.name)
+        .filter(|n| !covered.contains(n))
+        .collect();
+    assert!(missing.is_empty(), "{table} is missing: {missing:?}");
 }
 
 /// `LAUNCH_DIALOGS` is now derived from `AGENT_SPECS`. Pinned against the

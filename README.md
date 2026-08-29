@@ -57,6 +57,7 @@
 <a href="https://github.com/google-antigravity/antigravity-cli"><kbd><img src="docs/logos/antigravity.png" width="18" valign="middle" /> Antigravity</kbd></a>
 <a href="https://github.com/google-gemini/gemini-cli"><kbd><img src="docs/logos/gemini.svg" width="18" valign="middle" /> Gemini CLI</kbd></a>
 <a href="https://github.com/github/copilot-cli"><kbd><img src="docs/logos/copilot-dark.svg" width="18" valign="middle" /> Copilot</kbd></a>
+<a href="https://github.com/earendil-works/pi"><kbd>pi</kbd></a>
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching.
 - **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI.
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously.
@@ -339,6 +340,21 @@ agy mcp add agtx agtx mcp-serve
 mkdir -p ~/.gemini/antigravity-cli/skills/agtx-sweep
 cp skills/sweep/SKILL.md ~/.gemini/antigravity-cli/skills/agtx-sweep/SKILL.md
 ```
+
+</details>
+
+<details>
+<summary><strong>pi</strong></summary>
+
+pi has no MCP client of its own — the `pi-mcp-adapter` package provides one and
+reads servers in the standard `mcpServers` shape:
+
+```bash
+mkdir -p ~/.pi/skills/agtx-sweep && cp skills/sweep/SKILL.md ~/.pi/skills/agtx-sweep/SKILL.md
+```
+
+Register `agtx mcp-serve` with the adapter, then in any pi session:
+`/skill:agtx-sweep` / `/skill:agtx-brainstorm`
 
 </details>
 
