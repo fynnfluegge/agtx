@@ -72,13 +72,44 @@
 > [!TIP]
 > Check out the [Contributing](#contributing) section or have a look at [`good first issues`](https://github.com/fynnfluegge/agtx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) to get involved and become a contributor ⭐️
 
-## Why agtx?
+## Why agtx? - The blackboard model
 
-AI coding tools give you one agent, one task, one terminal. agtx gives you a **kanban board where multiple coding agents work in parallel** — each in its own git worktree, each in its own tmux window, running autonomously through a spec-driven workflow managed by an orchestrator agent.
+Most AI coding tools give you one agent, one task, one terminal. agtx is built on a different and much
+older idea: the [**blackboard system**](https://en.wikipedia.org/wiki/Blackboard_system).
 
-When ideas come up mid-session, `/agtx:brainstorm` keeps your agent in exploration mode — then `/agtx:sweep` turns the conversation into board tasks with a single confirmation step. **No context switching, no copy-pasting — ideas flow directly into work.**
+> A blackboard system is an approach where a common knowledge base — the *blackboard* — is iteratively
+> updated by a diverse group of specialist *knowledge sources*, starting from a problem specification
+> and ending with a solution. Each specialist writes a partial solution to the blackboard when the
+> state on the board matches what it can contribute.
+>
+> — after [*Blackboard system*](https://en.wikipedia.org/wiki/Blackboard_system), Wikipedia (CC BY-SA)
 
-With the orchestrator, you don't even manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, review and resolving conflicts — while you focus on what matters: research, defining tasks, and merging changes.
+That architecture was designed for problems that are too ill-defined for a single solver and too
+interdependent to split cleanly up front. **Shipping software with coding agents is exactly that
+problem**, so agtx implements the model directly:
+
+```
+        ┌───────────────────────────────────────────────────────────┐
+        │  CONTROL     orchestrator agent · phase gates · dep graph │
+        └─────────────────────────────┬─────────────────────────────┘
+                                      │ decides which agent acts next
+        ┌─────────────────────────────▼─────────────────────────────┐
+        │                       THE BLACKBOARD                      │
+        │     backlog  →  planning  →  running  →  review  →  done  │
+        │     specs · plans · diffs · reviews · phase artifacts     │
+        └────▲─────────▲─────────▲─────────▲─────────▲─────────▲────┘
+             │         │         │         │         │         │
+        ┌────┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐
+        │ Claude │ │ Codex │ │Gemini │ │Cursor │ │ Grok  │ │  ...  │
+        └────────┘ └───────┘ └───────┘ └───────┘ └───────┘ └───────┘
+           KNOWLEDGE SOURCES — one git worktree + tmux window each
+```
+
+| Blackboard model | In agtx |
+|------------------|---------|
+| **The blackboard** — a shared repository of the problem, partial solutions and contributed information | The kanban board and everything the phases leave behind: specs, plans, diffs, reviews, phase artifacts. Every agent reads from and writes to the same board |
+| **Knowledge sources** — independent specialists that never talk to each other, only to the board | Eight coding agent CLIs, each running in its **own git worktree and tmux window**. No agent can see another's context — they exchange only what lands on the board |
+| **Control shell** — decides opportunistically which specialist runs next | Phase gating derived from each plugin's artifacts, the task dependency graph, and the [orchestrator agent](#orchestrator-agent-experimental) driving the whole board over MCP |
 
 ## Quick Start
 
