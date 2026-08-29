@@ -7,11 +7,10 @@
 
 <div align="left">
     
-> **The blackboard for coding agents** - Add tasks. Press one key. An orchestrator agent picks it up, plans, and delegates to multiple coding agents running in parallel. Come back to changes ready to merge.
 >
-> **Let different coding agents collaborate** autonomously on the same task with automatic session switching and context awareness.
->
-> **Capture ideas without leaving your agent session** — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to push the conversation to the board as tasks in one step.
+> **Let different coding agents collaborate** autonomously on the same task with automatic session switching and context awareness.  
+> **A blackboard for coding agents** - One shared board. A fleet of agents. Add tasks, delegate to multiple coding agents running in parallel.
+> **Capture ideas without leaving your session** — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to push the conversation to the board as tasks in one step.
 
 </div>
 
@@ -48,17 +47,6 @@
 
 </div>
 
-## Why agtx?
-
-AI coding tools give you one agent, one task, one terminal. agtx gives you a **kanban board where multiple coding agents work in parallel** — each in its own git worktree, each in its own tmux window, running autonomously through a spec-driven workflow managed by an orchestrator agent.
-
-When ideas come up mid-session, `/agtx:brainstorm` keeps your agent in exploration mode — then `/agtx:sweep` turns the conversation into board tasks with a single confirmation step. **No context switching, no copy-pasting — ideas flow directly into work.**
-
-With the orchestrator, you don't even manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, review and resolving conflicts — while you focus on what matters: research, defining tasks, and merging changes.
-
-> [!TIP]
-> Check out the [Contributing](#contributing) section or have a look at [`good first issues`](https://github.com/fynnfluegge/agtx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) to get involved and become a contributor ⭐️ 
-
 ## Features
 
 - **Supported Agents**:&nbsp; <a href="https://github.com/anthropics/claude-code"><kbd><img src="docs/logos/claude.svg" width="18" valign="middle" /> Claude Code</kbd></a>
@@ -69,17 +57,28 @@ With the orchestrator, you don't even manage the board yourself. **An AI agent p
 <a href="https://github.com/google-antigravity/antigravity-cli"><kbd><img src="docs/logos/antigravity.png" width="18" valign="middle" /> Antigravity</kbd></a>
 <a href="https://github.com/google-gemini/gemini-cli"><kbd><img src="docs/logos/gemini.svg" width="18" valign="middle" /> Gemini CLI</kbd></a>
 <a href="https://github.com/github/copilot-cli"><kbd><img src="docs/logos/copilot-dark.svg" width="18" valign="middle" /> Copilot</kbd></a>
-- **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching
-- **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI
-- **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously
-- **Orchestrator agent**: A dedicated AI agent that autonomously manages your kanban board via [MCP](https://modelcontextprotocol.io) — delegates to coding agents, advances phases, checks for merge conflicts ([experimental](#orchestrator-agent-experimental))
-- **Brainstorm & Sweep skills**: Capture ideas and push them to the board from any coding agent session — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to decompose and create tasks with one confirmation step ([details](#brainstorm--sweep-skills))
-- **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — or define your own workflow with a single TOML file
+- **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching.
+- **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI.
+- **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously.
+- **Orchestrator agent**: A dedicated AI agent that autonomously manages your kanban board via [MCP](https://modelcontextprotocol.io) — delegates to coding agents, advances phases, checks for merge conflicts ([experimental](#orchestrator-agent-experimental)).
+- **Brainstorm & Sweep skills**: Capture ideas and push them to the board from any coding agent session — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to decompose and create tasks with one confirmation step ([details](#brainstorm--sweep-skills)).
+- **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) — fully customizable. Ddefine your own workflow via a single TOML file.
 
 > [!NOTE]
-> Just need a plain coding agent session manager with **full human-in-the-loop control** and **no automatic spec-driven skill execution and orchestration** on advancing tasks?
+> Just need a plain coding-agent session-manager with **full human-in-the-loop control** and **no spec-driven skill execution and orchestration** on advancing tasks?
 >
-> Choose the **`void` plugin** and enjoy agtx with full human control across all agent session phases.
+> Choose the **`void` plugin** and enjoy agtx as a batteries included multi-agent session-manager.
+
+> [!TIP]
+> Check out the [Contributing](#contributing) section or have a look at [`good first issues`](https://github.com/fynnfluegge/agtx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) to get involved and become a contributor ⭐️
+
+## Why agtx?
+
+AI coding tools give you one agent, one task, one terminal. agtx gives you a **kanban board where multiple coding agents work in parallel** — each in its own git worktree, each in its own tmux window, running autonomously through a spec-driven workflow managed by an orchestrator agent.
+
+When ideas come up mid-session, `/agtx:brainstorm` keeps your agent in exploration mode — then `/agtx:sweep` turns the conversation into board tasks with a single confirmation step. **No context switching, no copy-pasting — ideas flow directly into work.**
+
+With the orchestrator, you don't even manage the board yourself. **An AI agent picks up tasks, delegates work, and ensures getting things done** through planning, implementation, review and resolving conflicts — while you focus on what matters: research, defining tasks, and merging changes.
 
 ## Quick Start
 
