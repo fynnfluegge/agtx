@@ -713,7 +713,7 @@ class AgentTrustSetup(unittest.TestCase):
         self.assertIn("/somewhere/else", entries)
 
     def test_flag_based_and_unmeasured_agents_write_nothing(self):
-        for agent in ("cursor", "grok", "opencode", "copilot"):
+        for agent in ("cursor", "grok", "pi", "opencode", "copilot"):
             with self.subTest(agent=agent):
                 self.assertFalse(smoke.setup_agent_trust(agent, self.repo))
         self.assertEqual(os.listdir(self.home), [])
@@ -722,8 +722,54 @@ class AgentTrustSetup(unittest.TestCase):
         """Kept in step with `src/agent/trust.rs` — a new store there needs one here."""
         self.assertEqual(
             set(smoke.AGENT_TRUST_STORES),
-            {"claude", "codex", "gemini", "antigravity"},
+            {"claude", "codex", "gemini", "antigravity", "kimi"},
         )
+
+    def test_only_the_exact_matching_stores_are_seeded(self):
+        """`trust_store_lists` is meaningful only where agtx writes the record.
+
+        The inheriting stores hold entries agtx never wrote and does not prune,
+        so asserting on them after Done would fail for the wrong reason.
+        """
+        self.assertEqual(set(smoke.SEEDED_TRUST_STORES), {"antigravity", "kimi"})
+        for agent in ("claude", "codex", "gemini", "cursor", "copilot"):
+            with self.subTest(agent=agent):
+                self.assertIsNone(smoke.trust_store_lists(agent, self.repo))
+
+    def test_kimi_writes_a_record_kimi_would_read(self):
+        smoke.setup_agent_trust("kimi", self.repo)
+        root = str(self.repo.resolve())
+        path = (
+            Path(self.home)
+            / ".kimi-code"
+            / "workspace-trust"
+            / smoke.kimi_trust_key(root)
+        )
+        # kimi's own check is that the file exists and parses as JSON.
+        self.assertEqual(json.loads(path.read_text())["root"], root)
+        self.assertTrue(smoke.trust_store_lists("kimi", self.repo))
+
+    def test_kimi_trust_key_matches_the_rust_derivation(self):
+        """The shape kimi computes: `wd_<slug>_<sha256[:12]>`.
+
+        Restated in both languages on purpose — if only one carried it, a drift
+        would show up as every kimi task parked on a dialog whose default answer
+        kills the agent.
+        """
+        key = smoke.kimi_trust_key("/one/proj")
+        slug, digest = key[len("wd_"):].rsplit("_", 1)
+        self.assertEqual(slug, "proj")
+        self.assertEqual(len(digest), 12)
+        self.assertTrue(all(c in "0123456789abcdef" for c in digest))
+        # Lexical normalization, not realpath: a trailing slash is the same dir.
+        self.assertEqual(smoke.kimi_trust_key("/one/proj/"), key)
+        # The hash covers the whole path, not just the basename.
+        self.assertNotEqual(smoke.kimi_trust_key("/two/proj"), key)
+        # One dash per run of separators; truncate to 40 and trim again.
+        self.assertTrue(
+            smoke.kimi_trust_key("/tmp/My Project (v2)!!").startswith("wd_my-project-v2_")
+        )
+        self.assertTrue(smoke.kimi_trust_key("/").startswith("wd_workspace_"))
 
 
 

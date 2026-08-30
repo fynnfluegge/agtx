@@ -51,6 +51,11 @@ impl Agent {
             Some(s) if s.launch_prompt_verified => match s.prompt_form {
                 spec::PromptForm::Argv => PromptInjection::Argv,
                 spec::PromptForm::Flag(flag) => PromptInjection::FlagInteractive(flag),
+                // Belt and braces with the spec-table invariant that forbids
+                // this combination: an agent whose CLI takes no opening message
+                // can never be put on the launch lane, however its
+                // `launch_prompt_verified` is set.
+                spec::PromptForm::None => PromptInjection::Unknown,
             },
             _ => PromptInjection::Unknown,
         }

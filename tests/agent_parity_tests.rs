@@ -25,6 +25,7 @@ const AGENTS: &[&str] = &[
     "grok",
     "antigravity",
     "pi",
+    "kimi",
 ];
 
 fn agent(name: &str) -> Agent {
@@ -76,6 +77,9 @@ fn interactive_command_parity_without_prompt() {
         // pi has no permission system to bypass; `--approve` is project trust,
         // without which the worktree's own skills are never loaded.
         ("pi", "pi --approve"),
+        // `--auto` is "fully autonomous"; `--yolo` auto-approves tools but the
+        // agent "may still ask questions", which hangs an unattended session.
+        ("kimi", "kimi --auto"),
     ];
     for (name, want) in expected {
         assert_eq!(&agent(name).build_interactive_command(""), want, "{name}");
@@ -104,6 +108,12 @@ fn interactive_command_parity_with_prompt() {
             "agy --dangerously-skip-permissions --mode accept-edits -i 'hi'",
         ),
         ("pi", "pi --approve 'hi'"),
+        // **The prompt is dropped, on purpose.** kimi's CLI has no launch form
+        // for one: positional args are rejected with `unknown command`, and its
+        // only prompt flag is print mode. Appending anything here would produce
+        // a command that dies before drawing its TUI. `prompt_injection` returns
+        // `Unknown`, so the text goes down the typed mid-session lane instead.
+        ("kimi", "kimi --auto"),
     ];
     for (name, want) in expected {
         assert_eq!(&agent(name).build_interactive_command("hi"), want, "{name}");
@@ -118,11 +128,28 @@ fn interactive_command_parity_with_prompt() {
 fn interactive_command_escapes_single_quotes_for_every_agent() {
     // The command is wrapped in `sh -c '...'` downstream, so a prompt quote must
     // survive as the POSIX '"'"' idiom for every agent, including the fallback.
-    for name in AGENTS.iter().copied() {
+    //
+    // kimi is exempt because it emits no quoted prompt at all to escape — and
+    // the exemption is written as a positive assertion below rather than a hole,
+    // so an agent that starts emitting one cannot slip through unescaped.
+    const NO_LAUNCH_PROMPT: &[&str] = &["kimi"];
+    for name in AGENTS
+        .iter()
+        .copied()
+        .filter(|n| !NO_LAUNCH_PROMPT.contains(n))
+    {
         let cmd = agent(name).build_interactive_command("it's");
         assert!(
             cmd.ends_with(r#"'it'"'"'s'"#),
             "{name} lost single-quote escaping: {cmd}"
+        );
+    }
+    for name in NO_LAUNCH_PROMPT {
+        let a = agent(name);
+        assert_eq!(
+            a.build_interactive_command("it's"),
+            a.build_interactive_command(""),
+            "{name} must append no prompt at all, quoted or otherwise"
         );
     }
     assert!(unknown()
@@ -154,6 +181,7 @@ fn resume_command_parity() {
             "agy --dangerously-skip-permissions --mode accept-edits --continue",
         ),
         ("pi", "pi --approve --continue"),
+        ("kimi", "kimi --auto --continue"),
     ];
     for (name, want) in expected {
         assert_eq!(&agent(name).build_resume_command(), want, "{name}");
@@ -180,6 +208,9 @@ fn headless_invocation_parity() {
         // `--no-approve`: a one-shot PR description has no use for the repo's
         // own skills or extensions, so it declines them.
         ("pi", "pi", &["--no-approve", "-p"]),
+        // `-p, --prompt` — "run one prompt non-interactively and print the
+        // response". Exactly why it cannot double as a launch prompt.
+        ("kimi", "kimi", &["-p"]),
     ];
     for (name, bin, flags) in expected {
         let a = agent(name);
@@ -243,7 +274,15 @@ fn prompt_injection_parity() {
     // dialogs, no located trust store, `-i` unchecked. It must stay unverified
     // rather than inherit a neighbour's behaviour — assuming that is what produced
     // the antigravity and cursor dialog bugs in the first place.
-    let unverified = ["copilot"];
+    // Two agents, two different reasons — worth stating, because
+    // `verified.len() + unverified.len() == AGENTS.len()` is asserted below and
+    // would otherwise read as one category.
+    //
+    // - copilot: a launch form *exists* (`-i`) and has never been measured.
+    // - kimi: **no launch form exists**. Positional args are rejected and `-p`
+    //   is print mode, so `PromptForm::None` is the shape of the CLI, not a
+    //   statement about agtx's confidence in it. No measurement can promote it.
+    let unverified = ["copilot", "kimi"];
     for name in unverified {
         assert_eq!(
             agent(name).prompt_injection(),
@@ -277,6 +316,9 @@ fn native_skill_dir_parity() {
         // Vendor-neutral tree, not an agent dotdir.
         ("antigravity", Some((".agents/skills", ""))),
         ("pi", Some((".pi/skills", ""))),
+        // Not `.agents/skills`, which kimi also scans — that tree is
+        // antigravity's, and both agents deploy into a shared worktree.
+        ("kimi", Some((".kimi-code/skills", ""))),
     ];
     for (name, want) in expected {
         assert_eq!(agent_native_skill_dir(name), *want, "{name}");
@@ -310,6 +352,7 @@ fn skill_filename_parity() {
         ("grok", "plan.md"),
         ("antigravity", "plan.md"),
         ("pi", "plan.md"),
+        ("kimi", "plan.md"),
     ];
     for (name, want) in expected {
         assert_eq!(&skill_dir_to_filename("agtx-plan", name), want, "{name}");
@@ -342,6 +385,8 @@ fn plugin_command_parity() {
         // pi has one `skill:` namespace for every skill, so the plugin's own
         // namespace is folded into the skill name rather than kept as a prefix.
         ("pi", Some("/skill:gsd-plan-phase 1")),
+        // Same one-namespace `skill:` form as pi.
+        ("kimi", Some("/skill:gsd-plan-phase 1")),
     ];
     for (name, want) in expected {
         assert_eq!(
@@ -430,6 +475,12 @@ fn identity_parity() {
             "Earendil's pi coding agent",
             "Pi <noreply@earendil.works>",
         ),
+        (
+            "kimi",
+            "kimi",
+            "Moonshot AI's Kimi Code CLI",
+            "Kimi <noreply@moonshot.cn>",
+        ),
     ];
     for (name, binary, description, co_author) in expected {
         let a = agent(name);
@@ -469,6 +520,7 @@ fn scan_agent_skills_parity() {
     write(root, ".grok/skills/agtx-plan/SKILL.md", MD_SKILL);
     write(root, ".agents/skills/agtx-plan/SKILL.md", MD_SKILL);
     write(root, ".pi/skills/agtx-plan/SKILL.md", MD_SKILL);
+    write(root, ".kimi-code/skills/agtx-plan/SKILL.md", MD_SKILL);
     // OpenCode's project commands live under .config/, not in the tree agtx
     // deploys into (.opencode/command). Both are written here to lock which one
     // the scan reads.
@@ -489,6 +541,9 @@ fn scan_agent_skills_parity() {
         ("antigravity", &[("/agtx-plan", "Plan the work")]),
         // Same SkillDir layout, but pi types it under its own namespace.
         ("pi", &[("/skill:agtx-plan", "Plan the work")]),
+        // Same again for kimi — and since pi's tree is in this same fixture,
+        // one entry each also proves neither reads the other's directory.
+        ("kimi", &[("/skill:agtx-plan", "Plan the work")]),
     ];
     for (name, want) in expected {
         let got = agtx::skills::scan_agent_skills(name, root);

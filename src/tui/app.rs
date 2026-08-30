@@ -11613,9 +11613,9 @@ fn merge_hooks_into_json_settings(path: &Path, ours: serde_json::Value) {
 
 /// Insert agtx's entry into a `mcpServers` JSON file without disturbing the rest.
 ///
-/// Shared by the two `…Merge` JSON kinds (antigravity, pi), which differ only in
-/// directory and filename: their file is vendor-neutral or written back by the
-/// agent's own tooling, so the project's other servers — and any sibling
+/// Shared by the three `…Merge` JSON kinds (antigravity, pi, kimi), which differ
+/// only in directory and filename: their file is vendor-neutral or written back by
+/// the agent's own tooling, so the project's other servers — and any sibling
 /// top-level keys — have to survive. A missing or unparseable file starts from an
 /// empty object rather than failing, on the same best-effort footing as the rest
 /// of worktree setup.
@@ -11643,8 +11643,8 @@ fn merge_mcp_servers_json(dir: &Path, filename: &str, agtx_bin: &str, project_pa
 /// Write the project-scoped MCP server config for one agent into its worktree.
 ///
 /// Selected by [`McpConfigKind`](agent::McpConfigKind) rather than agent name.
-/// The variants are genuinely seven, not one parameterised writer: the formats
-/// differ (JSON vs TOML, `mcpServers` vs `mcp_servers` vs `mcp`), two must
+/// The variants are genuinely eight, not one parameterised writer: the formats
+/// differ (JSON vs TOML, `mcpServers` vs `mcp_servers` vs `mcp`), four must
 /// **merge** rather than overwrite because their file may already be tracked in
 /// the repo, and two carry a side-effect beyond the config file itself — so the
 /// `…Merge` names mark where clobbering a user's file is the failure mode.
@@ -11824,6 +11824,20 @@ fn write_mcp_config(
                 "mcp.json",
                 &agtx_bin,
                 &project_path_str,
+            );
+        }
+        agent::McpConfigKind::KimiJsonMerge => {
+            // `.kimi-code/mcp.json`, standard `mcpServers`. Merged rather than
+            // overwritten: a repo may track its own project-level servers here,
+            // and kimi's in-TUI `/mcp-config` writes this same file, so a task
+            // must not silently drop what either put there. `.kimi-code` is not
+            // in AGENT_CONFIG_DIRS, so only the tracked-in-the-repo half
+            // applies — as for pi.
+            merge_mcp_servers_json(
+                &Path::new(worktree_path).join(".kimi-code"),
+                "mcp.json",
+                agtx_bin,
+                project_path_str,
             );
         }
         agent::McpConfigKind::OpenCode => {

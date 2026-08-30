@@ -24,6 +24,20 @@ pub enum PromptForm {
     Argv,
     /// Prompt flag: `gemini -i '<text>'`.
     Flag(&'static str),
+    /// The CLI takes no opening message at all.
+    ///
+    /// Not "unverified" — *absent*. Kimi Code is the case: its argument parser
+    /// is `program.argument('[args...]')` followed by
+    /// `program.error("unknown command '<arg>'")`, so a positional prompt kills
+    /// the process on startup, and its only prompt flag (`-p, --prompt`) is
+    /// print mode. There is no third option, so [`compose_command`] appends
+    /// nothing and the prompt goes down the mid-session lane instead.
+    ///
+    /// Paired invariant, asserted below: a `None`-form agent must never be
+    /// `launch_prompt_verified`. `prompt_injection` maps it to
+    /// `PromptInjection::Unknown` regardless, so both halves have to be wrong
+    /// before a task's text can be dropped.
+    None,
 }
 
 /// How the resume flags combine with [`AgentSpec::base_args`].
@@ -58,10 +72,11 @@ pub enum CommandSyntax {
     Hyphen,
     /// `$ns-command` — Codex's inline skill reference.
     Dollar,
-    /// `/skill:ns-command` — pi's skill commands live in one `skill:` namespace
-    /// of their own, so the plugin's namespace collapses into the skill *name*
-    /// (`/agtx:plan` → `/skill:agtx-plan`) rather than staying a prefix.
-    /// Verified against pi 0.84.3.
+    /// `/skill:ns-command` — pi's and kimi's skill commands live in one `skill:`
+    /// namespace of their own, so the plugin's namespace collapses into the
+    /// skill *name* (`/agtx:plan` → `/skill:agtx-plan`) rather than staying a
+    /// prefix. Verified against pi 0.84.3; kimi documents the same form
+    /// (`/skill:<name> <args>`) and reads the same `SKILL.md` frontmatter.
     PiSkill,
     /// No interactive skill invocation; callers fall back to a file-path
     /// reference. Copilot, and any agent agtx has not been taught.
@@ -145,7 +160,7 @@ pub enum SendStrategy {
 
 /// Where and how an agent's project-scoped MCP server config is written.
 ///
-/// Seven variants for seven agents, which looks untidy and is: the formats
+/// Eight variants for eight agents, which looks untidy and is: the formats
 /// genuinely differ (JSON vs TOML, `mcpServers` vs `mcp_servers` vs `mcp`). What
 /// the enum buys is that the mess lives in one function instead of a 170-line
 /// match inside `write_skills_to_worktree`, and that the names now say *why* the
@@ -178,6 +193,11 @@ pub enum McpConfigKind {
     /// reads this path as its highest-precedence project layer, and without the
     /// adapter installed the file is inert rather than harmful.
     PiJsonMerge,
+    /// `.kimi-code/mcp.json` — parsed, agtx inserted, written back. Standard
+    /// `mcpServers` shape. Merged rather than overwritten because a repo may
+    /// track its own project-level servers there and kimi's in-TUI
+    /// `/mcp-config` writes the same file.
+    KimiJsonMerge,
 }
 
 /// Where and how an agent's lifecycle-hook config is written, and which event
@@ -904,6 +924,95 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // unloaded — so a pane that reaches the dialog is already misconfigured.
         dialogs: &[],
     },
+    AgentSpec {
+        name: "kimi",
+        binary: "kimi",
+        description: "Moonshot AI's Kimi Code CLI",
+        co_author: "Kimi <noreply@moonshot.cn>",
+        // Empty means *none*, not "unmeasured". Kimi reads provider credentials
+        // only from the `[providers]` table in `~/.kimi-code/config.toml` and
+        // documents that it does not fall back to shell environment variables,
+        // so there is no headless credential a CI runner could supply. The
+        // smoke harness's "is this agent runnable here?" check skips it, which
+        // is correct.
+        api_key_env: &[],
+        env: &[],
+        // `--auto`, not `-y/--yolo`. They are separate flags and only one is
+        // usable unattended: `--yolo` auto-approves tool calls but its own help
+        // says "the agent may still ask questions", which hangs a session
+        // nobody is watching. `--auto` is "fully autonomous, the agent will not
+        // ask questions".
+        base_args: &["--auto"],
+        // Kimi has no launch-prompt form at all — see `PromptForm::None`.
+        prompt_form: PromptForm::None,
+        launch_prompt_verified: false,
+        resume: ResumeArgs::Append(&["--continue"]),
+        headless_args: &["-p"],
+        // Deliberately not `.agents/skills`, which kimi also scans:
+        // antigravity owns that tree, and `write_skills_to_worktree` deploys
+        // for every configured phase agent, so sharing it would have two agents
+        // writing the same files. Kimi discovering antigravity's copies in a
+        // multi-agent worktree is inert — the files are byte-identical and kimi
+        // dedupes by normalized name.
+        skill_dir: Some((".kimi-code/skills", "")),
+        skill_layout: SkillLayout::SkillDir,
+        skill_scan_dir: Some(".kimi-code/skills"),
+        command_syntax: CommandSyntax::PiSkill,
+        mcp_config: Some(McpConfigKind::KimiJsonMerge),
+        // Kimi's hooks are Claude-shaped — PascalCase `hook_event_name` in a
+        // snake_case stdin payload, with the whole `SessionStart` …
+        // `SessionEnd` vocabulary — and would map onto `ClaudeSettings`
+        // almost unchanged. But `[[hooks]]` exists *only* in the user-global
+        // `~/.kimi-code/config.toml`; the one project-local file,
+        // `.kimi-code/local.toml`, accepts a `[workspace]` table and nothing
+        // else. Every `HookConfigKind` is project-local by invariant, so this
+        // stays `None` until kimi gains project-scoped hooks. Phase status
+        // falls back to the pane-hash heuristic, as for opencode and pi.
+        hook_config: None,
+        hook_event_source: HookEventSource::Payload,
+        // `node` must NOT be added: it is every Ink-class agent's pane name and
+        // would make any node process read as a live agent. Kimi sets
+        // `process.title = 'kimi-code'`, which Linux picks up and macOS ignores
+        // (`p_comm` is fixed at exec) — hence the indicators below.
+        process_names: &["kimi", "kimi-code"],
+        active_indicators: &["Welcome to Kimi Code!"],
+        // The splash scrolls away once the session has output; the second
+        // footer line (`context: N% (tokens/max)`) is unconditional. Scoped
+        // rather than global because "context: " occurs in ordinary agent
+        // output and would report an exited agent as still running.
+        scoped_indicators: &["context: "],
+        exit_command: Some("/exit"),
+        label_fg: (170, 140, 250), // violet — unused by the other nine
+        label_bg: None,
+        send_strategy: SendStrategy::Combined,
+        // `/new` — "start a fresh session, discarding the current context".
+        // Documented rather than measured; `/clear` is its alias.
+        clear_context_command: Some("/new"),
+        dialogs: &[
+            // Fires on every untrusted directory — i.e. every fresh worktree —
+            // before any session is created, and gates project MCP servers
+            // *and* project skills. Mostly moot in practice: `agent::trust`
+            // seeds the worktree from the project's existing consent, so the
+            // dialog does not appear.
+            //
+            // `Up` then `Enter`, and never a bare Enter. This menu is
+            // arrow-navigated with `Don't trust` **preselected**
+            // (`selectedIndex = 1`), and choosing it calls `stop()`, which
+            // exits the process before a session exists — a bare Enter would
+            // kill the task's agent outright. It takes no digit either; a `1`
+            // would be typed as literal text. This is the exact inverse of
+            // antigravity's identically-shaped prompt, where the safe option is
+            // preselected and a bare Enter is right. Do not generalise between
+            // them.
+            AgentDialog {
+                patterns: &["Trust this folder?"],
+                security: true,
+                require_all: false,
+                answer: &["Up", "Enter"],
+                scope: DialogScope::Launch,
+            },
+        ],
+    },
     // TODO: investigate CLI usage before enabling
     // aider  — "AI pair programming in your terminal", Aider <noreply@aider.chat>
     // cline  — "AI coding assistant for VS Code",      Cline <noreply@cline.bot>
@@ -976,16 +1085,28 @@ pub fn compose_command(spec: &AgentSpec, args: &[&str], prompt: Option<&str>) ->
         out.push_str(arg);
     }
     if let Some(prompt) = prompt.filter(|p| !p.is_empty()) {
-        if let PromptForm::Flag(flag) = spec.prompt_form {
-            out.push(' ');
-            out.push_str(flag);
-        }
         // POSIX single-quote escaping: close, emit a literal quote, reopen. The
         // whole command is itself wrapped in `sh -c '…'` by create_window, so a
         // bare quote here would end that outer word and let the shell interpret
         // the rest of the task as code.
-        let prompt = normalize_prompt(prompt);
-        out.push_str(&format!(" '{}'", prompt.replace('\'', "'\"'\"'")));
+        let quoted = |out: &mut String| {
+            let prompt = normalize_prompt(prompt);
+            out.push_str(&format!(" '{}'", prompt.replace('\'', "'\"'\"'")));
+        };
+        match spec.prompt_form {
+            // Nothing to append. Appending anyway would produce
+            // `kimi --auto '<task>'`, which kimi rejects with
+            // `unknown command` before it ever draws its TUI. The caller sees
+            // `PromptInjection::Unknown`, so the text is typed after readiness
+            // by `send_skill_and_prompt` instead.
+            PromptForm::None => {}
+            PromptForm::Flag(flag) => {
+                out.push(' ');
+                out.push_str(flag);
+                quoted(&mut out);
+            }
+            PromptForm::Argv => quoted(&mut out),
+        }
     }
     out
 }
@@ -1054,6 +1175,40 @@ mod tests {
                 entry.prompt_form,
                 PromptForm::Flag("-p"),
                 "{} cannot deliver its prompt at launch through print mode",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_verified_launch_prompt_needs_a_launch_form_to_exist() {
+        // The sibling of the guard above, and the one that keeps kimi safe:
+        // `PromptForm::None` means the CLI has *no* way to take an opening
+        // message, so marking such an agent verified would silently drop every
+        // task's text — `compose_command` appends nothing, and the caller would
+        // believe it had been delivered.
+        for entry in AGENT_SPECS.iter().filter(|s| s.launch_prompt_verified) {
+            assert_ne!(
+                entry.prompt_form,
+                PromptForm::None,
+                "{} has no launch-prompt form to verify",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_promptless_agent_composes_the_same_command_with_or_without_a_prompt() {
+        // The regression this exists for: a future match site treating `None`
+        // as "nothing special" and falling through to `Argv`.
+        for entry in AGENT_SPECS
+            .iter()
+            .filter(|s| s.prompt_form == PromptForm::None)
+        {
+            assert_eq!(
+                compose_command(entry, entry.base_args, Some("some task text")),
+                compose_command(entry, entry.base_args, None),
+                "{} must append nothing for a prompt it cannot take",
                 entry.name
             );
         }
