@@ -201,6 +201,46 @@ fn test_build_footer_text_at_bottom() {
     let footer = build_footer_text(0, 10);
     assert!(footer.contains("At bottom"));
     assert!(!footer.contains("Line"));
+    assert!(footer.contains("[C-n/p] scroll  ·  [C-f] fullscreen"));
+    assert!(!footer.contains("[C-j/k]"));
+    assert!(!footer.contains("[C-d/u]"));
+}
+
+#[test]
+fn agent_managed_history_is_described_by_actions_not_implementation() {
+    let popup = ShellPopup {
+        metrics: Some(agtx::tmux::PaneMetrics {
+            cursor_x: 0,
+            cursor_y: 0,
+            pane_height: 24,
+            history_size: 0,
+        }),
+        ..ShellPopup::new("Task".to_string(), "window".to_string())
+    };
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            render_shell_popup(
+                &popup,
+                frame,
+                Rect::new(0, 0, 100, 24),
+                vec![],
+                &ShellPopupColors::default(),
+            );
+        })
+        .unwrap();
+    let content: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(content.contains("[C-n/p] scroll"));
+    assert!(!content.contains("[C-j/k]"));
+    assert!(!content.contains("[C-d/u]"));
+    assert!(!content.contains("scrollback"));
 }
 
 #[test]
@@ -208,6 +248,7 @@ fn test_build_footer_text_scrolled_up() {
     let footer = build_footer_text(-5, 10);
     assert!(footer.contains("Line 11")); // start_line + 1
     assert!(footer.contains("bottom")); // Ctrl+g option visible
+    assert!(footer.contains("[C-n/p] scroll  [C-g] bottom"));
 }
 
 #[test]
@@ -243,12 +284,6 @@ fn test_fullscreen_footer_offers_windowed_toggle() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(content.contains("[C-f] windowed"));
-}
-
-#[test]
-fn test_footer_documents_reserved_key_passthrough() {
-    let footer = build_footer_text(0, 0);
-    assert!(footer.contains("[C-Space] send next"));
 }
 
 // === Rendering Tests ===

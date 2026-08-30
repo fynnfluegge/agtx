@@ -23,8 +23,6 @@ pub struct ShellPopup {
     pub last_content_refresh: Instant,
     /// Cursor position inside the visible tmux pane and its pane height.
     pub metrics: Option<crate::tmux::PaneMetrics>,
-    /// Forward the next key directly to tmux, even when agtx normally owns it.
-    pub pass_through_next_key: bool,
 }
 
 impl ShellPopup {
@@ -40,7 +38,6 @@ impl ShellPopup {
             fullscreen: false,
             last_content_refresh: Instant::now(),
             metrics: None,
-            pass_through_next_key: false,
         }
     }
 
@@ -167,21 +164,49 @@ fn build_footer_text_for_mode(
     // exactly what made an empty buffer look like a broken scrollbar.
     if !has_scrollback {
         return format!(
-            " agent scrollback | [C-d/u] page [C-g] bottom [C-f] {view_action} [C-Space] send next [C-q] close "
+            "[C-n/p] scroll  [C-g] bottom  ·  [C-f] {view_action}  [C-q] close"
         );
     }
     if scroll_offset < 0 {
         format!(
-            " Line {} | [C-g] bottom [C-f] {} [C-Space] send next [C-q] close [C-j/k] scroll [C-d/u] page ",
+            "Line {}  ·  [C-n/p] scroll  [C-g] bottom  ·  [C-f] {}  [C-q] close",
             start_line + 1,
             view_action
         )
     } else {
         format!(
-            " At bottom | [C-f] {} [C-Space] send next [C-q] close [C-j/k] scroll [C-d/u] page ",
+            "At bottom  ·  [C-n/p] scroll  ·  [C-f] {}  [C-q] close",
             view_action
         )
     }
+}
+
+/// Render popup shortcuts with the same key-first hierarchy as the board
+/// footer: keys carry the accent while labels and separators stay subdued.
+fn styled_footer(text: &str, colors: &ShellPopupColors) -> Line<'static> {
+    let key_style = Style::default().fg(colors.border).bold();
+    let label_style = Style::default().fg(colors.footer_bg);
+    let mut spans = Vec::new();
+    let mut rest = text;
+
+    while let Some(open) = rest.find('[') {
+        if open > 0 {
+            spans.push(Span::styled(rest[..open].to_string(), label_style));
+        }
+        let Some(close) = rest[open..].find(']') else {
+            spans.push(Span::styled(rest[open..].to_string(), label_style));
+            rest = "";
+            break;
+        };
+        let end = open + close + 1;
+        spans.push(Span::styled(rest[open..end].to_string(), key_style));
+        rest = &rest[end..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_string(), label_style));
+    }
+
+    Line::from(spans)
 }
 
 /// Maximum number of trailing empty lines to keep after content
@@ -388,18 +413,13 @@ pub fn render_shell_popup(
         }
     }
 
-    // Footer with scroll indicator (pad to fill width)
+    // Footer with scroll indicator and grouped, accented shortcuts.
     let footer_text = build_footer_text_for_mode(
         popup.scroll_offset,
         start_line,
         popup.fullscreen,
         popup.has_scrollback(),
     );
-    let padded_footer = format!(
-        "{:<width$}",
-        footer_text,
-        width = popup_chunks[3].width as usize
-    );
-    let footer = Paragraph::new(padded_footer).style(Style::default().fg(colors.footer_bg));
+    let footer = Paragraph::new(styled_footer(&footer_text, colors)).alignment(Alignment::Center);
     frame.render_widget(footer, popup_chunks[3]);
 }

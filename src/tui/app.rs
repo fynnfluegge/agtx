@@ -51,31 +51,31 @@ fn build_footer_text(
     match input_mode {
         InputMode::Normal => {
             if sidebar_focused {
-                " [j/k] navigate  [Enter] open  [l] board  [e] hide sidebar  [q] quit ".to_string()
+                "[j/k] navigate  [Enter] open  [l] board  ·  [e] hide sidebar  [q] quit".to_string()
             } else {
                 match selected_column {
-                    0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [D] deps  [R] research  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
+                    0 => "[o] new  [/] search  ·  [Enter] open  [d] diff  [D] deps  ·  [m] plan  [M] run  [R] research  ·  [x] delete  [e] sidebar  [q] quit".to_string(),
                     1 => if fullscreen_on_enter {
-                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [m] run  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     } else {
-                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [m] run  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     },
                     2 => if fullscreen_on_enter {
-                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     } else {
-                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     },
                     3 if has_cyclic_plugin => if fullscreen_on_enter {
-                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [r] resume  [p] next phase  [m] done  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     } else {
-                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [r] resume  [p] next phase  [m] done  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     },
                     3 => if fullscreen_on_enter {
-                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     } else {
-                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     },
-                    _ => " [o] new  [/] search  [Enter] open  [x] del  [e] sidebar  [q] quit".to_string(),
+                    _ => "[o] new  [/] search  ·  [Enter] open  ·  [x] delete  [e] sidebar  [q] quit".to_string(),
                 }
             }
         }
@@ -4006,25 +4006,6 @@ impl App {
                 return Ok(());
             }
 
-            // Ctrl+Space is a prefix for keys that agtx normally reserves for
-            // popup navigation (for example Ctrl+q or Ctrl+u). This preserves
-            // complete terminal access without leaving the in-app fullscreen.
-            if popup.pass_through_next_key {
-                popup.pass_through_next_key = false;
-                if let Some(input) = popup_key_input(&window_name, key) {
-                    forward_pane_input(
-                        self.state.input_sink.as_ref(),
-                        &mut self.state.warning_message,
-                        input,
-                    );
-                }
-                return Ok(());
-            }
-            if has_ctrl && matches!(key.code, KeyCode::Char(' ')) {
-                popup.pass_through_next_key = true;
-                return Ok(());
-            }
-
             match key.code {
                 // Ctrl+q = close popup
                 KeyCode::Char('q') if has_ctrl => {
@@ -4038,16 +4019,16 @@ impl App {
                     );
                     self.state.shell_popup = None;
                 }
-                // Scroll up with Ctrl+k or Ctrl+p or Ctrl+Up
-                KeyCode::Char('k') | KeyCode::Char('p') | KeyCode::Up if has_ctrl => {
+                // Scroll up with Ctrl+p or Ctrl+Up
+                KeyCode::Char('p') | KeyCode::Up if has_ctrl => {
                     if popup.has_scrollback() {
                         popup.scroll_up(5);
                     } else {
                         delegate_scroll(&mut self.state, &window_name, "PageUp");
                     }
                 }
-                // Scroll down with Ctrl+j or Ctrl+n or Ctrl+Down
-                KeyCode::Char('j') | KeyCode::Char('n') | KeyCode::Down if has_ctrl => {
+                // Scroll down with Ctrl+n or Ctrl+Down
+                KeyCode::Char('n') | KeyCode::Down if has_ctrl => {
                     if popup.has_scrollback() {
                         popup.scroll_down(5);
                     } else {
@@ -9008,18 +8989,16 @@ fn flush_pane_input_sync(sink: &dyn PaneInputSink, warning: &mut Option<(String,
 /// one-screen buffer by zero lines and print a line number to match, agtx sends
 /// the agent a key that scrolls *its* view.
 ///
-/// **Only `PageUp`/`PageDown`, and never `Up`/`Down`.** Measured against Claude
+/// **Never `Up`/`Down`.** Measured against Claude
 /// Code 2.1.251: in its detailed transcript view (`ctrl+o`) all four scroll, but
 /// in the main view `Up` recalls a previous prompt **into the composer** —
 /// overwriting whatever the user had typed — while `PageUp` is inert. A scroll
 /// key that silently rewrites the user's half-typed message is worse than one
-/// that does nothing, so the safe pair is used for every chord. The cost is
-/// granularity: `C-k`/`C-j` page rather than move five lines.
+/// that does nothing, so `C-n/p` use the safe Page Down/Up translation.
 ///
 /// The chord is **translated, never passed through**, for the same reason:
 /// forwarding a raw `C-d` would be an EOF that can end the session, and `C-u`
-/// would kill the line in the composer. `C-Space` remains the way to send those
-/// deliberately.
+/// would kill the line in the composer.
 fn delegate_scroll(state: &mut AppState, target: &str, key: &str) {
     forward_pane_input(
         state.input_sink.as_ref(),

@@ -63,6 +63,13 @@ fn styled_footer_emphasizes_shortcuts_without_changing_text() {
 }
 
 #[test]
+fn footer_groups_related_shortcuts() {
+    let text = build_footer_text(InputMode::Normal, false, 1, false, false);
+    assert!(text.contains("search  ·  [Enter] open"));
+    assert!(text.contains("[m] run  ·  [x] delete"));
+}
+
+#[test]
 fn wizard_plugin_descriptions_wrap_and_align() {
     let lines = wizard_plugin_option_lines(
         "  > ",
@@ -1444,7 +1451,7 @@ fn test_footer_text_planning_column() {
 #[test]
 fn test_footer_text_running_column() {
     let text = build_footer_text(InputMode::Normal, false, 2, false, false);
-    assert!(text.contains("[r] move left"));
+    assert!(text.contains("[r] move back"));
     assert!(text.contains("[m] move"));
 }
 
@@ -1473,7 +1480,7 @@ fn test_footer_text_fullscreen_on_enter_hides_ctrl_f() {
 #[test]
 fn test_footer_text_review_column() {
     let text = build_footer_text(InputMode::Normal, false, 3, false, false);
-    assert!(text.contains("[r] move left"));
+    assert!(text.contains("[r] move back"));
     assert!(text.contains("[m] move"));
 }
 
@@ -13355,8 +13362,6 @@ fn named_keys_are_enqueued_as_key_names() {
 fn modified_characters_are_key_names_not_text() {
     // Ctrl+a is a key; sending it as literal text would type an "a".
     let (mut app, sink) = app_with_open_popup();
-    app.handle_key(key_event(KeyCode::Char(' '), KeyModifiers::CONTROL))
-        .unwrap(); // Ctrl+Space: the pass-through prefix, consumed by agtx
     app.handle_key(key_event(KeyCode::Char('a'), KeyModifiers::CONTROL))
         .unwrap();
     app.handle_key(key_event(KeyCode::Char('b'), KeyModifiers::ALT))
@@ -13379,10 +13384,10 @@ fn modified_characters_are_key_names_not_text() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn the_popups_own_shortcuts_are_never_forwarded() {
-    // Ctrl+q closes, Ctrl+f toggles fullscreen, Ctrl+j/k/u/d/g scroll. None of
+    // Ctrl+q closes, Ctrl+f toggles fullscreen, and Ctrl+u/d/g navigate. None of
     // them belong to the agent, and forwarding one would be invisible damage.
     let (mut app, sink) = app_with_open_popup();
-    for code in ['k', 'j', 'u', 'd', 'g', 'f'] {
+    for code in ['u', 'd', 'g', 'f'] {
         app.handle_key(key_event(KeyCode::Char(code), KeyModifiers::CONTROL))
             .unwrap();
     }
@@ -13397,6 +13402,30 @@ fn the_popups_own_shortcuts_are_never_forwarded() {
     app.handle_key(key_event(KeyCode::Char('q'), KeyModifiers::CONTROL))
         .unwrap();
     assert!(app.state.shell_popup.is_none(), "Ctrl+q closes the popup");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn ctrl_j_and_k_are_not_popup_keymaps() {
+    let (mut app, sink) = app_with_open_popup();
+    for code in ['j', 'k'] {
+        app.handle_key(key_event(KeyCode::Char(code), KeyModifiers::CONTROL))
+            .unwrap();
+    }
+    assert_eq!(
+        sink.taken(),
+        vec![
+            PaneInput::Key {
+                target: "proj:task".to_string(),
+                key: "C-j".to_string(),
+            },
+            PaneInput::Key {
+                target: "proj:task".to_string(),
+                key: "C-k".to_string(),
+            },
+        ],
+        "unmapped chords should pass through without agtx translating them"
+    );
 }
 
 #[test]
@@ -13435,29 +13464,6 @@ fn toggling_fullscreen_waits_before_resizing_the_pane() {
     );
 }
 
-#[test]
-#[cfg(feature = "test-mocks")]
-fn the_ctrl_space_prefix_forwards_the_next_key_verbatim() {
-    // Ctrl+Space is how a user reaches keys agtx reserves — Ctrl+q to the agent,
-    // not to the popup.
-    let (mut app, sink) = app_with_open_popup();
-    app.handle_key(key_event(KeyCode::Char(' '), KeyModifiers::CONTROL))
-        .unwrap();
-    app.handle_key(key_event(KeyCode::Char('q'), KeyModifiers::CONTROL))
-        .unwrap();
-    assert_eq!(
-        sink.taken(),
-        vec![PaneInput::Key {
-            target: "proj:task".to_string(),
-            key: "C-q".to_string(),
-        }]
-    );
-    assert!(
-        app.state.shell_popup.is_some(),
-        "the prefixed Ctrl+q went to the agent, not to the popup"
-    );
-}
-
 /// Give the popup a pane that reports `history_size` lines of scrollback.
 #[cfg(feature = "test-mocks")]
 fn with_scrollback(app: &mut App, history_size: usize) {
@@ -13480,7 +13486,7 @@ fn with_scrollback(app: &mut App, history_size: usize) {
 fn scroll_keys_move_the_popup_when_tmux_has_history() {
     let (mut app, sink) = app_with_open_popup();
     with_scrollback(&mut app, 500);
-    for code in [KeyCode::Char('k'), KeyCode::Char('u')] {
+    for code in [KeyCode::Char('p'), KeyCode::Char('u')] {
         app.handle_key(key_event(code, KeyModifiers::CONTROL))
             .unwrap();
     }
@@ -13506,8 +13512,8 @@ fn scroll_keys_go_to_the_agent_when_tmux_has_no_history() {
     let (mut app, sink) = app_with_open_popup();
     with_scrollback(&mut app, 0);
     for code in [
-        KeyCode::Char('k'),
-        KeyCode::Char('j'),
+        KeyCode::Char('p'),
+        KeyCode::Char('n'),
         KeyCode::Char('u'),
         KeyCode::Char('d'),
     ] {
@@ -13529,12 +13535,15 @@ fn scroll_keys_go_to_the_agent_when_tmux_has_no_history() {
             other => panic!("expected a key, got {other:?}"),
         })
         .collect();
-    // Paging keys only. `Up`/`Down` would scroll Claude's transcript view but
+    // Ctrl+N/P use the safe translation. `Up`/`Down` would scroll Claude's
+    // transcript view but
     // recall prompt history in its main view, overwriting the composer — see
     // `delegate_scroll`.
     assert_eq!(
         keys,
-        vec!["PageUp", "PageDown", "PageUp", "PageDown", "PageUp", "PageDown", "End"]
+        vec![
+            "PageUp", "PageDown", "PageUp", "PageDown", "PageUp", "PageDown", "End"
+        ]
     );
     assert_eq!(
         app.state.shell_popup.as_ref().unwrap().scroll_offset,
@@ -13575,7 +13584,7 @@ fn unknown_pane_metrics_keep_the_popups_own_scrolling() {
         popup.metrics = None;
         popup.cached_content = b"a\nb\nc\n".to_vec();
     }
-    app.handle_key(key_event(KeyCode::Char('k'), KeyModifiers::CONTROL))
+    app.handle_key(key_event(KeyCode::Char('p'), KeyModifiers::CONTROL))
         .unwrap();
     assert!(sink.taken().is_empty());
     assert!(app.state.shell_popup.as_ref().unwrap().scroll_offset < 0);
