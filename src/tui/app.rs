@@ -23,7 +23,9 @@ use crate::git::{
     self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps,
 };
 use crate::skills;
-use crate::tmux::{self, RealTmuxOps, TmuxOperations};
+use crate::tmux::{
+    self, InputConfig, InputError, PaneInput, PaneInputSink, RealTmuxOps, TmuxOperations,
+};
 use crate::AppMode;
 
 use super::board::BoardState;
@@ -298,6 +300,9 @@ struct AppState {
     available_agents: Vec<agent::Agent>,
     // Tmux operations (injectable for testing)
     tmux_ops: Arc<dyn TmuxOperations>,
+    // Popup keystrokes go here, never straight to tmux: enqueueing is the only
+    // thing the input thread is allowed to do with a key. See `tmux::input`.
+    input_sink: Arc<dyn PaneInputSink>,
     // Git operations (injectable for testing)
     git_ops: Arc<dyn git::GitOperations>,
     // Git provider operations (injectable for testing)
@@ -741,6 +746,14 @@ impl App {
 
         let config = MergedConfig::merge(&global_config, &project_config);
 
+        // One broker for the process. Popup keys are enqueued onto it, so the
+        // input thread never waits for a tmux subprocess; whether the broker
+        // then writes through a control connection or one process per key is
+        // the only thing the flag decides.
+        let mut input_config = InputConfig::new(tmux::AGENT_SERVER, &tmux_project_name);
+        input_config.control_mode = control_mode_enabled(config.tmux_control_mode);
+        let input_sink = tmux::input::spawn(input_config, Arc::clone(&tmux_ops));
+
         // If the project is untrusted, also suppress plugin init_scripts
         // by forcing no_init_scripts in the flags
         let mut flags = flags;
@@ -771,6 +784,7 @@ impl App {
                 tmux_project_name: tmux_project_name.clone(),
                 available_agents,
                 tmux_ops,
+                input_sink,
                 git_ops,
                 git_provider_ops,
                 agent_registry,
@@ -996,6 +1010,9 @@ impl App {
                 tmux_project_name,
                 available_agents: vec![],
                 tmux_ops,
+                // Tests assert what the UI *enqueued*; a broker thread would add
+                // timing to something that is a pure translation.
+                input_sink: Arc::new(crate::tmux::RecordingSink::new()),
                 git_ops,
                 git_provider_ops,
                 agent_registry,
@@ -1051,6 +1068,12 @@ impl App {
                 instance_id: uuid::Uuid::new_v4().to_string(),
             },
         })
+    }
+
+    /// Swap in a recording sink so a test can assert what the UI enqueued.
+    #[cfg(feature = "test-mocks")]
+    pub fn set_input_sink(&mut self, sink: Arc<dyn PaneInputSink>) {
+        self.state.input_sink = sink;
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -3988,7 +4011,13 @@ impl App {
             // complete terminal access without leaving the in-app fullscreen.
             if popup.pass_through_next_key {
                 popup.pass_through_next_key = false;
-                send_key_to_tmux(&window_name, key, self.state.tmux_ops.as_ref());
+                if let Some(input) = popup_key_input(&window_name, key) {
+                    forward_pane_input(
+                        self.state.input_sink.as_ref(),
+                        &mut self.state.warning_message,
+                        input,
+                    );
+                }
                 return Ok(());
             }
             if has_ctrl && matches!(key.code, KeyCode::Char(' ')) {
@@ -3999,6 +4028,9 @@ impl App {
             match key.code {
                 // Ctrl+q = close popup
                 KeyCode::Char('q') if has_ctrl => {
+                    // Anything still batched belongs to *this* pane. Deliver it
+                    // before the popup — and with it the target — can change.
+                    let _ = self.state.input_sink.flush();
                     self.state.shell_popup = None;
                 }
                 // Scroll up with Ctrl+k or Ctrl+p or Ctrl+Up
@@ -4029,6 +4061,9 @@ impl App {
                 }
                 // Ctrl+f toggles between centered and fullscreen in-app views.
                 KeyCode::Char('f') if has_ctrl => {
+                    // The resize is a plain tmux subprocess; queued text must
+                    // reach the pane at the size it was typed at.
+                    let _ = self.state.input_sink.flush();
                     popup.fullscreen = !popup.fullscreen;
                     let (pane_width, pane_height) = if popup.fullscreen {
                         crossterm::terminal::size()
@@ -4053,7 +4088,13 @@ impl App {
                 }
                 _ => {
                     // Forward all other keys to tmux window (including Esc)
-                    send_key_to_tmux(&window_name, key, self.state.tmux_ops.as_ref());
+                    if let Some(input) = popup_key_input(&window_name, key) {
+                        forward_pane_input(
+                            self.state.input_sink.as_ref(),
+                            &mut self.state.warning_message,
+                            input,
+                        );
+                    }
                 }
             }
         }
@@ -4061,10 +4102,19 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: String) -> Result<()> {
-        // Shell popup open: forward paste to the tmux pane with proper bracketed paste sequences
+        // Shell popup open: forward paste to the tmux pane with proper bracketed
+        // paste sequences. It goes through the broker like every other request,
+        // so it cannot overtake characters typed just before it.
         if let Some(ref popup) = self.state.shell_popup {
             let window_name = popup.window_name.clone();
-            let _ = self.state.tmux_ops.paste_text(&window_name, &text);
+            forward_pane_input(
+                self.state.input_sink.as_ref(),
+                &mut self.state.warning_message,
+                PaneInput::Paste {
+                    target: window_name,
+                    text,
+                },
+            );
             return Ok(());
         }
 
@@ -6995,6 +7045,7 @@ impl App {
             }
             popup.cached_content =
                 capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
+            let _ = self.state.input_sink.flush();
             self.state.shell_popup = Some(popup);
             return Ok(());
         }
@@ -7076,6 +7127,7 @@ impl App {
         }
         popup.cached_content =
             capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
+        let _ = self.state.input_sink.flush();
         self.state.shell_popup = Some(popup);
 
         // Deploy orchestrate skill to project root so the agent can discover it
@@ -7167,6 +7219,9 @@ impl App {
                 popup.cached_content =
                     capture_tmux_pane_with_history(window_name, 500, self.state.tmux_ops.as_ref());
 
+                // A popup opening changes the target; nothing queued for the
+                // previous one may follow it here.
+                let _ = self.state.input_sink.flush();
                 self.state.shell_popup = Some(popup);
             }
         }
@@ -7902,6 +7957,12 @@ impl App {
             &project_path,
             self.state.tmux_ops.as_ref(),
         );
+        // The control client attaches to a session, and the old project's may be
+        // killed later. Delivery does not depend on which one it is — commands
+        // carry their own target — but the next *connect* does.
+        self.state
+            .input_sink
+            .set_session(&self.state.tmux_project_name);
 
         // Clear per-task caches from previous project
         self.state.merge_conflict_checked.clear();
@@ -7926,6 +7987,10 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        // Deliver what is still queued and stop the broker before the process
+        // goes away — the last characters typed into a pane were typed on
+        // purpose. Bounded by the queue depth, so quitting stays instant.
+        self.state.input_sink.shutdown();
         match self.terminal.backend_mut() {
             AppBackend::Crossterm(backend) => {
                 let _ = disable_raw_mode();
@@ -8773,15 +8838,34 @@ fn push_changes_to_existing_pr(
         .unwrap_or_else(|| "Changes pushed to existing PR".to_string()))
 }
 
-/// Send a key to a tmux pane
-fn send_key_to_tmux(
-    window_name: &str,
-    key: crossterm::event::KeyEvent,
-    tmux_ops: &dyn TmuxOperations,
-) {
+/// Translate a popup keystroke into a request for the pane input broker.
+///
+/// The split between [`PaneInput::Text`] and [`PaneInput::Key`] is the whole
+/// point of the type: text goes out with `send-keys -l`, which suppresses tmux's
+/// key-name lookup, and a key goes out without it, which is what makes `Enter`
+/// an Enter.
+///
+/// An unmodified character is therefore **text**, where it used to be a key.
+/// That is a fix, not just a reclassification: `send-keys -t x ";"` never
+/// reached the pane at all, because a standalone semicolon is how tmux separates
+/// commands — it was parsed as one and the keystroke vanished. The same lookup
+/// is why a batched run of characters could not have been sent as a key.
+fn popup_key_input(target: &str, key: crossterm::event::KeyEvent) -> Option<PaneInput> {
     use crossterm::event::KeyModifiers;
     let has_alt = key.modifiers.contains(KeyModifiers::ALT);
     let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // Shift is already reflected in the character crossterm reports, so it is
+    // not a modifier prefix here — `C-A` and `C-a` are different keys to tmux,
+    // but `A` alone is just the character.
+    if let KeyCode::Char(c) = key.code {
+        if !has_ctrl && !has_alt {
+            return Some(PaneInput::Text {
+                target: target.to_string(),
+                text: c.to_string(),
+            });
+        }
+    }
 
     let base = match key.code {
         KeyCode::Char(c) => c.to_string(),
@@ -8800,7 +8884,7 @@ fn send_key_to_tmux(
         KeyCode::Delete => "DC".to_string(),
         KeyCode::Insert => "IC".to_string(),
         KeyCode::F(n) => format!("F{}", n),
-        _ => return,
+        _ => return None,
     };
 
     let key_str = match (has_ctrl, has_alt) {
@@ -8810,7 +8894,57 @@ fn send_key_to_tmux(
         (false, false) => base,
     };
 
-    let _ = tmux_ops.send_key(window_name, &key_str);
+    Some(PaneInput::Key {
+        target: target.to_string(),
+        key: key_str,
+    })
+}
+
+/// Hand one request to the broker, surfacing the two ways that can fail.
+///
+/// Takes the sink and the warning slot rather than `&mut App` on purpose: it is
+/// called with the popup mutably borrowed, and these are disjoint fields.
+///
+/// A full queue is **not** retried synchronously. Sending it now would put this
+/// key ahead of everything already queued, and a keystroke arriving out of order
+/// is worse than one that visibly did not arrive — so the queued prefix is kept
+/// and the user is told.
+fn forward_pane_input(
+    sink: &dyn PaneInputSink,
+    warning: &mut Option<(String, Instant)>,
+    input: PaneInput,
+) {
+    match sink.send(input) {
+        Ok(()) => {}
+        Err(InputError::QueueFull) => {
+            tracing::warn!("pane input queue full; keystroke dropped");
+            *warning = Some((
+                "Input is backing up; a keystroke was dropped rather than sent out of order."
+                    .to_string(),
+                Instant::now(),
+            ));
+        }
+        Err(InputError::Disconnected) => {
+            tracing::error!("pane input broker stopped");
+            *warning = Some((
+                "Pane input is not running; restart agtx to type into task panes.".to_string(),
+                Instant::now(),
+            ));
+        }
+    }
+}
+
+/// Is the persistent control-mode backend on for this run?
+///
+/// `AGTX_TMUX_CONTROL` wins over the config file in both directions, so a user
+/// who hits trouble can turn it off for one launch without editing anything, and
+/// the integration suite can turn it on without a config file at all.
+fn control_mode_enabled(configured: bool) -> bool {
+    match std::env::var("AGTX_TMUX_CONTROL").ok().as_deref() {
+        Some("1") | Some("true") | Some("yes") => true,
+        Some("0") | Some("false") | Some("no") => false,
+        _ => configured,
+    }
 }
 
 const SHELL_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);

@@ -58,7 +58,11 @@ src/
 │                     # Notification, RunningAgent, AgentStatus
 ├── tmux/
 │   ├── mod.rs        # Tmux server "agtx", session management
-│   └── operations.rs # TmuxOperations trait (mockable for testing)
+│   ├── operations.rs # TmuxOperations trait (mockable for testing)
+│   ├── input.rs      # PaneInput/PaneInputSink, the input broker, both backends
+│   ├── input_tests.rs # Coalescing, ordering, queue policy (included via #[path])
+│   ├── control.rs    # Persistent `tmux -C` client, frame parser, tmux command encoder
+│   └── control_tests.rs # Encoder fixtures + parser tests (included via #[path])
 ├── git/
 │   ├── mod.rs        # is_git_repo, repo_root, current_branch, diff_stat/diff_full,
 │                     # merge_branch, check_merge_conflicts, delete_branch
@@ -131,6 +135,8 @@ tests/
 ├── update_tests.rs    # Version policy, cache TTL, artifact naming parity, binary swap
 ├── mock_infrastructure_tests.rs # Mock infrastructure tests
 ├── shell_popup_tests.rs         # Shell popup logic tests
+├── tmux_control_tests.rs        # Real-tmux pane input: ordering, escaping, sizing,
+│                                # reconnect, latency — opt-in via AGTX_TMUX_IT=1
 └── smoke/             # Per-agent smoke tests — real binaries, no mocks, opt-in
     ├── agent_smoke.py      # The runner: scratch repo → TUI in tmux → phases over MCP
     ├── test_agent_smoke.py # Deterministic tests for the harness itself (no tmux/auth)
@@ -264,6 +270,71 @@ So `submit_message()` counts nothing and watches the composer instead: it presse
 | `send_keys` | `send-keys` + `Enter` | text plus a submit, generic path |
 
 Without `-l`, tmux resolves an argument that matches a key name *as that key*: `"Space"` arrives as `0x20`, `"Escape"` as `ESC`, `"Up"` as `\033[A` (tmux 3.5a). So `send_key` must never carry task-derived text — that is what `send_text` is for.
+
+### Typing into a Task Pane
+The two lanes above deliver a *task*. This is the third lane, and it is the only one a **human** is
+waiting on: the keys forwarded from an open task popup.
+
+```text
+crossterm key event
+        │  popup_key_input()          — Char → Text, everything else → Key
+        ▼
+ PaneInputSink::send                  — enqueue, ~1 µs, never waits for tmux
+   bounded channel (1024)
+        ▼
+   one broker thread                  — the single ordering authority
+        ├─ coalesces adjacent Text for the same target (2 ms window, 4 KiB cap)
+        ├─ flushes before every Key, Paste, target change, popup close, shutdown
+        ├─► control backend  `tmux -C attach-session`   (persistent, opt-in)
+        └─► subprocess backend  `tmux send-keys`        (default, and the fallback)
+```
+
+**Every key used to be a process.** `send_key` starts a `tmux` client and waits for it: **~20 ms
+p95** idle, 40–50 ms under load, on the input thread, per keystroke. That is the whole reason this
+lane exists. Enqueueing costs ~1 µs, and end-to-end delivery over the control connection is **0.32 ms
+p95** against 38 ms for the subprocess path (tmux 3.5a, macOS; the measurement lives in
+`tests/tmux_control_tests.rs`, and `docs/planning/tmux-control-mode-input.md` has the full table).
+
+- **`PaneInput` is typed, not a formatted command**, because the broker must be able to tell literal
+  text from a key name: text goes out with `send-keys -l` (no key-name lookup), a key without it.
+  An unmodified character is therefore **`Text`**, where it used to be a key — a fix, not a
+  reclassification: `send-keys -t x ";"` never arrived at all, because a standalone semicolon is how
+  tmux separates commands.
+- **Batching never delays a key.** Enter, Escape, arrows, and anything Ctrl/Alt-modified flush the
+  buffer first and go immediately. A delayed Enter is a visibly broken editor.
+- **A target change flushes.** Queued characters belong to the pane they were typed into; the popup
+  close, popup open and fullscreen-toggle paths all flush so nothing can follow the target.
+- **The control connection is opt-in** (`tmux_control_mode`, or `AGTX_TMUX_CONTROL=1`/`=0` for one
+  run) and defaults **off**. The non-blocking broker is *not* conditional — the flag only chooses
+  what the broker thread writes through, so the subprocess path gets the same ordering and the same
+  responsive input thread.
+- **`tmux -C` is attached with `-f ignore-size,no-output`.** `ignore-size` keeps it out of tmux's
+  client-size calculation, so it cannot resize the pane the popup sized by hand; `no-output` stops
+  every byte an agent paints from being mirrored down our stdout, which the popup does not read
+  (it captures panes instead). The session is only an **attach point** — commands carry their own
+  target and are executed server-wide, so one client drives every window on the server, and a
+  project switch only re-points the *next* connect (`set_session`).
+- **`tmux_quote` is not `single_quote`.** Control mode parses tmux's syntax, not the shell's: inside
+  double quotes tmux replaces `$VAR`, `#{format}`, a leading `~`, and backslash escapes, so all of
+  `\ " $ # ~` are escaped, LF/CR/tab become `\n`/`\r`/`\t`, and the rest of C0 becomes `\ooo`. A
+  raw newline is the one thing that cannot be sent: commands are newline-terminated, so it splits
+  the command and the tail is parsed as a second one.
+- **A failed control write is not replayed.** A write error is ambiguous — part of it may have
+  reached tmux — and a duplicated Enter is worse than a dropped one. The request is dropped, the
+  connection is marked dead, and the *next* one goes to the subprocess backend. A backend found
+  *dead before writing* is different: nothing was sent, so that request moves to the fallback in
+  place, keeping its order.
+- **A full queue warns rather than reordering.** Sending synchronously would put that key ahead of
+  everything already queued, so agtx keeps the prefix and tells the user.
+- **A paste stays on `load-buffer`** (it needs a pipe, not a command argument) and is issued behind a
+  `ControlClient::barrier` — the two travel different sockets, and only the barrier keeps the paste
+  behind the text typed before it.
+- Logs carry lengths, targets, key categories and timings. **Pane input is never logged.**
+- The broker's ordering authority covers **popup input**. agtx's own writes to a pane — a dialog
+  answer from `dismiss_launch_dialog`, a phase advance from `send_skill_and_prompt` — still go
+  through `TmuxOperations` on their own threads, unordered with respect to it. That was equally true
+  when both were subprocesses, and they do not overlap in practice: a pane parked on a dialog is not
+  one the user is typing into.
 
 ### First-Launch Dialogs
 Agents gate a directory they have not seen behind an interactive dialog. `LAUNCH_DIALOGS`
@@ -485,6 +556,9 @@ fullscreen_on_enter = false  # When true, Enter opens the task's tmux pane fulls
 agent_hooks = true           # Write agent lifecycle-hook configs into worktrees (see Hook-Based Phase Status)
 auto_trust = false           # Answer agents' trust / bypass-permission prompts by reading the pane (see First-Launch Dialogs)
 update_check = true          # Daily GitHub release check + header notice (see Self-Update)
+tmux_control_mode = false    # Type into task panes over a persistent `tmux -C` connection
+                             # (see Typing into a Task Pane). `AGTX_TMUX_CONTROL=1`/`=0`
+                             # overrides it for one run
 
 [agents]                     # Per-phase agent overrides (PhaseAgentsConfig)
 research = "claude"
@@ -831,7 +905,15 @@ cargo test --features test-mocks
 # Per-agent smoke tests — real binaries, real auth, real tokens (opt-in, never CI)
 tests/smoke/agent_smoke.py                    # installed agents x the agtx plugin
 python3 tests/smoke/test_agent_smoke.py       # tests for the harness itself
+
+# Real-tmux pane input: ordering, escaping, pane sizing, reconnect, latency (opt-in)
+AGTX_TMUX_IT=1 cargo test --test tmux_control_tests -- --nocapture
 ```
+
+`tmux_control_tests.rs` starts throwaway tmux servers and asserts on the **bytes a program in the
+pane received**, not on rendered output — a redraw hides a reordering that a byte comparison
+catches. Skipped tests name their reason instead of passing quietly. Run it on Linux before
+`tmux_control_mode` can become the default.
 
 The smoke runner answers the one question the Rust suite cannot: **does a real agent binary actually
 receive its work?** Unit tests mock `TmuxOperations` and `agent_parity_tests.rs` pins the strings

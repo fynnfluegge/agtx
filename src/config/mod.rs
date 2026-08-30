@@ -54,6 +54,17 @@ pub struct GlobalConfig {
     /// per-invocation equivalent, for CI and containers.
     #[serde(default = "default_update_check")]
     pub update_check: bool,
+
+    /// Type into task panes over a persistent tmux **control-mode** connection
+    /// instead of one `tmux send-keys` process per key.
+    ///
+    /// Off while it earns its default: the subprocess path is what every agent
+    /// has been exercised against, and a keystroke lane that misbehaves is worse
+    /// than a slow one. `AGTX_TMUX_CONTROL=1` / `=0` overrides it for one run.
+    /// Either way the TUI thread no longer waits for tmux — that part is not
+    /// conditional; this only chooses what the broker thread writes through.
+    #[serde(default)]
+    pub tmux_control_mode: bool,
 }
 
 fn default_update_check() -> bool {
@@ -75,6 +86,7 @@ impl Default for GlobalConfig {
             agent_hooks: default_agent_hooks(),
             auto_trust: false,
             update_check: default_update_check(),
+            tmux_control_mode: false,
         }
     }
 }
@@ -423,6 +435,8 @@ pub struct MergedConfig {
     /// Global-only: a project does not get to decide whether the user is told
     /// about agtx releases.
     pub update_check: bool,
+    /// Global-only: which backend the pane-input broker writes through.
+    pub tmux_control_mode: bool,
 }
 
 impl MergedConfig {
@@ -461,6 +475,7 @@ impl MergedConfig {
             agent_hooks: global.agent_hooks,
             auto_trust: global.auto_trust,
             update_check: global.update_check,
+            tmux_control_mode: global.tmux_control_mode,
             branch_prefix: project
                 .branch_prefix
                 .clone()

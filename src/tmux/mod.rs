@@ -1,6 +1,15 @@
+pub mod control;
+pub mod input;
 mod operations;
 
+pub use control::{tmux_quote, ControlClient, Frame, FrameParser};
+pub use input::{
+    InputConfig, InputError, PaneInput, PaneInputSink, DEFAULT_BATCH_WINDOW, DEFAULT_QUEUE_CAPACITY,
+};
 pub use operations::*;
+
+#[cfg(any(test, feature = "test-mocks"))]
+pub use input::RecordingSink;
 
 #[cfg(feature = "test-mocks")]
 pub use operations::MockTmuxOperations;

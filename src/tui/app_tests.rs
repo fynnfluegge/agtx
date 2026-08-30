@@ -8,6 +8,7 @@ use crate::agent::MockAgentOperations;
 use crate::git::{MockGitOperations, MockGitProviderOperations};
 #[cfg(feature = "test-mocks")]
 use crate::tmux::MockTmuxOperations;
+use crossterm::event::KeyModifiers;
 
 #[test]
 fn visible_columns_use_all_columns_on_wide_terminals() {
@@ -782,219 +783,75 @@ fn test_fuzzy_score_consecutive_bonus() {
 }
 
 // =============================================================================
-// Tests for send_key_to_tmux
+// Tests for popup key translation
+//
+// These used to assert against a mock `TmuxOperations`, because a keystroke went
+// straight out as a `send-keys` subprocess. Translation is now a pure function
+// and delivery is `tmux::input`'s job, so the key names — the part agents
+// actually depend on — are pinned here without a mock in sight.
 // =============================================================================
 
-/// Test sending character key to tmux
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_char() {
-    let mut mock_tmux = MockTmuxOperations::new();
-
-    mock_tmux
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("test-window"),
-            mockall::predicate::eq("a"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "test-window",
-        crossterm::event::KeyEvent::new(KeyCode::Char('a'), crossterm::event::KeyModifiers::NONE),
-        &mock_tmux,
-    );
+#[cfg(test)]
+fn translated(code: KeyCode, modifiers: KeyModifiers) -> Option<PaneInput> {
+    popup_key_input("win", crossterm::event::KeyEvent::new(code, modifiers))
 }
 
-/// Test sending Enter key to tmux
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_enter() {
-    let mut mock_tmux = MockTmuxOperations::new();
-
-    mock_tmux
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("test-window"),
-            mockall::predicate::eq("Enter"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "test-window",
-        crossterm::event::KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
-        &mock_tmux,
-    );
+#[cfg(test)]
+fn translated_key(code: KeyCode, modifiers: KeyModifiers) -> String {
+    match translated(code, modifiers) {
+        Some(PaneInput::Key { key, .. }) => key,
+        other => panic!("expected a key name, got {other:?}"),
+    }
 }
 
-/// Test sending special keys to tmux
 #[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_special_keys() {
-    let mut mock_tmux = MockTmuxOperations::new();
-
-    // Test Escape
-    mock_tmux
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("win"),
-            mockall::predicate::eq("Escape"),
-        )
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::NONE),
-        &mock_tmux,
-    );
-
-    // Test Backspace
-    let mut mock_tmux2 = MockTmuxOperations::new();
-    mock_tmux2
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("win"),
-            mockall::predicate::eq("BSpace"),
-        )
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::NONE),
-        &mock_tmux2,
-    );
-}
-
-/// Test sending function key to tmux
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_function_key() {
-    let mut mock_tmux = MockTmuxOperations::new();
-
-    mock_tmux
-        .expect_send_key()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("F5"))
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::F(5), crossterm::event::KeyModifiers::NONE),
-        &mock_tmux,
-    );
-}
-
-/// Test Alt+Left and Alt+Right send M-Left / M-Right (word-boundary navigation)
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_alt_arrow_keys() {
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("win"),
-            mockall::predicate::eq("M-Left"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Left, crossterm::event::KeyModifiers::ALT),
-        &mock_tmux,
-    );
-
-    let mut mock_tmux2 = MockTmuxOperations::new();
-    mock_tmux2
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("win"),
-            mockall::predicate::eq("M-Right"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Right, crossterm::event::KeyModifiers::ALT),
-        &mock_tmux2,
-    );
-}
-
-/// Test Alt+b / Alt+f (macOS Option+Left/Right Emacs-style) send M-b / M-f
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_alt_b_f() {
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_send_key()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-b"))
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Char('b'), crossterm::event::KeyModifiers::ALT),
-        &mock_tmux,
-    );
-
-    let mut mock_tmux2 = MockTmuxOperations::new();
-    mock_tmux2
-        .expect_send_key()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-f"))
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Char('f'), crossterm::event::KeyModifiers::ALT),
-        &mock_tmux2,
-    );
-}
-
-/// Control modifiers must reach the pane so terminal programs can be
-/// interrupted, suspended, or otherwise controlled from the in-app popup.
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_control_char() {
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_send_key()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("C-c"))
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(
-            KeyCode::Char('c'),
-            crossterm::event::KeyModifiers::CONTROL,
-        ),
-        &mock_tmux,
+fn a_character_becomes_literal_text_for_the_right_target() {
+    assert_eq!(
+        translated(KeyCode::Char('a'), KeyModifiers::NONE),
+        Some(PaneInput::Text {
+            target: "win".to_string(),
+            text: "a".to_string(),
+        })
     );
 }
 
 #[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_control_alt_char() {
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("win"),
-            mockall::predicate::eq("C-M-x"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
+fn enter_and_escape_keep_their_tmux_names() {
+    assert_eq!(translated_key(KeyCode::Enter, KeyModifiers::NONE), "Enter");
+    assert_eq!(translated_key(KeyCode::Esc, KeyModifiers::NONE), "Escape");
+    assert_eq!(
+        translated_key(KeyCode::Backspace, KeyModifiers::NONE),
+        "BSpace"
+    );
+    assert_eq!(translated_key(KeyCode::Delete, KeyModifiers::NONE), "DC");
+    assert_eq!(translated_key(KeyCode::Insert, KeyModifiers::NONE), "IC");
+    assert_eq!(translated_key(KeyCode::F(5), KeyModifiers::NONE), "F5");
+}
 
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(
+#[test]
+fn alt_arrows_stay_word_boundary_navigation() {
+    // Option+Left/Right in a composer. Both spellings matter: macOS terminals
+    // send the arrow form, and Emacs-style bindings send M-b / M-f.
+    assert_eq!(translated_key(KeyCode::Left, KeyModifiers::ALT), "M-Left");
+    assert_eq!(translated_key(KeyCode::Right, KeyModifiers::ALT), "M-Right");
+    assert_eq!(translated_key(KeyCode::Char('b'), KeyModifiers::ALT), "M-b");
+    assert_eq!(translated_key(KeyCode::Char('f'), KeyModifiers::ALT), "M-f");
+}
+
+#[test]
+fn control_modifiers_reach_the_pane() {
+    // Interrupting or suspending a program from the in-app popup depends on
+    // these arriving as keys rather than as the letters they are typed with.
+    assert_eq!(
+        translated_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        "C-c"
+    );
+    assert_eq!(
+        translated_key(
             KeyCode::Char('x'),
-            crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT
         ),
-        &mock_tmux,
+        "C-M-x"
     );
 }
 
@@ -11303,33 +11160,12 @@ fn test_task_has_live_session_returns_false_on_tmux_error() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_handle_paste_into_shell_popup_calls_paste_text() {
-    // When shell popup is open, handle_paste must call paste_text exactly once
-    // with the full pasted string (not send_key character by character).
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_window_exists().returning(|_| Ok(false));
-    mock_tmux.expect_has_session().returning(|_| false);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
-
-    let received = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let received_c = received.clone();
-    mock_tmux
-        .expect_paste_text()
-        .times(1)
-        .returning(move |_, text| {
-            *received_c.lock().unwrap() = text.to_string();
-            Ok(())
-        });
-
-    let mut app = App::new_for_test(
-        Some(PathBuf::from("/tmp/test-project")),
-        Arc::new(mock_tmux),
-        Arc::new(MockGitOperations::new()),
-        Arc::new(MockGitProviderOperations::new()),
-        Arc::new(MockAgentRegistry::new()),
-    )
-    .unwrap();
-
+fn test_handle_paste_into_shell_popup_enqueues_one_atomic_paste() {
+    // A paste is one request with the whole string, never a character at a time.
+    // It goes to the broker rather than straight to tmux, so the assertion moved
+    // from `paste_text` to what the UI enqueued — the delivery itself is
+    // `tmux::input`'s contract, tested there.
+    let (mut app, sink) = app_with_recording_sink();
     app.state.shell_popup = Some(ShellPopup::new(
         "my task".to_string(),
         "proj:my-task".to_string(),
@@ -11337,23 +11173,28 @@ fn test_handle_paste_into_shell_popup_calls_paste_text() {
 
     app.handle_paste("hello world".to_string()).unwrap();
 
-    assert_eq!(*received.lock().unwrap(), "hello world");
+    assert_eq!(
+        sink.taken(),
+        vec![PaneInput::Paste {
+            target: "proj:my-task".to_string(),
+            text: "hello world".to_string(),
+        }]
+    );
 }
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_handle_paste_into_shell_popup_does_not_call_send_key() {
-    // Verify the old per-character path is not taken for paste events.
+fn test_handle_paste_into_shell_popup_never_touches_tmux_on_the_input_thread() {
+    // The whole point of the broker: nothing on the key path may start or wait
+    // for a tmux process. mockall panics on any unexpected call, so an
+    // expectation of `times(0)` on all three send primitives is the assertion.
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
     mock_tmux.expect_get_cursor_info().returning(|_| None);
-    mock_tmux
-        .expect_paste_text()
-        .times(1)
-        .returning(|_, _| Ok(()));
-    // send_key must NOT be called — mockall panics if an unexpected call occurs
     mock_tmux.expect_send_key().times(0);
+    mock_tmux.expect_send_text().times(0);
+    mock_tmux.expect_paste_text().times(0);
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -11363,6 +11204,7 @@ fn test_handle_paste_into_shell_popup_does_not_call_send_key() {
         Arc::new(MockAgentRegistry::new()),
     )
     .unwrap();
+    app.set_input_sink(Arc::new(crate::tmux::RecordingSink::new()));
 
     app.state.shell_popup = Some(ShellPopup::new(
         "my task".to_string(),
@@ -11370,6 +11212,10 @@ fn test_handle_paste_into_shell_popup_does_not_call_send_key() {
     ));
 
     app.handle_paste("some pasted text".to_string()).unwrap();
+    app.handle_key(key_event(KeyCode::Char('a'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
 }
 
 #[test]
@@ -13361,4 +13207,290 @@ fn test_no_release_check_runs_in_tests() {
     // a live dependency on GitHub.
     let app = make_test_app();
     assert!(app.state.update_rx.is_none());
+}
+
+// =============================================================================
+// Popup input: what a keystroke becomes, and where it goes
+// =============================================================================
+
+/// Helper: an App whose pane input is recorded instead of sent.
+#[cfg(feature = "test-mocks")]
+fn app_with_recording_sink() -> (App, Arc<crate::tmux::RecordingSink>) {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
+    // Nothing on the key path may reach tmux directly any more.
+    mock_tmux.expect_send_key().times(0);
+    mock_tmux.expect_send_text().times(0);
+    mock_tmux.expect_paste_text().times(0);
+
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+    let sink = Arc::new(crate::tmux::RecordingSink::new());
+    app.set_input_sink(Arc::clone(&sink) as Arc<dyn crate::tmux::PaneInputSink>);
+    (app, sink)
+}
+
+#[cfg(feature = "test-mocks")]
+fn key_event(code: KeyCode, modifiers: KeyModifiers) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(code, modifiers)
+}
+
+/// Helper: an App with a popup open on `proj:task`, plus its recording sink.
+#[cfg(feature = "test-mocks")]
+fn app_with_open_popup() -> (App, Arc<crate::tmux::RecordingSink>) {
+    let (mut app, sink) = app_with_recording_sink();
+    app.state.shell_popup = Some(ShellPopup::new(
+        "my task".to_string(),
+        "proj:task".to_string(),
+    ));
+    (app, sink)
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_printable_key_is_enqueued_as_literal_text() {
+    let (mut app, sink) = app_with_open_popup();
+    for c in "aZ 9".chars() {
+        app.handle_key(key_event(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(
+        sink.taken(),
+        "aZ 9"
+            .chars()
+            .map(|c| PaneInput::Text {
+                target: "proj:task".to_string(),
+                text: c.to_string(),
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_character_that_tmux_would_read_as_syntax_is_still_text() {
+    // `;` used to be sent through tmux's key-name lookup, where a standalone
+    // semicolon is a command separator — the keystroke never reached the pane.
+    // As text it is just a semicolon.
+    let (mut app, sink) = app_with_open_popup();
+    for c in [';', '$', '#', '"', '\\'] {
+        app.handle_key(key_event(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert!(
+        sink.taken()
+            .iter()
+            .all(|input| matches!(input, PaneInput::Text { .. })),
+        "punctuation must never go through key-name lookup"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn shifted_characters_carry_no_modifier_prefix() {
+    // crossterm reports the shifted character itself, so `M-A`/`S-a` would both
+    // be wrong: the character is the whole story.
+    let (mut app, sink) = app_with_open_popup();
+    app.handle_key(key_event(KeyCode::Char('A'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(
+        sink.taken(),
+        vec![PaneInput::Text {
+            target: "proj:task".to_string(),
+            text: "A".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn named_keys_are_enqueued_as_key_names() {
+    let (mut app, sink) = app_with_open_popup();
+    for code in [
+        KeyCode::Enter,
+        KeyCode::Esc,
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Backspace,
+        KeyCode::Tab,
+        KeyCode::Delete,
+        KeyCode::F(5),
+    ] {
+        app.handle_key(key_event(code, KeyModifiers::NONE)).unwrap();
+    }
+    let keys: Vec<String> = sink
+        .taken()
+        .into_iter()
+        .map(|input| match input {
+            PaneInput::Key { key, .. } => key,
+            other => panic!("expected a key, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["Enter", "Escape", "Up", "Down", "Left", "Right", "BSpace", "Tab", "DC", "F5"]
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn modified_characters_are_key_names_not_text() {
+    // Ctrl+a is a key; sending it as literal text would type an "a".
+    let (mut app, sink) = app_with_open_popup();
+    app.handle_key(key_event(KeyCode::Char(' '), KeyModifiers::CONTROL))
+        .unwrap(); // Ctrl+Space: the pass-through prefix, consumed by agtx
+    app.handle_key(key_event(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Char('b'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(
+        sink.taken(),
+        vec![
+            PaneInput::Key {
+                target: "proj:task".to_string(),
+                key: "C-a".to_string(),
+            },
+            PaneInput::Key {
+                target: "proj:task".to_string(),
+                key: "M-b".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_popups_own_shortcuts_are_never_forwarded() {
+    // Ctrl+q closes, Ctrl+f toggles fullscreen, Ctrl+j/k/u/d/g scroll. None of
+    // them belong to the agent, and forwarding one would be invisible damage.
+    let (mut app, sink) = app_with_open_popup();
+    for code in ['k', 'j', 'u', 'd', 'g', 'f'] {
+        app.handle_key(key_event(KeyCode::Char(code), KeyModifiers::CONTROL))
+            .unwrap();
+    }
+    assert!(
+        sink.taken()
+            .iter()
+            .all(|input| matches!(input, PaneInput::Flush)),
+        "popup-local shortcuts must enqueue nothing but the fullscreen flush"
+    );
+    assert!(app.state.shell_popup.is_some());
+
+    app.handle_key(key_event(KeyCode::Char('q'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.state.shell_popup.is_none(), "Ctrl+q closes the popup");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn closing_the_popup_flushes_the_target_it_was_typed_into() {
+    // Batched characters belong to the pane they were typed into. Without this
+    // flush they would still be buffered when the next popup changes the target.
+    let (mut app, sink) = app_with_open_popup();
+    app.handle_key(key_event(KeyCode::Char('h'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Char('q'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(
+        sink.taken().last(),
+        Some(&PaneInput::Flush),
+        "the last thing a closing popup does is flush"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_ctrl_space_prefix_forwards_the_next_key_verbatim() {
+    // Ctrl+Space is how a user reaches keys agtx reserves — Ctrl+q to the agent,
+    // not to the popup.
+    let (mut app, sink) = app_with_open_popup();
+    app.handle_key(key_event(KeyCode::Char(' '), KeyModifiers::CONTROL))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Char('q'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(
+        sink.taken(),
+        vec![PaneInput::Key {
+            target: "proj:task".to_string(),
+            key: "C-q".to_string(),
+        }]
+    );
+    assert!(
+        app.state.shell_popup.is_some(),
+        "the prefixed Ctrl+q went to the agent, not to the popup"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_full_queue_warns_instead_of_sending_out_of_order() {
+    // Sending this key synchronously would put it ahead of everything already
+    // queued. A dropped key the user is told about beats a reordered one.
+    let (mut app, sink) = app_with_open_popup();
+    sink.fail_with(crate::tmux::InputError::QueueFull);
+    app.handle_key(key_event(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    let warning = app
+        .state
+        .warning_message
+        .as_ref()
+        .map(|(text, _)| text.clone())
+        .unwrap_or_default();
+    assert!(
+        warning.contains("dropped"),
+        "the user must be told a keystroke was dropped, got {warning:?}"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn an_escalation_banner_swallows_only_the_first_key() {
+    let (mut app, sink) = app_with_open_popup();
+    if let Some(popup) = app.state.shell_popup.as_mut() {
+        popup.escalation_note = Some("needs a human".to_string());
+    }
+    app.handle_key(key_event(KeyCode::Char('a'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(sink.taken().is_empty(), "the banner ate the keystroke");
+    app.handle_key(key_event(KeyCode::Char('b'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        sink.taken(),
+        vec![PaneInput::Text {
+            target: "proj:task".to_string(),
+            text: "b".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn control_mode_is_off_unless_asked_for() {
+    // The environment override exists so a user who hits trouble can turn the
+    // new backend off for one launch without editing a config file.
+    assert!(!control_mode_enabled(false));
+    assert!(control_mode_enabled(true));
+}
+
+#[test]
+fn an_unmapped_key_is_dropped_rather_than_guessed() {
+    // A key with no tmux name has no correct encoding; inventing one would type
+    // something the user did not press.
+    assert_eq!(
+        popup_key_input(
+            "t",
+            crossterm::event::KeyEvent::new(KeyCode::CapsLock, KeyModifiers::NONE)
+        ),
+        None
+    );
 }
