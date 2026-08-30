@@ -65,8 +65,12 @@ pub trait TmuxOperations: Send + Sync {
     /// Capture pane content with history (returns raw bytes for ANSI parsing)
     fn capture_pane_with_history(&self, target: &str, history_lines: i32) -> Vec<u8>;
 
-    /// Get cursor position and pane height: (cursor_x, cursor_y, pane_height)
-    fn get_cursor_info(&self, target: &str) -> Option<(usize, usize, usize)>;
+    /// Cursor position, pane height, and how much scrollback tmux is holding.
+    ///
+    /// One `display -p` for all four: the popup refresh runs this every 50 ms,
+    /// so a second process to ask about scrollback would cost more than the
+    /// answer is worth.
+    fn pane_metrics(&self, target: &str) -> Option<PaneMetrics>;
 
     /// Resize a tmux window
     fn resize_window(&self, target: &str, width: u16, height: u16) -> Result<()>;
@@ -79,6 +83,36 @@ pub trait TmuxOperations: Send + Sync {
 
     /// Create a new detached session
     fn create_session(&self, session: &str, working_dir: &str) -> Result<()>;
+}
+
+/// What tmux reports about a pane, in one query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneMetrics {
+    pub cursor_x: usize,
+    pub cursor_y: usize,
+    pub pane_height: usize,
+    /// Lines tmux is holding *above* the visible screen.
+    ///
+    /// Zero for a pane in the **alternate screen**, which is where full-screen
+    /// agent UIs live: the alternate screen accumulates no scrollback, so the
+    /// session's history belongs to the agent and tmux cannot see any of it.
+    /// Measured on Claude Code 2.1.251, which takes the alternate screen shortly
+    /// after startup and never gives it back — `capture-pane -S -500` then
+    /// returns exactly the visible rows, and there is nothing for agtx to
+    /// scroll through.
+    pub history_size: usize,
+}
+
+impl PaneMetrics {
+    /// Where the cursor is, for rendering it in the popup.
+    pub fn cursor(&self) -> (usize, usize, usize) {
+        (self.cursor_x, self.cursor_y, self.pane_height)
+    }
+
+    /// What [`trim_content_to_cursor`](crate::tui::shell_popup::trim_content_to_cursor) needs.
+    pub fn trim_bounds(&self) -> (usize, usize) {
+        (self.cursor_y, self.pane_height)
+    }
 }
 
 /// Wrap `text` as one POSIX single-quoted shell word.
@@ -254,7 +288,7 @@ impl TmuxOperations for RealTmuxOps {
             .unwrap_or_default()
     }
 
-    fn get_cursor_info(&self, target: &str) -> Option<(usize, usize, usize)> {
+    fn pane_metrics(&self, target: &str) -> Option<PaneMetrics> {
         let output = std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
             .args([
@@ -262,19 +296,21 @@ impl TmuxOperations for RealTmuxOps {
                 "-p",
                 "-t",
                 target,
-                "#{cursor_x} #{cursor_y} #{pane_height}",
+                "#{cursor_x} #{cursor_y} #{pane_height} #{history_size}",
             ])
             .output()
             .ok()?;
 
         if output.status.success() {
             let output_str = String::from_utf8_lossy(&output.stdout);
-            let parts: Vec<&str> = output_str.trim().split_whitespace().collect();
-            if parts.len() == 3 {
-                let cursor_x: usize = parts[0].parse().ok()?;
-                let cursor_y: usize = parts[1].parse().ok()?;
-                let pane_height: usize = parts[2].parse().ok()?;
-                return Some((cursor_x, cursor_y, pane_height));
+            let parts: Vec<&str> = output_str.split_whitespace().collect();
+            if parts.len() == 4 {
+                return Some(PaneMetrics {
+                    cursor_x: parts[0].parse().ok()?,
+                    cursor_y: parts[1].parse().ok()?,
+                    pane_height: parts[2].parse().ok()?,
+                    history_size: parts[3].parse().ok()?,
+                });
             }
         }
         None

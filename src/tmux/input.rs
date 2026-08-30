@@ -40,7 +40,7 @@ use super::TmuxOperations;
 /// Typed rather than preformatted tmux commands: the broker has to be able to
 /// tell literal text from a key name to decide what may be batched, and a
 /// formatted `send-keys` string has already thrown that distinction away.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum PaneInput {
     /// Literal text (`send-keys -l`). Never goes through tmux's key-name lookup,
     /// so text that spells `Space` or `Up` stays text.
@@ -52,6 +52,10 @@ pub enum PaneInput {
     /// Deliver everything buffered now. Sent when a popup closes or changes
     /// target, so queued text can never land in a different task's pane.
     Flush,
+    /// Flush and acknowledge only after the active backend has executed every
+    /// preceding command. This is the ownership boundary used before the TUI
+    /// performs a synchronous tmux operation outside the broker.
+    Barrier { ack: std::sync::mpsc::Sender<bool> },
     /// Flush, then stop the broker.
     Shutdown,
 }
@@ -63,10 +67,30 @@ impl PaneInput {
             PaneInput::Text { target, .. }
             | PaneInput::Key { target, .. }
             | PaneInput::Paste { target, .. } => Some(target),
-            PaneInput::Flush | PaneInput::Shutdown => None,
+            PaneInput::Flush | PaneInput::Barrier { .. } | PaneInput::Shutdown => None,
         }
     }
 }
+
+impl PartialEq for PaneInput {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Text { target: a, text: b }, Self::Text { target: c, text: d }) => {
+                a == c && b == d
+            }
+            (Self::Key { target: a, key: b }, Self::Key { target: c, key: d }) => a == c && b == d,
+            (Self::Paste { target: a, text: b }, Self::Paste { target: c, text: d }) => {
+                a == c && b == d
+            }
+            (Self::Flush, Self::Flush)
+            | (Self::Barrier { .. }, Self::Barrier { .. })
+            | (Self::Shutdown, Self::Shutdown) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PaneInput {}
 
 /// Why an enqueue failed. Named, because the caller's recovery differs per case
 /// and "the input was dropped" must never be silent.
@@ -78,6 +102,12 @@ pub enum InputError {
     /// The broker thread is gone.
     #[error("pane input broker is not running")]
     Disconnected,
+    /// An acknowledged flush was not answered in time. The queued prefix is
+    /// still being delivered — it is *late*, not lost, which is why this is not
+    /// `Disconnected`: that variant tells the user to restart agtx, and here
+    /// there is nothing wrong to restart.
+    #[error("pane input did not drain in time")]
+    Timeout,
 }
 
 /// Where popup input is handed off. Implementations must not block the caller.
@@ -109,6 +139,14 @@ pub trait PaneInputSink: Send + Sync {
         self.send(PaneInput::Flush)
     }
 
+    /// Flush and wait until tmux has executed the queued prefix.
+    ///
+    /// The default keeps test/embedding sinks simple. The production broker
+    /// overrides this with an acknowledged barrier.
+    fn flush_sync(&self) -> std::result::Result<(), InputError> {
+        self.flush()
+    }
+
     /// Deliver what is queued and stop. Called when agtx exits, so the last
     /// characters typed into a pane are not lost with the process.
     fn shutdown(&self) {
@@ -133,7 +171,9 @@ pub(crate) trait PaneBackend: Send {
     fn paste(&mut self, target: &str, text: &str) -> Result<()>;
     /// Block until everything written so far has actually been executed.
     /// A no-op for a backend that is synchronous anyway.
-    fn barrier(&mut self) {}
+    fn barrier(&mut self) -> bool {
+        true
+    }
     fn healthy(&self) -> bool {
         true
     }
@@ -226,14 +266,18 @@ impl PaneBackend for ControlBackend {
         // `load-buffer` needs a pipe, not a command argument, so a paste stays on
         // the subprocess path. It travels a *different* socket, so without the
         // barrier it could overtake text still queued on this connection.
-        self.barrier();
+        let _ = self.barrier();
         self.paste_via.paste(target, text)
     }
-    fn barrier(&mut self) {
+    fn barrier(&mut self) -> bool {
         if let Some(client) = self.client.as_mut() {
-            if !client.barrier(BARRIER_TIMEOUT) {
+            let completed = client.barrier(BARRIER_TIMEOUT);
+            if !completed {
                 tracing::debug!("tmux control barrier timed out");
             }
+            completed
+        } else {
+            false
         }
     }
     fn healthy(&self) -> bool {
@@ -282,6 +326,20 @@ pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
 /// Reconnect backoff bounds for the control client.
 const RECONNECT_MIN: Duration = Duration::from_millis(250);
 const RECONNECT_MAX: Duration = Duration::from_secs(5);
+
+/// How long an acknowledged flush waits for the broker to answer.
+///
+/// **Not** a second copy of [`BARRIER_TIMEOUT`]. The barrier sits *behind the
+/// queue*, so this wait is dominated by draining whatever is already in it — and
+/// on the subprocess backend every queued command is a ~25 ms process, so a
+/// barrier-sized budget expires mid-drain and hands back a guarantee that was
+/// not kept. Measured: 20 queued keys at 25 ms each returned an error after
+/// 300 ms with half of them still in flight.
+///
+/// So this is the "the broker is wedged" guard instead. The work it waits on is
+/// the user's own keystrokes, so in practice it returns in microseconds; the cap
+/// only exists so a hung tmux cannot freeze the TUI thread forever.
+const FLUSH_SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Bounds on quitting: how long to keep trying to enqueue the stop request, and
 /// how long to wait for the broker's final flush afterwards.
@@ -395,6 +453,18 @@ impl PaneInputSink for BrokerSink {
             if let Some(handle) = join.take() {
                 let _ = handle.join();
             }
+        }
+    }
+
+    fn flush_sync(&self) -> std::result::Result<(), InputError> {
+        let (ack, done) = std::sync::mpsc::channel();
+        self.send(PaneInput::Barrier { ack })?;
+        match done.recv_timeout(FLUSH_SYNC_TIMEOUT) {
+            Ok(true) => Ok(()),
+            // The control barrier gave up; the broker is alive and answered.
+            Ok(false) => Err(InputError::Timeout),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(InputError::Timeout),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(InputError::Disconnected),
         }
     }
 
@@ -532,6 +602,11 @@ impl Broker {
                     tracing::debug!(bytes = len, "pane paste delivered");
                 }
                 PaneInput::Flush => self.flush(FlushReason::Explicit),
+                PaneInput::Barrier { ack } => {
+                    self.flush(FlushReason::Explicit);
+                    let completed = self.barrier();
+                    let _ = ack.send(completed);
+                }
                 PaneInput::Shutdown => {
                     self.flush(FlushReason::Shutdown);
                     break;
@@ -575,6 +650,16 @@ impl Broker {
         self.dispatch(|b| b.text(&target, &text), "text");
         // Lengths and reasons only: pane input is never logged.
         tracing::trace!(?reason, chars, "pane text flushed");
+    }
+
+    fn barrier(&mut self) -> bool {
+        match self.control.as_mut() {
+            Some(control) if control.healthy() => control.barrier(),
+            // The subprocess backend is synchronous. If control died after the
+            // preceding dispatch, that dispatch was deliberately treated as
+            // ambiguous and cannot be made safer by waiting here.
+            _ => true,
+        }
     }
 
     /// Run one operation on the best available backend.
@@ -694,6 +779,14 @@ impl RecordingSink {
 
 #[cfg(any(test, feature = "test-mocks"))]
 impl PaneInputSink for RecordingSink {
+    /// Records the barrier rather than degrading to a plain `Flush`, so a test
+    /// can tell the two apart. Without this the default turns `flush_sync` into
+    /// `flush` and nothing pins which one a call site asked for.
+    fn flush_sync(&self) -> std::result::Result<(), InputError> {
+        let (ack, _done) = std::sync::mpsc::channel();
+        self.send(PaneInput::Barrier { ack })
+    }
+
     fn send(&self, input: PaneInput) -> std::result::Result<(), InputError> {
         if let Ok(slot) = self.fail_with.lock() {
             if let Some(err) = slot.as_ref() {

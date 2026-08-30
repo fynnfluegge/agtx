@@ -212,7 +212,7 @@ impl TmuxOperations for TestTmuxOps {
     fn capture_pane_with_history(&self, _target: &str, _history_lines: i32) -> Vec<u8> {
         unimplemented!("not used by the input broker")
     }
-    fn get_cursor_info(&self, _target: &str) -> Option<(usize, usize, usize)> {
+    fn pane_metrics(&self, _target: &str) -> Option<agtx::tmux::PaneMetrics> {
         None
     }
     fn resize_window(&self, _target: &str, _width: u16, _height: u16) -> Result<()> {

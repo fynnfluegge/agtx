@@ -470,7 +470,7 @@ fn test_trim_trailing_empty_lines_whitespace_only() {
 }
 
 #[test]
-fn test_trim_content_to_cursor_no_cursor_info() {
+fn test_trim_content_to_cursor_no_metrics() {
     let content = b"line 1\nline 2\n\n\n\n\n\n\n\n\n".to_vec();
     let result = trim_content_to_cursor(content, None);
     let result_str = String::from_utf8_lossy(&result);
@@ -482,14 +482,14 @@ fn test_trim_content_to_cursor_no_cursor_info() {
 }
 
 #[test]
-fn test_trim_content_to_cursor_with_cursor_info() {
+fn test_trim_content_to_cursor_with_metrics() {
     // Simulate: 10 lines captured, pane_height=5, cursor at line 2 of visible area
     // visible_pane_start = 10 - 5 = 5
     // cursor_in_capture = 5 + 2 = 7
     // Lines below cursor are empty (unused pane buffer) → trimmed at cursor
     let content = b"line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n\n".to_vec();
-    let cursor_info = Some((2, 5)); // cursor_y=2, pane_height=5
-    let result = trim_content_to_cursor(content, cursor_info);
+    let metrics = Some((2, 5)); // cursor_y=2, pane_height=5
+    let result = trim_content_to_cursor(content, metrics);
     let result_str = String::from_utf8_lossy(&result);
     let lines: Vec<&str> = result_str.lines().collect();
 
@@ -504,8 +504,8 @@ fn test_trim_content_to_cursor_tui_cursor_mid_screen() {
     // Should keep all content, not trim at cursor
     let content =
         b"header\nstatus bar\n\ninput field\n\noutput area\nmore output\nbottom bar".to_vec();
-    let cursor_info = Some((3, 8)); // cursor_y=3 (mid-screen), pane_height=8
-    let result = trim_content_to_cursor(content, cursor_info);
+    let metrics = Some((3, 8)); // cursor_y=3 (mid-screen), pane_height=8
+    let result = trim_content_to_cursor(content, metrics);
     let result_str = String::from_utf8_lossy(&result);
     let lines: Vec<&str> = result_str.lines().collect();
 
@@ -519,8 +519,8 @@ fn test_trim_content_to_cursor_cursor_at_bottom_with_empty() {
     // Cursor at bottom of pane, but those lines are empty
     // Should trim the empty lines via second pass
     let content = b"line 0\nline 1\nline 2\n\n\n\n\n".to_vec();
-    let cursor_info = Some((6, 7)); // cursor at line 6 of 7-line pane (bottom)
-    let result = trim_content_to_cursor(content, cursor_info);
+    let metrics = Some((6, 7)); // cursor at line 6 of 7-line pane (bottom)
+    let result = trim_content_to_cursor(content, metrics);
     let result_str = String::from_utf8_lossy(&result);
     // Count newlines + 1 to avoid lines() quirk with trailing newlines
     let line_count = result_str.matches('\n').count() + 1;

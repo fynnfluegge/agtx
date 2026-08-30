@@ -329,6 +329,33 @@ p95** against 38 ms for the subprocess path (tmux 3.5a, macOS; the measurement l
 - **A paste stays on `load-buffer`** (it needs a pipe, not a command argument) and is issued behind a
   `ControlClient::barrier` — the two travel different sockets, and only the barrier keeps the paste
   behind the text typed before it.
+- **A pane with no tmux scrollback delegates its scroll keys to the agent.** A
+  full-screen agent UI lives in the terminal's *alternate screen*, which
+  accumulates no scrollback: `history_size` is 0, `capture-pane -S -500` returns
+  exactly the visible rows, and the session's history belongs to the agent.
+  Scrolling agtx's one-screen buffer would move nothing while the footer printed
+  a line number to match — which is what made an empty buffer look like a broken
+  scrollbar. So `ShellPopup::has_scrollback()` (from `PaneMetrics::history_size`,
+  free in the `display -p` the refresh already runs) switches those keys over to
+  `delegate_scroll`, and the footer says the agent owns the scrollback. Unknown
+  metrics count as *has* scrollback, so a failed query changes nothing.
+  **Only `PageUp`, `PageDown` and `End` are ever sent**, and the chord is
+  translated rather than passed through. Measured against Claude Code 2.1.251: in its `ctrl+o`
+  transcript view all four of `Up`/`Down`/`PageUp`/`PageDown` scroll, but in the
+  main view `Up` recalls a previous prompt **into the composer** — overwriting
+  what the user was typing — while `PageUp` is inert. A raw `C-d` would be an
+  EOF that ends the session and `C-u` would kill the composer line, which is why
+  nothing is forwarded verbatim; `C-Space` is still there to send them on
+  purpose. Claude takes the alternate screen shortly after startup and never
+  gives it back, so this is the normal case for a task pane, not an edge one.
+  `C-g` maps to `End`, measured the same way: it returns the transcript view to
+  the bottom, and in the main view it only moves the composer cursor to the end
+  of the line without altering the text. One consequence of paging being the only
+  safe pair: `C-j/k` and `C-n/p` page rather than moving five lines when the
+  agent owns the scrollback, so they do the same thing as `C-d/u` there.
+  Unrelated but worth knowing when a key "does nothing": a user's **own** tmux
+  can eat it before agtx sees it — `vim-tmux-navigator` binds `C-h/C-j/C-k/C-l`
+  in the root table and only forwards them to vim-like panes.
 - Logs carry lengths, targets, key categories and timings. **Pane input is never logged.**
 - The broker's ordering authority covers **popup input**. agtx's own writes to a pane — a dialog
   answer from `dismiss_launch_dialog`, a phase advance from `send_skill_and_prompt` — still go
@@ -662,7 +689,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 ### Task Popup (tmux view)
 | Key | Action |
 |-----|--------|
-| `Ctrl+j/k` or `Ctrl+n/p` | Scroll up/down |
+| `Ctrl+j/k` or `Ctrl+n/p` | Scroll up/down (delegated to the agent when the pane has no tmux scrollback) |
 | `Ctrl+d/u` or `PageDown/PageUp` | Page down/up |
 | `Ctrl+g` | Jump to bottom |
 | `Ctrl+f` | Toggle the task popup between windowed and fullscreen modes |

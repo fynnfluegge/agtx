@@ -320,7 +320,7 @@ struct AppState {
     shell_popup: Option<ShellPopup>,
     // At most one pane-history capture runs off the input thread at a time.
     shell_refresh_rx:
-        Option<mpsc::Receiver<(String, Vec<u8>, Option<(usize, usize, usize)>)>>,
+        Option<mpsc::Receiver<(String, Vec<u8>, Option<crate::tmux::PaneMetrics>)>>,
     // File search dropdown
     file_search: Option<FileSearchState>,
     // Skill search dropdown
@@ -1164,12 +1164,12 @@ impl App {
             // the input thread.
             if let Some(ref rx) = self.state.shell_refresh_rx {
                 match rx.try_recv() {
-                    Ok((window_name, content, cursor_info)) => {
+                    Ok((window_name, content, metrics)) => {
                         self.state.shell_refresh_rx = None;
                         if let Some(popup) = self.state.shell_popup.as_mut() {
                             if popup.window_name == window_name {
                                 popup.cached_content = content;
-                                popup.cursor_info = cursor_info;
+                                popup.metrics = metrics;
                             }
                         }
                     }
@@ -1191,12 +1191,12 @@ impl App {
                         popup.mark_content_refreshed();
                         self.state.shell_refresh_rx = Some(rx);
                         std::thread::spawn(move || {
-                            let (content, cursor_info) = capture_tmux_pane_snapshot(
+                            let (content, metrics) = capture_tmux_pane_snapshot(
                                 &window_name,
                                 500,
                                 tmux_ops.as_ref(),
                             );
-                            let _ = tx.send((window_name, content, cursor_info));
+                            let _ = tx.send((window_name, content, metrics));
                         });
                     }
                 }
@@ -4029,41 +4029,82 @@ impl App {
                 // Ctrl+q = close popup
                 KeyCode::Char('q') if has_ctrl => {
                     // Anything still batched belongs to *this* pane. Deliver it
-                    // before the popup — and with it the target — can change.
-                    let _ = self.state.input_sink.flush();
+                    // before the popup — and with it the target — can change,
+                    // and before agtx's own next write to this pane (a phase
+                    // advance is one keystroke away on the board).
+                    flush_pane_input_sync(
+                        self.state.input_sink.as_ref(),
+                        &mut self.state.warning_message,
+                    );
                     self.state.shell_popup = None;
                 }
                 // Scroll up with Ctrl+k or Ctrl+p or Ctrl+Up
                 KeyCode::Char('k') | KeyCode::Char('p') | KeyCode::Up if has_ctrl => {
-                    popup.scroll_up(5);
+                    if popup.has_scrollback() {
+                        popup.scroll_up(5);
+                    } else {
+                        delegate_scroll(&mut self.state, &window_name, "PageUp");
+                    }
                 }
                 // Scroll down with Ctrl+j or Ctrl+n or Ctrl+Down
                 KeyCode::Char('j') | KeyCode::Char('n') | KeyCode::Down if has_ctrl => {
-                    popup.scroll_down(5);
+                    if popup.has_scrollback() {
+                        popup.scroll_down(5);
+                    } else {
+                        delegate_scroll(&mut self.state, &window_name, "PageDown");
+                    }
                 }
                 // Page up with Ctrl+u or PageUp
                 KeyCode::Char('u') if has_ctrl => {
-                    popup.scroll_up(20);
+                    if popup.has_scrollback() {
+                        popup.scroll_up(20);
+                    } else {
+                        delegate_scroll(&mut self.state, &window_name, "PageUp");
+                    }
                 }
                 KeyCode::PageUp => {
-                    popup.scroll_up(20);
+                    if popup.has_scrollback() {
+                        popup.scroll_up(20);
+                    } else {
+                        delegate_scroll(&mut self.state, &window_name, "PageUp");
+                    }
                 }
                 // Page down with Ctrl+d or PageDown
                 KeyCode::Char('d') if has_ctrl => {
-                    popup.scroll_down(20);
+                    if popup.has_scrollback() {
+                        popup.scroll_down(20);
+                    } else {
+                        delegate_scroll(&mut self.state, &window_name, "PageDown");
+                    }
                 }
                 KeyCode::PageDown => {
-                    popup.scroll_down(20);
+                    if popup.has_scrollback() {
+                        popup.scroll_down(20);
+                    } else {
+                        delegate_scroll(&mut self.state, &window_name, "PageDown");
+                    }
                 }
                 // Ctrl+g = go to bottom (current)
                 KeyCode::Char('g') if has_ctrl => {
-                    popup.scroll_to_bottom();
+                    if popup.has_scrollback() {
+                        popup.scroll_to_bottom();
+                    } else {
+                        // `End`, measured the same way as the paging keys: it
+                        // returns Claude's transcript view to the bottom, and in
+                        // its main view it only moves the composer cursor to the
+                        // end of the line — it does not alter the text there.
+                        delegate_scroll(&mut self.state, &window_name, "End");
+                    }
                 }
                 // Ctrl+f toggles between centered and fullscreen in-app views.
                 KeyCode::Char('f') if has_ctrl => {
-                    // The resize is a plain tmux subprocess; queued text must
-                    // reach the pane at the size it was typed at.
-                    let _ = self.state.input_sink.flush();
+                    // The resize is a plain tmux subprocess on a different
+                    // socket; queued text must reach the pane at the size it was
+                    // typed at, so this waits rather than just enqueueing.
+                    flush_pane_input_sync(
+                        self.state.input_sink.as_ref(),
+                        &mut self.state.warning_message,
+                    );
                     popup.fullscreen = !popup.fullscreen;
                     let (pane_width, pane_height) = if popup.fullscreen {
                         crossterm::terminal::size()
@@ -8703,18 +8744,18 @@ fn capture_tmux_pane_snapshot(
     window_name: &str,
     history_lines: i32,
     tmux_ops: &dyn TmuxOperations,
-) -> (Vec<u8>, Option<(usize, usize, usize)>) {
+) -> (Vec<u8>, Option<crate::tmux::PaneMetrics>) {
     let content = tmux_ops.capture_pane_with_history(window_name, history_lines);
 
     // Get the cursor position and pane height to know where the "real" content ends
     // Lines below the cursor are unused pane buffer space
-    let cursor_info = tmux_ops.get_cursor_info(window_name);
+    let metrics = tmux_ops.pane_metrics(window_name);
 
     // Trim content to only include lines up to cursor position
-    let trim_info = cursor_info.map(|(_, y, height)| (y, height));
+    let trim_info = metrics.map(|m| m.trim_bounds());
     (
         shell_popup::trim_content_to_cursor(content, trim_info),
-        cursor_info,
+        metrics,
     )
 }
 
@@ -8931,7 +8972,63 @@ fn forward_pane_input(
                 Instant::now(),
             ));
         }
+        // `send` is an enqueue and cannot time out. The arm exists because the
+        // variant shares an error type with `flush_sync`, which can.
+        Err(InputError::Timeout) => {
+            tracing::debug!("pane input enqueue reported a timeout");
+        }
     }
+}
+
+/// Deliver everything queued and wait for tmux to have executed it.
+///
+/// Used before agtx does a synchronous tmux operation of its own on this thread:
+/// that travels a different socket, so without the wait it can overtake keys the
+/// user typed a moment earlier. The wait is bounded — see `FLUSH_SYNC_TIMEOUT` —
+/// and reaching the bound means the ordering was not achieved, which is worth a
+/// word to the user rather than a silent shrug.
+fn flush_pane_input_sync(sink: &dyn PaneInputSink, warning: &mut Option<(String, Instant)>) {
+    match sink.flush_sync() {
+        Ok(()) => {}
+        Err(InputError::Timeout) => {
+            tracing::warn!("pane input did not drain before a synchronous tmux operation");
+            *warning = Some((
+                "tmux is slow to accept input — your last keystrokes may arrive late.".to_string(),
+                Instant::now(),
+            ));
+        }
+        Err(e) => tracing::debug!(error = %e, "acknowledged flush failed"),
+    }
+}
+
+/// Hand a scroll keystroke to the agent, because agtx has nothing to scroll.
+///
+/// A pane in the alternate screen keeps no tmux scrollback (`history_size == 0`),
+/// so the session's history is the agent's, not ours. Rather than move a
+/// one-screen buffer by zero lines and print a line number to match, agtx sends
+/// the agent a key that scrolls *its* view.
+///
+/// **Only `PageUp`/`PageDown`, and never `Up`/`Down`.** Measured against Claude
+/// Code 2.1.251: in its detailed transcript view (`ctrl+o`) all four scroll, but
+/// in the main view `Up` recalls a previous prompt **into the composer** —
+/// overwriting whatever the user had typed — while `PageUp` is inert. A scroll
+/// key that silently rewrites the user's half-typed message is worse than one
+/// that does nothing, so the safe pair is used for every chord. The cost is
+/// granularity: `C-k`/`C-j` page rather than move five lines.
+///
+/// The chord is **translated, never passed through**, for the same reason:
+/// forwarding a raw `C-d` would be an EOF that can end the session, and `C-u`
+/// would kill the line in the composer. `C-Space` remains the way to send those
+/// deliberately.
+fn delegate_scroll(state: &mut AppState, target: &str, key: &str) {
+    forward_pane_input(
+        state.input_sink.as_ref(),
+        &mut state.warning_message,
+        PaneInput::Key {
+            target: target.to_string(),
+            key: key.to_string(),
+        },
+    );
 }
 
 /// Is the persistent control-mode backend on for this run?

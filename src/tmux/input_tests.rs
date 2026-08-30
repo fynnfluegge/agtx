@@ -14,6 +14,7 @@ enum Op {
     Key(String, String),
     Paste(String, String),
     Barrier,
+    OutsideTmuxOperation,
 }
 
 #[derive(Clone, Default)]
@@ -79,8 +80,9 @@ impl PaneBackend for RecordingBackend {
         ));
         Ok(())
     }
-    fn barrier(&mut self) {
+    fn barrier(&mut self) -> bool {
         self.recorder.push(Op::Barrier);
+        true
     }
     fn healthy(&self) -> bool {
         !self.dead.load(std::sync::atomic::Ordering::Relaxed)
@@ -117,6 +119,11 @@ impl Harness {
             target: target.to_string(),
             key: key.to_string(),
         });
+    }
+    fn flush_sync(&self) {
+        let (ack, done) = std::sync::mpsc::channel();
+        self.send(PaneInput::Barrier { ack });
+        assert_eq!(done.recv_timeout(Duration::from_secs(1)), Ok(true));
     }
     /// Stop the broker and return everything the backends were asked to do.
     fn finish(self) -> Vec<Op> {
@@ -220,6 +227,103 @@ fn an_explicit_flush_delivers_the_prefix() {
             Op::Text("sub:s:w".into(), "half".into()),
             Op::Text("sub:s:w".into(), "rest".into()),
         ]
+    );
+}
+
+#[test]
+fn an_acknowledged_flush_prevents_an_external_tmux_operation_from_overtaking_input() {
+    let h = harness(NEVER);
+    h.text("s:w", "typed-before-resize");
+
+    // This models Ctrl+F: the resize is issued synchronously by the TUI after
+    // the broker boundary returns. A plain `Flush` enqueue can return before
+    // the text is delivered; the acknowledged barrier may not.
+    h.flush_sync();
+    h.recorder.push(Op::OutsideTmuxOperation);
+
+    assert_eq!(
+        h.finish(),
+        vec![
+            Op::Text("sub:s:w".into(), "typed-before-resize".into()),
+            Op::OutsideTmuxOperation,
+        ]
+    );
+}
+
+/// A backend whose every command costs what a `tmux` subprocess costs.
+struct SlowBackend {
+    recorder: Recorder,
+    per_command: Duration,
+}
+
+impl PaneBackend for SlowBackend {
+    fn text(&mut self, target: &str, text: &str) -> Result<()> {
+        std::thread::sleep(self.per_command);
+        self.recorder
+            .push(Op::Text(format!("slow:{target}"), text.to_string()));
+        Ok(())
+    }
+    fn key(&mut self, target: &str, key: &str) -> Result<()> {
+        std::thread::sleep(self.per_command);
+        self.recorder
+            .push(Op::Key(format!("slow:{target}"), key.to_string()));
+        Ok(())
+    }
+    fn paste(&mut self, _target: &str, _text: &str) -> Result<()> {
+        Ok(())
+    }
+    fn label(&self) -> &'static str {
+        "slow"
+    }
+}
+
+#[test]
+fn an_acknowledged_flush_waits_out_a_slow_drain() {
+    // The barrier sits *behind* the queue, so the wait is dominated by draining
+    // it — not by the barrier round trip. Sized as a barrier round trip instead,
+    // it expired mid-drain and handed back a guarantee that had not been kept:
+    // measured at 20 queued keys x 25 ms, it reported failure with half of them
+    // still in flight, and the caller went on to resize the pane anyway.
+    let recorder = Recorder::default();
+    let (tx, rx) = sync_channel(64);
+    let depth = Arc::new(AtomicUsize::new(0));
+    let broker = Broker {
+        rx,
+        depth: Arc::clone(&depth),
+        batch_window: NEVER,
+        fallback: Box::new(SlowBackend {
+            recorder: recorder.clone(),
+            per_command: Duration::from_millis(25),
+        }),
+        control: None,
+        control_factory: None,
+        generation: 0,
+        next_attempt: None,
+        backoff: Duration::from_millis(1),
+        pending: None,
+        deadline: None,
+        fallbacks: 0,
+        finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    std::thread::spawn(move || broker.run());
+    let sink = BrokerSink {
+        tx,
+        depth,
+        high_water: Arc::new(AtomicUsize::new(0)),
+        session: Arc::new(Mutex::new("it".to_string())),
+        finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        join: Mutex::new(None),
+    };
+
+    // Non-text keys, because adjacent text would coalesce into one command.
+    for _ in 0..20 {
+        sink.key("s:w", "BSpace").unwrap();
+    }
+    assert_eq!(sink.flush_sync(), Ok(()));
+    assert_eq!(
+        recorder.ops().len(),
+        20,
+        "every queued key must have been delivered before the flush returned"
     );
 }
 

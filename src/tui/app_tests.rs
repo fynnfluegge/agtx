@@ -880,9 +880,16 @@ fn test_capture_tmux_pane_with_history() {
         .returning(|_, _| b"Line 1\nLine 2\nLine 3\n".to_vec());
 
     mock_tmux
-        .expect_get_cursor_info()
+        .expect_pane_metrics()
         .with(mockall::predicate::eq("test-window"))
-        .returning(|_| Some((0, 2, 3))); // cursor at column 0, line 2, pane has 3 lines
+        .returning(|_| {
+            Some(crate::tmux::PaneMetrics {
+                cursor_x: 0,
+                cursor_y: 2,
+                pane_height: 3,
+                history_size: 0,
+            })
+        });
 
     let content = capture_tmux_pane_with_history("test-window", 500, &mock_tmux);
 
@@ -8139,7 +8146,7 @@ fn test_toggle_orchestrator_spawns_new_session() {
     mock_tmux
         .expect_capture_pane_with_history()
         .returning(|_, _| vec![]);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry.expect_get().returning(|_| {
@@ -8178,7 +8185,7 @@ fn test_toggle_orchestrator_opens_popup_when_already_running() {
     mock_tmux
         .expect_capture_pane_with_history()
         .returning(|_, _| vec![]);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry
@@ -8228,7 +8235,7 @@ fn test_toggle_orchestrator_reattaches_to_live_orchestrator_from_other_instance(
     mock_tmux
         .expect_capture_pane_with_history()
         .returning(|_, _| vec![]);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry
@@ -8283,7 +8290,7 @@ fn test_toggle_orchestrator_clears_stale_session_and_respawns() {
     mock_tmux
         .expect_capture_pane_with_history()
         .returning(|_, _| vec![]);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry.expect_get().returning(|_| {
@@ -11191,7 +11198,7 @@ fn test_handle_paste_into_shell_popup_never_touches_tmux_on_the_input_thread() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
     mock_tmux.expect_send_key().times(0);
     mock_tmux.expect_send_text().times(0);
     mock_tmux.expect_paste_text().times(0);
@@ -13219,7 +13226,7 @@ fn app_with_recording_sink() -> (App, Arc<crate::tmux::RecordingSink>) {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
     mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
     // Nothing on the key path may reach tmux directly any more.
     mock_tmux.expect_send_key().times(0);
@@ -13382,8 +13389,8 @@ fn the_popups_own_shortcuts_are_never_forwarded() {
     assert!(
         sink.taken()
             .iter()
-            .all(|input| matches!(input, PaneInput::Flush)),
-        "popup-local shortcuts must enqueue nothing but the fullscreen flush"
+            .all(|input| matches!(input, PaneInput::Barrier { .. })),
+        "popup-local shortcuts must enqueue nothing but the fullscreen barrier"
     );
     assert!(app.state.shell_popup.is_some());
 
@@ -13394,18 +13401,37 @@ fn the_popups_own_shortcuts_are_never_forwarded() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn closing_the_popup_flushes_the_target_it_was_typed_into() {
-    // Batched characters belong to the pane they were typed into. Without this
-    // flush they would still be buffered when the next popup changes the target.
+fn closing_the_popup_waits_for_the_target_it_was_typed_into() {
+    // Batched characters belong to the pane they were typed into, and agtx's own
+    // next write to that pane — a phase advance is one keystroke away on the
+    // board — must not overtake them. An *enqueued* flush returns before
+    // delivery, so this has to be the acknowledged one.
     let (mut app, sink) = app_with_open_popup();
     app.handle_key(key_event(KeyCode::Char('h'), KeyModifiers::NONE))
         .unwrap();
     app.handle_key(key_event(KeyCode::Char('q'), KeyModifiers::CONTROL))
         .unwrap();
-    assert_eq!(
-        sink.taken().last(),
-        Some(&PaneInput::Flush),
-        "the last thing a closing popup does is flush"
+    assert!(
+        matches!(sink.taken().last(), Some(PaneInput::Barrier { .. })),
+        "closing the popup must wait for the queued prefix, not just enqueue a flush"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn toggling_fullscreen_waits_before_resizing_the_pane() {
+    // The resize is a synchronous tmux subprocess on a different socket. If the
+    // flush were only enqueued it could still be pending when the resize lands,
+    // and the text would reach the pane at the wrong size.
+    let (mut app, sink) = app_with_open_popup();
+    app.handle_key(key_event(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Char('f'), KeyModifiers::CONTROL))
+        .unwrap();
+    let sent = sink.taken();
+    assert!(
+        matches!(sent.last(), Some(PaneInput::Barrier { .. })),
+        "Ctrl+F must wait for the queued prefix before it resizes, got {sent:?}"
     );
 }
 
@@ -13430,6 +13456,129 @@ fn the_ctrl_space_prefix_forwards_the_next_key_verbatim() {
         app.state.shell_popup.is_some(),
         "the prefixed Ctrl+q went to the agent, not to the popup"
     );
+}
+
+/// Give the popup a pane that reports `history_size` lines of scrollback.
+#[cfg(feature = "test-mocks")]
+fn with_scrollback(app: &mut App, history_size: usize) {
+    if let Some(popup) = app.state.shell_popup.as_mut() {
+        popup.metrics = Some(crate::tmux::PaneMetrics {
+            cursor_x: 0,
+            cursor_y: 1,
+            pane_height: 20,
+            history_size,
+        });
+        popup.cached_content = (0..200)
+            .map(|i| format!("line {i}\n"))
+            .collect::<String>()
+            .into_bytes();
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn scroll_keys_move_the_popup_when_tmux_has_history() {
+    let (mut app, sink) = app_with_open_popup();
+    with_scrollback(&mut app, 500);
+    for code in [KeyCode::Char('k'), KeyCode::Char('u')] {
+        app.handle_key(key_event(code, KeyModifiers::CONTROL))
+            .unwrap();
+    }
+    app.handle_key(key_event(KeyCode::PageUp, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.state.shell_popup.as_ref().unwrap().scroll_offset,
+        -45,
+        "5 + 20 + 20 lines of agtx-side scrolling"
+    );
+    assert!(
+        sink.taken().is_empty(),
+        "with real scrollback the agent must not see the scroll keys"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn scroll_keys_go_to_the_agent_when_tmux_has_no_history() {
+    // A pane in the alternate screen keeps no tmux scrollback, so agtx's buffer
+    // is one screen and scrolling it moves nothing. The agent owns the history,
+    // so it gets the key it scrolls with.
+    let (mut app, sink) = app_with_open_popup();
+    with_scrollback(&mut app, 0);
+    for code in [
+        KeyCode::Char('k'),
+        KeyCode::Char('j'),
+        KeyCode::Char('u'),
+        KeyCode::Char('d'),
+    ] {
+        app.handle_key(key_event(code, KeyModifiers::CONTROL))
+            .unwrap();
+    }
+    app.handle_key(key_event(KeyCode::PageUp, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::PageDown, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    let keys: Vec<String> = sink
+        .taken()
+        .into_iter()
+        .map(|input| match input {
+            PaneInput::Key { key, .. } => key,
+            other => panic!("expected a key, got {other:?}"),
+        })
+        .collect();
+    // Paging keys only. `Up`/`Down` would scroll Claude's transcript view but
+    // recall prompt history in its main view, overwriting the composer — see
+    // `delegate_scroll`.
+    assert_eq!(
+        keys,
+        vec!["PageUp", "PageDown", "PageUp", "PageDown", "PageUp", "PageDown", "End"]
+    );
+    assert_eq!(
+        app.state.shell_popup.as_ref().unwrap().scroll_offset,
+        0,
+        "agtx must not also move its own buffer"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_delegated_scroll_only_ever_sends_a_paging_key() {
+    // Passing the chord through instead of translating it would send `C-d` —
+    // an EOF that can end the session — and `C-u`, which kills the line the
+    // user is typing in the agent's composer.
+    let (mut app, sink) = app_with_open_popup();
+    with_scrollback(&mut app, 0);
+    for code in [KeyCode::Char('d'), KeyCode::Char('u'), KeyCode::Char('g')] {
+        app.handle_key(key_event(code, KeyModifiers::CONTROL))
+            .unwrap();
+    }
+    for input in sink.taken() {
+        match input {
+            PaneInput::Key { key, .. } => assert!(
+                matches!(key.as_str(), "PageUp" | "PageDown" | "End"),
+                "only keys that cannot alter the composer may be delegated; got {key}"
+            ),
+            other => panic!("expected a key, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn unknown_pane_metrics_keep_the_popups_own_scrolling() {
+    // A failed `display -p` must not silently reroute keys into the agent.
+    let (mut app, sink) = app_with_open_popup();
+    if let Some(popup) = app.state.shell_popup.as_mut() {
+        popup.metrics = None;
+        popup.cached_content = b"a\nb\nc\n".to_vec();
+    }
+    app.handle_key(key_event(KeyCode::Char('k'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(sink.taken().is_empty());
+    assert!(app.state.shell_popup.as_ref().unwrap().scroll_offset < 0);
 }
 
 #[test]
