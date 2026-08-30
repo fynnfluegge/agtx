@@ -13505,6 +13505,20 @@ fn scroll_keys_move_the_popup_when_tmux_has_history() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
+fn hidden_ctrl_arrow_scroll_aliases_are_preserved() {
+    let (mut app, sink) = app_with_open_popup();
+    with_scrollback(&mut app, 500);
+    app.handle_key(key_event(KeyCode::Up, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.shell_popup.as_ref().unwrap().scroll_offset, -5);
+    app.handle_key(key_event(KeyCode::Down, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.shell_popup.as_ref().unwrap().scroll_offset, 0);
+    assert!(sink.taken().is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
 fn scroll_keys_go_to_the_agent_when_tmux_has_no_history() {
     // A pane in the alternate screen keeps no tmux scrollback, so agtx's buffer
     // is one screen and scrolling it moves nothing. The agent owns the history,
@@ -13538,7 +13552,7 @@ fn scroll_keys_go_to_the_agent_when_tmux_has_no_history() {
     // Ctrl+N/P use the safe translation. `Up`/`Down` would scroll Claude's
     // transcript view but
     // recall prompt history in its main view, overwriting the composer — see
-    // `delegate_scroll`.
+    // `handle_popup_scroll`.
     assert_eq!(
         keys,
         vec![

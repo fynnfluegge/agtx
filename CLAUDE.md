@@ -337,7 +337,7 @@ p95** against 38 ms for the subprocess path (tmux 3.5a, macOS; the measurement l
   a line number to match — which is what made an empty buffer look like a broken
   scrollbar. So `ShellPopup::has_scrollback()` (from `PaneMetrics::history_size`,
   free in the `display -p` the refresh already runs) switches those keys over to
-  `delegate_scroll`, and the footer says the agent owns the scrollback. Unknown
+  `handle_popup_scroll`; the footer shows only the available actions. Unknown
   metrics count as *has* scrollback, so a failed query changes nothing.
   Scroll chords are translated rather than passed through: `C-n/p` use the same
   Page Down/Up translation, while `C-g` uses End. Measured against

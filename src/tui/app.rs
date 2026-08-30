@@ -4006,6 +4006,27 @@ impl App {
                 return Ok(());
             }
 
+            let scroll_action = match key.code {
+                KeyCode::Char('p') | KeyCode::Up if has_ctrl => Some(PopupScroll::Up(5)),
+                KeyCode::Char('n') | KeyCode::Down if has_ctrl => Some(PopupScroll::Down(5)),
+                KeyCode::Char('u') if has_ctrl => Some(PopupScroll::Up(20)),
+                KeyCode::PageUp => Some(PopupScroll::Up(20)),
+                KeyCode::Char('d') if has_ctrl => Some(PopupScroll::Down(20)),
+                KeyCode::PageDown => Some(PopupScroll::Down(20)),
+                KeyCode::Char('g') if has_ctrl => Some(PopupScroll::Bottom),
+                _ => None,
+            };
+            if let Some(action) = scroll_action {
+                handle_popup_scroll(
+                    popup,
+                    self.state.input_sink.as_ref(),
+                    &mut self.state.warning_message,
+                    &window_name,
+                    action,
+                );
+                return Ok(());
+            }
+
             match key.code {
                 // Ctrl+q = close popup
                 KeyCode::Char('q') if has_ctrl => {
@@ -4018,64 +4039,6 @@ impl App {
                         &mut self.state.warning_message,
                     );
                     self.state.shell_popup = None;
-                }
-                // Scroll up with Ctrl+p or Ctrl+Up
-                KeyCode::Char('p') | KeyCode::Up if has_ctrl => {
-                    if popup.has_scrollback() {
-                        popup.scroll_up(5);
-                    } else {
-                        delegate_scroll(&mut self.state, &window_name, "PageUp");
-                    }
-                }
-                // Scroll down with Ctrl+n or Ctrl+Down
-                KeyCode::Char('n') | KeyCode::Down if has_ctrl => {
-                    if popup.has_scrollback() {
-                        popup.scroll_down(5);
-                    } else {
-                        delegate_scroll(&mut self.state, &window_name, "PageDown");
-                    }
-                }
-                // Page up with Ctrl+u or PageUp
-                KeyCode::Char('u') if has_ctrl => {
-                    if popup.has_scrollback() {
-                        popup.scroll_up(20);
-                    } else {
-                        delegate_scroll(&mut self.state, &window_name, "PageUp");
-                    }
-                }
-                KeyCode::PageUp => {
-                    if popup.has_scrollback() {
-                        popup.scroll_up(20);
-                    } else {
-                        delegate_scroll(&mut self.state, &window_name, "PageUp");
-                    }
-                }
-                // Page down with Ctrl+d or PageDown
-                KeyCode::Char('d') if has_ctrl => {
-                    if popup.has_scrollback() {
-                        popup.scroll_down(20);
-                    } else {
-                        delegate_scroll(&mut self.state, &window_name, "PageDown");
-                    }
-                }
-                KeyCode::PageDown => {
-                    if popup.has_scrollback() {
-                        popup.scroll_down(20);
-                    } else {
-                        delegate_scroll(&mut self.state, &window_name, "PageDown");
-                    }
-                }
-                // Ctrl+g = go to bottom (current)
-                KeyCode::Char('g') if has_ctrl => {
-                    if popup.has_scrollback() {
-                        popup.scroll_to_bottom();
-                    } else {
-                        // `End`, measured the same way as the paging keys: it
-                        // returns Claude's transcript view to the bottom, and in
-                        // its main view it only moves the composer cursor to the
-                        // end of the line — it does not alter the text there.
-                        delegate_scroll(&mut self.state, &window_name, "End");
-                    }
                 }
                 // Ctrl+f toggles between centered and fullscreen in-app views.
                 KeyCode::Char('f') if has_ctrl => {
@@ -8982,7 +8945,14 @@ fn flush_pane_input_sync(sink: &dyn PaneInputSink, warning: &mut Option<(String,
     }
 }
 
-/// Hand a scroll keystroke to the agent, because agtx has nothing to scroll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PopupScroll {
+    Up(i32),
+    Down(i32),
+    Bottom,
+}
+
+/// Apply one logical popup scroll action to whichever component owns history.
 ///
 /// A pane in the alternate screen keeps no tmux scrollback (`history_size == 0`),
 /// so the session's history is the agent's, not ours. Rather than move a
@@ -8999,10 +8969,30 @@ fn flush_pane_input_sync(sink: &dyn PaneInputSink, warning: &mut Option<(String,
 /// The chord is **translated, never passed through**, for the same reason:
 /// forwarding a raw `C-d` would be an EOF that can end the session, and `C-u`
 /// would kill the line in the composer.
-fn delegate_scroll(state: &mut AppState, target: &str, key: &str) {
+fn handle_popup_scroll(
+    popup: &mut ShellPopup,
+    sink: &dyn PaneInputSink,
+    warning: &mut Option<(String, Instant)>,
+    target: &str,
+    action: PopupScroll,
+) {
+    if popup.has_scrollback() {
+        match action {
+            PopupScroll::Up(lines) => popup.scroll_up(lines),
+            PopupScroll::Down(lines) => popup.scroll_down(lines),
+            PopupScroll::Bottom => popup.scroll_to_bottom(),
+        }
+        return;
+    }
+
+    let key = match action {
+        PopupScroll::Up(_) => "PageUp",
+        PopupScroll::Down(_) => "PageDown",
+        PopupScroll::Bottom => "End",
+    };
     forward_pane_input(
-        state.input_sink.as_ref(),
-        &mut state.warning_message,
+        sink,
+        warning,
         PaneInput::Key {
             target: target.to_string(),
             key: key.to_string(),
