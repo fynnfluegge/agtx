@@ -2829,6 +2829,48 @@ fn test_resolve_prompt_research_with_task() {
     assert_eq!(prompt, "Task: add tests");
 }
 
+/// The pi column of the README plugin matrix, for the half of it that is
+/// code-enforced rather than a claim about a third-party installer.
+///
+/// gsd's `init_script` passes `--{agent}` to its own installer, which has no pi
+/// target, so pi is absent from its `supported_agents` and the plugin is filtered
+/// out for a pi task entirely (❌). Every other bundled plugin leaves
+/// `supported_agents` empty and so accepts pi, and whether its commands *resolve*
+/// there is the framework's business, not agtx's (✅ / 🟡). Locked because the
+/// exclusion is a whitelist omission — nothing names pi, so nothing fails if the
+/// list later grows an entry that should not be there.
+#[test]
+fn test_bundled_plugin_support_for_pi() {
+    use crate::config::WorkflowPlugin;
+    let plugin = |name: &str| -> WorkflowPlugin {
+        let (_n, _d, content) = skills::BUNDLED_PLUGINS
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .unwrap_or_else(|| panic!("{name} plugin should be bundled"));
+        toml::from_str(content).unwrap()
+    };
+
+    assert!(
+        !plugin("gsd").supports_agent("pi"),
+        "gsd's installer has no pi target, so pi must stay out of supported_agents"
+    );
+    // The same whitelist already excludes these two; pi joins them rather than
+    // being a new kind of case.
+    assert!(!plugin("gsd").supports_agent("antigravity"));
+    assert!(!plugin("gsd").supports_agent("copilot"));
+
+    for name in ["agtx", "agtx-terse", "spec-kit", "openspec", "bmad", "void"] {
+        assert!(
+            plugin(name).supports_agent("pi"),
+            "{name} declares no supported_agents, so it must accept pi"
+        );
+    }
+    // Claude-only plugins stay claude-only.
+    for name in ["superpowers", "oh-my-claudecode"] {
+        assert!(!plugin(name).supports_agent("pi"), "{name}");
+    }
+}
+
 #[test]
 fn test_gsd_plugin_toml_has_research_command() {
     use crate::config::WorkflowPlugin;
@@ -3200,6 +3242,72 @@ fn test_is_pane_at_shell_returns_false_when_none() {
         .returning(|_| None);
 
     assert!(!is_pane_at_shell(&mock, "sess:win"));
+}
+
+/// A process name is matched whole, not by substring.
+///
+/// `pi` is two characters and `AGENT_COMMANDS` is flat across every agent, so a
+/// `contains` test made `pip`, `pipx`, `pipenv` and `pinentry` read as "an agent
+/// is running" in *any* task's pane — and `is_pane_at_shell` is the signal for
+/// "the agent has exited". Cursor's `agent` had the same shape.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_does_not_match_process_names_by_substring() {
+    for cmd in ["pip", "pip3", "pipx", "pipenv", "pinentry", "agentless"] {
+        let mut mock = MockTmuxOperations::new();
+        mock.expect_pane_current_command()
+            .returning(move |_| Some(cmd.to_string()));
+        assert!(
+            is_pane_at_shell(&mock, "sess:win"),
+            "{cmd} must not read as a live agent"
+        );
+    }
+
+    // The names themselves still match, surrounding whitespace included.
+    for cmd in ["pi", "agent", " claude "] {
+        let mut mock = MockTmuxOperations::new();
+        mock.expect_pane_current_command()
+            .returning(move |_| Some(cmd.to_string()));
+        assert!(!is_pane_at_shell(&mock, "sess:win"), "{cmd}");
+    }
+}
+
+// === indicator scoping tests ===
+
+/// `scoped_indicators` must be matched against the bottom of the pane only.
+///
+/// pi's `%/` is one field of its footer and also occurs in ordinary output, so
+/// over a whole capture it finds scrollback rather than a live footer. On the
+/// agent-switch path that scrollback belongs to the *previous* agent, which would
+/// end the readiness wait before the new agent had execed.
+#[test]
+fn test_scoped_indicators_are_not_found_in_scrollback() {
+    let scrollback_only = format!("Coverage: 85%/90%\n{}", "some later output\n".repeat(20));
+    let tail = pane_tail(&scrollback_only, PANE_TAIL_LINES);
+    assert!(!tail.contains("%/"), "tail was: {tail:?}");
+
+    // ...and still found where pi actually draws it.
+    let live = format!("{}0.0%/1.0M (auto)", "older output\n".repeat(20));
+    assert!(pane_tail(&live, PANE_TAIL_LINES).contains("%/"));
+}
+
+/// Trailing blank rows must not push the window off the content: `capture-pane -p`
+/// emits one line per pane *row*, so an unfilled pane ends in padding.
+#[test]
+fn test_pane_tail_ignores_trailing_blank_rows() {
+    let pane = format!("0.0%/1.0M (auto){}", "\n".repeat(30));
+    assert!(pane_tail(&pane, PANE_TAIL_LINES).contains("%/"));
+}
+
+/// The flat list is what an unknown agent's pane is matched against, and pi's
+/// `%/` must stay out of it in both directions.
+#[test]
+fn test_flat_and_scoped_indicators_are_disjoint_for_pi() {
+    assert!(!flat_indicators_for(Some("pi")).contains(&"%/"));
+    assert!(scoped_indicators_for(Some("pi")).contains(&"%/"));
+    // An unknown agent gets the flat list and no scoped strings at all.
+    assert!(scoped_indicators_for(Some("mistral")).is_empty());
+    assert!(scoped_indicators_for(None).is_empty());
 }
 
 // === kill_windows_by_name tests ===
@@ -4591,6 +4699,57 @@ fn test_write_skills_to_worktree_mcp_antigravity() {
     let v: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert!(v["mcpServers"]["agtx"]["command"].is_string());
     assert_eq!(v["mcpServers"]["agtx"]["args"][0], "mcp-serve");
+}
+
+#[test]
+fn test_write_skills_to_worktree_pi() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"], false);
+
+    // pi discovers `.pi/skills/<name>/SKILL.md`, and only once the project is
+    // trusted — which is what the `--approve` in its launch args buys.
+    assert!(
+        dir.path().join(".pi/skills/agtx-plan/SKILL.md").exists(),
+        ".pi/skills/agtx-plan/SKILL.md should be deployed for pi"
+    );
+
+    let cfg = dir.path().join(".pi/mcp.json");
+    assert!(cfg.exists(), ".pi/mcp.json should be written for pi");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+    assert_eq!(v["mcpServers"]["agtx"]["args"][0], "mcp-serve");
+}
+
+/// The adapter persists its own per-server `disabled` flags into this same file,
+/// so the writer must merge rather than clobber.
+#[test]
+fn test_write_skills_to_worktree_mcp_pi_preserves_existing_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let pi_dir = dir.path().join(".pi");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    std::fs::write(
+        pi_dir.join("mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"other","disabled":true}},"somethingElse":true}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["pi"], false);
+
+    let content = std::fs::read_to_string(pi_dir.join("mcp.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        v["mcpServers"]["other"]["disabled"], true,
+        "a project's own .pi/mcp.json must not be clobbered: {content}"
+    );
+    assert_eq!(
+        v["somethingElse"], true,
+        "top-level sibling keys must survive: {content}"
+    );
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
 }
 
 #[test]
@@ -9319,6 +9478,40 @@ fn test_is_agent_active_true_when_gemini_indicator_in_pane() {
     assert!(is_agent_active(&mock_tmux, "proj:task", None));
 }
 
+/// pi has no banner: the only unconditional part of its footer is the context
+/// display, so `%/` is what proves the TUI is up. It counts only in a pane agtx
+/// knows is pi's — the same string elsewhere must not.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_agent_active_scoped_indicator_counts_only_for_its_own_agent() {
+    let pane = || Ok("cwd (main)\n0.0%/1.0M (auto)".to_string());
+
+    let mut as_pi = MockTmuxOperations::new();
+    as_pi
+        .expect_pane_current_command()
+        // macOS reports pi's Ink process as `node`, i.e. "at the shell".
+        .returning(|_| Some("bash".to_string()));
+    as_pi.expect_capture_pane().returning(move |_| pane());
+    assert!(is_agent_active(&as_pi, "proj:task", Some("pi")));
+
+    let mut as_claude = MockTmuxOperations::new();
+    as_claude
+        .expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    as_claude.expect_capture_pane().returning(move |_| pane());
+    assert!(!is_agent_active(&as_claude, "proj:task", Some("claude")));
+
+    let mut as_unknown = MockTmuxOperations::new();
+    as_unknown
+        .expect_pane_current_command()
+        .returning(|_| Some("bash".to_string()));
+    as_unknown.expect_capture_pane().returning(move |_| pane());
+    assert!(
+        !is_agent_active(&as_unknown, "proj:task", None),
+        "an unknown pane must not read a bare percent-slash as a live agent"
+    );
+}
+
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_is_agent_active_false_when_at_shell_no_indicator() {
@@ -12294,6 +12487,11 @@ fn test_agent_commands_derivation_matches_the_previous_literals() {
     got.sort_unstable();
     let mut want = vec![
         "claude", "codex", "gemini", "copilot", "opencode", "agent", "grok", "agy",
+        // pi. Only fires on Linux — macOS fixes `p_comm` at exec, so the pane
+        // reports `node` and pi's scoped indicator does the detecting there.
+        // `node` itself must never join this list: it is every Ink agent's pane
+        // name, and would make any node process read as a live agent.
+        "pi",
         // Not agent binaries, but a Python entry point must not read as "shell".
         "python3", "python",
     ];
@@ -12321,6 +12519,11 @@ fn test_active_indicator_derivation_matches_the_previous_literals() {
         "? for shortcuts",
     ];
     want.sort_unstable();
+    // pi's "%/" is deliberately absent: it lives in `scoped_indicators`, which
+    // is matched only in a pane agtx knows is running pi. In this flat list —
+    // used for panes whose agent is unknown — it would report an exited claude
+    // or codex as still running the moment output contained "85%/90%".
+    assert!(!got.contains(&"%/"));
     assert_eq!(got, want);
 }
 
@@ -12328,22 +12531,25 @@ fn test_active_indicator_derivation_matches_the_previous_literals() {
 /// Ctrl+C, not a `/exit` typed into a TUI that does not understand it.
 #[test]
 fn test_exit_command_per_agent() {
-    for (agent, want) in [
+    let table = [
         ("claude", Some("/exit")),
         ("opencode", Some("/exit")),
         ("copilot", Some("/exit")),
         ("antigravity", Some("/exit")),
         ("gemini", Some("/quit")),
         ("grok", Some("/quit")),
+        ("pi", Some("/quit")),
         ("codex", None),
         ("cursor", None),
-    ] {
+    ];
+    for (agent, want) in table {
         assert_eq!(
             crate::agent::spec(agent).unwrap().exit_command,
             want,
             "{agent}"
         );
     }
+    assert_covers_every_agent(&table.map(|(a, _)| a), "test_exit_command_per_agent");
     // An agent agtx has never heard of keeps the historical default.
     assert!(crate::agent::spec("mistral").is_none());
 }
@@ -12354,7 +12560,7 @@ fn test_exit_command_per_agent() {
 #[test]
 fn test_send_strategy_per_agent() {
     use crate::agent::SendStrategy;
-    for (agent, want) in [
+    let table = [
         ("claude", SendStrategy::Generic),
         ("copilot", SendStrategy::Generic),
         ("grok", SendStrategy::Generic),
@@ -12362,40 +12568,87 @@ fn test_send_strategy_per_agent() {
         ("codex", SendStrategy::Combined),
         ("cursor", SendStrategy::Combined),
         ("antigravity", SendStrategy::Combined),
+        ("pi", SendStrategy::Combined),
         ("opencode", SendStrategy::OpenCodePicker),
-    ] {
+    ];
+    for (agent, want) in table {
         assert_eq!(
             crate::agent::spec(agent).unwrap().send_strategy,
             want,
             "{agent}"
         );
     }
+    assert_covers_every_agent(&table.map(|(a, _)| a), "test_send_strategy_per_agent");
 }
 
-/// `/clear` is Claude-only today (issue #46). An agent with `None` must fall
-/// through to a normal send rather than typing a command it does not understand
-/// into its composer.
+/// Which agents have a verified clear-context command (issue #46). An agent with
+/// `None` must fall through to a normal send rather than typing a command it does
+/// not understand into its composer.
 #[test]
-fn test_clear_context_command_is_claude_only() {
-    assert_eq!(
-        crate::agent::spec("claude").unwrap().clear_context_command,
-        Some("/clear")
-    );
-    for agent in [
-        "codex",
-        "gemini",
-        "cursor",
-        "antigravity",
-        "opencode",
-        "grok",
-        "copilot",
-    ] {
+fn test_clear_context_command_per_agent() {
+    let table = [
+        ("claude", Some("/clear")),
+        ("pi", Some("/new")),
+        ("codex", None),
+        ("gemini", None),
+        ("cursor", None),
+        ("antigravity", None),
+        ("opencode", None),
+        ("grok", None),
+        ("copilot", None),
+    ];
+    for (agent, want) in table {
         assert_eq!(
             crate::agent::spec(agent).unwrap().clear_context_command,
-            None,
+            want,
             "{agent}"
         );
     }
+    assert_covers_every_agent(
+        &table.map(|(a, _)| a),
+        "test_clear_context_command_per_agent",
+    );
+}
+
+/// Every agent that *has* a clear-context command must be reachable by a delivery
+/// path that actually submits it.
+///
+/// The gap this pins cost pi its whole phase command: `/new` was declared while
+/// the send was an unconditional `send_keys`, which pi's own spec comment records
+/// as leaving the text unsent — so the skill+prompt was pasted onto the parked
+/// `/new` and submitted as one message. `SendStrategy::Combined` now takes the
+/// paste-and-confirm path and `Generic` keeps the typed one, so what is asserted
+/// is that the strategy is one the send has an arm for.
+#[test]
+fn test_clear_context_agents_have_a_delivery_path() {
+    use crate::agent::SendStrategy;
+    for spec in crate::agent::AGENT_SPECS.iter() {
+        if spec.clear_context_command.is_none() {
+            continue;
+        }
+        assert!(
+            matches!(
+                spec.send_strategy,
+                SendStrategy::Generic | SendStrategy::Combined
+            ),
+            "{}: clear_context_command is delivered by send_skill_and_prompt, \
+             which has no arm for {:?}",
+            spec.name,
+            spec.send_strategy
+        );
+    }
+}
+
+/// Helper for the per-agent literal tables: a new agent must be added to each one
+/// rather than silently escaping the lock it exists to provide. This is how pi
+/// slipped past three of them at once.
+fn assert_covers_every_agent(covered: &[&str], table: &str) {
+    let missing: Vec<&str> = crate::agent::AGENT_SPECS
+        .iter()
+        .map(|s| s.name)
+        .filter(|n| !covered.contains(n))
+        .collect();
+    assert!(missing.is_empty(), "{table} is missing: {missing:?}");
 }
 
 /// `LAUNCH_DIALOGS` is now derived from `AGENT_SPECS`. Pinned against the

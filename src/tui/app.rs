@@ -9773,13 +9773,30 @@ fn send_skill_and_prompt(
     auto_dismiss: &[crate::config::AutoDismiss],
     clear_context: bool,
 ) {
+    // How this agent's composer takes a message. Read once: it decides both the
+    // clear-context send below and the skill+prompt send after it.
+    let strategy =
+        agent::spec(agent_name).map_or(agent::SendStrategy::Generic, |s| s.send_strategy);
+
     // Opt-in context clear on phase advance. Agents with no known clear command
     // (`clear_context_command: None`, tbd per issue #46) fall through to a normal
     // send unchanged.
     let clear_cmd = agent::spec(agent_name).and_then(|s| s.clear_context_command);
     if let (true, Some(cmd)) = (clear_context, clear_cmd) {
-        let _ = tmux_ops.send_keys(target, cmd);
-        // Wait for Claude to clear its buffer and return to idle prompt.
+        // An Ink-class composer (`SendStrategy::Combined`) drops a combined
+        // text+Enter `send-keys`: the Enter fires before the TUI has rendered the
+        // input, so the command is left parked. That is worse than not clearing —
+        // the skill+prompt below is then pasted *onto the end* of the parked text
+        // and the whole thing submits as one message, so the phase command never
+        // resolves. Deliver it the way a message is delivered and confirm it left
+        // the composer. Verified against pi 0.84.3, which is why pi is `Combined`.
+        if strategy == agent::SendStrategy::Combined {
+            deliver_message(tmux_ops, target, cmd, true);
+            submit_message(tmux_ops, target, cmd);
+        } else {
+            let _ = tmux_ops.send_keys(target, cmd);
+        }
+        // Wait for the agent to clear its buffer and return to idle prompt.
         // Pattern mirrors the stability-poll loops used elsewhere in this
         // function: poll until pane content stabilises (no changes for ~1s),
         // capped at ~5s total.
@@ -9808,9 +9825,6 @@ fn send_skill_and_prompt(
     //
     // Fix: send just the command name, wait for picker, Enter to confirm (inserts cmd),
     // then send the args (picker dismissed, input now has just the command), then Enter.
-    let strategy =
-        agent::spec(agent_name).map_or(agent::SendStrategy::Generic, |s| s.send_strategy);
-
     if strategy == agent::SendStrategy::OpenCodePicker {
         // Build the full message: skill command (if any) + prompt (if any)
         let full_text = if let Some(cmd) = skill_cmd {
@@ -10305,7 +10319,14 @@ static AGENT_ACTIVE_INDICATORS: std::sync::LazyLock<Vec<&'static str>> =
 /// rather than an agent process.
 fn is_pane_at_shell(tmux_ops: &dyn TmuxOperations, target: &str) -> bool {
     if let Some(cmd) = tmux_ops.pane_current_command(target) {
-        !AGENT_COMMANDS.iter().any(|a| cmd.contains(a))
+        // Compared whole, not by substring. `pane_current_command` reports the
+        // command *name*, so equality is what the field means — and a substring
+        // test lets short names swallow unrelated processes: `pi` matches `pip`,
+        // `pipx`, `pipenv` and `pinentry`, and `agent` (cursor) matches anything
+        // ending in it. Every one of those would read as "an agent is running"
+        // for *every* task, since this list is flattened across all agents.
+        let cmd = cmd.trim();
+        !AGENT_COMMANDS.iter().any(|a| cmd == *a)
     } else {
         false
     }
@@ -10402,10 +10423,7 @@ fn is_agent_active(tmux_ops: &dyn TmuxOperations, target: &str, agent_name: Opti
     // Only the last few lines are checked to avoid false positives from
     // indicator strings appearing in conversation output higher up.
     if let Ok(content) = tmux_ops.capture_pane(target) {
-        let lines: Vec<&str> = content.lines().collect();
-        let bottom = lines.len().saturating_sub(5);
-        let tail = &lines[bottom..];
-        let tail_text = tail.join("\n");
+        let tail_text = pane_tail(&content, PANE_TAIL_LINES);
         if active_indicators_for(agent_name)
             .iter()
             .any(|s| tail_text.contains(s))
@@ -10452,10 +10470,10 @@ fn ensure_window_or_recover(
 /// Terminates the current agent, waits for the shell prompt,
 /// then starts the new agent.
 ///
-/// Exit commands per agent:
-///   - Claude, OpenCode: `/exit`
-///   - Gemini, Codex: `/quit`
-///   - Fallback: Ctrl+C + Ctrl+D as last resort
+/// The exit command comes from `AgentSpec::exit_command`; `None` (codex, cursor)
+/// means Ctrl+C is the only way out, and Ctrl+C + Ctrl+D is the last resort when
+/// the command does not take. How it is *delivered* is decided by
+/// `AgentSpec::send_strategy` — see the comment on the send below.
 ///
 /// Detection uses `tmux display -p #{pane_current_command}` which reports
 /// the actual process name (e.g. "claude", "node", "bash"), avoiding
@@ -10472,10 +10490,18 @@ fn switch_agent_in_tmux(
     let exit_cmd = agent::spec(current_agent).map_or(Some("/exit"), |s| s.exit_command);
 
     if let Some(cmd) = exit_cmd {
-        // For Gemini (Ink/Node TUI): send text first, wait for it to appear in pane,
-        // then send Enter — same pattern as send_skill_and_prompt. Without this delay,
-        // Enter fires before the Ink TUI has rendered the input, and /quit is lost.
-        if current_agent == "gemini" {
+        // An Ink-class composer (`SendStrategy::Combined`) loses a combined
+        // text+Enter `send-keys`: Enter fires before the TUI has rendered the
+        // input, and the exit command is lost. Send the text, wait for it to
+        // echo, then Enter — the same pattern as `send_skill_and_prompt`. Found
+        // with gemini; pi's spec records the identical measurement, and
+        // antigravity is the same class of TUI. Without this the graceful path is
+        // dead code for those agents: the command sits unsent, the 3s poll times
+        // out, and every switch away from them kills the agent with Ctrl+C
+        // mid-turn — after which the unsent text lands in the bare shell.
+        let split_enter = agent::spec(current_agent)
+            .is_some_and(|s| s.send_strategy == agent::SendStrategy::Combined);
+        if split_enter {
             let _ = tmux_ops.send_text(target, cmd);
             for _ in 0..20 {
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -10661,9 +10687,60 @@ fn launch_dialogs_for(agent_name: Option<&str>) -> Vec<&'static agent::AgentDial
 /// OpenCode being ready. Unknown agents keep the flat list.
 fn active_indicators_for(agent_name: Option<&str>) -> Vec<&'static str> {
     match agent_name.and_then(agent::spec) {
+        // `scoped_indicators` are added only here, where the pane's agent is
+        // known. They are deliberately absent from AGENT_ACTIVE_INDICATORS: pi's
+        // `%/` occurs in ordinary output, so in the flat list it would report an
+        // exited claude or codex as still running.
+        Some(spec) => spec
+            .active_indicators
+            .iter()
+            .chain(spec.scoped_indicators.iter())
+            .copied()
+            .collect(),
+        None => AGENT_ACTIVE_INDICATORS.clone(),
+    }
+}
+
+/// The indicators distinctive enough to match anywhere in a pane.
+///
+/// The counterpart of [`scoped_indicators_for`]: the split exists because the two
+/// halves need different match windows. Only [`is_agent_active`] uses the merged
+/// list, and it looks at the tail either way.
+fn flat_indicators_for(agent_name: Option<&str>) -> Vec<&'static str> {
+    match agent_name.and_then(agent::spec) {
         Some(spec) => spec.active_indicators.to_vec(),
         None => AGENT_ACTIVE_INDICATORS.clone(),
     }
+}
+
+/// Indicators that are only meaningful at the *bottom* of the pane.
+///
+/// pi's `%/` is one field of its footer and also occurs in ordinary output
+/// (`Coverage: 85%/90%`), so matching it against a whole capture — scrollback
+/// included — finds an earlier turn's text rather than a live footer. On the
+/// agent-switch path that scrollback belongs to the *previous* agent, so a stale
+/// percentage would end the readiness wait before the new agent had execed.
+fn scoped_indicators_for(agent_name: Option<&str>) -> &'static [&'static str] {
+    agent_name
+        .and_then(agent::spec)
+        .map_or(&[][..], |spec| spec.scoped_indicators)
+}
+
+/// How many lines from the bottom of a capture count as "live now".
+const PANE_TAIL_LINES: usize = 5;
+
+/// The bottom `n` lines of a captured pane, trailing blank rows dropped first.
+///
+/// `capture-pane -p` emits one line per pane *row*, so the raw end of a capture
+/// is padding whenever the agent's output has not filled the pane; anchoring the
+/// window there would look at nothing. Same reasoning as `composer_holds`.
+fn pane_tail(content: &str, n: usize) -> String {
+    let mut lines: Vec<&str> = content.lines().collect();
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
 }
 
 /// Per-launch state for [`dismiss_launch_dialog`].
@@ -10848,10 +10925,20 @@ fn wait_for_agent_ready(
 
         // Check 2 & 3: pane content checks
         if let Some(content) = content {
-            // Check 2: known ready indicator in pane content
-            if active_indicators_for(agent_name)
-                .iter()
-                .any(|s| content.contains(s))
+            // Check 2: known ready indicator in pane content. Flat indicators
+            // are distinctive enough to match anywhere; `scoped_indicators` are
+            // not, so they get the same tail window `is_agent_active` uses —
+            // otherwise the previous agent's scrollback answers for the new one.
+            let scoped_hit = {
+                let tail = pane_tail(&content, PANE_TAIL_LINES);
+                scoped_indicators_for(agent_name)
+                    .iter()
+                    .any(|s| tail.contains(s))
+            };
+            if scoped_hit
+                || flat_indicators_for(agent_name)
+                    .iter()
+                    .any(|s| content.contains(s))
             {
                 break;
             }
@@ -11524,6 +11611,35 @@ fn merge_hooks_into_json_settings(path: &Path, ours: serde_json::Value) {
     write_json(path, &serde_json::Value::Object(settings));
 }
 
+/// Insert agtx's entry into a `mcpServers` JSON file without disturbing the rest.
+///
+/// Shared by the two `…Merge` JSON kinds (antigravity, pi), which differ only in
+/// directory and filename: their file is vendor-neutral or written back by the
+/// agent's own tooling, so the project's other servers — and any sibling
+/// top-level keys — have to survive. A missing or unparseable file starts from an
+/// empty object rather than failing, on the same best-effort footing as the rest
+/// of worktree setup.
+fn merge_mcp_servers_json(dir: &Path, filename: &str, agtx_bin: &str, project_path_str: &str) {
+    let _ = std::fs::create_dir_all(dir);
+    let path = dir.join(filename);
+    let mut root = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !root["mcpServers"].is_object() {
+        root["mcpServers"] = serde_json::json!({});
+    }
+    root["mcpServers"]["agtx"] = serde_json::json!({
+        "command": agtx_bin,
+        "args": ["mcp-serve", project_path_str]
+    });
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&root).unwrap_or_default(),
+    );
+}
+
 /// Write the project-scoped MCP server config for one agent into its worktree.
 ///
 /// Selected by [`McpConfigKind`](agent::McpConfigKind) rather than agent name.
@@ -11690,24 +11806,24 @@ fn write_mcp_config(
             // (JSON, `mcpServers`). `.agents/` is vendor-neutral and may already be
             // tracked in the repo, so merge the agtx entry into any existing file
             // instead of clobbering the project's own servers.
-            let dir = Path::new(worktree_path).join(".agents");
-            let _ = std::fs::create_dir_all(&dir);
-            let path = dir.join("mcp_config.json");
-            let mut root = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .filter(|v| v.is_object())
-                .unwrap_or_else(|| serde_json::json!({}));
-            if !root["mcpServers"].is_object() {
-                root["mcpServers"] = serde_json::json!({});
-            }
-            root["mcpServers"]["agtx"] = serde_json::json!({
-                "command": &agtx_bin,
-                "args": ["mcp-serve", &project_path_str]
-            });
-            let _ = std::fs::write(
-                &path,
-                serde_json::to_string_pretty(&root).unwrap_or_default(),
+            merge_mcp_servers_json(
+                &Path::new(worktree_path).join(".agents"),
+                "mcp_config.json",
+                &agtx_bin,
+                &project_path_str,
+            );
+        }
+        agent::McpConfigKind::PiJsonMerge => {
+            // pi itself has no MCP client; the `pi-mcp-adapter` package provides
+            // one and reads `.pi/mcp.json` as its highest-precedence project
+            // layer, in the standard `mcpServers` shape. Merged rather than
+            // overwritten because the adapter also persists its own per-server
+            // `disabled` flags into this file.
+            merge_mcp_servers_json(
+                &Path::new(worktree_path).join(".pi"),
+                "mcp.json",
+                &agtx_bin,
+                &project_path_str,
             );
         }
         agent::McpConfigKind::OpenCode => {

@@ -24,6 +24,7 @@ const AGENTS: &[&str] = &[
     "cursor",
     "grok",
     "antigravity",
+    "pi",
 ];
 
 fn agent(name: &str) -> Agent {
@@ -72,6 +73,9 @@ fn interactive_command_parity_without_prompt() {
             "antigravity",
             "agy --dangerously-skip-permissions --mode accept-edits",
         ),
+        // pi has no permission system to bypass; `--approve` is project trust,
+        // without which the worktree's own skills are never loaded.
+        ("pi", "pi --approve"),
     ];
     for (name, want) in expected {
         assert_eq!(&agent(name).build_interactive_command(""), want, "{name}");
@@ -99,6 +103,7 @@ fn interactive_command_parity_with_prompt() {
             "antigravity",
             "agy --dangerously-skip-permissions --mode accept-edits -i 'hi'",
         ),
+        ("pi", "pi --approve 'hi'"),
     ];
     for (name, want) in expected {
         assert_eq!(&agent(name).build_interactive_command("hi"), want, "{name}");
@@ -148,6 +153,7 @@ fn resume_command_parity() {
             "antigravity",
             "agy --dangerously-skip-permissions --mode accept-edits --continue",
         ),
+        ("pi", "pi --approve --continue"),
     ];
     for (name, want) in expected {
         assert_eq!(&agent(name).build_resume_command(), want, "{name}");
@@ -171,6 +177,9 @@ fn headless_invocation_parity() {
         ("cursor", "agent", &["--print", "--yolo"]),
         ("grok", "grok", &["-p"]),
         ("antigravity", "agy", &["-p"]),
+        // `--no-approve`: a one-shot PR description has no use for the repo's
+        // own skills or extensions, so it declines them.
+        ("pi", "pi", &["--no-approve", "-p"]),
     ];
     for (name, bin, flags) in expected {
         let a = agent(name);
@@ -223,6 +232,8 @@ fn prompt_injection_parity() {
         ("opencode", PromptInjection::FlagInteractive("--prompt")),
         // agy 1.1.21 — an argv prompt is queued behind the trust dialog, not eaten
         ("antigravity", PromptInjection::FlagInteractive("-i")),
+        // pi 0.84.3 — `pi --approve '<prompt>'` stays interactive and submits it
+        ("pi", PromptInjection::Argv),
     ];
     for (name, want) in verified {
         assert_eq!(agent(name).prompt_injection(), *want, "{name}");
@@ -265,6 +276,7 @@ fn native_skill_dir_parity() {
         ("grok", Some((".grok/skills", ""))),
         // Vendor-neutral tree, not an agent dotdir.
         ("antigravity", Some((".agents/skills", ""))),
+        ("pi", Some((".pi/skills", ""))),
     ];
     for (name, want) in expected {
         assert_eq!(agent_native_skill_dir(name), *want, "{name}");
@@ -297,6 +309,7 @@ fn skill_filename_parity() {
         ("cursor", "plan.md"),
         ("grok", "plan.md"),
         ("antigravity", "plan.md"),
+        ("pi", "plan.md"),
     ];
     for (name, want) in expected {
         assert_eq!(&skill_dir_to_filename("agtx-plan", name), want, "{name}");
@@ -326,6 +339,9 @@ fn plugin_command_parity() {
         ("cursor", Some("/gsd-plan-phase 1")),
         ("grok", Some("/gsd-plan-phase 1")),
         ("antigravity", Some("/gsd-plan-phase 1")),
+        // pi has one `skill:` namespace for every skill, so the plugin's own
+        // namespace is folded into the skill name rather than kept as a prefix.
+        ("pi", Some("/skill:gsd-plan-phase 1")),
     ];
     for (name, want) in expected {
         assert_eq!(
@@ -408,6 +424,12 @@ fn identity_parity() {
             "Google's Antigravity CLI",
             "Antigravity <noreply@google.com>",
         ),
+        (
+            "pi",
+            "pi",
+            "Earendil's pi coding agent",
+            "Pi <noreply@earendil.works>",
+        ),
     ];
     for (name, binary, description, co_author) in expected {
         let a = agent(name);
@@ -446,6 +468,7 @@ fn scan_agent_skills_parity() {
     write(root, ".cursor/skills/agtx-plan/SKILL.md", MD_SKILL);
     write(root, ".grok/skills/agtx-plan/SKILL.md", MD_SKILL);
     write(root, ".agents/skills/agtx-plan/SKILL.md", MD_SKILL);
+    write(root, ".pi/skills/agtx-plan/SKILL.md", MD_SKILL);
     // OpenCode's project commands live under .config/, not in the tree agtx
     // deploys into (.opencode/command). Both are written here to lock which one
     // the scan reads.
@@ -464,6 +487,8 @@ fn scan_agent_skills_parity() {
         ("cursor", &[("/agtx-plan", "Plan the work")]),
         ("grok", &[("/agtx-plan", "Plan the work")]),
         ("antigravity", &[("/agtx-plan", "Plan the work")]),
+        // Same SkillDir layout, but pi types it under its own namespace.
+        ("pi", &[("/skill:agtx-plan", "Plan the work")]),
     ];
     for (name, want) in expected {
         let got = agtx::skills::scan_agent_skills(name, root);

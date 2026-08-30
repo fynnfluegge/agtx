@@ -19,11 +19,12 @@
 //! | gemini | `~/.gemini/trustedFolders.json` → `{"<dir>": "TRUST_FOLDER"}`, **lowercased** | ancestor |
 //! | antigravity | `~/.gemini/antigravity-cli/settings.json` → `trustedWorkspaces: [...]` | **exact** |
 //! | cursor, grok | launch flag `--trust` | n/a |
+//! | pi | launch flag `--approve` (store is `~/.pi/agent/trust.json`) | n/a |
 //! | opencode | no trust concept | n/a |
 //! | copilot | unmeasured | n/a |
 //!
 //! Versions the table was measured against: claude 2.1.246, codex 0.144.5,
-//! gemini 0.46.0, agy 1.1.21, cursor-agent 2026.08.11, opencode 1.18.20.
+//! gemini 0.46.0, agy 1.1.21, cursor-agent 2026.08.11, opencode 1.18.20, pi 0.84.3.
 //!
 //! **copilot is deliberately `NotApplicable`, not "assumed inherited".** It is not
 //! installed on any machine this was measured on, so nothing is known about its
@@ -184,8 +185,11 @@ fn store_for(agent: &str) -> Option<Store> {
         "codex" => Some(Store::CodexToml),
         "gemini" => Some(Store::GeminiTrustedFolders),
         "antigravity" => Some(Store::AntigravityWorkspaces),
-        // cursor and grok pass `--trust` at launch; opencode has no trust gate;
-        // copilot is unmeasured. None of them are a blocker agtx can reason about.
+        // cursor and grok pass `--trust` at launch and pi passes `--approve`;
+        // opencode has no trust gate; copilot is unmeasured. None of them are a
+        // blocker agtx can reason about. pi does keep a store
+        // (`~/.pi/agent/trust.json`), but agtx never needs to read or seed it:
+        // the flag decides the run, and unlike codex it writes nothing global.
         _ => None,
     }
 }

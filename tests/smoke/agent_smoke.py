@@ -515,9 +515,9 @@ def setup_agent_trust(agent: str, repo: Path) -> bool:
     inherits, so agtx must seed each worktree from this consent — if that seeding
     breaks, its cases park and the run says so.
 
-    Returns whether anything was written. cursor and grok pass `--trust` at launch,
-    opencode has no trust gate, and copilot is unmeasured — nothing to set up, and
-    nothing to guess at.
+    Returns whether anything was written. cursor and grok pass `--trust` at launch
+    and pi passes `--approve`, opencode has no trust gate, and copilot is
+    unmeasured — nothing to set up, and nothing to guess at.
     """
     kind = AGENT_TRUST_STORES.get(agent)
     if kind is None:
