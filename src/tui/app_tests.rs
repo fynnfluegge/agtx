@@ -869,13 +869,13 @@ fn shell_popup_uses_twenty_fps_poll_interval() {
 }
 
 // =============================================================================
-// Tests for capture_tmux_pane_with_history
+// Tests for capture_tmux_pane_snapshot
 // =============================================================================
 
 /// Test capturing tmux pane content
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_capture_tmux_pane_with_history() {
+fn test_capture_tmux_pane_snapshot() {
     let mut mock_tmux = MockTmuxOperations::new();
 
     mock_tmux
@@ -898,10 +898,13 @@ fn test_capture_tmux_pane_with_history() {
             })
         });
 
-    let content = capture_tmux_pane_with_history("test-window", 500, &mock_tmux);
+    let (content, metrics) = capture_tmux_pane_snapshot("test-window", 500, &mock_tmux);
 
     // Content should be trimmed to cursor position
     assert!(!content.is_empty());
+    // The metrics come back with it, so a popup can seed `has_scrollback()`
+    // at open time instead of waiting for the first refresh.
+    assert_eq!(metrics.map(|m| m.history_size), Some(0));
 }
 
 // =============================================================================
@@ -13647,11 +13650,55 @@ fn an_escalation_banner_swallows_only_the_first_key() {
 }
 
 #[test]
-fn control_mode_is_off_unless_asked_for() {
-    // The environment override exists so a user who hits trouble can turn the
-    // new backend off for one launch without editing a config file.
-    assert!(!control_mode_enabled(false));
-    assert!(control_mode_enabled(true));
+fn a_popup_target_always_names_its_session() {
+    // A bare window name is resolved inside whichever session the issuing client
+    // is bound to — the attached one for the control client, the
+    // most-recently-used one for a subprocess. Neither is reliably this
+    // project's after a switch, and `orchestrator` exists in every project's
+    // session, so a bare target could type into another project's agent.
+    assert_eq!(pane_target("proj", "task-abc"), "proj:task-abc");
+    assert_eq!(pane_target("proj", "orchestrator"), "proj:orchestrator");
+    // Idempotent: the orchestrator builds its target qualified already, and
+    // re-qualifying would produce `proj:proj:orchestrator`, which resolves to
+    // nothing at all.
+    assert_eq!(
+        pane_target("proj", "proj:orchestrator"),
+        "proj:orchestrator"
+    );
+}
+
+#[test]
+fn control_mode_is_on_unless_turned_off() {
+    // There is no config field: a connection that fails or dies already falls
+    // back to the subprocess backend by itself. `AGTX_TMUX_CONTROL` stays as a
+    // one-run escape hatch so a bug report can be bisected across the two lanes.
+    //
+    // Serialised on a mutex and restored afterwards: the variable is process
+    // global, and `cargo test` runs these on threads that share it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::var("AGTX_TMUX_CONTROL").ok();
+
+    std::env::remove_var("AGTX_TMUX_CONTROL");
+    assert!(control_mode_enabled(), "on when nothing is set");
+
+    for off in ["0", "false", "no"] {
+        std::env::set_var("AGTX_TMUX_CONTROL", off);
+        assert!(!control_mode_enabled(), "{off} turns it off");
+    }
+    for on in ["1", "true", "yes"] {
+        std::env::set_var("AGTX_TMUX_CONTROL", on);
+        assert!(control_mode_enabled(), "{on} leaves it on");
+    }
+    // Anything unrecognised must not read as "off" — a typo in the escape hatch
+    // should leave the default alone rather than silently change lanes.
+    std::env::set_var("AGTX_TMUX_CONTROL", "maybe");
+    assert!(control_mode_enabled());
+
+    match previous {
+        Some(value) => std::env::set_var("AGTX_TMUX_CONTROL", value),
+        None => std::env::remove_var("AGTX_TMUX_CONTROL"),
+    }
 }
 
 #[test]

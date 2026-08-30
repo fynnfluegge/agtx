@@ -267,7 +267,15 @@ impl PaneBackend for ControlBackend {
         // the subprocess path. It travels a *different* socket, so without the
         // barrier it could overtake text still queued on this connection.
         let _ = self.barrier();
-        self.paste_via.paste(target, text)
+        // Reported, never propagated. The broker reads an `Err` from this
+        // backend as an *ambiguous control write* and tears the connection
+        // down — but nothing was written to it here, and the request already
+        // ran on the fallback it would be moved to. Propagating would kill a
+        // healthy connection over an unrelated failure.
+        if let Err(e) = self.paste_via.paste(target, text) {
+            tracing::warn!(error = %e, "pane paste failed on the subprocess backend");
+        }
+        Ok(())
     }
     fn barrier(&mut self) -> bool {
         if let Some(client) = self.client.as_mut() {
@@ -354,8 +362,9 @@ pub struct InputConfig {
     /// Session the control client attaches to. Commands still carry their own
     /// targets; this is only an attach point.
     pub session: String,
-    /// Try the persistent control-mode backend. Off by default — see
-    /// `GlobalConfig::tmux_control_mode`.
+    /// Try the persistent control-mode backend. On by default; a failure to
+    /// connect, or a connection lost later, falls back to the subprocess
+    /// backend on its own. See `control_mode_enabled` for the escape hatch.
     pub control_mode: bool,
     pub batch_window: Duration,
     pub capacity: usize,
@@ -366,7 +375,7 @@ impl InputConfig {
         Self {
             server: server.into(),
             session: session.into(),
-            control_mode: false,
+            control_mode: true,
             batch_window: DEFAULT_BATCH_WINDOW,
             capacity: DEFAULT_QUEUE_CAPACITY,
         }
@@ -534,6 +543,13 @@ pub fn spawn(config: InputConfig, ops: Arc<dyn TmuxOperations>) -> Arc<BrokerSin
         .name("agtx-pane-input".to_string())
         .spawn(move || broker.run())
         .ok();
+    if join.is_none() {
+        // Nothing will ever set `finished`, and `shutdown` would then wait out
+        // its whole drain budget on every quit. Mark it done now; the sink's
+        // sends fail with `Disconnected`, which the TUI already surfaces.
+        tracing::error!("failed to start the pane input broker thread");
+        finished.store(true, Ordering::Relaxed);
+    }
 
     Arc::new(BrokerSink {
         tx,

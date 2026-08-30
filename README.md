@@ -380,10 +380,6 @@ fullscreen_on_enter = false  # When true, Enter opens the tmux pane fullscreen i
 agent_hooks = true           # Let agents report their own phase status via lifecycle hooks
 auto_trust = false           # Answer agents' trust prompts on your behalf
 update_check = true          # Check GitHub daily for a new release (see Updating)
-tmux_control_mode = false    # Experimental: type into task panes over a persistent tmux
-                             # control-mode connection instead of one `tmux send-keys`
-                             # process per key. `AGTX_TMUX_CONTROL=1`/`=0` overrides it
-                             # for a single run.
 ```
 
 ### Worktree Base Branch

@@ -304,16 +304,23 @@ p95** against 38 ms for the subprocess path (tmux 3.5a, macOS; the measurement l
   buffer first and go immediately. A delayed Enter is a visibly broken editor.
 - **A target change flushes.** Queued characters belong to the pane they were typed into; the popup
   close, popup open and fullscreen-toggle paths all flush so nothing can follow the target.
-- **The control connection is opt-in** (`tmux_control_mode`, or `AGTX_TMUX_CONTROL=1`/`=0` for one
-  run) and defaults **off**. The non-blocking broker is *not* conditional — the flag only chooses
-  what the broker thread writes through, so the subprocess path gets the same ordering and the same
-  responsive input thread.
+- **The control connection is on, and there is no config field for it.** A connect that fails, and a
+  connection lost later, both fall back to the subprocess backend on their own (`maybe_connect` /
+  `drop_control`), so a persisted setting could only hold a staler copy of a decision the broker
+  already makes at runtime. `AGTX_TMUX_CONTROL=0` turns it off for one run, which is what a bug
+  report needs to bisect the two lanes. The non-blocking broker is *not* conditional either way —
+  the backend choice only decides what the broker thread writes through, so the subprocess path gets
+  the same ordering and the same responsive input thread.
 - **`tmux -C` is attached with `-f ignore-size,no-output`.** `ignore-size` keeps it out of tmux's
   client-size calculation, so it cannot resize the pane the popup sized by hand; `no-output` stops
   every byte an agent paints from being mirrored down our stdout, which the popup does not read
-  (it captures panes instead). The session is only an **attach point** — commands carry their own
-  target and are executed server-wide, so one client drives every window on the server, and a
-  project switch only re-points the *next* connect (`set_session`).
+  (it captures panes instead). The session is an **attach point**, but only for targets that name
+  their own session: `send-keys -t "orchestrator"` is resolved *inside the attached session*, so one
+  client drives every window on the server **only** if every target is `session:window`. That is
+  what `pane_target` guarantees, and it is not a nicety — `orchestrator` is a window name every
+  project session has, so a bare target after a project switch delivered keystrokes to the previous
+  project's agent, while a bare `task-<slug>` drew `%error can't find pane` and was dropped in
+  silence. `set_session` re-points the *next* connect, for when the old session is killed.
 - **`tmux_quote` is not `single_quote`.** Control mode parses tmux's syntax, not the shell's: inside
   double quotes tmux replaces `$VAR`, `#{format}`, a leading `~`, and backslash escapes, so all of
   `\ " $ # ~` are escaped, LF/CR/tab become `\n`/`\r`/`\t`, and the rest of C0 becomes `\ooo`. A
@@ -350,8 +357,8 @@ p95** against 38 ms for the subprocess path (tmux 3.5a, macOS; the measurement l
   gives it back, so this is the normal case for a task pane, not an edge one.
   `C-g` maps to `End`, measured the same way: it returns the transcript view to
   the bottom, and in the main view it only moves the composer cursor to the end
-  of the line without altering the text. One consequence of paging being the only
-  `C-n/p` use the same translation; `C-d/u` remain explicit page navigation.
+  of the line without altering the text. `C-n/p` use that same Page Up/Down
+  translation; `C-d/u` remain explicit page navigation.
   Unrelated but worth knowing when a key "does nothing": a user's **own** tmux
   can eat it before agtx sees it — `vim-tmux-navigator` binds `C-h/C-j/C-k/C-l`
   in the root table and only forwards them to vim-like panes.
@@ -582,9 +589,6 @@ fullscreen_on_enter = false  # When true, Enter opens the task's tmux pane fulls
 agent_hooks = true           # Write agent lifecycle-hook configs into worktrees (see Hook-Based Phase Status)
 auto_trust = false           # Answer agents' trust / bypass-permission prompts by reading the pane (see First-Launch Dialogs)
 update_check = true          # Daily GitHub release check + header notice (see Self-Update)
-tmux_control_mode = false    # Type into task panes over a persistent `tmux -C` connection
-                             # (see Typing into a Task Pane). `AGTX_TMUX_CONTROL=1`/`=0`
-                             # overrides it for one run
 
 [agents]                     # Per-phase agent overrides (PhaseAgentsConfig)
 research = "claude"
@@ -688,12 +692,19 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 ### Task Popup (tmux view)
 | Key | Action |
 |-----|--------|
-| `Ctrl+n/p` | Scroll down/up (delegated to the agent when the pane has no tmux scrollback) |
-| `Ctrl+d/u` or `PageDown/PageUp` | Page down/up |
+| `Ctrl+d/u` or `PageDown/PageUp` | Page down/up — the pair the footer advertises |
+| `Ctrl+n/p` or `Ctrl+Down/Up` | Scroll down/up five lines — bound, but not named in the footer |
 | `Ctrl+g` | Jump to bottom |
 | `Ctrl+f` | Toggle the task popup between windowed and fullscreen modes |
 | `Ctrl+q` | Close popup |
 | Other keys | Forwarded to tmux/agent (including `Esc`) |
+
+**All three scroll rows** are delegated to the agent when the pane has no tmux scrollback — see
+*Typing into a Task Pane*. There they are translated to `PageUp`/`PageDown`/`End` rather than passed
+through, so the five-line and twenty-line distinction disappears and both pairs page.
+
+The footer names only `C-d/u` because it has room for one pair, **not** because the other is
+unbound. Do not reconcile the two by unbinding `C-n/p`.
 
 When an escalation note is present, the first keypress only dismisses the banner and is not forwarded.
 
@@ -938,8 +949,8 @@ AGTX_TMUX_IT=1 cargo test --test tmux_control_tests -- --nocapture
 
 `tmux_control_tests.rs` starts throwaway tmux servers and asserts on the **bytes a program in the
 pane received**, not on rendered output — a redraw hides a reordering that a byte comparison
-catches. Skipped tests name their reason instead of passing quietly. Run it on Linux before
-`tmux_control_mode` can become the default.
+catches. Skipped tests name their reason instead of passing quietly. It has only been run on macOS
+(tmux 3.5a); run it on Linux too.
 
 The smoke runner answers the one question the Rust suite cannot: **does a real agent binary actually
 receive its work?** Unit tests mock `TmuxOperations` and `agent_parity_tests.rs` pins the strings

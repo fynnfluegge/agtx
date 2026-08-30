@@ -410,6 +410,50 @@ fn a_missing_target_window_does_not_wedge_the_broker() {
 }
 
 #[test]
+fn a_target_naming_another_session_is_delivered_there() {
+    guard!();
+    // The regression guard for the bug this file could not see: every test here
+    // used an `it:`-qualified target while the popup passed a bare window name,
+    // which tmux resolves *inside the attached session*. A second session with a
+    // window the attached one does not have is the shape that failed —
+    // `%error can't find pane`, keystroke dropped, `write_command` still `Ok`.
+    let server = Server::start("cross");
+    let target = server.recording_window("here");
+    let sink = sink_for(&server, true);
+
+    let path = server.dir.path().join("there.txt");
+    server
+        .tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "other",
+            "-n",
+            "there",
+            "sh",
+            "-c",
+            &format!("cat > {}", path.display()),
+        ])
+        .expect("create the second session");
+    std::thread::sleep(Duration::from_millis(300));
+
+    // The client is attached to `it`; this names `other` and must land there.
+    sink.text("other:there", "elsewhere").unwrap();
+    sink.key("other:there", "Enter").unwrap();
+    // ...without disturbing the session it is attached to.
+    sink.text(&target, "here").unwrap();
+    sink.key(&target, "Enter").unwrap();
+    sink.shutdown();
+
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        String::from_utf8_lossy(&std::fs::read(&path).unwrap_or_default()),
+        "elsewhere\n"
+    );
+    assert_eq!(settle(&server, "here"), b"here\n".to_vec());
+}
+
+#[test]
 fn a_restarted_server_is_reconnected_to() {
     guard!();
     let server = Server::start("restart");

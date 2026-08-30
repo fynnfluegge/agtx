@@ -581,8 +581,10 @@ fn a_full_queue_reports_queue_full_rather_than_blocking() {
 #[test]
 fn changing_project_repoints_the_next_connection() {
     // agtx switches project in place. An open connection is deliberately left
-    // alone — it still delivers, because commands carry their own target — but a
-    // reconnect must not try to attach to a session that has gone.
+    // alone — it still delivers, because every target is `session:window`
+    // (`pane_target`) and is therefore resolved server-wide rather than inside
+    // the attached session. What the switch does change is where a *reconnect*
+    // attaches, since the old project's session may be killed.
     let (tx, _rx) = sync_channel(2);
     let sink = BrokerSink {
         tx,

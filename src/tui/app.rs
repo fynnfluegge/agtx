@@ -747,11 +747,12 @@ impl App {
         let config = MergedConfig::merge(&global_config, &project_config);
 
         // One broker for the process. Popup keys are enqueued onto it, so the
-        // input thread never waits for a tmux subprocess; whether the broker
-        // then writes through a control connection or one process per key is
-        // the only thing the flag decides.
+        // input thread never waits for a tmux subprocess. Whether the broker
+        // then writes through a control connection or one process per key is a
+        // runtime decision it makes for itself: this only says not to try the
+        // control connection at all.
         let mut input_config = InputConfig::new(tmux::AGENT_SERVER, &tmux_project_name);
-        input_config.control_mode = control_mode_enabled(config.tmux_control_mode);
+        input_config.control_mode = control_mode_enabled();
         let input_sink = tmux::input::spawn(input_config, Arc::clone(&tmux_ops));
 
         // If the project is untrusted, also suppress plugin init_scripts
@@ -7028,8 +7029,10 @@ impl App {
                 popup.last_pane_size = Some((pane_width, pane_height));
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            popup.cached_content =
-                capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
+            let (content, metrics) =
+                capture_tmux_pane_snapshot(&orch_target, 500, self.state.tmux_ops.as_ref());
+            popup.cached_content = content;
+            popup.metrics = metrics;
             let _ = self.state.input_sink.flush();
             self.state.shell_popup = Some(popup);
             return Ok(());
@@ -7110,8 +7113,10 @@ impl App {
                 .resize_window(&orch_target, pane_width, pane_height);
             popup.last_pane_size = Some((pane_width, pane_height));
         }
-        popup.cached_content =
-            capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
+        let (content, metrics) =
+            capture_tmux_pane_snapshot(&orch_target, 500, self.state.tmux_ops.as_ref());
+        popup.cached_content = content;
+        popup.metrics = metrics;
         let _ = self.state.input_sink.flush();
         self.state.shell_popup = Some(popup);
 
@@ -7176,7 +7181,11 @@ impl App {
 
                 let task_id = task.id.clone();
                 let escalation_note = task.escalation_note.clone();
-                let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
+                // Qualified, like the orchestrator popup's target: a bare window
+                // name resolves inside whichever session the caller is bound to,
+                // which is not necessarily this project's. See `pane_target`.
+                let target = pane_target(&self.state.tmux_project_name, window_name);
+                let mut popup = ShellPopup::new(task.title.clone(), target.clone());
                 popup.task_id = Some(task_id);
                 popup.escalation_note = escalation_note;
 
@@ -7187,22 +7196,24 @@ impl App {
                         (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
                     let pane_height = popup_height.saturating_sub(4); // -4 for borders + header/footer
 
-                    let target = format!("{}:{}", self.state.tmux_project_name, window_name);
-                    // TODO the resize should be done on target which is
-                    // session_name:window_name, but for some reason that doesn't work
-                    // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
-                    let _ =
-                        self.state
-                            .tmux_ops
-                            .resize_window(&window_name, pane_width, pane_height);
+                    let _ = self
+                        .state
+                        .tmux_ops
+                        .resize_window(&target, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
                     // Give TUI apps (OpenCode, Gemini Ink) time to re-render after resize
                     std::thread::sleep(std::time::Duration::from_millis(200));
                 }
 
-                // Capture initial content
-                popup.cached_content =
-                    capture_tmux_pane_with_history(window_name, 500, self.state.tmux_ops.as_ref());
+                // Capture initial content *and* the pane metrics, so the first
+                // keypress already knows whether this pane has tmux scrollback.
+                // Reading them only in the 50 ms refresh left a window in which
+                // `has_scrollback()` fell back to its `true` default and the
+                // scroll keys moved a buffer that could not move.
+                let (content, metrics) =
+                    capture_tmux_pane_snapshot(&target, 500, self.state.tmux_ops.as_ref());
+                popup.cached_content = content;
+                popup.metrics = metrics;
 
                 // A popup opening changes the target; nothing queued for the
                 // previous one may follow it here.
@@ -8675,15 +8686,8 @@ fn centered_rect_fixed_width(fixed_width: u16, percent_y: u16, r: Rect) -> Rect 
     }
 }
 
-/// Capture content from a tmux pane with history (with ANSI escape sequences)
-fn capture_tmux_pane_with_history(
-    window_name: &str,
-    history_lines: i32,
-    tmux_ops: &dyn TmuxOperations,
-) -> Vec<u8> {
-    capture_tmux_pane_snapshot(window_name, history_lines, tmux_ops).0
-}
-
+/// Capture a pane's content with history (ANSI escape sequences included) and
+/// the metrics describing it, in one pass.
 fn capture_tmux_pane_snapshot(
     window_name: &str,
     history_lines: i32,
@@ -9000,17 +9004,34 @@ fn handle_popup_scroll(
     );
 }
 
+/// Address a window the way every tmux command in agtx should: `session:window`.
+///
+/// A **bare** window name is resolved inside whichever session the issuing
+/// client is bound to — the attached session for a control client, the
+/// most-recently-used one for a subprocess. Neither is reliably this project's
+/// after a project switch, and `orchestrator` is a window name every project
+/// session has, so a bare target could deliver a keystroke to the wrong
+/// project's agent. Qualifying makes the target absolute.
+fn pane_target(session: &str, window: &str) -> String {
+    if window.contains(':') {
+        // Already qualified — the orchestrator builds its target this way.
+        return window.to_string();
+    }
+    format!("{session}:{window}")
+}
+
 /// Is the persistent control-mode backend on for this run?
 ///
-/// `AGTX_TMUX_CONTROL` wins over the config file in both directions, so a user
-/// who hits trouble can turn it off for one launch without editing anything, and
-/// the integration suite can turn it on without a config file at all.
-fn control_mode_enabled(configured: bool) -> bool {
-    match std::env::var("AGTX_TMUX_CONTROL").ok().as_deref() {
-        Some("1") | Some("true") | Some("yes") => true,
-        Some("0") | Some("false") | Some("no") => false,
-        _ => configured,
-    }
+/// On unless `AGTX_TMUX_CONTROL` says otherwise. There is no config field: a
+/// failed or lost connection already falls back to the subprocess backend on its
+/// own, so the only thing a persisted setting could add is a second, staler copy
+/// of that decision. The variable stays as a one-run escape hatch, so a bug
+/// report can be bisected across the two lanes without editing anything.
+fn control_mode_enabled() -> bool {
+    !matches!(
+        std::env::var("AGTX_TMUX_CONTROL").ok().as_deref(),
+        Some("0") | Some("false") | Some("no")
+    )
 }
 
 const SHELL_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);

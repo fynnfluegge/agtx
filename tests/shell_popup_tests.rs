@@ -201,9 +201,10 @@ fn test_build_footer_text_at_bottom() {
     let footer = build_footer_text(0, 10);
     assert!(footer.contains("At bottom"));
     assert!(!footer.contains("Line"));
-    assert!(footer.contains("[C-n/p] scroll  ·  [C-f] fullscreen"));
+    assert!(footer.contains("[C-d/u] scroll  ·  [C-f] fullscreen"));
     assert!(!footer.contains("[C-j/k]"));
-    assert!(!footer.contains("[C-d/u]"));
+    // Both pairs scroll; only one is advertised.
+    assert!(!footer.contains("[C-n/p]"));
 }
 
 #[test]
@@ -237,9 +238,9 @@ fn agent_managed_history_is_described_by_actions_not_implementation() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(content.contains("[C-n/p] scroll"));
+    assert!(content.contains("[C-d/u] scroll"));
     assert!(!content.contains("[C-j/k]"));
-    assert!(!content.contains("[C-d/u]"));
+    assert!(!content.contains("[C-n/p]"));
     assert!(!content.contains("scrollback"));
 }
 
@@ -248,7 +249,7 @@ fn test_build_footer_text_scrolled_up() {
     let footer = build_footer_text(-5, 10);
     assert!(footer.contains("Line 11")); // start_line + 1
     assert!(footer.contains("bottom")); // Ctrl+g option visible
-    assert!(footer.contains("[C-n/p] scroll  [C-g] bottom"));
+    assert!(footer.contains("[C-d/u] scroll  [C-g] bottom"));
 }
 
 #[test]

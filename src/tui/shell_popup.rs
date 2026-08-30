@@ -159,23 +159,27 @@ fn build_footer_text_for_mode(
     has_scrollback: bool,
 ) -> String {
     let view_action = if fullscreen { "windowed" } else { "fullscreen" };
+    // `C-n/p` and `C-d/u` are both bound and both stay bound; the footer has
+    // room to name one pair, and `C-d/u` is the one advertised. Do not "fix"
+    // the mismatch by unbinding the other — see `handle_shell_popup_key`.
+    //
     // With no tmux scrollback the scroll keys go to the agent, so advertising a
     // line number agtx cannot move to is worse than saying nothing: that is
     // exactly what made an empty buffer look like a broken scrollbar.
     if !has_scrollback {
         return format!(
-            "[C-n/p] scroll  [C-g] bottom  ·  [C-f] {view_action}  [C-q] close"
+            "[C-d/u] scroll  [C-g] bottom  ·  [C-f] {view_action}  [C-q] close"
         );
     }
     if scroll_offset < 0 {
         format!(
-            "Line {}  ·  [C-n/p] scroll  [C-g] bottom  ·  [C-f] {}  [C-q] close",
+            "Line {}  ·  [C-d/u] scroll  [C-g] bottom  ·  [C-f] {}  [C-q] close",
             start_line + 1,
             view_action
         )
     } else {
         format!(
-            "At bottom  ·  [C-n/p] scroll  ·  [C-f] {}  [C-q] close",
+            "At bottom  ·  [C-d/u] scroll  ·  [C-f] {}  [C-q] close",
             view_action
         )
     }
