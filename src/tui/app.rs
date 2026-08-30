@@ -23,7 +23,9 @@ use crate::git::{
     self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps,
 };
 use crate::skills;
-use crate::tmux::{self, RealTmuxOps, TmuxOperations};
+use crate::tmux::{
+    self, InputConfig, InputError, PaneInput, PaneInputSink, RealTmuxOps, TmuxOperations,
+};
 use crate::AppMode;
 
 use super::board::BoardState;
@@ -49,31 +51,31 @@ fn build_footer_text(
     match input_mode {
         InputMode::Normal => {
             if sidebar_focused {
-                " [j/k] navigate  [Enter] open  [l] board  [e] hide sidebar  [q] quit ".to_string()
+                "[j/k] navigate  [Enter] open  [l] board  ·  [e] hide sidebar  [q] quit".to_string()
             } else {
                 match selected_column {
-                    0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [D] deps  [R] research  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
+                    0 => "[o] new  [/] search  ·  [Enter] open  [d] diff  [D] deps  ·  [m] plan  [M] run  [R] research  ·  [x] delete  [e] sidebar  [q] quit".to_string(),
                     1 => if fullscreen_on_enter {
-                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [m] run  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     } else {
-                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [m] run  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     },
                     2 => if fullscreen_on_enter {
-                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     } else {
-                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     },
                     3 if has_cyclic_plugin => if fullscreen_on_enter {
-                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [r] resume  [p] next phase  [m] done  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     } else {
-                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [r] resume  [p] next phase  [m] done  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     },
                     3 => if fullscreen_on_enter {
-                        " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     } else {
-                        " [o] new  [/] search  [Enter] open  [C-f] fullscreen  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string()
+                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
                     },
-                    _ => " [o] new  [/] search  [Enter] open  [x] del  [e] sidebar  [q] quit".to_string(),
+                    _ => "[o] new  [/] search  ·  [Enter] open  ·  [x] delete  [e] sidebar  [q] quit".to_string(),
                 }
             }
         }
@@ -298,6 +300,9 @@ struct AppState {
     available_agents: Vec<agent::Agent>,
     // Tmux operations (injectable for testing)
     tmux_ops: Arc<dyn TmuxOperations>,
+    // Popup keystrokes go here, never straight to tmux: enqueueing is the only
+    // thing the input thread is allowed to do with a key. See `tmux::input`.
+    input_sink: Arc<dyn PaneInputSink>,
     // Git operations (injectable for testing)
     git_ops: Arc<dyn git::GitOperations>,
     // Git provider operations (injectable for testing)
@@ -315,7 +320,7 @@ struct AppState {
     shell_popup: Option<ShellPopup>,
     // At most one pane-history capture runs off the input thread at a time.
     shell_refresh_rx:
-        Option<mpsc::Receiver<(String, Vec<u8>, Option<(usize, usize, usize)>)>>,
+        Option<mpsc::Receiver<(String, Vec<u8>, Option<crate::tmux::PaneMetrics>)>>,
     // File search dropdown
     file_search: Option<FileSearchState>,
     // Skill search dropdown
@@ -741,6 +746,15 @@ impl App {
 
         let config = MergedConfig::merge(&global_config, &project_config);
 
+        // One broker for the process. Popup keys are enqueued onto it, so the
+        // input thread never waits for a tmux subprocess. Whether the broker
+        // then writes through a control connection or one process per key is a
+        // runtime decision it makes for itself: this only says not to try the
+        // control connection at all.
+        let mut input_config = InputConfig::new(tmux::AGENT_SERVER, &tmux_project_name);
+        input_config.control_mode = control_mode_enabled();
+        let input_sink = tmux::input::spawn(input_config, Arc::clone(&tmux_ops));
+
         // If the project is untrusted, also suppress plugin init_scripts
         // by forcing no_init_scripts in the flags
         let mut flags = flags;
@@ -771,6 +785,7 @@ impl App {
                 tmux_project_name: tmux_project_name.clone(),
                 available_agents,
                 tmux_ops,
+                input_sink,
                 git_ops,
                 git_provider_ops,
                 agent_registry,
@@ -996,6 +1011,9 @@ impl App {
                 tmux_project_name,
                 available_agents: vec![],
                 tmux_ops,
+                // Tests assert what the UI *enqueued*; a broker thread would add
+                // timing to something that is a pure translation.
+                input_sink: Arc::new(crate::tmux::RecordingSink::new()),
                 git_ops,
                 git_provider_ops,
                 agent_registry,
@@ -1051,6 +1069,12 @@ impl App {
                 instance_id: uuid::Uuid::new_v4().to_string(),
             },
         })
+    }
+
+    /// Swap in a recording sink so a test can assert what the UI enqueued.
+    #[cfg(feature = "test-mocks")]
+    pub fn set_input_sink(&mut self, sink: Arc<dyn PaneInputSink>) {
+        self.state.input_sink = sink;
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -1141,12 +1165,12 @@ impl App {
             // the input thread.
             if let Some(ref rx) = self.state.shell_refresh_rx {
                 match rx.try_recv() {
-                    Ok((window_name, content, cursor_info)) => {
+                    Ok((window_name, content, metrics)) => {
                         self.state.shell_refresh_rx = None;
                         if let Some(popup) = self.state.shell_popup.as_mut() {
                             if popup.window_name == window_name {
                                 popup.cached_content = content;
-                                popup.cursor_info = cursor_info;
+                                popup.metrics = metrics;
                             }
                         }
                     }
@@ -1168,12 +1192,12 @@ impl App {
                         popup.mark_content_refreshed();
                         self.state.shell_refresh_rx = Some(rx);
                         std::thread::spawn(move || {
-                            let (content, cursor_info) = capture_tmux_pane_snapshot(
+                            let (content, metrics) = capture_tmux_pane_snapshot(
                                 &window_name,
                                 500,
                                 tmux_ops.as_ref(),
                             );
-                            let _ = tx.send((window_name, content, cursor_info));
+                            let _ = tx.send((window_name, content, metrics));
                         });
                     }
                 }
@@ -3983,52 +4007,49 @@ impl App {
                 return Ok(());
             }
 
-            // Ctrl+Space is a prefix for keys that agtx normally reserves for
-            // popup navigation (for example Ctrl+q or Ctrl+u). This preserves
-            // complete terminal access without leaving the in-app fullscreen.
-            if popup.pass_through_next_key {
-                popup.pass_through_next_key = false;
-                send_key_to_tmux(&window_name, key, self.state.tmux_ops.as_ref());
-                return Ok(());
-            }
-            if has_ctrl && matches!(key.code, KeyCode::Char(' ')) {
-                popup.pass_through_next_key = true;
+            let scroll_action = match key.code {
+                KeyCode::Char('p') | KeyCode::Up if has_ctrl => Some(PopupScroll::Up(5)),
+                KeyCode::Char('n') | KeyCode::Down if has_ctrl => Some(PopupScroll::Down(5)),
+                KeyCode::Char('u') if has_ctrl => Some(PopupScroll::Up(20)),
+                KeyCode::PageUp => Some(PopupScroll::Up(20)),
+                KeyCode::Char('d') if has_ctrl => Some(PopupScroll::Down(20)),
+                KeyCode::PageDown => Some(PopupScroll::Down(20)),
+                KeyCode::Char('g') if has_ctrl => Some(PopupScroll::Bottom),
+                _ => None,
+            };
+            if let Some(action) = scroll_action {
+                handle_popup_scroll(
+                    popup,
+                    self.state.input_sink.as_ref(),
+                    &mut self.state.warning_message,
+                    &window_name,
+                    action,
+                );
                 return Ok(());
             }
 
             match key.code {
                 // Ctrl+q = close popup
                 KeyCode::Char('q') if has_ctrl => {
+                    // Anything still batched belongs to *this* pane. Deliver it
+                    // before the popup — and with it the target — can change,
+                    // and before agtx's own next write to this pane (a phase
+                    // advance is one keystroke away on the board).
+                    flush_pane_input_sync(
+                        self.state.input_sink.as_ref(),
+                        &mut self.state.warning_message,
+                    );
                     self.state.shell_popup = None;
-                }
-                // Scroll up with Ctrl+k or Ctrl+p or Ctrl+Up
-                KeyCode::Char('k') | KeyCode::Char('p') | KeyCode::Up if has_ctrl => {
-                    popup.scroll_up(5);
-                }
-                // Scroll down with Ctrl+j or Ctrl+n or Ctrl+Down
-                KeyCode::Char('j') | KeyCode::Char('n') | KeyCode::Down if has_ctrl => {
-                    popup.scroll_down(5);
-                }
-                // Page up with Ctrl+u or PageUp
-                KeyCode::Char('u') if has_ctrl => {
-                    popup.scroll_up(20);
-                }
-                KeyCode::PageUp => {
-                    popup.scroll_up(20);
-                }
-                // Page down with Ctrl+d or PageDown
-                KeyCode::Char('d') if has_ctrl => {
-                    popup.scroll_down(20);
-                }
-                KeyCode::PageDown => {
-                    popup.scroll_down(20);
-                }
-                // Ctrl+g = go to bottom (current)
-                KeyCode::Char('g') if has_ctrl => {
-                    popup.scroll_to_bottom();
                 }
                 // Ctrl+f toggles between centered and fullscreen in-app views.
                 KeyCode::Char('f') if has_ctrl => {
+                    // The resize is a plain tmux subprocess on a different
+                    // socket; queued text must reach the pane at the size it was
+                    // typed at, so this waits rather than just enqueueing.
+                    flush_pane_input_sync(
+                        self.state.input_sink.as_ref(),
+                        &mut self.state.warning_message,
+                    );
                     popup.fullscreen = !popup.fullscreen;
                     let (pane_width, pane_height) = if popup.fullscreen {
                         crossterm::terminal::size()
@@ -4053,7 +4074,13 @@ impl App {
                 }
                 _ => {
                     // Forward all other keys to tmux window (including Esc)
-                    send_key_to_tmux(&window_name, key, self.state.tmux_ops.as_ref());
+                    if let Some(input) = popup_key_input(&window_name, key) {
+                        forward_pane_input(
+                            self.state.input_sink.as_ref(),
+                            &mut self.state.warning_message,
+                            input,
+                        );
+                    }
                 }
             }
         }
@@ -4061,10 +4088,19 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: String) -> Result<()> {
-        // Shell popup open: forward paste to the tmux pane with proper bracketed paste sequences
+        // Shell popup open: forward paste to the tmux pane with proper bracketed
+        // paste sequences. It goes through the broker like every other request,
+        // so it cannot overtake characters typed just before it.
         if let Some(ref popup) = self.state.shell_popup {
             let window_name = popup.window_name.clone();
-            let _ = self.state.tmux_ops.paste_text(&window_name, &text);
+            forward_pane_input(
+                self.state.input_sink.as_ref(),
+                &mut self.state.warning_message,
+                PaneInput::Paste {
+                    target: window_name,
+                    text,
+                },
+            );
             return Ok(());
         }
 
@@ -6993,8 +7029,11 @@ impl App {
                 popup.last_pane_size = Some((pane_width, pane_height));
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            popup.cached_content =
-                capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
+            let (content, metrics) =
+                capture_tmux_pane_snapshot(&orch_target, 500, self.state.tmux_ops.as_ref());
+            popup.cached_content = content;
+            popup.metrics = metrics;
+            let _ = self.state.input_sink.flush();
             self.state.shell_popup = Some(popup);
             return Ok(());
         }
@@ -7074,8 +7113,11 @@ impl App {
                 .resize_window(&orch_target, pane_width, pane_height);
             popup.last_pane_size = Some((pane_width, pane_height));
         }
-        popup.cached_content =
-            capture_tmux_pane_with_history(&orch_target, 500, self.state.tmux_ops.as_ref());
+        let (content, metrics) =
+            capture_tmux_pane_snapshot(&orch_target, 500, self.state.tmux_ops.as_ref());
+        popup.cached_content = content;
+        popup.metrics = metrics;
+        let _ = self.state.input_sink.flush();
         self.state.shell_popup = Some(popup);
 
         // Deploy orchestrate skill to project root so the agent can discover it
@@ -7139,7 +7181,11 @@ impl App {
 
                 let task_id = task.id.clone();
                 let escalation_note = task.escalation_note.clone();
-                let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
+                // Qualified, like the orchestrator popup's target: a bare window
+                // name resolves inside whichever session the caller is bound to,
+                // which is not necessarily this project's. See `pane_target`.
+                let target = pane_target(&self.state.tmux_project_name, window_name);
+                let mut popup = ShellPopup::new(task.title.clone(), target.clone());
                 popup.task_id = Some(task_id);
                 popup.escalation_note = escalation_note;
 
@@ -7150,23 +7196,28 @@ impl App {
                         (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
                     let pane_height = popup_height.saturating_sub(4); // -4 for borders + header/footer
 
-                    let target = format!("{}:{}", self.state.tmux_project_name, window_name);
-                    // TODO the resize should be done on target which is
-                    // session_name:window_name, but for some reason that doesn't work
-                    // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
-                    let _ =
-                        self.state
-                            .tmux_ops
-                            .resize_window(&window_name, pane_width, pane_height);
+                    let _ = self
+                        .state
+                        .tmux_ops
+                        .resize_window(&target, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
                     // Give TUI apps (OpenCode, Gemini Ink) time to re-render after resize
                     std::thread::sleep(std::time::Duration::from_millis(200));
                 }
 
-                // Capture initial content
-                popup.cached_content =
-                    capture_tmux_pane_with_history(window_name, 500, self.state.tmux_ops.as_ref());
+                // Capture initial content *and* the pane metrics, so the first
+                // keypress already knows whether this pane has tmux scrollback.
+                // Reading them only in the 50 ms refresh left a window in which
+                // `has_scrollback()` fell back to its `true` default and the
+                // scroll keys moved a buffer that could not move.
+                let (content, metrics) =
+                    capture_tmux_pane_snapshot(&target, 500, self.state.tmux_ops.as_ref());
+                popup.cached_content = content;
+                popup.metrics = metrics;
 
+                // A popup opening changes the target; nothing queued for the
+                // previous one may follow it here.
+                let _ = self.state.input_sink.flush();
                 self.state.shell_popup = Some(popup);
             }
         }
@@ -7902,6 +7953,12 @@ impl App {
             &project_path,
             self.state.tmux_ops.as_ref(),
         );
+        // The control client attaches to a session, and the old project's may be
+        // killed later. Delivery does not depend on which one it is — commands
+        // carry their own target — but the next *connect* does.
+        self.state
+            .input_sink
+            .set_session(&self.state.tmux_project_name);
 
         // Clear per-task caches from previous project
         self.state.merge_conflict_checked.clear();
@@ -7926,6 +7983,10 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        // Deliver what is still queued and stop the broker before the process
+        // goes away — the last characters typed into a pane were typed on
+        // purpose. Bounded by the queue depth, so quitting stays instant.
+        self.state.input_sink.shutdown();
         match self.terminal.backend_mut() {
             AppBackend::Crossterm(backend) => {
                 let _ = disable_raw_mode();
@@ -8625,31 +8686,24 @@ fn centered_rect_fixed_width(fixed_width: u16, percent_y: u16, r: Rect) -> Rect 
     }
 }
 
-/// Capture content from a tmux pane with history (with ANSI escape sequences)
-fn capture_tmux_pane_with_history(
-    window_name: &str,
-    history_lines: i32,
-    tmux_ops: &dyn TmuxOperations,
-) -> Vec<u8> {
-    capture_tmux_pane_snapshot(window_name, history_lines, tmux_ops).0
-}
-
+/// Capture a pane's content with history (ANSI escape sequences included) and
+/// the metrics describing it, in one pass.
 fn capture_tmux_pane_snapshot(
     window_name: &str,
     history_lines: i32,
     tmux_ops: &dyn TmuxOperations,
-) -> (Vec<u8>, Option<(usize, usize, usize)>) {
+) -> (Vec<u8>, Option<crate::tmux::PaneMetrics>) {
     let content = tmux_ops.capture_pane_with_history(window_name, history_lines);
 
     // Get the cursor position and pane height to know where the "real" content ends
     // Lines below the cursor are unused pane buffer space
-    let cursor_info = tmux_ops.get_cursor_info(window_name);
+    let metrics = tmux_ops.pane_metrics(window_name);
 
     // Trim content to only include lines up to cursor position
-    let trim_info = cursor_info.map(|(_, y, height)| (y, height));
+    let trim_info = metrics.map(|m| m.trim_bounds());
     (
         shell_popup::trim_content_to_cursor(content, trim_info),
-        cursor_info,
+        metrics,
     )
 }
 
@@ -8773,15 +8827,34 @@ fn push_changes_to_existing_pr(
         .unwrap_or_else(|| "Changes pushed to existing PR".to_string()))
 }
 
-/// Send a key to a tmux pane
-fn send_key_to_tmux(
-    window_name: &str,
-    key: crossterm::event::KeyEvent,
-    tmux_ops: &dyn TmuxOperations,
-) {
+/// Translate a popup keystroke into a request for the pane input broker.
+///
+/// The split between [`PaneInput::Text`] and [`PaneInput::Key`] is the whole
+/// point of the type: text goes out with `send-keys -l`, which suppresses tmux's
+/// key-name lookup, and a key goes out without it, which is what makes `Enter`
+/// an Enter.
+///
+/// An unmodified character is therefore **text**, where it used to be a key.
+/// That is a fix, not just a reclassification: `send-keys -t x ";"` never
+/// reached the pane at all, because a standalone semicolon is how tmux separates
+/// commands — it was parsed as one and the keystroke vanished. The same lookup
+/// is why a batched run of characters could not have been sent as a key.
+fn popup_key_input(target: &str, key: crossterm::event::KeyEvent) -> Option<PaneInput> {
     use crossterm::event::KeyModifiers;
     let has_alt = key.modifiers.contains(KeyModifiers::ALT);
     let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // Shift is already reflected in the character crossterm reports, so it is
+    // not a modifier prefix here — `C-A` and `C-a` are different keys to tmux,
+    // but `A` alone is just the character.
+    if let KeyCode::Char(c) = key.code {
+        if !has_ctrl && !has_alt {
+            return Some(PaneInput::Text {
+                target: target.to_string(),
+                text: c.to_string(),
+            });
+        }
+    }
 
     let base = match key.code {
         KeyCode::Char(c) => c.to_string(),
@@ -8800,7 +8873,7 @@ fn send_key_to_tmux(
         KeyCode::Delete => "DC".to_string(),
         KeyCode::Insert => "IC".to_string(),
         KeyCode::F(n) => format!("F{}", n),
-        _ => return,
+        _ => return None,
     };
 
     let key_str = match (has_ctrl, has_alt) {
@@ -8810,7 +8883,155 @@ fn send_key_to_tmux(
         (false, false) => base,
     };
 
-    let _ = tmux_ops.send_key(window_name, &key_str);
+    Some(PaneInput::Key {
+        target: target.to_string(),
+        key: key_str,
+    })
+}
+
+/// Hand one request to the broker, surfacing the two ways that can fail.
+///
+/// Takes the sink and the warning slot rather than `&mut App` on purpose: it is
+/// called with the popup mutably borrowed, and these are disjoint fields.
+///
+/// A full queue is **not** retried synchronously. Sending it now would put this
+/// key ahead of everything already queued, and a keystroke arriving out of order
+/// is worse than one that visibly did not arrive — so the queued prefix is kept
+/// and the user is told.
+fn forward_pane_input(
+    sink: &dyn PaneInputSink,
+    warning: &mut Option<(String, Instant)>,
+    input: PaneInput,
+) {
+    match sink.send(input) {
+        Ok(()) => {}
+        Err(InputError::QueueFull) => {
+            tracing::warn!("pane input queue full; keystroke dropped");
+            *warning = Some((
+                "Input is backing up; a keystroke was dropped rather than sent out of order."
+                    .to_string(),
+                Instant::now(),
+            ));
+        }
+        Err(InputError::Disconnected) => {
+            tracing::error!("pane input broker stopped");
+            *warning = Some((
+                "Pane input is not running; restart agtx to type into task panes.".to_string(),
+                Instant::now(),
+            ));
+        }
+        // `send` is an enqueue and cannot time out. The arm exists because the
+        // variant shares an error type with `flush_sync`, which can.
+        Err(InputError::Timeout) => {
+            tracing::debug!("pane input enqueue reported a timeout");
+        }
+    }
+}
+
+/// Deliver everything queued and wait for tmux to have executed it.
+///
+/// Used before agtx does a synchronous tmux operation of its own on this thread:
+/// that travels a different socket, so without the wait it can overtake keys the
+/// user typed a moment earlier. The wait is bounded — see `FLUSH_SYNC_TIMEOUT` —
+/// and reaching the bound means the ordering was not achieved, which is worth a
+/// word to the user rather than a silent shrug.
+fn flush_pane_input_sync(sink: &dyn PaneInputSink, warning: &mut Option<(String, Instant)>) {
+    match sink.flush_sync() {
+        Ok(()) => {}
+        Err(InputError::Timeout) => {
+            tracing::warn!("pane input did not drain before a synchronous tmux operation");
+            *warning = Some((
+                "tmux is slow to accept input — your last keystrokes may arrive late.".to_string(),
+                Instant::now(),
+            ));
+        }
+        Err(e) => tracing::debug!(error = %e, "acknowledged flush failed"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PopupScroll {
+    Up(i32),
+    Down(i32),
+    Bottom,
+}
+
+/// Apply one logical popup scroll action to whichever component owns history.
+///
+/// A pane in the alternate screen keeps no tmux scrollback (`history_size == 0`),
+/// so the session's history is the agent's, not ours. Rather than move a
+/// one-screen buffer by zero lines and print a line number to match, agtx sends
+/// the agent a key that scrolls *its* view.
+///
+/// **Never `Up`/`Down`.** Measured against Claude
+/// Code 2.1.251: in its detailed transcript view (`ctrl+o`) all four scroll, but
+/// in the main view `Up` recalls a previous prompt **into the composer** —
+/// overwriting whatever the user had typed — while `PageUp` is inert. A scroll
+/// key that silently rewrites the user's half-typed message is worse than one
+/// that does nothing, so `C-n/p` use the safe Page Down/Up translation.
+///
+/// The chord is **translated, never passed through**, for the same reason:
+/// forwarding a raw `C-d` would be an EOF that can end the session, and `C-u`
+/// would kill the line in the composer.
+fn handle_popup_scroll(
+    popup: &mut ShellPopup,
+    sink: &dyn PaneInputSink,
+    warning: &mut Option<(String, Instant)>,
+    target: &str,
+    action: PopupScroll,
+) {
+    if popup.has_scrollback() {
+        match action {
+            PopupScroll::Up(lines) => popup.scroll_up(lines),
+            PopupScroll::Down(lines) => popup.scroll_down(lines),
+            PopupScroll::Bottom => popup.scroll_to_bottom(),
+        }
+        return;
+    }
+
+    let key = match action {
+        PopupScroll::Up(_) => "PageUp",
+        PopupScroll::Down(_) => "PageDown",
+        PopupScroll::Bottom => "End",
+    };
+    forward_pane_input(
+        sink,
+        warning,
+        PaneInput::Key {
+            target: target.to_string(),
+            key: key.to_string(),
+        },
+    );
+}
+
+/// Address a window the way every tmux command in agtx should: `session:window`.
+///
+/// A **bare** window name is resolved inside whichever session the issuing
+/// client is bound to — the attached session for a control client, the
+/// most-recently-used one for a subprocess. Neither is reliably this project's
+/// after a project switch, and `orchestrator` is a window name every project
+/// session has, so a bare target could deliver a keystroke to the wrong
+/// project's agent. Qualifying makes the target absolute.
+fn pane_target(session: &str, window: &str) -> String {
+    if window.contains(':') {
+        // Already qualified — the orchestrator builds its target this way.
+        return window.to_string();
+    }
+    format!("{session}:{window}")
+}
+
+/// Is the persistent control-mode backend on for this run?
+///
+/// On unless `AGTX_TMUX_CONTROL` says otherwise. There is no config field: a
+/// failed or lost connection already falls back to the subprocess backend on its
+/// own, so the only thing a persisted setting could add is a second, staler copy
+/// of that decision. The variable stays as a one-run escape hatch, so a bug
+/// report can be bisected across the two lanes without editing anything.
+fn control_mode_enabled() -> bool {
+    !matches!(
+        std::env::var("AGTX_TMUX_CONTROL").ok().as_deref(),
+        Some("0") | Some("false") | Some("no")
+    )
 }
 
 const SHELL_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
