@@ -963,6 +963,96 @@ fn a_poke_puts_the_watcher_back_on_the_fast_cadence() {
 }
 
 #[test]
+fn a_paint_signal_only_wakes_the_pane_being_watched() {
+    // The output watch mirrors *every* pane in the session, so filtering is what
+    // keeps another task's output from driving captures of this one.
+    let watch = PaneWatch::default();
+    watch.follow(Some("pj:mine"));
+    watch.set_pane_id(Some("%7".to_string()));
+    let before = watch.signal_count();
+
+    watch.mark_output("%9");
+    assert_eq!(watch.signal_count(), before, "another pane must not signal");
+    watch.mark_output("%7");
+    assert_ne!(watch.signal_count(), before, "the watched pane must signal");
+
+    // With no id resolved, push is not active and nothing may signal — the
+    // watcher is on the timer, and a stray wake would defeat its back-off.
+    watch.set_pane_id(None);
+    let idle = watch.signal_count();
+    watch.mark_output("%7");
+    assert_eq!(watch.signal_count(), idle);
+}
+
+#[test]
+fn following_a_new_pane_drops_the_previous_pane_id() {
+    // Otherwise the old pane's output would keep signalling after the popup
+    // moved, and the new pane's would not.
+    let watch = PaneWatch::default();
+    watch.follow(Some("pj:one"));
+    watch.set_pane_id(Some("%1".to_string()));
+    watch.follow(Some("pj:two"));
+    let before = watch.signal_count();
+    watch.mark_output("%1");
+    assert_eq!(
+        watch.signal_count(),
+        before,
+        "the old pane must stop signalling the moment the popup moves"
+    );
+}
+
+#[test]
+fn the_interval_becomes_a_rate_limit_under_push() {
+    use std::time::Duration;
+    // Push removes the floor: with a signal driving captures, the interval's
+    // only job is to stop a pane painting flat out (~56 notifications/s) from
+    // driving one capture per notification.
+    assert_eq!(
+        push_rate_limit_wait(true, Duration::ZERO),
+        Some(SHELL_REFRESH_INTERVAL)
+    );
+    assert_eq!(push_rate_limit_wait(true, SHELL_REFRESH_INTERVAL), None);
+    assert_eq!(push_rate_limit_wait(true, SHELL_REFRESH_INTERVAL * 2), None);
+    // Polling paces itself through its own wait, so it must never sleep twice.
+    assert_eq!(push_rate_limit_wait(false, Duration::ZERO), None);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_failing_output_watch_is_not_retried_every_iteration() {
+    // The failure path runs inside a loop that ticks every
+    // `SHELL_REFRESH_INTERVAL`, and each attempt is two `tmux` processes. A
+    // popup left open on a window that has since closed would otherwise spawn a
+    // hundred processes a second — the very cost this change removes.
+    let mut mock = MockTmuxOperations::new();
+    // The point of the assertion: asked once, not once per call.
+    mock.expect_pane_id().times(1).returning(|_| None);
+    let watch = Arc::new(PaneWatch::default());
+    let mut retry_at: Option<std::time::Instant> = None;
+
+    for _ in 0..50 {
+        let push = attach_pane_push(None, "pj:t1", &watch, &mock, &mut retry_at);
+        assert!(push.is_none(), "a pane with no id cannot be watched");
+    }
+    assert!(retry_at.is_some(), "a failed attach must schedule a retry");
+}
+
+#[test]
+fn the_output_watch_is_reused_only_within_one_session() {
+    // `%output` never crosses sessions, so the session decides whether an open
+    // watch still covers the pane being followed.
+    assert_eq!(pane_push_session("pj:task-one"), "pj");
+    assert_eq!(
+        pane_push_session("pj:task-one"),
+        pane_push_session("pj:task-two")
+    );
+    assert_ne!(pane_push_session("pj:t"), pane_push_session("other:t"));
+    // A bare target names no session; treating it as one is better than
+    // panicking, and `pane_target` guarantees it does not happen.
+    assert_eq!(pane_push_session("bare"), "bare");
+}
+
+#[test]
 fn a_pane_watch_follows_the_open_popup() {
     let watch = PaneWatch::default();
     assert_eq!(watch.target(), None);

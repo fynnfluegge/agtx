@@ -9353,6 +9353,26 @@ const SHELL_POPUP_CAPTURE_LINES: i32 = 500;
 /// character after a pause is as prompt as the tenth.
 const PANE_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// How long the watcher waits for a paint that never comes.
+///
+/// Under push this replaces the poll interval entirely, so it is a **safety
+/// net**, not a cadence: `%output` says bytes reached the pty, not that the
+/// rendered pane differs, and the converse happens too — a repaint with no new
+/// bytes still changes what `capture-pane` returns. A missed signal is otherwise
+/// invisible, because the popup simply stops updating. Same reasoning as
+/// [`REDRAW_BACKSTOP`], and if it is ever what makes the popup look right,
+/// something above it is wrong.
+const PANE_PUSH_BACKSTOP: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long to wait before trying to attach an output watch again.
+///
+/// Attaching costs two `tmux` processes (the pane id, then the client), and the
+/// attempt sits in a loop that runs every [`SHELL_REFRESH_INTERVAL`]. A popup
+/// left open on a window that has since closed would otherwise spawn a hundred
+/// processes a second — the exact cost this whole change removes, reintroduced
+/// through the failure path.
+const PANE_PUSH_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Unchanged captures before the watcher backs off — about 200 ms at the fast
 /// cadence, long enough to ride out the gap between two keystrokes.
 const PANE_IDLE_ROUNDS: u32 = 40;
@@ -9400,8 +9420,13 @@ struct PaneWatch {
 #[derive(Default)]
 struct PaneWatchState {
     target: Option<String>,
+    /// tmux pane id of `target` (`%7`), matched against `%output` notifications.
+    /// `None` means push is unavailable for this pane and the timer runs.
+    pane_id: Option<String>,
     /// Bumped to make the watcher capture now, at the fast cadence.
     poke: u64,
+    /// Bumped by the output watch every time *this* pane paints.
+    signal: u64,
     stopped: bool,
 }
 
@@ -9416,9 +9441,31 @@ impl PaneWatch {
             return;
         }
         state.target = target.map(str::to_string);
+        // The id belongs to the old pane; the watcher resolves the new one.
+        state.pane_id = None;
         state.poke = state.poke.wrapping_add(1);
         drop(state);
         self.cv.notify_all();
+    }
+
+    /// Record that `pane_id` painted. Called from the output-watch reader
+    /// thread, for **every** pane in the session, so it filters before waking.
+    fn mark_output(&self, pane_id: &str) {
+        let Ok(mut state) = self.inner.lock() else {
+            return;
+        };
+        if state.pane_id.as_deref() != Some(pane_id) {
+            return;
+        }
+        state.signal = state.signal.wrapping_add(1);
+        drop(state);
+        self.cv.notify_all();
+    }
+
+    fn set_pane_id(&self, pane_id: Option<String>) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.pane_id = pane_id;
+        }
     }
 
     /// Capture now and go back to the fast cadence: the user just typed.
@@ -9445,6 +9492,12 @@ impl PaneWatch {
     /// following the same target twice is not one.
     fn poke_count(&self) -> u64 {
         self.inner.lock().map(|s| s.poke).unwrap_or(0)
+    }
+
+    /// Paint signals accepted so far. Tests read it to assert the filtering.
+    #[cfg(test)]
+    fn signal_count(&self) -> u64 {
+        self.inner.lock().map(|s| s.signal).unwrap_or(0)
     }
 }
 
@@ -9523,6 +9576,23 @@ fn spawn_terminal_reader(tx: mpsc::Sender<Wake>) {
 /// Comparing here rather than in the loop is what makes an idle popup free: an
 /// agent that is painting nothing produces no wake-ups at all, so no frame is
 /// drawn and no capture is re-parsed.
+///
+/// **How it learns the pane painted** has two modes, and the second is not a
+/// degraded copy of the first — it is the whole design when control mode is off:
+///
+/// - **push**, when an [`OutputWatch`](crate::tmux::OutputWatch) is attached:
+///   the thread sleeps until tmux says *this* pane produced output. Typing at
+///   human speed changes the pane 5–8 times a second where the timer sampled it
+///   100 times, so most of those captures found nothing new; push removes
+///   exactly that waste.
+/// - **poll**, otherwise: the historical timer, fast while the pane changes and
+///   backing off once it settles.
+///
+/// Under push, `SHELL_REFRESH_INTERVAL` stops being a poll period and becomes a
+/// **rate limit**. The signal removes the floor — no capture when nothing
+/// happened — while the interval keeps the ceiling, because a pane painting flat
+/// out emits ~56 notifications a second and capturing per notification would
+/// spin at one per 1.5 ms capture, worse than the timer it replaced.
 fn spawn_pane_watcher(
     watch: Arc<PaneWatch>,
     tx: mpsc::Sender<Wake>,
@@ -9534,10 +9604,27 @@ fn spawn_pane_watcher(
         .spawn(move || {
             let mut last: Option<(String, Vec<u8>, Option<crate::tmux::PaneMetrics>)> = None;
             let mut unchanged: u32 = 0;
+            let mut push: Option<PanePush> = None;
+            let mut push_retry_at: Option<Instant> = None;
+            let mut watched_target = String::new();
             loop {
                 // Wait for something to watch. No popup open is the common case
-                // and costs one blocked thread.
-                let (target, poke) = {
+                // and costs one blocked thread — and, because the output watch is
+                // dropped here, nothing mirrored out of tmux either.
+                // Release the output watch before taking the lock, never while
+                // holding it: dropping it closes a tmux client and reaps the
+                // child, and the UI thread calls `follow()` on this same mutex
+                // every loop iteration — so doing it under the lock stalls the
+                // whole TUI for as long as the client takes to exit.
+                if watch
+                    .inner
+                    .lock()
+                    .map(|state| state.target.is_none())
+                    .unwrap_or(true)
+                {
+                    push = None;
+                }
+                let (target, poke, signal) = {
                     let Ok(mut state) = watch.inner.lock() else {
                         return;
                     };
@@ -9550,10 +9637,20 @@ fn spawn_pane_watcher(
                     if state.stopped {
                         return;
                     }
-                    (state.target.clone(), state.poke)
+                    (state.target.clone(), state.poke, state.signal)
                 };
                 let Some(target) = target else { continue };
 
+                if target != watched_target {
+                    // A new pane deserves an immediate attempt rather than
+                    // whatever backoff the previous one had accumulated.
+                    push_retry_at = None;
+                    watched_target = target.clone();
+                }
+                push =
+                    attach_pane_push(push, &target, &watch, tmux_ops.as_ref(), &mut push_retry_at);
+
+                let captured_at = Instant::now();
                 let (content, metrics) = capture_pane_for_popup(
                     &target,
                     SHELL_POPUP_CAPTURE_LINES,
@@ -9577,9 +9674,17 @@ fn spawn_pane_watcher(
                     unchanged = unchanged.saturating_add(1);
                 }
 
-                let wait = pane_watch_interval(unchanged);
-                // A poke or a target change ends the wait early, so backing off
-                // never costs the first keystroke after a pause.
+                let pushing = push.is_some();
+                // Under push there is nothing to poll for: the next capture is
+                // caused by the pane painting, and this is only the net for a
+                // signal that never came.
+                let wait = if pushing {
+                    PANE_PUSH_BACKSTOP
+                } else {
+                    pane_watch_interval(unchanged)
+                };
+                // A poke, a paint, or a target change ends the wait early, so
+                // backing off never costs the first keystroke after a pause.
                 //
                 // A poke also puts the watcher back on the fast cadence, and
                 // that half is not optional: the capture a poke triggers runs
@@ -9594,7 +9699,7 @@ fn spawn_pane_watcher(
                 if state.stopped {
                     return;
                 }
-                if state.poke == poke {
+                if state.poke == poke && state.signal == signal {
                     let Ok((state, _)) = watch.cv.wait_timeout(state, wait) else {
                         return;
                     };
@@ -9603,11 +9708,128 @@ fn spawn_pane_watcher(
                     }
                     unchanged = pane_watch_rounds_after_wait(unchanged, state.poke != poke);
                 } else {
-                    // A poke landed while this capture was in flight.
+                    // A poke or a paint landed while this capture was in flight.
                     unchanged = pane_watch_rounds_after_wait(unchanged, true);
+                }
+
+                // The rate limit, under push only — polling already paces itself.
+                if let Some(remaining) = push_rate_limit_wait(pushing, captured_at.elapsed()) {
+                    std::thread::sleep(remaining);
                 }
             }
         });
+}
+
+/// How long to hold off the next capture, given how long ago the last one
+/// started. `None` means capture now.
+///
+/// Only meaningful under push: it turns `SHELL_REFRESH_INTERVAL` from "how often
+/// to look" into "no more often than this", which is what stops a pane painting
+/// flat out from driving one capture per notification.
+fn push_rate_limit_wait(
+    pushing: bool,
+    since_last_capture: std::time::Duration,
+) -> Option<std::time::Duration> {
+    if !pushing || since_last_capture >= SHELL_REFRESH_INTERVAL {
+        return None;
+    }
+    Some(SHELL_REFRESH_INTERVAL - since_last_capture)
+}
+
+/// The output-watch connection for the pane currently being followed.
+struct PanePush {
+    /// Session the watch is attached to. `%output` never crosses sessions, so a
+    /// popup in another session needs a different client.
+    session: String,
+    watch: crate::tmux::OutputWatch,
+}
+
+/// Keep the output watch pointed at `target`'s session, reconnecting when the
+/// popup moves and giving up — to the timer — when tmux will not cooperate.
+///
+/// `None` is a supported state, not a failure: `AGTX_TMUX_CONTROL=0`, a tmux
+/// that refuses the attach, and a pane whose id cannot be read all land here and
+/// get the poll path instead.
+fn attach_pane_push(
+    current: Option<PanePush>,
+    target: &str,
+    watch: &Arc<PaneWatch>,
+    tmux_ops: &dyn TmuxOperations,
+    retry_at: &mut Option<Instant>,
+) -> Option<PanePush> {
+    if !control_mode_enabled() || !output_push_enabled() {
+        return None;
+    }
+    let session = pane_push_session(target);
+    if let Some(push) = current {
+        if push.session == session && push.watch.alive() {
+            return Some(push);
+        }
+        // Dropping it closes the client, so nothing stays mirrored for a session
+        // nobody is looking at.
+        // Also outside any lock, for the same reason: this runs on the watcher
+        // thread with nothing held, and closing the client can take a moment.
+        drop(push);
+        // A watch that died is retried like a first attempt, not immediately.
+        *retry_at = Some(Instant::now() + PANE_PUSH_RETRY);
+        return None;
+    }
+    // Both steps below spawn a `tmux` process, and this runs once per watcher
+    // iteration — every 10 ms while a pane is changing. Without a backoff, a
+    // popup left open on a window that has since closed would spawn a hundred
+    // processes a second, which is far worse than the polling this replaces.
+    if let Some(at) = retry_at {
+        if Instant::now() < *at {
+            return None;
+        }
+    }
+    *retry_at = Some(Instant::now() + PANE_PUSH_RETRY);
+    // The id is what every `%output` line is matched against; without it the
+    // watch could only say "some pane in this session painted", which is not a
+    // signal — it would fire on every other task's output.
+    let pane_id = tmux_ops.pane_id(target)?;
+    watch.set_pane_id(Some(pane_id));
+
+    let signal_watch = Arc::clone(watch);
+    match crate::tmux::OutputWatch::connect(crate::tmux::AGENT_SERVER, &session, move |id| {
+        signal_watch.mark_output(id);
+    }) {
+        Ok(client) => {
+            tracing::debug!(session, "pane output watch attached");
+            *retry_at = None;
+            Some(PanePush {
+                session,
+                watch: client,
+            })
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "pane output watch unavailable; polling instead");
+            watch.set_pane_id(None);
+            None
+        }
+    }
+}
+
+/// Is `%output` push on for this run?
+///
+/// On unless `AGTX_TMUX_PUSH` says otherwise, and there is no config field for
+/// the same reason [`control_mode_enabled`] has none: an attach that fails falls
+/// back to polling on its own, so a persisted setting could only hold a staler
+/// copy of a decision made at runtime. The escape hatch exists because a bug
+/// report needs to bisect the two capture lanes — push against poll — the way
+/// `AGTX_TMUX_CONTROL` bisects the two input lanes.
+fn output_push_enabled() -> bool {
+    control_mode_from_env(std::env::var("AGTX_TMUX_PUSH").ok().as_deref())
+}
+
+/// The session half of a `session:window` target — the only thing `%output` is
+/// scoped to, so it is what decides whether an existing watch can be reused.
+fn pane_push_session(target: &str) -> String {
+    target
+        .split_once(':')
+        .map(|(session, _)| session)
+        .unwrap_or(target)
+        .to_string()
 }
 
 /// Parse ANSI escape sequences to ratatui Lines with colors

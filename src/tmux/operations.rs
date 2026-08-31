@@ -30,6 +30,9 @@ pub trait TmuxOperations: Send + Sync {
     /// Check if a window exists
     fn window_exists(&self, target: &str) -> Result<bool>;
 
+    /// This window's tmux pane id (`%7`), for matching `%output` notifications.
+    fn pane_id(&self, target: &str) -> Option<String>;
+
     /// Every window on the server as `session:window`.
     ///
     /// One call answers [`window_exists`](Self::window_exists) for every task on
@@ -294,6 +297,19 @@ impl TmuxOperations for RealTmuxOps {
             .args(["kill-window", "-t", target])
             .output()?;
         Ok(())
+    }
+
+    fn pane_id(&self, target: &str) -> Option<String> {
+        let out = std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["display", "-p", "-t", target, "#{pane_id}"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!id.is_empty()).then_some(id)
     }
 
     fn list_window_targets(&self) -> Result<Vec<String>> {

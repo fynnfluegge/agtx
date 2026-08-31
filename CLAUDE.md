@@ -328,7 +328,8 @@ p95** against 38 ms for the subprocess path (tmux 3.5a, macOS; the measurement l
   connection lost later, both fall back to the subprocess backend on their own (`maybe_connect` /
   `drop_control`), so a persisted setting could only hold a staler copy of a decision the broker
   already makes at runtime. `AGTX_TMUX_CONTROL=0` turns it off for one run, which is what a bug
-  report needs to bisect the two lanes. The non-blocking broker is *not* conditional either way —
+  report needs to bisect the two lanes; `AGTX_TMUX_PUSH=0` does the same for the two *capture*
+  lanes, leaving control mode on but forcing the watcher back onto its timer. The non-blocking broker is *not* conditional either way —
   the backend choice only decides what the broker thread writes through, so the subprocess path gets
   the same ordering and the same responsive input thread.
 - **`tmux -C` is attached with `-f ignore-size,no-output`.** `ignore-size` keeps it out of tmux's
@@ -823,13 +824,26 @@ agtx-pane-watch ──────┘                          │
 That one interval had been standing in for three unrelated things, and tuning it for any one of them
 priced the other two wrongly. They are now separate:
 
-- **Echo latency** is the pane watcher's cadence (`SHELL_REFRESH_INTERVAL`). tmux offers no
-  "this pane changed" push a client can wait on unless it takes `%output`, which agtx's input client
-  turns off because it has no use for the bytes — so the watcher polls. What changed is that it
-  *compares* and wakes the loop only on a difference, at 0.1 µs against a 1.5 ms capture. Building
-  the popup on `%output` instead is measured and written up in
-  `docs/planning/pane-output-push.md`; it is not built, because the idle back-off below already
-  takes the same case from ~15% of a core to ~3%.
+- **Echo latency** is the pane watcher's cadence, and the watcher learns a pane painted in one of
+  two ways:
+  - **push** — a second control client attached **without** `no-output` (`OutputWatch`), open only
+    while a popup is, whose `%output` notifications say which pane painted. `SHELL_REFRESH_INTERVAL`
+    then stops being a poll period and becomes a **rate limit**: the signal removes the floor, the
+    interval keeps the ceiling, since a pane painting flat out emits ~56 notifications/s and one
+    capture each would spin at one per 1.5 ms capture. Measured: typing costs ~0.9–1.4% of a core
+    against ~2.0–2.6% polling.
+  - **poll** — the timer, when push is unavailable (`AGTX_TMUX_PUSH=0`, control mode off, or a pane
+    whose id cannot be read). Not a degraded copy: it is the whole design in that case.
+
+  Either way the watcher *compares* and wakes the loop only on a difference, at 0.1 µs against a
+  1.5 ms capture. `docs/planning/pane-output-push.md` has the measurements and the two bugs the
+  push path introduced on the way.
+- **Three things about `%output` shape that design.** It is scoped to the **attached session** and
+  no other, so the watch client attaches to the popup's own session. `no-output` is fixed at attach
+  time — it survives every `refresh-client` form on 3.5a — which is why this is a *second* client
+  rather than a flag flip on the input one, and why nothing is mirrored while no popup is open. And
+  it means *bytes reached the pty*, not that the rendered pane differs, so `PANE_PUSH_BACKSTOP`
+  (500 ms) stays as the net for a signal that never came.
 - **Housekeeping** — the MCP transition queue, `maybe_spawn_session_refresh`, expiring warnings, the
   spinner — runs on `HOUSEKEEPING_TICK` (100 ms), set by the spinner, the fastest of them. It used to
   run once per loop iteration, so at a 5 ms poll that was **200 SQLite queries a second**, rising and

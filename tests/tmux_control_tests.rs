@@ -23,7 +23,8 @@ use agtx::tmux::input::{spawn, InputConfig, PaneInput, PaneInputSink};
 use agtx::tmux::{CaptureSpec, TmuxOperations};
 use anyhow::Result;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Skip guard. Returns the reason, so a skipped test names itself.
@@ -116,6 +117,12 @@ impl Server {
             .unwrap_or(0)
     }
 
+    fn client_count(&self) -> usize {
+        self.tmux(&["list-clients", "-F", "#{client_name}"])
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
+    }
+
     fn pane_size(&self, target: &str) -> String {
         self.tmux(&[
             "display",
@@ -176,6 +183,15 @@ impl TmuxOperations for TestTmuxOps {
     }
     fn kill_window(&self, _target: &str) -> Result<()> {
         unimplemented!("not used by the input broker")
+    }
+    fn pane_id(&self, target: &str) -> Option<String> {
+        let out = Command::new("tmux")
+            .args(["-L", &self.server])
+            .args(["display", "-p", "-t", target, "#{pane_id}"])
+            .output()
+            .ok()?;
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!id.is_empty()).then_some(id)
     }
     fn list_window_targets(&self) -> Result<Vec<String>> {
         let out = Command::new("tmux")
@@ -769,6 +785,164 @@ fn a_control_capture_beats_two_tmux_processes() {
     assert!(
         ctl_p95 * 5 < sub_p95,
         "a control capture ({ctl_p95:?}) should be far cheaper than two processes ({sub_p95:?})"
+    );
+}
+
+// --- %output push: does tmux actually tell us a pane painted? ---
+
+/// The scope assumption the push design rests on, pinned so a tmux upgrade
+/// cannot change it in silence: `%output` covers every pane in the **attached**
+/// session and no pane outside it.
+#[test]
+fn output_notifications_cover_the_attached_session_only() {
+    guard!();
+    let server = Server::start("outscope");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "mine", "cat"])
+        .expect("window in the attached session");
+    server
+        .tmux(&["new-session", "-d", "-s", "other", "-n", "theirs", "cat"])
+        .expect("window in another session");
+    std::thread::sleep(Duration::from_millis(300));
+
+    let ops = TestTmuxOps {
+        server: server.name.clone(),
+    };
+    let mine = ops.pane_id("it:mine").expect("pane id");
+    let theirs = ops.pane_id("other:theirs").expect("pane id");
+    assert_ne!(mine, theirs);
+
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&seen);
+    let watch = agtx::tmux::OutputWatch::connect(&server.name, "it", move |id| {
+        sink.lock().unwrap().push(id.to_string());
+    })
+    .expect("attach the output watch");
+    std::thread::sleep(Duration::from_millis(400));
+
+    server
+        .tmux(&["send-keys", "-t", "it:mine", "-l", "painted\n"])
+        .expect("paint the watched pane");
+    server
+        .tmux(&["send-keys", "-t", "other:theirs", "-l", "painted\n"])
+        .expect("paint the other session's pane");
+    std::thread::sleep(Duration::from_millis(600));
+
+    let ids = seen.lock().unwrap().clone();
+    drop(watch);
+    assert!(
+        ids.iter().any(|id| *id == mine),
+        "the attached session's pane must notify: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| *id == theirs),
+        "a pane outside the attached session must not: {ids:?}"
+    );
+}
+
+/// A pane that paints notifies **promptly** — this is what replaces the timer,
+/// so it has to beat one.
+#[test]
+fn a_paint_notifies_faster_than_the_poll_interval() {
+    guard!();
+    let server = Server::start("outlat");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "p", "cat"])
+        .expect("create the window");
+    std::thread::sleep(Duration::from_millis(300));
+    let ops = TestTmuxOps {
+        server: server.name.clone(),
+    };
+    let pane = ops.pane_id("it:p").expect("pane id");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let want = pane.clone();
+    let watch = agtx::tmux::OutputWatch::connect(&server.name, "it", move |id| {
+        if id == want {
+            let _ = tx.send(Instant::now());
+        }
+    })
+    .expect("attach the output watch");
+    std::thread::sleep(Duration::from_millis(400));
+    while rx.try_recv().is_ok() {}
+
+    let mut samples = Vec::new();
+    for i in 0..10 {
+        // Drain *per iteration*: one paint produces several `%output` frames, and
+        // reading a leftover from the previous round would time an event that
+        // happened before the send — which saturates to zero and makes the whole
+        // measurement look perfect.
+        while rx.try_recv().is_ok() {}
+        let started = Instant::now();
+        server
+            .tmux(&["send-keys", "-t", "it:p", "-l", &format!("x{i}\n")])
+            .expect("paint");
+        let at = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a paint must notify");
+        samples.push(at.duration_since(started));
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    drop(watch);
+    let p95 = p95(samples);
+    eprintln!("paint -> %output p95 {p95:?} ({})", agtx_tmux_version());
+    // Loose on purpose: the `send-keys` process in front of it costs more than
+    // the notification does. It only has to be in a different class from a poll.
+    assert!(
+        p95 < Duration::from_millis(100),
+        "a paint notification should be prompt, got {p95:?}"
+    );
+}
+
+/// An idle pane must produce **nothing**. This is the property that makes an
+/// open popup free, and the one a timer can never have.
+#[test]
+fn an_idle_pane_notifies_nothing() {
+    guard!();
+    let server = Server::start("outidle");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "quiet", "cat"])
+        .expect("create the window");
+    std::thread::sleep(Duration::from_millis(400));
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&count);
+    let watch = agtx::tmux::OutputWatch::connect(&server.name, "it", move |_| {
+        seen.fetch_add(1, Ordering::Relaxed);
+    })
+    .expect("attach the output watch");
+    // Let the attach settle: a client attaching makes tmux repaint.
+    std::thread::sleep(Duration::from_millis(700));
+    count.store(0, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_secs(2));
+    let n = count.load(Ordering::Relaxed);
+    drop(watch);
+    assert_eq!(n, 0, "an idle pane produced {n} notifications");
+}
+
+/// Dropping the watch must close the tmux client. Left running it would mirror
+/// the whole session's output for the life of the server, which is the cost the
+/// dedicated-client design exists to avoid paying while no popup is open.
+#[test]
+fn dropping_the_watch_closes_its_client() {
+    guard!();
+    let server = Server::start("outdrop");
+    std::thread::sleep(Duration::from_millis(200));
+    let before = server.client_count();
+    let watch = agtx::tmux::OutputWatch::connect(&server.name, "it", |_| {})
+        .expect("attach the output watch");
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        server.client_count(),
+        before + 1,
+        "the watch did not attach"
+    );
+    drop(watch);
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(
+        server.client_count(),
+        before,
+        "the watch client outlived the watch"
     );
 }
 

@@ -43,6 +43,7 @@
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -178,6 +179,24 @@ impl FrameParser {
             return Frame::Payload(line);
         }
         Frame::Notify(line)
+    }
+}
+
+/// `%output %7 some\015bytes` → `Some("%7")`.
+///
+/// Only the pane id is taken; the payload is dropped without being decoded.
+/// `%output` is used as a **signal** that a pane painted, never as content — the
+/// pane is still read with `capture-pane`, which is what renders correctly and is
+/// byte-verified against the subprocess path.
+pub fn output_pane_id(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("%output ")?;
+    let id = rest.split(' ').next()?;
+    // A pane id is `%` followed by digits. Anything else is a notification we do
+    // not understand, and guessing at it would signal the wrong pane.
+    if id.len() >= 2 && id.starts_with('%') && id[1..].bytes().all(|b| b.is_ascii_digit()) {
+        Some(id)
+    } else {
+        None
     }
 }
 
@@ -545,6 +564,103 @@ impl ControlClient {
         }
         let _ = child.kill();
         let _ = child.wait();
+    }
+}
+
+/// A control client attached **without** `no-output`, whose only job is to say
+/// which panes painted.
+///
+/// Separate from [`ControlClient`] on purpose, and the separation is forced:
+/// `no-output` is fixed at attach time — it survives every `refresh-client`
+/// form on 3.5a — so push cannot be switched on for the input connection when a
+/// popup opens. A second client also means the mirrored bytes never touch the
+/// path a keystroke takes, and that nothing is mirrored at all while no popup is
+/// open, because this is connected only for as long as one is.
+pub struct OutputWatch {
+    child: Child,
+    alive: Arc<AtomicBool>,
+}
+
+impl OutputWatch {
+    /// Attach and call `on_output` with a pane id every time that pane paints.
+    ///
+    /// The callback runs on the reader thread and must be cheap: a busy pane
+    /// produces ~56 frames a second, and every pane in the session is mirrored
+    /// here, not just the one being watched.
+    pub fn connect(
+        server: &str,
+        session: &str,
+        on_output: impl Fn(&str) + Send + 'static,
+    ) -> Result<Self> {
+        let mut child = Command::new("tmux")
+            .args(["-L", server, "-C", "attach-session", "-t", session])
+            // `ignore-size` for the same reason as the input client; `no-output`
+            // deliberately absent, since the output is the entire point.
+            .args(["-f", "ignore-size"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("failed to start the tmux output-watch client")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("tmux output-watch client has no stdout")?;
+        let alive = Arc::new(AtomicBool::new(true));
+        let reader_alive = Arc::clone(&alive);
+        std::thread::Builder::new()
+            .name("agtx-tmux-output".to_string())
+            .spawn(move || {
+                let mut parser = FrameParser::new();
+                let mut buf = [0u8; 8192];
+                let mut stdout = stdout;
+                loop {
+                    let n = match stdout.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    parser.push(&buf[..n]);
+                    while let Some(frame) = parser.next_frame() {
+                        // Only notifications: a `%output`-shaped line *inside* a
+                        // command's reply is that command's output, not a pane
+                        // painting. The parser already draws that line.
+                        if let Frame::Notify(line) = frame {
+                            if let Some(id) = output_pane_id(&line) {
+                                on_output(id);
+                            } else if line.starts_with("%exit") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                reader_alive.store(false, Ordering::Relaxed);
+            })
+            .context("failed to start the output-watch reader thread")?;
+        Ok(Self { child, alive })
+    }
+
+    pub fn alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for OutputWatch {
+    fn drop(&mut self) {
+        // Closing stdin asks tmux to exit; the kill is for a client that ignores
+        // it. Left running, it would mirror the whole session's output forever.
+        drop(self.child.stdin.take());
+        let deadline = Instant::now() + Duration::from_millis(300);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => break,
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
