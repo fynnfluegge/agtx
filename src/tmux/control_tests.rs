@@ -169,6 +169,37 @@ fn a_payload_line_starting_with_percent_is_payload() {
 }
 
 #[test]
+fn a_payload_line_that_looks_like_an_end_tag_does_not_close_the_block() {
+    // A block's payload is now a whole pane capture, so its lines are whatever
+    // an agent chose to paint — `%end 1 7 0` included. Closing on the tag alone
+    // would end the block early, hand the caller half a capture, and leave
+    // `completed` permanently ahead of the commands that were actually run,
+    // which every barrier and query counts on. tmux pairs each `%end` with its
+    // `%begin`'s id, so the id is what decides.
+    assert_eq!(
+        frames(&["%begin 1 4 0\n%end 1 7 0\nreal content\n%end 1 4 0\n"]),
+        vec![
+            Frame::Begin { cmd: 4 },
+            Frame::Payload("%end 1 7 0".to_string()),
+            Frame::Payload("real content".to_string()),
+            Frame::End { cmd: 4 },
+        ]
+    );
+}
+
+#[test]
+fn a_payload_line_that_looks_like_an_error_tag_does_not_fail_the_block() {
+    assert_eq!(
+        frames(&["%begin 1 4 0\n%error 1 9 0\n%end 1 4 0\n"]),
+        vec![
+            Frame::Begin { cmd: 4 },
+            Frame::Payload("%error 1 9 0".to_string()),
+            Frame::End { cmd: 4 },
+        ]
+    );
+}
+
+#[test]
 fn a_malformed_begin_still_frames_the_block() {
     // Losing the command number costs a log field. Losing the framing would
     // desynchronise every later reply, so the parser is lenient here.

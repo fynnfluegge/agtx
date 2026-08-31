@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::control::{tmux_quote, ControlClient};
+use super::operations::{CaptureSpec, PaneSnapshot, PANE_METRICS_FORMAT};
 use super::TmuxOperations;
 
 /// One request to put something into a pane.
@@ -56,6 +57,21 @@ pub enum PaneInput {
     /// preceding command. This is the ownership boundary used before the TUI
     /// performs a synchronous tmux operation outside the broker.
     Barrier { ack: std::sync::mpsc::Sender<bool> },
+    /// Read a pane's content and geometry back over the same connection.
+    ///
+    /// A *read* in an input queue looks out of place until you ask what it is
+    /// ordered against: the capture must show the keys typed before it, and the
+    /// broker is the only thing that knows whether those have been flushed. Two
+    /// `tmux` subprocesses cost ~55 ms on macOS; the same pair down the control
+    /// connection costs ~1 ms, and that gap was most of the popup's echo lag.
+    ///
+    /// The reply is `None` when there is no control connection — the caller
+    /// then falls back to the subprocess capture, which is where it started.
+    Capture {
+        target: String,
+        spec: CaptureSpec,
+        ack: std::sync::mpsc::Sender<Option<PaneSnapshot>>,
+    },
     /// Flush, then stop the broker.
     Shutdown,
 }
@@ -66,7 +82,8 @@ impl PaneInput {
         match self {
             PaneInput::Text { target, .. }
             | PaneInput::Key { target, .. }
-            | PaneInput::Paste { target, .. } => Some(target),
+            | PaneInput::Paste { target, .. }
+            | PaneInput::Capture { target, .. } => Some(target),
             PaneInput::Flush | PaneInput::Barrier { .. } | PaneInput::Shutdown => None,
         }
     }
@@ -82,6 +99,14 @@ impl PartialEq for PaneInput {
             (Self::Paste { target: a, text: b }, Self::Paste { target: c, text: d }) => {
                 a == c && b == d
             }
+            (
+                Self::Capture {
+                    target: a, spec: b, ..
+                },
+                Self::Capture {
+                    target: c, spec: d, ..
+                },
+            ) => a == c && b == d,
             (Self::Flush, Self::Flush)
             | (Self::Barrier { .. }, Self::Barrier { .. })
             | (Self::Shutdown, Self::Shutdown) => true,
@@ -153,6 +178,16 @@ pub trait PaneInputSink: Send + Sync {
         let _ = self.flush();
     }
 
+    /// Capture a pane over the input connection, if there is one.
+    ///
+    /// `None` means "not available here" — no control connection, a full queue,
+    /// a wedged broker — and every caller must have a subprocess capture to fall
+    /// back to. It is deliberately not an error type: a missed capture costs one
+    /// frame at the old speed, which is not worth a code path of its own.
+    fn capture(&self, _target: &str, _spec: CaptureSpec) -> Option<PaneSnapshot> {
+        None
+    }
+
     /// Point future control-mode connections at a different session.
     ///
     /// agtx switches project in place, and a session that no longer exists is
@@ -173,6 +208,13 @@ pub(crate) trait PaneBackend: Send {
     /// A no-op for a backend that is synchronous anyway.
     fn barrier(&mut self) -> bool {
         true
+    }
+    /// Read a pane back. Only the control backend implements this: on the
+    /// subprocess path the caller's own `capture-pane` is the same two processes
+    /// for the same cost, so routing it through the broker would buy nothing and
+    /// block the input thread behind it.
+    fn capture(&mut self, _target: &str, _spec: CaptureSpec) -> Result<PaneSnapshot> {
+        anyhow::bail!("capture is not supported on the {} backend", self.label())
     }
     fn healthy(&self) -> bool {
         true
@@ -247,6 +289,22 @@ impl Drop for ControlBackend {
 /// and blocking the broker further would not help.
 const BARRIER_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// How long a pane capture waits for its reply.
+///
+/// Measured at ~1 ms (0.87 ms median, 1.13 ms p95 for both commands, tmux 3.5a
+/// on macOS), so this is not a budget but a wedge detector. It is generous
+/// because it is paid on a background refresh thread, not on the input path —
+/// and because giving up costs a frame at the old subprocess speed, not a
+/// dropped keystroke.
+const CAPTURE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How long the *caller* waits for a capture, queue time included.
+///
+/// Longer than [`CAPTURE_TIMEOUT`] on purpose: that one bounds the tmux round
+/// trip, this one also covers whatever is queued ahead of the request. Same
+/// distinction as [`FLUSH_SYNC_TIMEOUT`] against [`BARRIER_TIMEOUT`].
+const CAPTURE_ACK_TIMEOUT: Duration = Duration::from_millis(750);
+
 impl PaneBackend for ControlBackend {
     fn text(&mut self, target: &str, text: &str) -> Result<()> {
         let cmd = format!(
@@ -277,6 +335,47 @@ impl PaneBackend for ControlBackend {
         }
         Ok(())
     }
+    fn capture(&mut self, target: &str, spec: CaptureSpec) -> Result<PaneSnapshot> {
+        // Both commands in one round trip: they are written back to back and only
+        // the last reply is waited for. Fetching them together is also what keeps
+        // them consistent — the cursor row is an index into the content.
+        let mut cmds = vec![format!(
+            "capture-pane -t {}{} -p -S -{}",
+            tmux_quote(target),
+            if spec.escapes { " -e" } else { "" },
+            spec.history.max(0)
+        )];
+        if spec.metrics {
+            // Single quotes, not `tmux_quote`: tmux performs no replacements
+            // inside them, so `#{cursor_x}` reaches display-message intact
+            // instead of being escaped to a literal `\#{cursor_x}`.
+            cmds.push(format!(
+                "display -p -t {} '{}'",
+                tmux_quote(target),
+                PANE_METRICS_FORMAT
+            ));
+        }
+        let mut blocks = self.client()?.query(&cmds, CAPTURE_TIMEOUT)?;
+        if blocks.len() != cmds.len() {
+            anyhow::bail!("expected {} reply blocks, got {}", cmds.len(), blocks.len());
+        }
+        let metrics = if spec.metrics {
+            blocks
+                .pop()
+                .and_then(|lines| lines.first().and_then(|l| super::parse_pane_metrics(l)))
+        } else {
+            None
+        };
+        let lines = blocks.pop().unwrap_or_default();
+        // Rebuilt exactly as `capture-pane`'s stdout: one trailing newline per
+        // row, so a caller cannot tell the two backends apart.
+        let mut content = Vec::new();
+        for line in lines {
+            content.extend_from_slice(line.as_bytes());
+            content.push(b'\n');
+        }
+        Ok(PaneSnapshot { content, metrics })
+    }
     fn barrier(&mut self) -> bool {
         if let Some(client) = self.client.as_mut() {
             let completed = client.barrier(BARRIER_TIMEOUT);
@@ -301,6 +400,8 @@ impl PaneBackend for ControlBackend {
 pub(crate) enum FlushReason {
     /// The batching window elapsed.
     Window,
+    /// The queue ran dry, so the buffered text had nothing left to join.
+    Idle,
     /// A non-text request came next.
     BeforeKey,
     /// The next text is for a different pane.
@@ -313,13 +414,16 @@ pub(crate) enum FlushReason {
     Shutdown,
 }
 
-/// How long adjacent characters may wait to be combined.
+/// How long adjacent characters may wait to be combined **during a burst**.
 ///
-/// Two milliseconds is short enough to be invisible next to the ~16 ms a typical
-/// key repeat takes and the 50 ms pane refresh, and long enough to sweep up a
-/// burst of pasted-as-keystrokes characters. It is the plan's starting value;
-/// raising it trades echo latency for fewer commands, which only pays on the
-/// subprocess backend.
+/// It is not paid by ordinary typing: text is flushed as soon as the queue is
+/// empty, and between two keystrokes a human makes it always is. That is the
+/// difference between a 2 ms tax on every character and one paid only while
+/// characters are genuinely backed up — worth having once the capture path stops
+/// costing 55 ms and 2 ms is a third of the remaining budget.
+///
+/// So this bounds how long a *backlog* may keep growing before it goes out, and
+/// raising it trades echo latency for fewer commands only in that case.
 pub const DEFAULT_BATCH_WINDOW: Duration = Duration::from_millis(2);
 
 /// Byte cap on one coalesced `send-keys`. Well under any command-length limit,
@@ -463,6 +567,20 @@ impl PaneInputSink for BrokerSink {
                 let _ = handle.join();
             }
         }
+    }
+
+    fn capture(&self, target: &str, spec: CaptureSpec) -> Option<PaneSnapshot> {
+        let (ack, done) = std::sync::mpsc::channel();
+        self.send(PaneInput::Capture {
+            target: target.to_string(),
+            spec,
+            ack,
+        })
+        .ok()?;
+        // Bounded by the same reasoning as the broker's own timeout, plus the
+        // queue ahead of it: this runs on the popup's refresh thread, so waiting
+        // costs a frame and never a keystroke.
+        done.recv_timeout(CAPTURE_ACK_TIMEOUT).ok().flatten()
     }
 
     fn flush_sync(&self) -> std::result::Result<(), InputError> {
@@ -617,6 +735,15 @@ impl Broker {
                     self.dispatch(|b| b.paste(&target, &text), "paste");
                     tracing::debug!(bytes = len, "pane paste delivered");
                 }
+                PaneInput::Capture { target, spec, ack } => {
+                    // Ordered against the keys, not merely concurrent with them:
+                    // a capture that overtook buffered text would render a frame
+                    // missing characters the user has already typed, which is
+                    // the exact illusion this whole path exists to remove.
+                    self.flush(FlushReason::BeforeKey);
+                    let snapshot = self.capture(&target, spec);
+                    let _ = ack.send(snapshot);
+                }
                 PaneInput::Flush => self.flush(FlushReason::Explicit),
                 PaneInput::Barrier { ack } => {
                     self.flush(FlushReason::Explicit);
@@ -654,6 +781,15 @@ impl Broker {
                 self.pending = Some((target, text));
                 self.deadline = Some(Instant::now() + self.batch_window);
             }
+        }
+        // Nothing else is queued, so there is nothing left to coalesce *with*:
+        // waiting out the window would add its full length to the echo latency
+        // of every keystroke a human types, since at typing speed the broker is
+        // always idle between characters. Batching is for bursts — a paste
+        // arriving as keystrokes, a held key — and a burst is exactly the case
+        // where this counter is non-zero.
+        if self.depth.load(Ordering::Relaxed) == 0 {
+            self.flush(FlushReason::Idle);
         }
     }
 
@@ -719,6 +855,43 @@ impl Broker {
                 micros = started.elapsed().as_micros() as u64,
                 "pane input delivered"
             );
+        }
+    }
+
+    /// Capture a pane on the control connection, or `None` if there isn't one.
+    ///
+    /// Never falls back to the subprocess itself: the caller already owns that
+    /// path, and doing it here would block the broker — and therefore the next
+    /// keystroke — behind ~55 ms of `tmux` process startup.
+    fn capture(&mut self, target: &str, spec: CaptureSpec) -> Option<PaneSnapshot> {
+        self.maybe_connect();
+        let started = Instant::now();
+        let outcome = match self.control.as_mut() {
+            Some(control) if control.healthy() => control.capture(target, spec),
+            Some(_) => Err(anyhow::anyhow!("connection closed")),
+            None => return None,
+        };
+        match outcome {
+            Ok(snapshot) => {
+                tracing::trace!(
+                    bytes = snapshot.content.len(),
+                    micros = started.elapsed().as_micros() as u64,
+                    "pane captured over the control connection"
+                );
+                Some(snapshot)
+            }
+            Err(e) => {
+                // A read that failed is not the ambiguous write `dispatch`
+                // guards against, so a healthy connection is kept: dropping it
+                // over a slow capture would demote every subsequent *keystroke*
+                // to the 25 ms subprocess path to fix a 1 ms read.
+                if self.control.as_ref().map(|c| c.healthy()) != Some(true) {
+                    self.drop_control(&format!("capture failed: {e}"));
+                } else {
+                    tracing::debug!(error = %e, "pane capture failed; using the subprocess path");
+                }
+                None
+            }
         }
     }
 

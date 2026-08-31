@@ -30,6 +30,15 @@ pub trait TmuxOperations: Send + Sync {
     /// Check if a window exists
     fn window_exists(&self, target: &str) -> Result<bool>;
 
+    /// Every window on the server as `session:window`.
+    ///
+    /// One call answers [`window_exists`](Self::window_exists) for every task on
+    /// the board. The per-task form is still the right shape for one-off checks;
+    /// this exists because the status refresh asks about every task at once, on a
+    /// timer, and N processes for one listing is the difference that shows up in
+    /// tmux's CPU as a board grows.
+    fn list_window_targets(&self) -> Result<Vec<String>>;
+
     /// Send keys to a window (with Enter at the end).
     ///
     /// Like [`send_key`](Self::send_key), this goes through
@@ -101,6 +110,81 @@ pub struct PaneMetrics {
     /// returns exactly the visible rows, and there is nothing for agtx to
     /// scroll through.
     pub history_size: usize,
+}
+
+/// The `display -p` format that yields a [`PaneMetrics`], in field order.
+///
+/// One constant because two paths send it — the subprocess client and the
+/// control connection — and a field added to one spelling but not the other
+/// would silently misparse into the wrong struct fields rather than fail.
+///
+/// Verified against tmux 3.5a: `-t` is honoured for the expansion, so this
+/// reports the *target* pane and not the attached client's active one, which is
+/// what makes it usable from a control client attached elsewhere.
+pub const PANE_METRICS_FORMAT: &str = "#{cursor_x} #{cursor_y} #{pane_height} #{history_size}";
+
+/// Parse what [`PANE_METRICS_FORMAT`] produces. Anything unexpected is `None`:
+/// a half-parsed pane geometry would mistrim the popup's content.
+pub fn parse_pane_metrics(line: &str) -> Option<PaneMetrics> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    Some(PaneMetrics {
+        cursor_x: parts[0].parse().ok()?,
+        cursor_y: parts[1].parse().ok()?,
+        pane_height: parts[2].parse().ok()?,
+        history_size: parts[3].parse().ok()?,
+    })
+}
+
+/// What a capture should ask tmux for.
+///
+/// The popup and the status refresh want different things from the same command,
+/// and the difference is not cosmetic: `-e` embeds SGR escapes, which is what
+/// the popup renders from and what a *text scan* — dialog matching, content
+/// hashing — must not have to parse around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureSpec {
+    /// Scrollback lines (`-S -<n>`). Zero captures only the visible pane.
+    pub history: i32,
+    /// Include SGR escapes (`-e`).
+    pub escapes: bool,
+    /// Also fetch cursor and geometry. A second tmux command, so only the popup
+    /// — which needs the cursor row to trim — pays for it.
+    pub metrics: bool,
+}
+
+impl CaptureSpec {
+    /// What the popup renders: scrollback, colour, and the geometry to trim by.
+    pub fn popup(history: i32) -> Self {
+        Self {
+            history,
+            escapes: true,
+            metrics: true,
+        }
+    }
+
+    /// What a text scan needs: the visible pane, no escapes, no geometry.
+    /// Matches `TmuxOperations::capture_pane` byte for byte.
+    pub fn text() -> Self {
+        Self {
+            history: 0,
+            escapes: false,
+            metrics: false,
+        }
+    }
+}
+
+/// One pane capture: its content and the geometry needed to trim it.
+///
+/// The two are fetched together because they are only consistent together — the
+/// cursor row is an index *into* the content, so pairing a capture with metrics
+/// taken a frame later can trim off a line the user just typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneSnapshot {
+    pub content: Vec<u8>,
+    pub metrics: Option<PaneMetrics>,
 }
 
 impl PaneMetrics {
@@ -212,6 +296,22 @@ impl TmuxOperations for RealTmuxOps {
         Ok(())
     }
 
+    fn list_window_targets(&self) -> Result<Vec<String>> {
+        let output = std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["list-windows", "-a", "-F", "#{session_name}:#{window_name}"])
+            .output()?;
+        if !output.status.success() {
+            // No server at all is "no windows", not an error: it is the normal
+            // state before the first task is started.
+            return Ok(Vec::new());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
     fn window_exists(&self, target: &str) -> Result<bool> {
         let output = std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
@@ -291,29 +391,14 @@ impl TmuxOperations for RealTmuxOps {
     fn pane_metrics(&self, target: &str) -> Option<PaneMetrics> {
         let output = std::process::Command::new("tmux")
             .args(["-L", super::AGENT_SERVER])
-            .args([
-                "display",
-                "-p",
-                "-t",
-                target,
-                "#{cursor_x} #{cursor_y} #{pane_height} #{history_size}",
-            ])
+            .args(["display", "-p", "-t", target, PANE_METRICS_FORMAT])
             .output()
             .ok()?;
 
-        if output.status.success() {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            let parts: Vec<&str> = output_str.split_whitespace().collect();
-            if parts.len() == 4 {
-                return Some(PaneMetrics {
-                    cursor_x: parts[0].parse().ok()?,
-                    cursor_y: parts[1].parse().ok()?,
-                    pane_height: parts[2].parse().ok()?,
-                    history_size: parts[3].parse().ok()?,
-                });
-            }
+        if !output.status.success() {
+            return None;
         }
-        None
+        parse_pane_metrics(&String::from_utf8_lossy(&output.stdout))
     }
 
     fn resize_window(&self, target: &str, width: u16, height: u16) -> Result<()> {

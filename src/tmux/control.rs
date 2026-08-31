@@ -21,8 +21,17 @@
 //!   On 3.5a a control client with no size set turned out to be size-neutral
 //!   already, but the flag makes that a guarantee rather than an observation.
 //! - **`no-output`.** Without it every byte an agent paints is mirrored down our
-//!   stdout as `%output`. The popup gets its content from `capture-pane`, so that
-//!   is pure cost — a busy agent would push megabytes through the reader thread.
+//!   stdout as `%output`. The popup gets its content from `capture-pane` — issued
+//!   as a command on this same connection, see [`ControlClient::query`] — so for
+//!   *this* client the mirror is pure cost, and suppressing it does not suppress
+//!   command replies, which are what a query reads.
+//!
+//!   The cost is not the volume, despite what this comment used to claim: a pane
+//!   painting flat out pushes **29 KB/s across 56 frames/s** (tmux 3.5a, macOS),
+//!   not megabytes. It is that this client has no use for the bytes. That
+//!   distinction matters because `%output` is the only "this pane changed" push
+//!   tmux offers, and it is the one route to a popup that never polls — see
+//!   `docs/planning/pane-output-push.md`, which has the measurements.
 //! - **The session is only an attach point.** Commands carry their own
 //!   `session:window` target and are executed server-wide, so one client drives
 //!   every window on the `agtx` server. Verified: a client attached to session
@@ -118,7 +127,15 @@ pub enum Frame {
 #[derive(Default)]
 pub struct FrameParser {
     buf: Vec<u8>,
-    in_block: bool,
+    /// Command id of the block currently open, if any.
+    ///
+    /// Not a bool, because a block's payload is arbitrary text and a *pane
+    /// capture* is the most arbitrary there is: an agent that prints a line
+    /// beginning `%end ` would otherwise close the block early and desync
+    /// `completed`, which barriers and queries both count on. tmux pairs every
+    /// `%end`/`%error` with its `%begin`'s id, so requiring the match costs
+    /// nothing and makes the spoof need today's exact command number.
+    open_cmd: Option<u64>,
 }
 
 impl FrameParser {
@@ -146,17 +163,17 @@ impl FrameParser {
         // A `%begin` block's payload is arbitrary text, so it is classified by
         // position, never by a leading `%`.
         if let Some(cmd) = frame_cmd(&line, "%begin") {
-            self.in_block = true;
+            self.open_cmd = Some(cmd);
             return Frame::Begin { cmd };
         }
-        if self.in_block {
-            if let Some(cmd) = frame_cmd(&line, "%end") {
-                self.in_block = false;
-                return Frame::End { cmd };
+        if let Some(open) = self.open_cmd {
+            if frame_cmd(&line, "%end") == Some(open) {
+                self.open_cmd = None;
+                return Frame::End { cmd: open };
             }
-            if let Some(cmd) = frame_cmd(&line, "%error") {
-                self.in_block = false;
-                return Frame::Error { cmd };
+            if frame_cmd(&line, "%error") == Some(open) {
+                self.open_cmd = None;
+                return Frame::Error { cmd: open };
             }
             return Frame::Payload(line);
         }
@@ -193,6 +210,49 @@ struct ClientState {
     /// name the target, not the keys.
     last_error: Option<String>,
     errors: u64,
+    /// The one in-flight [`ControlClient::query`], if any. Single-slot because
+    /// the client is owned by one thread, which is blocked while it waits.
+    query: Option<QueryState>,
+}
+
+/// A command whose *output* a caller wants, identified by the completion
+/// indices its blocks will carry.
+///
+/// Commands complete in the order they were issued, so `completed` — the same
+/// counter [`ControlClient::barrier`] waits on — is enough to tell which block
+/// belongs to the query. Nothing has to parse `%begin`'s command id.
+#[derive(Debug)]
+struct QueryState {
+    first: u64,
+    last: u64,
+    blocks: Vec<Vec<String>>,
+    /// First `%error` payload in the range. A query is reported as failed even
+    /// when later commands in the same batch succeed.
+    failed: Option<String>,
+    done: bool,
+}
+
+impl ClientState {
+    /// Hand a just-closed block to the waiting query, if it belongs to one.
+    ///
+    /// Called with `completed` already incremented, so it *is* the index of the
+    /// block that closed.
+    fn record_block(&mut self, payload: Vec<String>, error: Option<String>) {
+        let idx = self.completed;
+        let Some(query) = self.query.as_mut() else {
+            return;
+        };
+        if query.done || idx < query.first || idx > query.last {
+            return;
+        }
+        if let Some(err) = error {
+            query.failed.get_or_insert(err);
+        }
+        query.blocks.push(payload);
+        if idx >= query.last {
+            query.done = true;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -329,6 +389,94 @@ impl ControlClient {
         Ok(())
     }
 
+    /// Run commands and return the **output** of each, block by block.
+    ///
+    /// The write path is fire-and-forget by design — ordering, not
+    /// acknowledgement, is what pane input needs — so this is the one place that
+    /// reads a reply back. It exists for the popup's pane capture: two
+    /// `tmux` subprocesses cost ~55 ms on macOS against ~1 ms for the same two
+    /// commands here, and that difference is most of the popup's echo latency.
+    ///
+    /// All commands are written before waiting, so a batch costs one round trip
+    /// rather than one per command. On timeout the query slot is cleared and the
+    /// blocks collected so far are discarded: a late reply must not be handed to
+    /// whoever asks next.
+    ///
+    /// An `Err` from the write half is **ambiguous** in exactly the way
+    /// [`write_command`](Self::write_command) documents, and callers must treat
+    /// it the same way.
+    pub fn query(&mut self, cmds: &[String], timeout: Duration) -> Result<Vec<Vec<String>>> {
+        if cmds.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Indices the replies will carry. Every block for a command issued
+        // earlier has a smaller index, so one closing between here and the write
+        // below is ignored rather than mistaken for ours.
+        let first = self.issued + self.offset + 1;
+        let last = first + cmds.len() as u64 - 1;
+        {
+            let mut st = self
+                .shared
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("control-mode state poisoned"))?;
+            if !st.alive {
+                anyhow::bail!("tmux control client is gone");
+            }
+            st.query = Some(QueryState {
+                first,
+                last,
+                blocks: Vec::new(),
+                failed: None,
+                done: false,
+            });
+        }
+        for cmd in cmds {
+            if let Err(e) = self.write_command(cmd) {
+                self.clear_query();
+                return Err(e);
+            }
+        }
+
+        let deadline = Instant::now() + timeout;
+        let mut st = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("control-mode state poisoned"))?;
+        loop {
+            let done = st.query.as_ref().map(|q| q.done).unwrap_or(true);
+            if done || !st.alive {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                st.query = None;
+                anyhow::bail!("tmux control query timed out after {timeout:?}");
+            }
+            match self.shared.cv.wait_timeout(st, remaining) {
+                Ok((next, _)) => st = next,
+                Err(_) => anyhow::bail!("control-mode state poisoned"),
+            }
+        }
+        let Some(query) = st.query.take() else {
+            anyhow::bail!("tmux control query was never registered");
+        };
+        if let Some(err) = query.failed {
+            anyhow::bail!("tmux rejected the command: {err}");
+        }
+        if !query.done {
+            anyhow::bail!("tmux control client exited during the query");
+        }
+        Ok(query.blocks)
+    }
+
+    fn clear_query(&mut self) {
+        if let Ok(mut st) = self.shared.state.lock() {
+            st.query = None;
+        }
+    }
+
     /// Block until every command written so far has been executed by the server.
     ///
     /// Used before handing work to the subprocess path, which travels a
@@ -414,24 +562,28 @@ fn read_loop(mut stdout: std::process::ChildStdout, shared: Arc<Shared>) {
             match frame {
                 Frame::Begin { .. } => block_payload.clear(),
                 Frame::End { .. } => {
-                    let ready = block_payload.iter().any(|l| l == READY_SENTINEL);
-                    shared.signal(|st| {
+                    // Moved, not copied: a capture block is the whole pane, and
+                    // this runs on every command the broker issues.
+                    let payload = std::mem::take(&mut block_payload);
+                    let ready = payload.iter().any(|l| l == READY_SENTINEL);
+                    shared.signal(move |st| {
                         st.completed += 1;
                         if ready {
                             st.ready = true;
                         }
+                        st.record_block(payload, None);
                     });
-                    block_payload.clear();
                 }
                 Frame::Error { cmd } => {
-                    let msg = block_payload.join("; ");
+                    let payload = std::mem::take(&mut block_payload);
+                    let msg = payload.join("; ");
                     tracing::debug!(cmd, error = %msg, "tmux control command failed");
-                    shared.signal(|st| {
+                    shared.signal(move |st| {
                         st.completed += 1;
                         st.errors += 1;
-                        st.last_error = Some(msg);
+                        st.last_error = Some(msg.clone());
+                        st.record_block(Vec::new(), Some(msg));
                     });
-                    block_payload.clear();
                 }
                 Frame::Payload(line) => block_payload.push(line),
                 Frame::Notify(line) => {

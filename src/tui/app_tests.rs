@@ -56,7 +56,11 @@ fn board_scrollbar_is_hidden_without_overflow_or_height() {
 fn styled_footer_emphasizes_shortcuts_without_changing_text() {
     let styles = TuiStyles::from_theme(&ThemeConfig::default());
     let line = styled_footer(" [o] new  [Enter] open ", styles);
-    let rendered: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+    let rendered: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
     assert_eq!(rendered, "[o] new  [Enter] open");
     assert_eq!(line.spans[0].style.fg, Some(styles.selected));
     assert_eq!(line.spans[1].style.fg, Some(styles.dimmed));
@@ -83,7 +87,11 @@ fn wizard_plugin_descriptions_wrap_and_align() {
 
     assert!(lines.len() > 1);
     for line in &lines {
-        assert!(line.width() <= 40, "line reached the right margin: {:?}", line);
+        assert!(
+            line.width() <= 40,
+            "line reached the right margin: {:?}",
+            line
+        );
     }
     let continuation: String = lines[1]
         .spans
@@ -863,9 +871,118 @@ fn control_modifiers_reach_the_pane() {
 }
 
 #[test]
-fn shell_popup_uses_twenty_fps_poll_interval() {
-    assert_eq!(main_event_poll_timeout(true), std::time::Duration::from_millis(50));
-    assert_eq!(main_event_poll_timeout(false), std::time::Duration::from_millis(100));
+fn an_unreadable_window_listing_never_marks_a_task_exited() {
+    use std::collections::HashSet;
+    let live: HashSet<String> = ["pj:t1".to_string()].into_iter().collect();
+
+    assert!(!window_is_gone(Some("pj:t1"), Some(&live)));
+    assert!(window_is_gone(Some("pj:gone"), Some(&live)));
+
+    // The direction that matters. One listing now answers for every task, so a
+    // failed listing read as "no windows" would mark the whole board `Exited` —
+    // a visible, wrong status change — where the per-task check it replaced
+    // failed safe (`!window_exists(sn).unwrap_or(true)`).
+    assert!(
+        !window_is_gone(Some("pj:t1"), None),
+        "an unreadable listing must mean unknown, not gone"
+    );
+    // An empty-but-readable listing is real information: the windows are gone.
+    assert!(window_is_gone(Some("pj:t1"), Some(&HashSet::new())));
+    // A task with no session was never running in the first place.
+    assert!(!window_is_gone(None, Some(&HashSet::new())));
+}
+
+#[test]
+fn the_pane_watcher_only_wakes_the_loop_when_the_pane_changed() {
+    // The property the whole event-driven loop rests on: an agent painting
+    // nothing produces no wake-ups, so no frame is drawn and no capture is
+    // re-parsed. Asserted on the comparison itself, which is what the watcher
+    // thread decides with.
+    let a = (
+        "task-x".to_string(),
+        b"same".to_vec(),
+        Some(crate::tmux::PaneMetrics {
+            cursor_x: 1,
+            cursor_y: 2,
+            pane_height: 30,
+            history_size: 0,
+        }),
+    );
+    assert!(!pane_capture_changed(&Some(a.clone()), &a.0, &a.1, &a.2));
+
+    // Content, geometry and target each count as a change on their own: a
+    // cursor that moved without the text changing is still a redraw, and a
+    // capture for a different pane is never this pane's content.
+    let mut moved = a.clone();
+    moved.2.as_mut().unwrap().cursor_x = 9;
+    assert!(pane_capture_changed(
+        &Some(a.clone()),
+        &moved.0,
+        &moved.1,
+        &moved.2
+    ));
+    assert!(pane_capture_changed(&Some(a.clone()), &a.0, b"other", &a.2));
+    assert!(pane_capture_changed(&Some(a.clone()), "task-y", &a.1, &a.2));
+    // Nothing seen yet always sends, so a popup that seeded its own content
+    // still gets a first real capture.
+    assert!(pane_capture_changed(&None, &a.0, &a.1, &a.2));
+}
+
+#[test]
+fn the_watcher_backs_off_only_after_the_pane_has_settled() {
+    // Fast while the pane is moving — that is the cadence a keystroke's echo
+    // rides on — and slow once it has not moved for a while, because then
+    // nobody is waiting on a millisecond.
+    assert_eq!(pane_watch_interval(0), SHELL_REFRESH_INTERVAL);
+    assert_eq!(
+        pane_watch_interval(PANE_IDLE_ROUNDS - 1),
+        SHELL_REFRESH_INTERVAL
+    );
+    assert_eq!(pane_watch_interval(PANE_IDLE_ROUNDS), PANE_IDLE_INTERVAL);
+    assert!(PANE_IDLE_INTERVAL > SHELL_REFRESH_INTERVAL);
+    // The back-off must not be reachable between two keystrokes at any human
+    // typing speed, or the first character after a pause would lag.
+    assert!(SHELL_REFRESH_INTERVAL * PANE_IDLE_ROUNDS >= std::time::Duration::from_millis(150));
+}
+
+#[test]
+fn a_poke_puts_the_watcher_back_on_the_fast_cadence() {
+    // The regression this exists for: a poke's own capture runs before the key
+    // it announced has reached the pane, so it sees nothing new. If that left
+    // the count alone, the echo would wait out another idle interval — which is
+    // the back-off charging exactly what it was built not to.
+    let settled = PANE_IDLE_ROUNDS + 10;
+    assert_eq!(pane_watch_interval(settled), PANE_IDLE_INTERVAL);
+    assert_eq!(
+        pane_watch_interval(pane_watch_rounds_after_wait(settled, true)),
+        SHELL_REFRESH_INTERVAL,
+        "a keystroke must return the watcher to the fast cadence"
+    );
+    // A wait that simply expired changes nothing: an idle pane stays idle.
+    assert_eq!(pane_watch_rounds_after_wait(settled, false), settled);
+}
+
+#[test]
+fn a_pane_watch_follows_the_open_popup() {
+    let watch = PaneWatch::default();
+    assert_eq!(watch.target(), None);
+
+    watch.follow(Some("task-one"));
+    assert_eq!(watch.target().as_deref(), Some("task-one"));
+    let after_first = watch.poke_count();
+
+    // Following the same target again must not poke: this is called every loop
+    // iteration, and a poke means "capture now at the fast cadence".
+    watch.follow(Some("task-one"));
+    assert_eq!(watch.poke_count(), after_first);
+
+    // A switch and a close both have to reach the watcher, or it would keep
+    // capturing a pane nobody is looking at.
+    watch.follow(Some("task-two"));
+    assert_eq!(watch.target().as_deref(), Some("task-two"));
+    assert_ne!(watch.poke_count(), after_first);
+    watch.follow(None);
+    assert_eq!(watch.target(), None);
 }
 
 // =============================================================================
@@ -905,6 +1022,81 @@ fn test_capture_tmux_pane_snapshot() {
     // The metrics come back with it, so a popup can seed `has_scrollback()`
     // at open time instead of waiting for the first refresh.
     assert_eq!(metrics.map(|m| m.history_size), Some(0));
+}
+
+/// A sink that answers captures from a canned snapshot, standing in for a live
+/// control connection.
+#[cfg(feature = "test-mocks")]
+struct CapturingSink(Option<crate::tmux::PaneSnapshot>);
+
+#[cfg(feature = "test-mocks")]
+impl PaneInputSink for CapturingSink {
+    fn send(
+        &self,
+        _input: crate::tmux::PaneInput,
+    ) -> std::result::Result<(), crate::tmux::InputError> {
+        Ok(())
+    }
+    fn capture(
+        &self,
+        _target: &str,
+        _spec: crate::tmux::CaptureSpec,
+    ) -> Option<crate::tmux::PaneSnapshot> {
+        self.0.clone()
+    }
+}
+
+/// The popup's capture goes to the broker's control connection when there is
+/// one — the ~55 ms of `tmux` process startup this replaces was most of the
+/// delay between typing into a task pane and seeing the character.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_popup_capture_prefers_the_input_connection() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    // Not `times(0)` on a permissive mock: an unexpected call panics, which is
+    // the assertion. Neither subprocess may run when the sink answers.
+    mock_tmux.expect_capture_pane_with_history().never();
+    mock_tmux.expect_pane_metrics().never();
+
+    let sink = CapturingSink(Some(crate::tmux::PaneSnapshot {
+        content: b"from control\n".to_vec(),
+        metrics: Some(crate::tmux::PaneMetrics {
+            cursor_x: 0,
+            cursor_y: 0,
+            pane_height: 1,
+            history_size: 7,
+        }),
+    }));
+
+    let (content, metrics) = capture_pane_for_popup("test-window", 500, &sink, &mock_tmux);
+    // Trimmed to the cursor, exactly as the subprocess path is.
+    assert_eq!(content, b"from control".to_vec());
+    assert_eq!(metrics.map(|m| m.history_size), Some(7));
+}
+
+/// And falls back untouched when it does not: control mode is off, the
+/// connection is down, or the queue is full. A missed capture costs one frame at
+/// the old speed, never a blank popup.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_popup_capture_falls_back_to_the_subprocess_path() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux
+        .expect_capture_pane_with_history()
+        .returning(|_, _| b"from subprocess\n".to_vec());
+    mock_tmux.expect_pane_metrics().returning(|_| {
+        Some(crate::tmux::PaneMetrics {
+            cursor_x: 0,
+            cursor_y: 0,
+            pane_height: 1,
+            history_size: 3,
+        })
+    });
+
+    let (content, metrics) =
+        capture_pane_for_popup("test-window", 500, &CapturingSink(None), &mock_tmux);
+    assert_eq!(content, b"from subprocess".to_vec());
+    assert_eq!(metrics.map(|m| m.history_size), Some(3));
 }
 
 // =============================================================================
@@ -11498,12 +11690,19 @@ fn test_gemini_hooks_merge_with_existing_settings() {
     )
     .unwrap();
 
-    assert_eq!(v["theme"], serde_json::json!("Dracula"), "user key survived");
+    assert_eq!(
+        v["theme"],
+        serde_json::json!("Dracula"),
+        "user key survived"
+    );
     assert_eq!(v["mcpServers"]["agtx"]["command"].is_string(), true);
     let before_tool = v["hooks"]["BeforeTool"].as_array().unwrap();
     assert_eq!(before_tool.len(), 2, "user hook kept, agtx hook appended");
     assert_eq!(before_tool[0]["hooks"][0]["command"], "mine.sh");
-    assert_eq!(v["hooks"]["AfterAgent"][0]["hooks"][0]["command"].is_string(), true);
+    assert_eq!(
+        v["hooks"]["AfterAgent"][0]["hooks"][0]["command"].is_string(),
+        true
+    );
 }
 
 /// Redeploying must replace agtx's entries rather than accumulate them —
@@ -11566,7 +11765,10 @@ fn test_antigravity_hooks_preserve_a_projects_own_hooks() {
     )
     .unwrap();
 
-    assert_eq!(v["lint-checker"]["PostToolUse"][0]["hooks"][0]["command"], "./lint.sh");
+    assert_eq!(
+        v["lint-checker"]["PostToolUse"][0]["hooks"][0]["command"],
+        "./lint.sh"
+    );
     // Its payload carries no event name, so every handler must name its own.
     assert!(v["agtx"]["Stop"][0]["command"]
         .as_str()
@@ -11590,9 +11792,10 @@ fn test_cursor_hooks_carry_the_version_envelope() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
     write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
-    let v: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap())
-            .unwrap();
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(v["version"], serde_json::json!(1));
     // Flat `{command}`, not the Claude `{hooks:[{type,command}]}` wrapper —
     // cursor loads the wrapped form without complaint and never fires it.
@@ -11659,7 +11862,10 @@ fn test_cursor_hooks_preserve_a_projects_own_hooks() {
     let stop = v["hooks"]["stop"].as_array().unwrap();
     assert_eq!(stop.len(), 2);
     assert_eq!(stop[0]["command"], "./mine.sh");
-    assert!(stop[1]["command"].as_str().unwrap().contains("hook --env cursor"));
+    assert!(stop[1]["command"]
+        .as_str()
+        .unwrap()
+        .contains("hook --env cursor"));
 }
 
 /// Redeploying must replace agtx's own flat `{command}` entries, not stack them.
@@ -13558,9 +13764,7 @@ fn scroll_keys_go_to_the_agent_when_tmux_has_no_history() {
     // `handle_popup_scroll`.
     assert_eq!(
         keys,
-        vec![
-            "PageUp", "PageDown", "PageUp", "PageDown", "PageUp", "PageDown", "End"
-        ]
+        vec!["PageUp", "PageDown", "PageUp", "PageDown", "PageUp", "PageDown", "End"]
     );
     assert_eq!(
         app.state.shell_popup.as_ref().unwrap().scroll_offset,
@@ -13672,33 +13876,17 @@ fn control_mode_is_on_unless_turned_off() {
     // There is no config field: a connection that fails or dies already falls
     // back to the subprocess backend by itself. `AGTX_TMUX_CONTROL` stays as a
     // one-run escape hatch so a bug report can be bisected across the two lanes.
-    //
-    // Serialised on a mutex and restored afterwards: the variable is process
-    // global, and `cargo test` runs these on threads that share it.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let previous = std::env::var("AGTX_TMUX_CONTROL").ok();
-
-    std::env::remove_var("AGTX_TMUX_CONTROL");
-    assert!(control_mode_enabled(), "on when nothing is set");
-
+    assert!(control_mode_from_env(None), "on when nothing is set");
     for off in ["0", "false", "no"] {
-        std::env::set_var("AGTX_TMUX_CONTROL", off);
-        assert!(!control_mode_enabled(), "{off} turns it off");
+        assert!(!control_mode_from_env(Some(off)), "{off} turns it off");
     }
     for on in ["1", "true", "yes"] {
-        std::env::set_var("AGTX_TMUX_CONTROL", on);
-        assert!(control_mode_enabled(), "{on} leaves it on");
+        assert!(control_mode_from_env(Some(on)), "{on} leaves it on");
     }
     // Anything unrecognised must not read as "off" — a typo in the escape hatch
     // should leave the default alone rather than silently change lanes.
-    std::env::set_var("AGTX_TMUX_CONTROL", "maybe");
-    assert!(control_mode_enabled());
-
-    match previous {
-        Some(value) => std::env::set_var("AGTX_TMUX_CONTROL", value),
-        None => std::env::remove_var("AGTX_TMUX_CONTROL"),
-    }
+    assert!(control_mode_from_env(Some("maybe")));
+    assert!(control_mode_from_env(Some("")));
 }
 
 #[test]
