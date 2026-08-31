@@ -9364,6 +9364,32 @@ const PANE_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 /// something above it is wrong.
 const PANE_PUSH_BACKSTOP: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Slowest a capture may be driven by the **agent painting**, as opposed to by
+/// the user typing.
+///
+/// The two deserve different answers and used to share one. Nobody can read text
+/// scrolling past at 100 frames a second, but everybody notices their own
+/// keystroke arriving late — so output is sampled at ~30 fps while typing keeps
+/// [`SHELL_REFRESH_INTERVAL`].
+///
+/// This is not a micro-optimisation; without it a pane painting flat out is
+/// *worse* than the polling it replaced. A capture makes the tmux server format
+/// the whole pane, and at 10 ms that is 100 formats a second: measured
+/// agtx 9.0% + tmux 24.1% of a core, against 5.3% + 8.4% for 1.0.2, which was
+/// accidentally protected by its own slowness — one `capture-pane` process took
+/// 55 ms, so it could not ask more than ~18 times a second.
+const PANE_OUTPUT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// How long after a keystroke captures stay on the fast cadence.
+///
+/// A keystroke's echo does not arrive with the keystroke: the key reaches the
+/// pane in ~1 ms, the agent repaints some milliseconds later, and *that* is what
+/// the watcher sees — as a paint, indistinguishable from the agent's own output.
+/// Rate-limiting paints to 33 ms without this window would therefore delay the
+/// echo of every character by up to 33 ms, which is the one thing this whole
+/// lane exists to avoid.
+const PANE_TYPING_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// How long to wait before trying to attach an output watch again.
 ///
 /// Attaching costs two `tmux` processes (the pane id, then the client), and the
@@ -9607,6 +9633,9 @@ fn spawn_pane_watcher(
             let mut push: Option<PanePush> = None;
             let mut push_retry_at: Option<Instant> = None;
             let mut watched_target = String::new();
+            // When the user last typed, which decides how fast paints are
+            // sampled — see `PANE_TYPING_WINDOW`.
+            let mut last_keystroke: Option<Instant> = None;
             loop {
                 // Wait for something to watch. No popup open is the common case
                 // and costs one blocked thread — and, because the output watch is
@@ -9706,14 +9735,24 @@ fn spawn_pane_watcher(
                     if state.stopped {
                         return;
                     }
+                    if state.poke != poke {
+                        last_keystroke = Some(Instant::now());
+                    }
                     unchanged = pane_watch_rounds_after_wait(unchanged, state.poke != poke);
                 } else {
+                    if state.poke != poke {
+                        last_keystroke = Some(Instant::now());
+                    }
                     // A poke or a paint landed while this capture was in flight.
                     unchanged = pane_watch_rounds_after_wait(unchanged, true);
                 }
 
                 // The rate limit, under push only — polling already paces itself.
-                if let Some(remaining) = push_rate_limit_wait(pushing, captured_at.elapsed()) {
+                if let Some(remaining) = push_rate_limit_wait(
+                    pushing,
+                    captured_at.elapsed(),
+                    last_keystroke.map(|at| at.elapsed()),
+                ) {
                     std::thread::sleep(remaining);
                 }
             }
@@ -9729,11 +9768,21 @@ fn spawn_pane_watcher(
 fn push_rate_limit_wait(
     pushing: bool,
     since_last_capture: std::time::Duration,
+    since_last_keystroke: Option<std::time::Duration>,
 ) -> Option<std::time::Duration> {
-    if !pushing || since_last_capture >= SHELL_REFRESH_INTERVAL {
+    if !pushing {
         return None;
     }
-    Some(SHELL_REFRESH_INTERVAL - since_last_capture)
+    let floor = match since_last_keystroke {
+        // The user is typing: their own echo is what is being waited on.
+        Some(since) if since < PANE_TYPING_WINDOW => SHELL_REFRESH_INTERVAL,
+        // Nobody is waiting on a single frame of the agent's output.
+        _ => PANE_OUTPUT_MIN_INTERVAL,
+    };
+    if since_last_capture >= floor {
+        return None;
+    }
+    Some(floor - since_last_capture)
 }
 
 /// The output-watch connection for the pane currently being followed.

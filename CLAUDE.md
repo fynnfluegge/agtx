@@ -832,6 +832,14 @@ priced the other two wrongly. They are now separate:
     interval keeps the ceiling, since a pane painting flat out emits ~56 notifications/s and one
     capture each would spin at one per 1.5 ms capture. Measured: typing costs ~0.9–1.4% of a core
     against ~2.0–2.6% polling.
+  - **The ceiling has two heights, and that is load-bearing.** A capture makes the *tmux server*
+    format the whole pane, so 100 a second is expensive where nobody is watching for one frame:
+    `PANE_OUTPUT_MIN_INTERVAL` (33 ms) paces the agent's output, `SHELL_REFRESH_INTERVAL` paces the
+    user's own echo, and `PANE_TYPING_WINDOW` (250 ms) keeps the fast one in force after a keystroke
+    — because the echo arrives as a *paint*, indistinguishable from the agent's output, so pacing
+    paints without the window would delay every character. Sharing one interval made a pane painting
+    flat out **2.4× worse than 1.0.2**, which was protected by its own slowness: a 55 ms
+    `capture-pane` process could not be asked more than ~18 times a second.
   - **poll** — the timer, when push is unavailable (`AGTX_TMUX_PUSH=0`, control mode off, or a pane
     whose id cannot be read). Not a degraded copy: it is the whole design in that case.
 

@@ -1004,17 +1004,52 @@ fn following_a_new_pane_drops_the_previous_pane_id() {
 #[test]
 fn the_interval_becomes_a_rate_limit_under_push() {
     use std::time::Duration;
+    let typing = Some(Duration::ZERO);
     // Push removes the floor: with a signal driving captures, the interval's
-    // only job is to stop a pane painting flat out (~56 notifications/s) from
-    // driving one capture per notification.
+    // only job is to stop a pane painting flat out from driving one capture per
+    // notification.
     assert_eq!(
-        push_rate_limit_wait(true, Duration::ZERO),
+        push_rate_limit_wait(true, Duration::ZERO, typing),
         Some(SHELL_REFRESH_INTERVAL)
     );
-    assert_eq!(push_rate_limit_wait(true, SHELL_REFRESH_INTERVAL), None);
-    assert_eq!(push_rate_limit_wait(true, SHELL_REFRESH_INTERVAL * 2), None);
+    assert_eq!(
+        push_rate_limit_wait(true, SHELL_REFRESH_INTERVAL, typing),
+        None
+    );
     // Polling paces itself through its own wait, so it must never sleep twice.
-    assert_eq!(push_rate_limit_wait(false, Duration::ZERO), None);
+    assert_eq!(push_rate_limit_wait(false, Duration::ZERO, typing), None);
+}
+
+#[test]
+fn output_is_sampled_slower_than_a_keystroke_echo() {
+    use std::time::Duration;
+    // The two reasons to capture deserve different answers. Sharing one made a
+    // pane painting flat out *worse* than the polling it replaced: a capture
+    // makes the tmux server format the whole pane, and at 10 ms that is 100
+    // formats a second — measured agtx 9.0% + tmux 24.1% of a core against
+    // 5.3% + 8.4% for 1.0.2, which could not ask more than ~18 times a second
+    // because each `capture-pane` cost it a 55 ms process.
+    assert!(PANE_OUTPUT_MIN_INTERVAL > SHELL_REFRESH_INTERVAL);
+
+    // Nobody is waiting on one frame of an agent's output.
+    let idle_hands = Some(PANE_TYPING_WINDOW * 2);
+    assert_eq!(
+        push_rate_limit_wait(true, Duration::ZERO, idle_hands),
+        Some(PANE_OUTPUT_MIN_INTERVAL)
+    );
+    assert_eq!(
+        push_rate_limit_wait(true, Duration::ZERO, None),
+        Some(PANE_OUTPUT_MIN_INTERVAL)
+    );
+
+    // But a keystroke's echo arrives as a *paint*, indistinguishable from the
+    // agent's own output — so for a window after typing, paints stay fast or
+    // every character would echo up to `PANE_OUTPUT_MIN_INTERVAL` late.
+    assert_eq!(
+        push_rate_limit_wait(true, Duration::ZERO, Some(PANE_TYPING_WINDOW / 2)),
+        Some(SHELL_REFRESH_INTERVAL)
+    );
+    assert!(PANE_TYPING_WINDOW > SHELL_REFRESH_INTERVAL * 4);
 }
 
 #[test]
