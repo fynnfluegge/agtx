@@ -297,9 +297,11 @@ crossterm key event
 `SHELL_REFRESH_INTERVAL` is what bounds how stale the pane on screen is, and it only became a
 real knob once the capture stopped costing 55 ms — while the capture was slower than the gate,
 lowering it changed nothing at all. It doubles as the event-poll timeout, so its cost is per
-wake-up rather than per capture: a full `draw()` re-parses the capture (~26 µs release, ~141 µs
-debug for a 3 KiB pane) and each refresh spawns a thread (~50 µs). Drawing only when the content
-changed is what would make a small value free.
+capture rather than per wake-up, and the far side is the expensive one: a capture makes the tmux
+server format the whole pane. The ANSI parse (~26 µs release, ~141 µs debug for a 3 KiB pane) is
+done **once per change on the watcher thread**, not once per frame on the UI thread — `ShellPopup`
+carries `cached_lines` beside `cached_content`, set together by `set_content` so the bytes change
+detection compares and the lines the popup renders cannot drift.
 
 **Every key used to be a process.** `send_key` starts a `tmux` client and waits for it: **~20 ms
 p95** idle, 40–50 ms under load, on the input thread, per keystroke. That is the whole reason this
@@ -834,8 +836,8 @@ priced the other two wrongly. They are now separate:
     against ~2.0–2.6% polling.
   - **The ceiling has two heights, and that is load-bearing.** A capture makes the *tmux server*
     format the whole pane, so 100 a second is expensive where nobody is watching for one frame:
-    `PANE_OUTPUT_MIN_INTERVAL` (33 ms) paces the agent's output, `SHELL_REFRESH_INTERVAL` paces the
-    user's own echo, and `PANE_TYPING_WINDOW` (250 ms) keeps the fast one in force after a keystroke
+    `PANE_OUTPUT_MIN_INTERVAL` (50 ms, 20 fps) paces the agent's output, `SHELL_REFRESH_INTERVAL`
+    paces the user's own echo, and `PANE_TYPING_WINDOW` (250 ms) keeps the fast one in force after a keystroke
     — because the echo arrives as a *paint*, indistinguishable from the agent's output, so pacing
     paints without the window would delay every character. Sharing one interval made a pane painting
     flat out **2.4× worse than 1.0.2**, which was protected by its own slowness: a 55 ms
@@ -846,6 +848,13 @@ priced the other two wrongly. They are now separate:
   Either way the watcher *compares* and wakes the loop only on a difference, at 0.1 µs against a
   1.5 ms capture. `docs/planning/pane-output-push.md` has the measurements and the two bugs the
   push path introduced on the way.
+- **Capture depth follows the scroll position.** At the bottom only the visible rows are rendered,
+  so `SHELL_POPUP_TAIL_LINES` (100) is asked for and `SHELL_POPUP_CAPTURE_LINES` (500) only once the
+  user scrolls up (`popup_capture_depth`); a scroll is not a target change but it does poke the
+  watcher, so the deeper capture arrives immediately rather than after the next paint. This is worth
+  nothing for the agents that matter — they take the alternate screen, where `history_size` is 0 and
+  every depth returns the same bytes — and a lot for a pane that accumulates history, where the two
+  depths measured 46,905 bytes against 4,044.
 - **Three things about `%output` shape that design.** It is scoped to the **attached session** and
   no other, so the watch client attaches to the popup's own session. `no-output` is fixed at attach
   time — it survives every `refresh-client` form on 3.5a — which is why this is a *second* client

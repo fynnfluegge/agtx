@@ -1129,12 +1129,14 @@ impl App {
             // Point the watcher at whatever popup is open now. Done here rather
             // than at the three sites that open one and the several that close
             // one: this cannot be forgotten by a new call site.
-            watch.follow(
-                self.state
-                    .shell_popup
-                    .as_ref()
-                    .map(|p| p.window_name.as_str()),
-            );
+            let (watch_target, watch_depth) = match self.state.shell_popup.as_ref() {
+                Some(popup) => (
+                    Some(popup.window_name.as_str()),
+                    popup_capture_depth(popup.scroll_offset),
+                ),
+                None => (None, SHELL_POPUP_TAIL_LINES),
+            };
+            watch.follow(watch_target, watch_depth);
 
             match rx.recv_timeout(HOUSEKEEPING_TICK) {
                 Ok(wake) => {
@@ -1192,6 +1194,7 @@ impl App {
             Wake::Pane {
                 window,
                 content,
+                lines,
                 metrics,
             } => {
                 let Some(popup) = self.state.shell_popup.as_mut() else {
@@ -1208,7 +1211,7 @@ impl App {
                 if popup.cached_content == content && popup.metrics == metrics {
                     return Ok(false);
                 }
-                popup.cached_content = content;
+                popup.set_content(content, lines);
                 popup.metrics = metrics;
                 Ok(true)
             }
@@ -3005,7 +3008,9 @@ impl App {
         };
 
         // Parse ANSI escape sequences for colors
-        let styled_lines = parse_ansi_to_lines(&popup.cached_content);
+        // Already parsed by the watcher; cloning the styled lines is a handful of
+        // Cow clones against re-parsing the whole pane on every frame.
+        let styled_lines = popup.cached_lines.clone();
 
         // Build colors from theme
         let colors = shell_popup::ShellPopupColors {
@@ -7204,7 +7209,8 @@ impl App {
             }
             let (content, metrics) =
                 capture_tmux_pane_snapshot(&orch_target, 500, self.state.tmux_ops.as_ref());
-            popup.cached_content = content;
+            let lines = parse_ansi_to_lines(&content);
+            popup.set_content(content, lines);
             popup.metrics = metrics;
             let _ = self.state.input_sink.flush();
             self.state.shell_popup = Some(popup);
@@ -7288,7 +7294,8 @@ impl App {
         }
         let (content, metrics) =
             capture_tmux_pane_snapshot(&orch_target, 500, self.state.tmux_ops.as_ref());
-        popup.cached_content = content;
+        let lines = parse_ansi_to_lines(&content);
+        popup.set_content(content, lines);
         popup.metrics = metrics;
         let _ = self.state.input_sink.flush();
         self.state.shell_popup = Some(popup);
@@ -7385,7 +7392,8 @@ impl App {
                 // scroll keys moved a buffer that could not move.
                 let (content, metrics) =
                     capture_tmux_pane_snapshot(&target, 500, self.state.tmux_ops.as_ref());
-                popup.cached_content = content;
+                let lines = parse_ansi_to_lines(&content);
+                popup.set_content(content, lines);
                 popup.metrics = metrics;
 
                 // A popup opening changes the target; nothing queued for the
@@ -9323,19 +9331,39 @@ fn control_mode_from_env(value: Option<&str>) -> bool {
 /// constraint: the capture took longer than the gate, so lowering it changed
 /// nothing.
 ///
-/// The cost of a small value is paid per wake-up, not per capture: a full
-/// `draw()` re-parses the capture through `parse_ansi_to_lines` (~26 µs release,
-/// ~141 µs debug for a 3 KiB pane) and the refresh spawns a thread (~50 µs). At
-/// 5 ms that is a low single-digit percentage of one core in a release build,
-/// and it is paid whenever a popup is open — including while nothing on screen
-/// is changing. Drawing only when the content actually changed is what would
-/// make it free.
+/// The cost of a small value is paid per capture, and a capture is not cheap on
+/// the far side: it makes the tmux server format the whole pane. The parse
+/// (~26 µs release, ~141 µs debug for a 3 KiB pane) now happens once per change
+/// on the watcher thread rather than once per frame on this one.
 const SHELL_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// Scrollback lines a popup capture asks for. A pane in the alternate screen —
-/// where full-screen agent UIs live — has none, and returns just the visible
-/// rows regardless.
+/// Scrollback lines a popup capture asks for **when the user has scrolled up**.
+///
+/// A pane in the alternate screen — where full-screen agent UIs live — has none,
+/// and returns just the visible rows regardless of this.
 const SHELL_POPUP_CAPTURE_LINES: i32 = 500;
+
+/// Scrollback lines to ask for while the popup sits **at the bottom**.
+///
+/// Only the visible rows are rendered there, so the rest is fetched, formatted
+/// by the tmux server, compared and parsed for nothing. Not zero, because the
+/// first `C-u` needs somewhere to scroll to: 100 lines is ~3 pages, and by the
+/// time the user scrolls past that the deeper capture has arrived.
+///
+/// Worth nothing for the agents that matter today — they take the alternate
+/// screen, where `history_size` is 0 and every depth returns the same bytes. It
+/// is for a pane that *does* accumulate history, where the difference measured
+/// 46,905 bytes against 4,044.
+const SHELL_POPUP_TAIL_LINES: i32 = 100;
+
+/// How deep the watcher should capture, given where the popup is scrolled.
+fn popup_capture_depth(scroll_offset: i32) -> i32 {
+    if scroll_offset < 0 {
+        SHELL_POPUP_CAPTURE_LINES
+    } else {
+        SHELL_POPUP_TAIL_LINES
+    }
+}
 
 /// What the watcher slows to once a pane has stopped changing.
 ///
@@ -9369,8 +9397,10 @@ const PANE_PUSH_BACKSTOP: std::time::Duration = std::time::Duration::from_millis
 ///
 /// The two deserve different answers and used to share one. Nobody can read text
 /// scrolling past at 100 frames a second, but everybody notices their own
-/// keystroke arriving late — so output is sampled at ~30 fps while typing keeps
-/// [`SHELL_REFRESH_INTERVAL`].
+/// keystroke arriving late — so output is sampled at 20 fps while typing keeps
+/// [`SHELL_REFRESH_INTERVAL`]. 20 rather than 30 because the difference is not
+/// visible in streamed text and every frame is a `capture-pane` the tmux server
+/// pays for.
 ///
 /// This is not a micro-optimisation; without it a pane painting flat out is
 /// *worse* than the polling it replaced. A capture makes the tmux server format
@@ -9378,16 +9408,16 @@ const PANE_PUSH_BACKSTOP: std::time::Duration = std::time::Duration::from_millis
 /// agtx 9.0% + tmux 24.1% of a core, against 5.3% + 8.4% for 1.0.2, which was
 /// accidentally protected by its own slowness — one `capture-pane` process took
 /// 55 ms, so it could not ask more than ~18 times a second.
-const PANE_OUTPUT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+const PANE_OUTPUT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How long after a keystroke captures stay on the fast cadence.
 ///
 /// A keystroke's echo does not arrive with the keystroke: the key reaches the
 /// pane in ~1 ms, the agent repaints some milliseconds later, and *that* is what
 /// the watcher sees — as a paint, indistinguishable from the agent's own output.
-/// Rate-limiting paints to 33 ms without this window would therefore delay the
-/// echo of every character by up to 33 ms, which is the one thing this whole
-/// lane exists to avoid.
+/// Rate-limiting paints to [`PANE_OUTPUT_MIN_INTERVAL`] without this window would
+/// therefore delay the echo of every character by that much, which is the one
+/// thing this whole lane exists to avoid.
 const PANE_TYPING_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// How long to wait before trying to attach an output watch again.
@@ -9427,6 +9457,8 @@ enum Wake {
     Pane {
         window: String,
         content: Vec<u8>,
+        /// Parsed on the watcher thread — see `ShellPopup::cached_lines`.
+        lines: Vec<Line<'static>>,
         metrics: Option<crate::tmux::PaneMetrics>,
     },
 }
@@ -9449,6 +9481,8 @@ struct PaneWatchState {
     /// tmux pane id of `target` (`%7`), matched against `%output` notifications.
     /// `None` means push is unavailable for this pane and the timer runs.
     pane_id: Option<String>,
+    /// Scrollback depth to capture — see [`popup_capture_depth`].
+    history_lines: i32,
     /// Bumped to make the watcher capture now, at the fast cadence.
     poke: u64,
     /// Bumped by the output watch every time *this* pane paints.
@@ -9459,13 +9493,22 @@ struct PaneWatchState {
 impl PaneWatch {
     /// Point the watcher at `target` (or nothing). Cheap enough to call every
     /// iteration, which is the point: no popup call site has to remember to.
-    fn follow(&self, target: Option<&str>) {
+    fn follow(&self, target: Option<&str>, history_lines: i32) {
         let Ok(mut state) = self.inner.lock() else {
             return;
         };
         if state.target.as_deref() == target {
+            if state.history_lines != history_lines {
+                // The user scrolled: re-capture at the new depth now, rather
+                // than leaving them looking at a buffer with nothing above it.
+                state.history_lines = history_lines;
+                state.poke = state.poke.wrapping_add(1);
+                drop(state);
+                self.cv.notify_all();
+            }
             return;
         }
+        state.history_lines = history_lines;
         state.target = target.map(str::to_string);
         // The id belongs to the old pane; the watcher resolves the new one.
         state.pane_id = None;
@@ -9653,7 +9696,7 @@ fn spawn_pane_watcher(
                 {
                     push = None;
                 }
-                let (target, poke, signal) = {
+                let (target, poke, signal, history_lines) = {
                     let Ok(mut state) = watch.inner.lock() else {
                         return;
                     };
@@ -9666,7 +9709,12 @@ fn spawn_pane_watcher(
                     if state.stopped {
                         return;
                     }
-                    (state.target.clone(), state.poke, state.signal)
+                    (
+                        state.target.clone(),
+                        state.poke,
+                        state.signal,
+                        state.history_lines,
+                    )
                 };
                 let Some(target) = target else { continue };
 
@@ -9682,17 +9730,21 @@ fn spawn_pane_watcher(
                 let captured_at = Instant::now();
                 let (content, metrics) = capture_pane_for_popup(
                     &target,
-                    SHELL_POPUP_CAPTURE_LINES,
+                    history_lines,
                     input_sink.as_ref(),
                     tmux_ops.as_ref(),
                 );
                 if pane_capture_changed(&last, &target, &content, &metrics) {
                     unchanged = 0;
                     last = Some((target.clone(), content.clone(), metrics));
+                    // Parsed here, off the thread that handles keystrokes, and
+                    // once per *change* rather than once per frame.
+                    let lines = parse_ansi_to_lines(&content);
                     if tx
                         .send(Wake::Pane {
                             window: target,
                             content,
+                            lines,
                             metrics,
                         })
                         .is_err()

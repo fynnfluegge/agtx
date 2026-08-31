@@ -967,7 +967,7 @@ fn a_paint_signal_only_wakes_the_pane_being_watched() {
     // The output watch mirrors *every* pane in the session, so filtering is what
     // keeps another task's output from driving captures of this one.
     let watch = PaneWatch::default();
-    watch.follow(Some("pj:mine"));
+    watch.follow(Some("pj:mine"), SHELL_POPUP_TAIL_LINES);
     watch.set_pane_id(Some("%7".to_string()));
     let before = watch.signal_count();
 
@@ -989,9 +989,9 @@ fn following_a_new_pane_drops_the_previous_pane_id() {
     // Otherwise the old pane's output would keep signalling after the popup
     // moved, and the new pane's would not.
     let watch = PaneWatch::default();
-    watch.follow(Some("pj:one"));
+    watch.follow(Some("pj:one"), SHELL_POPUP_TAIL_LINES);
     watch.set_pane_id(Some("%1".to_string()));
-    watch.follow(Some("pj:two"));
+    watch.follow(Some("pj:two"), SHELL_POPUP_TAIL_LINES);
     let before = watch.signal_count();
     watch.mark_output("%1");
     assert_eq!(
@@ -1088,25 +1088,88 @@ fn the_output_watch_is_reused_only_within_one_session() {
 }
 
 #[test]
+fn the_capture_depth_follows_the_scroll_position() {
+    // At the bottom only the visible rows are rendered, so a deeper capture is
+    // fetched, formatted by tmux, compared and parsed for nothing. Scrolled up,
+    // the history is the whole point.
+    assert_eq!(popup_capture_depth(0), SHELL_POPUP_TAIL_LINES);
+    assert_eq!(popup_capture_depth(-1), SHELL_POPUP_CAPTURE_LINES);
+    assert_eq!(popup_capture_depth(-40), SHELL_POPUP_CAPTURE_LINES);
+    assert!(SHELL_POPUP_TAIL_LINES < SHELL_POPUP_CAPTURE_LINES);
+    // Not zero: the first `C-u` has to have somewhere to scroll to, and a page
+    // is the pane's height.
+    assert!(
+        SHELL_POPUP_TAIL_LINES >= 60,
+        "the tail must cover a few pages, or the first scroll-up hits the end"
+    );
+}
+
+#[test]
+fn scrolling_repoints_the_watcher_without_changing_target() {
+    // A scroll is not a target change, but it *is* a reason to capture again —
+    // otherwise the user scrolls into a buffer that has nothing above it and
+    // waits for the next paint to fill it in.
+    let watch = PaneWatch::default();
+    watch.follow(Some("pj:t"), SHELL_POPUP_TAIL_LINES);
+    let before = watch.poke_count();
+
+    watch.follow(Some("pj:t"), SHELL_POPUP_TAIL_LINES);
+    assert_eq!(
+        watch.poke_count(),
+        before,
+        "an unchanged depth must not poke"
+    );
+
+    watch.follow(Some("pj:t"), SHELL_POPUP_CAPTURE_LINES);
+    assert_ne!(
+        watch.poke_count(),
+        before,
+        "scrolling up must trigger a deeper capture immediately"
+    );
+}
+
+#[test]
+fn the_popup_renders_the_lines_the_watcher_parsed() {
+    // The parse moved off the UI thread, so the bytes and the styled lines are
+    // now two fields that must be set together: rendering from lines that do
+    // not match the bytes change detection compares would leave a wrong frame
+    // on screen forever, because the next capture would compare equal.
+    let mut popup = ShellPopup::new("t".to_string(), "pj:t".to_string());
+    let content = b"\x1b[31mred\x1b[0m\nplain\n".to_vec();
+    let lines = parse_ansi_to_lines(&content);
+    assert_eq!(lines.len(), 2);
+    popup.set_content(content.clone(), lines);
+    assert_eq!(popup.cached_content, content);
+    assert_eq!(popup.cached_lines.len(), 2);
+    // Scrolling still reads the byte side, so the two must describe one pane.
+    assert_eq!(
+        popup.cached_lines.len(),
+        String::from_utf8_lossy(&popup.cached_content)
+            .lines()
+            .count()
+    );
+}
+
+#[test]
 fn a_pane_watch_follows_the_open_popup() {
     let watch = PaneWatch::default();
     assert_eq!(watch.target(), None);
 
-    watch.follow(Some("task-one"));
+    watch.follow(Some("task-one"), SHELL_POPUP_TAIL_LINES);
     assert_eq!(watch.target().as_deref(), Some("task-one"));
     let after_first = watch.poke_count();
 
     // Following the same target again must not poke: this is called every loop
     // iteration, and a poke means "capture now at the fast cadence".
-    watch.follow(Some("task-one"));
+    watch.follow(Some("task-one"), SHELL_POPUP_TAIL_LINES);
     assert_eq!(watch.poke_count(), after_first);
 
     // A switch and a close both have to reach the watcher, or it would keep
     // capturing a pane nobody is looking at.
-    watch.follow(Some("task-two"));
+    watch.follow(Some("task-two"), SHELL_POPUP_TAIL_LINES);
     assert_eq!(watch.target().as_deref(), Some("task-two"));
     assert_ne!(watch.poke_count(), after_first);
-    watch.follow(None);
+    watch.follow(None, SHELL_POPUP_TAIL_LINES);
     assert_eq!(watch.target(), None);
 }
 

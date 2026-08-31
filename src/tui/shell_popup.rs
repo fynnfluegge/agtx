@@ -10,6 +10,14 @@ pub struct ShellPopup {
     pub scroll_offset: i32, // Negative means scroll up (see more history)
     /// Cached pane content - updated periodically, not on every frame
     pub cached_content: Vec<u8>,
+    /// [`cached_content`](Self::cached_content) already parsed into styled lines.
+    ///
+    /// Parsed **once, on the watcher thread**, rather than on every frame in
+    /// `draw()`: a repainting agent produces a new capture ~20 times a second and
+    /// the old shape re-parsed the whole pane on each redraw, on the same thread
+    /// that handles keystrokes. Kept beside the bytes because the bytes are what
+    /// change detection compares — a memcmp is 0.1 µs where the parse is ~26 µs.
+    pub cached_lines: Vec<Line<'static>>,
     /// Last known pane dimensions for resize detection
     pub last_pane_size: Option<(u16, u16)>,
     /// Escalation note from the orchestrator, shown as a banner
@@ -32,6 +40,7 @@ impl ShellPopup {
             window_name,
             scroll_offset: 0,
             cached_content: Vec::new(),
+            cached_lines: Vec::new(),
             last_pane_size: None,
             escalation_note: None,
             task_id: None,
@@ -39,6 +48,16 @@ impl ShellPopup {
             last_content_refresh: Instant::now(),
             metrics: None,
         }
+    }
+
+    /// Replace the cached pane, bytes and parsed lines together.
+    ///
+    /// One setter so the two cannot drift: rendering from lines that do not match
+    /// the bytes change detection compares would show a frame that is never
+    /// corrected, because the next capture would compare equal.
+    pub fn set_content(&mut self, content: Vec<u8>, lines: Vec<Line<'static>>) {
+        self.cached_content = content;
+        self.cached_lines = lines;
     }
 
     /// Scroll up into history, clamped to content bounds.
@@ -167,9 +186,7 @@ fn build_footer_text_for_mode(
     // line number agtx cannot move to is worse than saying nothing: that is
     // exactly what made an empty buffer look like a broken scrollbar.
     if !has_scrollback {
-        return format!(
-            "[C-d/u] scroll  [C-g] bottom  ·  [C-f] {view_action}  [C-q] close"
-        );
+        return format!("[C-d/u] scroll  [C-g] bottom  ·  [C-f] {view_action}  [C-q] close");
     }
     if scroll_offset < 0 {
         format!(
