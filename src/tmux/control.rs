@@ -314,6 +314,24 @@ impl ControlClient {
     /// Returns only once the connection has round-tripped a command, so a
     /// caller that gets a `ControlClient` has one that works.
     pub fn connect(server: &str, session: &str, generation: u64) -> Result<Self> {
+        Self::connect_with(server, session, generation, None)
+    }
+
+    /// As [`connect`](Self::connect), but raising `window_events` whenever tmux
+    /// reports a window closing.
+    ///
+    /// Those notifications arrive on a `no-output` client — verified on 3.5a —
+    /// so the connection agtx already holds for keystrokes can tell it an agent
+    /// exited, instead of the status refresh noticing up to its poll interval
+    /// later. It is a flag rather than the window id because the id would have
+    /// to be resolved to a task anyway: "some window closed, look again" is the
+    /// whole signal, and the refresh already knows how to look.
+    pub fn connect_with(
+        server: &str,
+        session: &str,
+        generation: u64,
+        window_events: Option<Arc<AtomicBool>>,
+    ) -> Result<Self> {
         let mut child = Command::new("tmux")
             .args(["-L", server, "-C", "attach-session", "-t", session])
             // See the module docs: size-neutral, and no pane output mirrored at us.
@@ -344,7 +362,7 @@ impl ControlClient {
         let reader_shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name(format!("agtx-tmux-control-{generation}"))
-            .spawn(move || read_loop(stdout, reader_shared))
+            .spawn(move || read_loop(stdout, reader_shared, window_events))
             .context("failed to start the control-mode reader thread")?;
 
         let mut client = Self {
@@ -664,7 +682,27 @@ impl Drop for OutputWatch {
     }
 }
 
-fn read_loop(mut stdout: std::process::ChildStdout, shared: Arc<Shared>) {
+/// Does this notification mean a window went away?
+///
+/// tmux emits `%window-close` for a window still linked elsewhere and
+/// `%unlinked-window-close` for one that is gone entirely; a task's window is
+/// the second, but both mean "the set of windows changed, look again".
+pub fn is_window_close(line: &str) -> bool {
+    for tag in ["%window-close", "%unlinked-window-close"] {
+        if let Some(rest) = line.strip_prefix(tag) {
+            if rest.is_empty() || rest.starts_with(' ') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn read_loop(
+    mut stdout: std::process::ChildStdout,
+    shared: Arc<Shared>,
+    window_events: Option<Arc<AtomicBool>>,
+) {
     let mut parser = FrameParser::new();
     let mut buf = [0u8; 8192];
     let mut block_payload: Vec<String> = Vec::new();
@@ -705,6 +743,10 @@ fn read_loop(mut stdout: std::process::ChildStdout, shared: Arc<Shared>) {
                 Frame::Notify(line) => {
                     if line.starts_with("%exit") {
                         shared.signal(|st| st.alive = false);
+                    } else if is_window_close(&line) {
+                        if let Some(flag) = window_events.as_ref() {
+                            flag.store(true, Ordering::Relaxed);
+                        }
                     }
                 }
             }

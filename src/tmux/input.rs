@@ -472,6 +472,10 @@ pub struct InputConfig {
     pub control_mode: bool,
     pub batch_window: Duration,
     pub capacity: usize,
+    /// Raised by the control connection when tmux reports a window closing, so
+    /// the status refresh can look immediately instead of on its next tick.
+    /// `None` disables the reporting.
+    pub window_events: Option<Arc<AtomicBool>>,
 }
 
 impl InputConfig {
@@ -482,6 +486,7 @@ impl InputConfig {
             control_mode: true,
             batch_window: DEFAULT_BATCH_WINDOW,
             capacity: DEFAULT_QUEUE_CAPACITY,
+            window_events: None,
         }
     }
 }
@@ -629,12 +634,14 @@ pub fn spawn(config: InputConfig, ops: Arc<dyn TmuxOperations>) -> Arc<BrokerSin
         let server = config.server.clone();
         let session = Arc::clone(&session);
         let ops = Arc::clone(&ops);
+        let window_events = config.window_events.clone();
         Some(Box::new(move |generation| {
             let attach = session
                 .lock()
                 .map(|s| s.clone())
                 .map_err(|_| anyhow::anyhow!("attach session poisoned"))?;
-            let client = ControlClient::connect(&server, &attach, generation)?;
+            let client =
+                ControlClient::connect_with(&server, &attach, generation, window_events.clone())?;
             Ok(Box::new(ControlBackend::new(client, Arc::clone(&ops))) as Box<dyn PaneBackend>)
         }))
     } else {

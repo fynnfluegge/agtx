@@ -1088,6 +1088,32 @@ fn the_output_watch_is_reused_only_within_one_session() {
 }
 
 #[test]
+fn the_transition_queue_paces_itself() {
+    // A SQLite query that used to run on every housekeeping tick — ten times a
+    // second, forever, whether or not anything was connected. A transition is a
+    // request to move a task between columns, acted on against a phase status
+    // that is itself only as fresh as its cache, so polling the queue faster
+    // than that cache buys nothing.
+    assert!(TRANSITION_POLL_INTERVAL > HOUSEKEEPING_TICK);
+    assert!(TRANSITION_POLL_INTERVAL >= PHASE_STATUS_CACHE_TTL);
+}
+
+#[test]
+fn nothing_on_the_board_animates() {
+    // The `Working` indicator used to be a spinner, and on an otherwise idle
+    // board it was the *only* thing forcing a redraw — ten a second, forever, to
+    // rotate a glyph. Every indicator is now static, so a board with running
+    // tasks asks for no frame at all between real changes. If a future indicator
+    // animates, `run_housekeeping` has to start reporting a change again, and
+    // the idle cost comes back with it.
+    let src = include_str!("app.rs");
+    assert!(
+        !src.contains("SPINNER_FRAMES"),
+        "an animated indicator is back; idle redraws return with it"
+    );
+}
+
+#[test]
 fn the_capture_depth_follows_the_scroll_position() {
     // At the bottom only the visible rows are rendered, so a deeper capture is
     // fetched, formatted by tmux, compared and parsed for nothing. Scrolled up,

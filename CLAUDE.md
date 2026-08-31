@@ -861,11 +861,23 @@ priced the other two wrongly. They are now separate:
   rather than a flag flip on the input one, and why nothing is mirrored while no popup is open. And
   it means *bytes reached the pty*, not that the rendered pane differs, so `PANE_PUSH_BACKSTOP`
   (500 ms) stays as the net for a signal that never came.
-- **Housekeeping** — the MCP transition queue, `maybe_spawn_session_refresh`, expiring warnings, the
-  spinner — runs on `HOUSEKEEPING_TICK` (100 ms), set by the spinner, the fastest of them. It used to
-  run once per loop iteration, so at a 5 ms poll that was **200 SQLite queries a second**, rising and
-  falling with how fast the user typed. The spinner also read as a blur at that rate rather than as
-  motion.
+- **Housekeeping** — `maybe_spawn_session_refresh`, expiring warnings, the MCP transition queue —
+  runs on `HOUSEKEEPING_TICK` (100 ms). It used to run once per loop iteration, so at a 5 ms poll
+  that was **200 SQLite queries a second**, rising and falling with how fast the user typed. The
+  transition queue has since moved to its own `TRANSITION_POLL_INTERVAL` (2 s): it is a SQLite query,
+  and a request to move a task between columns is acted on against a phase status that is itself only
+  as fresh as `PHASE_STATUS_CACHE_TTL`, so reading it faster buys nothing.
+- **Nothing on the board animates.** The `Working` indicator is a static `▶`, not a spinner. On an
+  otherwise idle board the spinner was the *only* thing forcing a redraw — ten a second, forever, to
+  rotate a glyph — and the card already said the task was running. Measured: an idle board with 8
+  running tasks went from 0.60% of a core to 0.25%. A future animated indicator brings that cost
+  back, and `nothing_on_the_board_animates` fails if one appears.
+- **A closing window is pushed, not polled.** tmux sends `%window-close` / `%unlinked-window-close`
+  to a `no-output` client — verified on 3.5a — so the connection agtx already holds for keystrokes
+  reports an agent exiting. It raises a flag (`InputConfig::window_events`); housekeeping ages out
+  the phase-status cache so the next refresh looks immediately. A flag rather than the window id,
+  because the id would have to be resolved to a task anyway and "look again" is the whole signal.
+  Measured: an `Exited` card appears in 0.24 s instead of 1.25 s.
 - **Drawing** happens when `dirty` was set: input, a changed capture, a background result, or a tick
   while something is actually animating (`has_running_indicator`). Idle with a popup open and the
   pane still measures **10 ms of CPU over 15 s** — 0.07% of a core.

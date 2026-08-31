@@ -362,7 +362,10 @@ struct AppState {
     setup_rx: Option<mpsc::Receiver<SetupResult>>,
     // Phase detection
     phase_status_cache: HashMap<String, (PhaseStatus, Instant)>,
-    spinner_frame: usize,
+    /// Paces the MCP transition-queue read, which is a SQLite query.
+    last_transition_poll: Instant,
+    /// Raised by the control connection when tmux reports a window closing.
+    window_events: Arc<AtomicBool>,
     // Idle detection: (content_hash, last_change_time) per task
     pane_content_hashes: HashMap<String, (u64, Instant)>,
     /// Why a task is Blocked, as reported by its agent's hook payload.
@@ -756,6 +759,11 @@ impl App {
         // control connection at all.
         let mut input_config = InputConfig::new(tmux::AGENT_SERVER, &tmux_project_name);
         input_config.control_mode = control_mode_enabled();
+        // tmux reports a window closing on this same connection, even with
+        // `no-output`. That is how an exited agent becomes an `Exited` card
+        // promptly instead of on the status refresh's next tick.
+        let window_events = Arc::new(AtomicBool::new(false));
+        input_config.window_events = Some(Arc::clone(&window_events));
         let input_sink = tmux::input::spawn(input_config, Arc::clone(&tmux_ops));
 
         // If the project is untrusted, also suppress plugin init_scripts
@@ -817,7 +825,8 @@ impl App {
                 review_confirm_popup: None,
                 trust_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
-                spinner_frame: 0,
+                last_transition_poll: Instant::now(),
+                window_events,
                 pane_content_hashes: HashMap::new(),
                 blocked_reasons: HashMap::new(),
                 trust_blocked: HashSet::new(),
@@ -1044,7 +1053,8 @@ impl App {
                 review_confirm_popup: None,
                 trust_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
-                spinner_frame: 0,
+                last_transition_poll: Instant::now(),
+                window_events: Arc::new(AtomicBool::new(false)),
                 pane_content_hashes: HashMap::new(),
                 blocked_reasons: HashMap::new(),
                 trust_blocked: HashSet::new(),
@@ -1359,20 +1369,30 @@ impl App {
     /// happened to be typing. Returns whether anything on screen moved.
     fn run_housekeeping(&mut self) -> bool {
         let mut changed = false;
+        let now = Instant::now();
 
-        // Process MCP transition requests from the command queue
-        if let Err(e) = self.process_transition_requests() {
-            tracing::warn!(error = %e, "failed to process transition requests");
+        // Process MCP transition requests from the command queue, on their own
+        // interval — this is a SQLite query, and it used to run on every tick.
+        if now.duration_since(self.state.last_transition_poll) >= TRANSITION_POLL_INTERVAL {
+            self.state.last_transition_poll = now;
+            if let Err(e) = self.process_transition_requests() {
+                tracing::warn!(error = %e, "failed to process transition requests");
+            }
+        }
+
+        // tmux said a window closed. The refresh is what turns that into an
+        // `Exited` card, and its per-task cache would otherwise hold the old
+        // status for up to `PHASE_STATUS_CACHE_TTL` — so age the cache out and
+        // let the refresh below run now.
+        if self.state.window_events.swap(false, Ordering::Relaxed) {
+            self.expire_phase_status_cache();
         }
 
         // Spawn background refresh if not already running and cache expired.
-        // This also advances the spinner, which is why it is on a tick: at the
-        // old loop rate the frames cycled twenty times a second and read as a
-        // blur rather than as motion.
         self.maybe_spawn_session_refresh();
-        if self.has_running_indicator() {
-            changed = true;
-        }
+
+        // Nothing on the board animates any more: every indicator is static, so
+        // an idle board asks for no frame at all between real changes.
 
         // Deliver queued notifications to orchestrator when idle
         self.deliver_orchestrator_notifications();
@@ -1388,15 +1408,19 @@ impl App {
         changed
     }
 
-    /// Is anything on screen currently animating?
+    /// Make every cached phase status look stale, so the next refresh re-checks
+    /// every task rather than waiting out its per-task TTL.
     ///
-    /// Only the phase spinner moves on its own, so a board with nothing running
-    /// needs no frame at all between one keystroke and the next.
-    fn has_running_indicator(&self) -> bool {
-        self.state
-            .phase_status_cache
-            .values()
-            .any(|(status, _)| matches!(status, PhaseStatus::Working))
+    /// The timestamps are aged rather than the entries dropped: the previous
+    /// status is what decides `was_ready`, and losing it would suppress the
+    /// "newly ready" notification for a task that had just finished.
+    fn expire_phase_status_cache(&mut self) {
+        let Some(stale) = Instant::now().checked_sub(PHASE_STATUS_CACHE_TTL) else {
+            return;
+        };
+        for (_, ts) in self.state.phase_status_cache.values_mut() {
+            *ts = stale;
+        }
     }
 
     pub fn draw(&mut self) -> Result<()> {
@@ -1644,7 +1668,6 @@ impl App {
                     is_selected,
                     &state.config.theme,
                     state.phase_status_cache.get(&task.id),
-                    state.spinner_frame,
                     deps_blocked,
                 );
             }
@@ -3033,7 +3056,6 @@ impl App {
         is_selected: bool,
         theme: &ThemeConfig,
         phase_status: Option<&(PhaseStatus, Instant)>,
-        spinner_frame: usize,
         deps_blocked: bool,
     ) {
         let styles = TuiStyles::from_theme(theme);
@@ -3088,17 +3110,17 @@ impl App {
             && task.session_name.is_some());
 
         if show_indicator {
-            const SPINNER_FRAMES: &[&str] = &[
-                "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
-                "\u{2827}", "\u{2807}", "\u{280f}",
-            ];
             let indicator = match phase_status {
                 Some((PhaseStatus::Ready, _)) => {
                     Span::styled("\u{2713} ", Style::default().fg(Color::Green))
                 }
+                // Static, not a spinner. An animated frame is a redraw of the
+                // whole board, and on an otherwise idle board it was the *only*
+                // thing forcing one — ten a second, forever, to rotate a glyph.
+                // The card already says a task is running; the motion added
+                // nothing that the icon does not.
                 Some((PhaseStatus::Working, _)) => {
-                    let spinner = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
-                    Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow))
+                    Span::styled("\u{25b6} ", Style::default().fg(Color::Yellow))
                 }
                 Some((PhaseStatus::Blocked, _)) => Span::styled(
                     "? ",
@@ -7563,12 +7585,11 @@ impl App {
     fn maybe_spawn_session_refresh(&mut self) {
         // Don't spawn if a refresh is already in flight
         if self.state.session_refresh_rx.is_some() {
-            self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
             return;
         }
 
         let now = Instant::now();
-        const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+        const CACHE_TTL: std::time::Duration = PHASE_STATUS_CACHE_TTL;
 
         // Collect tasks that need checking (cache expired or never checked)
         let tasks_to_check: Vec<_> = self
@@ -7611,7 +7632,6 @@ impl App {
             .collect();
 
         if tasks_to_check.is_empty() {
-            self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
             return;
         }
 
@@ -8110,8 +8130,6 @@ impl App {
                     .remove(&task_status.task_id);
             }
         }
-
-        self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
     }
 
     fn switch_to_project(&mut self, project: &ProjectInfo) -> Result<()> {
@@ -9443,6 +9461,17 @@ const HOUSEKEEPING_TICK: std::time::Duration = std::time::Duration::from_millis(
 
 /// How long the screen may go unpainted while nothing reports a change.
 const REDRAW_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How often the MCP transition queue is read.
+///
+/// A SQLite query, previously run on every housekeeping tick — ten times a
+/// second, forever, whether or not anything is connected. A queued transition is
+/// not latency-critical: it is a request to move a task between columns, and the
+/// phase status it acts on is itself refreshed on a 2-second cache.
+const TRANSITION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a phase status is trusted before the refresh looks again.
+const PHASE_STATUS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How long a warning banner stays up.
 const WARNING_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(5);

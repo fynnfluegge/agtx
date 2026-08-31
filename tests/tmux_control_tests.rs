@@ -23,7 +23,7 @@ use agtx::tmux::input::{spawn, InputConfig, PaneInput, PaneInputSink};
 use agtx::tmux::{CaptureSpec, TmuxOperations};
 use anyhow::Result;
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -786,6 +786,43 @@ fn a_control_capture_beats_two_tmux_processes() {
         ctl_p95 * 5 < sub_p95,
         "a control capture ({ctl_p95:?}) should be far cheaper than two processes ({sub_p95:?})"
     );
+}
+
+/// tmux must tell the **input** connection that a window closed, even though it
+/// is attached with `no-output`.
+///
+/// This is what turns an exited agent into an `Exited` card promptly rather than
+/// on the status refresh's next tick, and it costs nothing: the notification
+/// arrives on a connection agtx already holds open for keystrokes.
+#[test]
+fn a_closing_window_is_reported_on_the_input_connection() {
+    guard!();
+    let server = Server::start("winclose");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "doomed", "cat"])
+        .expect("create the window");
+    std::thread::sleep(Duration::from_millis(300));
+
+    let flag = Arc::new(AtomicBool::new(false));
+    let client =
+        agtx::tmux::ControlClient::connect_with(&server.name, "it", 1, Some(Arc::clone(&flag)))
+            .expect("attach the control client");
+    std::thread::sleep(Duration::from_millis(400));
+    // The attach itself must not look like a window closing.
+    assert!(!flag.load(Ordering::Relaxed), "attaching raised the flag");
+
+    server
+        .tmux(&["kill-window", "-t", "it:doomed"])
+        .expect("kill the window");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !flag.load(Ordering::Relaxed) {
+        assert!(
+            Instant::now() < deadline,
+            "a closing window was never reported on the input connection"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    client.shutdown();
 }
 
 // --- %output push: does tmux actually tell us a pane painted? ---

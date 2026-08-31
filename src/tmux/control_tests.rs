@@ -169,6 +169,27 @@ fn a_payload_line_starting_with_percent_is_payload() {
 }
 
 #[test]
+fn a_window_closing_is_recognised_in_either_form() {
+    // tmux emits `%window-close` for a window still linked elsewhere and
+    // `%unlinked-window-close` for one that is gone; a task's window is the
+    // second, but both mean "the set of windows changed, look again".
+    assert!(is_window_close("%unlinked-window-close @1"));
+    assert!(is_window_close("%window-close @7"));
+    assert!(is_window_close("%window-close"));
+    // Not a window closing. `%window-closed` does not exist today, but matching
+    // it would age out every task's status on a notification we misread.
+    for line in [
+        "%window-add @2",
+        "%window-closed @2",
+        "%unlinked-window-add @2",
+        "%exit",
+        "%output %1 data",
+    ] {
+        assert!(!is_window_close(line), "{line:?} is not a window closing");
+    }
+}
+
+#[test]
 fn an_output_notification_yields_its_pane_id() {
     assert_eq!(output_pane_id("%output %7 hello"), Some("%7"));
     assert_eq!(output_pane_id("%output %12 "), Some("%12"));
