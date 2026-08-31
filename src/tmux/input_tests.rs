@@ -369,8 +369,8 @@ fn an_acknowledged_flush_waits_out_a_slow_drain() {
     // The barrier sits *behind* the queue, so the wait is dominated by draining
     // it — not by the barrier round trip. Sized as a barrier round trip instead,
     // it expired mid-drain and handed back a guarantee that had not been kept:
-    // measured at 20 queued keys x 25 ms, it reported failure with half of them
-    // still in flight, and the caller went on to resize the pane anyway.
+    // with a queue of keys still in flight it reported failure, and the caller
+    // went on to resize the pane anyway.
     let recorder = Recorder::default();
     let (tx, rx) = sync_channel(64);
     let depth = Arc::new(AtomicUsize::new(0));
@@ -612,8 +612,8 @@ fn a_capture_shows_the_keys_typed_before_it() {
 #[test]
 fn a_capture_without_a_control_connection_is_declined_not_run_on_the_fallback() {
     // The subprocess path costs the caller the same two processes either way,
-    // and running them here would block the next keystroke behind ~55 ms of
-    // process startup. So the broker says no and the caller captures itself.
+    // and running them here would block the next keystroke behind that process
+    // startup. So the broker says no and the caller captures itself.
     let h = harness(NEVER);
     assert_eq!(capture(&h, "s:w"), None);
     assert_eq!(
@@ -626,8 +626,8 @@ fn a_capture_without_a_control_connection_is_declined_not_run_on_the_fallback() 
 #[test]
 fn a_failed_capture_keeps_a_healthy_control_connection() {
     // A read that fails is not the ambiguous *write* the broker tears the
-    // connection down for. Demoting every later keystroke to the 25 ms
-    // subprocess path over a 1 ms read would trade the fix for the bug.
+    // connection down for. Demoting every later keystroke to the subprocess path
+    // over one failed read would trade the fix for the bug.
     let recorder = Recorder::default();
     let rec = recorder.clone();
     let connects = Arc::new(AtomicUsize::new(0));
@@ -811,8 +811,8 @@ fn changing_project_repoints_the_next_connection() {
 fn the_queue_depth_counter_cannot_go_negative() {
     // The broker decrements this from another thread. Counting after a
     // successful send let it decrement first, taking a `usize` to `usize::MAX`
-    // and panicking on the next increment — found by the latency benchmark, not
-    // by any deterministic test, which is why it is pinned here.
+    // and panicking on the next increment — found only under real load, never
+    // by a deterministic test, which is why it is pinned here.
     let (tx, rx) = sync_channel(64);
     let depth = Arc::new(AtomicUsize::new(0));
     let sink = Arc::new(BrokerSink {

@@ -3,9 +3,9 @@ use agtx::tui::shell_popup::{
     trim_trailing_empty_lines, ShellPopup, ShellPopupColors, MAX_TRAILING_EMPTY_LINES,
 };
 use ratatui::backend::TestBackend;
-use std::time::{Duration, Instant};
 use ratatui::prelude::*;
 use ratatui::Terminal;
+use std::time::{Duration, Instant};
 
 #[test]
 fn test_shell_popup_new() {
@@ -101,7 +101,7 @@ fn test_shell_popup_is_at_bottom() {
 #[test]
 fn test_compute_visible_lines_empty() {
     let lines: Vec<Line> = vec![];
-    let (visible, start, total) = compute_visible_lines(lines, 10, 0);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, 0);
 
     assert!(visible.is_empty());
     assert_eq!(start, 0);
@@ -115,7 +115,7 @@ fn test_compute_visible_lines_fewer_than_height() {
         Line::from("line 2"),
         Line::from("line 3"),
     ];
-    let (visible, start, total) = compute_visible_lines(lines, 10, 0);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, 0);
 
     assert_eq!(visible.len(), 3);
     assert_eq!(start, 0);
@@ -126,7 +126,7 @@ fn test_compute_visible_lines_fewer_than_height() {
 fn test_compute_visible_lines_exact_height() {
     let lines: Vec<Line> = (0..10).map(|i| Line::from(format!("line {}", i))).collect();
 
-    let (visible, start, total) = compute_visible_lines(lines, 10, 0);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, 0);
 
     assert_eq!(visible.len(), 10);
     assert_eq!(start, 0);
@@ -138,7 +138,7 @@ fn test_compute_visible_lines_scrolled_up() {
     let lines: Vec<Line> = (0..20).map(|i| Line::from(format!("line {}", i))).collect();
 
     // Visible height 10, scrolled up by 5 lines
-    let (visible, start, total) = compute_visible_lines(lines, 10, -5);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, -5);
 
     assert_eq!(visible.len(), 10);
     assert_eq!(start, 5); // 20 - 10 - 5 = 5
@@ -149,7 +149,7 @@ fn test_compute_visible_lines_scrolled_up() {
 fn test_compute_visible_lines_at_bottom() {
     let lines: Vec<Line> = (0..20).map(|i| Line::from(format!("line {}", i))).collect();
 
-    let (visible, start, total) = compute_visible_lines(lines, 10, 0);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, 0);
 
     assert_eq!(visible.len(), 10);
     assert_eq!(start, 10); // Shows last 10 lines
@@ -165,7 +165,7 @@ fn test_compute_visible_lines_keeps_trailing_empty_at_bottom() {
     lines.push(Line::from(""));
 
     // At bottom (scroll_offset = 0) - should keep trailing empty lines
-    let (_visible, _start, total) = compute_visible_lines(lines, 20, 0);
+    let (_visible, _start, total) = compute_visible_lines(&lines, 20, 0);
 
     assert_eq!(total, 13); // Keeps all lines including trailing empty
 }
@@ -179,7 +179,7 @@ fn test_compute_visible_lines_strips_trailing_empty_when_scrolled() {
     lines.push(Line::from(""));
 
     // Scrolled up (scroll_offset < 0) - should trim trailing empty for cleaner history
-    let (_visible, _start, total) = compute_visible_lines(lines, 20, -5);
+    let (_visible, _start, total) = compute_visible_lines(&lines, 20, -5);
 
     assert_eq!(total, 10); // Trims trailing empty when scrolled up
 }
@@ -189,7 +189,7 @@ fn test_compute_visible_lines_scrolled_to_top() {
     let lines: Vec<Line> = (0..30).map(|i| Line::from(format!("line {}", i))).collect();
 
     // Scroll up enough to be at top
-    let (visible, start, total) = compute_visible_lines(lines, 10, -20);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, -20);
 
     assert_eq!(visible.len(), 10);
     assert_eq!(start, 0); // At the very top
@@ -226,7 +226,7 @@ fn agent_managed_history_is_described_by_actions_not_implementation() {
                 &popup,
                 frame,
                 Rect::new(0, 0, 100, 24),
-                vec![],
+                &[],
                 &ShellPopupColors::default(),
             );
         })
@@ -272,7 +272,7 @@ fn test_fullscreen_footer_offers_windowed_toggle() {
                 &popup,
                 frame,
                 Rect::new(0, 0, 80, 24),
-                vec![],
+                &[],
                 &ShellPopupColors::default(),
             );
         })
@@ -307,7 +307,7 @@ fn test_render_shell_popup_basic() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -338,7 +338,7 @@ fn test_render_shell_popup_with_content() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -365,7 +365,7 @@ fn test_render_shell_popup_scrolled_up() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -390,7 +390,7 @@ fn test_render_shell_popup_empty_content() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -424,7 +424,7 @@ fn test_render_shell_popup_custom_colors() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -446,7 +446,7 @@ fn test_render_shell_popup_small_area() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 40, 10);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 

@@ -1096,8 +1096,8 @@ impl App {
     /// whether or not anything had happened, and every wake-up redrew the whole
     /// screen and re-parsed the pane capture through `parse_ansi_to_lines`. That
     /// made the poll interval a three-way trade between echo latency, DB
-    /// polling rate and idle CPU, and tuning it for the first (5 ms) meant
-    /// paying the other two 200 times a second.
+    /// polling rate and idle CPU, so tuning it for the first made the other two
+    /// expensive.
     ///
     /// Splitting them makes each one answer to what it is actually for:
     ///
@@ -1127,9 +1127,9 @@ impl App {
         while !self.state.should_quit {
             // A missed `dirty` would leave a stale screen until the next
             // keystroke, which is a far worse failure than a wasted frame — so
-            // the loop repaints once a second regardless. This is a backstop,
-            // not the mechanism: at 26 µs a frame it is unmeasurable, and if it
-            // is ever what makes the UI look right, something above it is wrong.
+            // the loop repaints once a second regardless. A backstop, not the
+            // mechanism: one frame a second is nothing, and if it is ever what
+            // makes the UI look right, something above it is wrong.
             if dirty || last_draw.elapsed() >= REDRAW_BACKSTOP {
                 self.draw()?;
                 dirty = false;
@@ -1364,9 +1364,9 @@ impl App {
     /// Periodic work, on its own tick rather than once per wake-up.
     ///
     /// Every item here used to run on every loop iteration — including
-    /// `process_transition_requests`, which queries SQLite. At a 5 ms poll that
-    /// was 200 queries a second, and it rose and fell with how fast the user
-    /// happened to be typing. Returns whether anything on screen moved.
+    /// `process_transition_requests`, which queries SQLite — so its rate rose and
+    /// fell with how fast the user happened to be typing. Returns whether
+    /// anything on screen moved.
     fn run_housekeeping(&mut self) -> bool {
         let mut changed = false;
         let now = Instant::now();
@@ -3031,9 +3031,9 @@ impl App {
         };
 
         // Parse ANSI escape sequences for colors
-        // Already parsed by the watcher; cloning the styled lines is a handful of
-        // Cow clones against re-parsing the whole pane on every frame.
-        let styled_lines = popup.cached_lines.clone();
+        // Parsed by the watcher, and borrowed rather than cloned: only the rows
+        // that fit on screen are copied, not the whole cached pane.
+        let styled_lines = popup.cached_lines.as_slice();
 
         // Build colors from theme
         let colors = shell_popup::ShellPopupColors {
@@ -7409,7 +7409,7 @@ impl App {
 
                 // Capture initial content *and* the pane metrics, so the first
                 // keypress already knows whether this pane has tmux scrollback.
-                // Reading them only in the 50 ms refresh left a window in which
+                // Leaving them to the first refresh left a window in which
                 // `has_scrollback()` fell back to its `true` default and the
                 // scroll keys moved a buffer that could not move.
                 let (content, metrics) =
@@ -8940,10 +8940,10 @@ fn trim_pane_snapshot(
 /// there is one, otherwise the two `tmux` processes this has always cost.
 ///
 /// The broker is asked first because it already holds a live `tmux -C` client
-/// for keystrokes, and reusing it turns ~55 ms of process startup into ~1 ms —
-/// which was the dominant term in the delay between typing into a task pane and
-/// seeing the character appear. It also flushes buffered keystrokes ahead of the
-/// capture, so a frame can never be missing text the user has already typed.
+/// for keystrokes, and reusing it avoids the process startup that dominated the
+/// delay between typing into a task pane and seeing the character appear. It
+/// also flushes buffered keystrokes ahead of the capture, so a frame can never
+/// be missing text the user has already typed.
 fn capture_pane_for_popup(
     window_name: &str,
     history_lines: i32,
@@ -8993,9 +8993,9 @@ fn window_is_gone(session: Option<&str>, live: Option<&std::collections::HashSet
 /// [`TmuxOperations::capture_pane`], which is what the dialog matcher and the
 /// content hash have always been fed.
 ///
-/// Worth routing because this is the last per-task subprocess left on a 2-second
-/// timer: the fallback is a ~27 ms `tmux` process *per task*, against ~0.4 ms
-/// over the control connection, and it scales with the size of the board.
+/// Worth routing because this is the last per-task subprocess left on the status
+/// refresh's timer: the fallback is a `tmux` process *per task*, and it scales
+/// with the size of the board.
 fn capture_pane_text(
     target: &str,
     input_sink: &dyn PaneInputSink,
@@ -9339,20 +9339,17 @@ fn control_mode_from_env(value: Option<&str>) -> bool {
     !matches!(value, Some("0") | Some("false") | Some("no"))
 }
 
-/// How often an open popup re-reads its pane, and — because it doubles as the
-/// event-poll timeout below — how long a completed capture can sit in its
-/// channel before being applied.
+/// How fresh the popup's view of its pane is while the **user is typing**.
 ///
-/// This is the term the echo latency of a keystroke is made of, now that a
-/// capture over the control connection costs ~0.2 ms rather than the ~55 ms two
-/// `tmux` processes cost. While it was 50 ms it was not even the binding
-/// constraint: the capture took longer than the gate, so lowering it changed
-/// nothing.
+/// It means two different things depending on how the watcher is being driven:
+/// under push it is a *rate limit* — the ceiling on how often a paint may cause
+/// a capture — and on the poll fallback it is the sampling period itself.
 ///
-/// The cost of a small value is paid per capture, and a capture is not cheap on
-/// the far side: it makes the tmux server format the whole pane. The parse
-/// (~26 µs release, ~141 µs debug for a 3 KiB pane) now happens once per change
-/// on the watcher thread rather than once per frame on this one.
+/// Either way it is the term a keystroke's echo latency is made of, which is
+/// only true because a capture over the control connection is cheap where two
+/// `tmux` processes were not. Its cost is paid on the far side — a capture makes
+/// the tmux server format the whole pane — so this is not free to lower. [`PANE_OUTPUT_MIN_INTERVAL`] is the same ceiling for the agent's own
+/// output, where nobody is waiting on a single frame.
 const SHELL_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Scrollback lines a popup capture asks for **when the user has scrolled up**.
@@ -9370,8 +9367,8 @@ const SHELL_POPUP_CAPTURE_LINES: i32 = 500;
 ///
 /// Worth nothing for the agents that matter today — they take the alternate
 /// screen, where `history_size` is 0 and every depth returns the same bytes. It
-/// is for a pane that *does* accumulate history, where the difference measured
-/// 46,905 bytes against 4,044.
+/// is for a pane that *does* accumulate history, where the deeper capture is
+/// many times the size of the screen being rendered.
 const SHELL_POPUP_TAIL_LINES: i32 = 100;
 
 /// How deep the watcher should capture, given where the popup is scrolled.
@@ -9383,20 +9380,15 @@ fn popup_capture_depth(scroll_offset: i32) -> i32 {
     }
 }
 
-/// What the watcher slows to once a pane has stopped changing.
+/// What the **poll fallback** slows to once a pane has stopped changing.
 ///
-/// tmux offers no "this pane changed" notification a client can wait on — the
-/// only push is control mode's `%output`, which agtx deliberately turns off
-/// (see [`crate::tmux::control`]) because it mirrors every byte an agent paints.
-/// So the watcher polls, and the only question is how often.
-///
-/// The answer differs by what the user is doing. While the pane is changing they
-/// are usually the one changing it, and 5 ms is what makes typing feel direct.
-/// Once it has been still for [`PANE_IDLE_ROUNDS`] there is nobody waiting on a
-/// millisecond, and 50 ms of staleness in an idle agent's output is invisible —
-/// it is what the whole popup ran at before any of this. A keystroke resets it
-/// to the fast cadence before the character is even delivered, so the first
-/// character after a pause is as prompt as the tenth.
+/// Only reached when push is unavailable ([`attach_pane_push`]); with an output
+/// watch attached, a still pane produces no captures at all and this never
+/// applies. Once a pane has been unchanged for [`PANE_IDLE_ROUNDS`] nobody is
+/// waiting on a millisecond, and this much staleness is invisible. A keystroke
+/// pokes the watcher back
+/// to [`SHELL_REFRESH_INTERVAL`] before the character is even delivered, so the
+/// first character after a pause is as prompt as the tenth.
 const PANE_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How long the watcher waits for a paint that never comes.
@@ -9413,26 +9405,22 @@ const PANE_PUSH_BACKSTOP: std::time::Duration = std::time::Duration::from_millis
 /// Slowest a capture may be driven by the **agent painting**, as opposed to by
 /// the user typing.
 ///
-/// The two deserve different answers and used to share one. Nobody can read text
-/// scrolling past at 100 frames a second, but everybody notices their own
-/// keystroke arriving late — so output is sampled at 20 fps while typing keeps
-/// [`SHELL_REFRESH_INTERVAL`]. 20 rather than 30 because the difference is not
-/// visible in streamed text and every frame is a `capture-pane` the tmux server
-/// pays for.
+/// The two deserve different answers and used to share one. Nobody reads text
+/// scrolling past frame by frame, but everybody notices their own keystroke
+/// arriving late — so the agent's output is sampled at a readable rate while
+/// typing keeps [`SHELL_REFRESH_INTERVAL`].
 ///
-/// This is not a micro-optimisation; without it a pane painting flat out is
-/// *worse* than the polling it replaced. A capture makes the tmux server format
-/// the whole pane, and at 10 ms that is 100 formats a second: measured
-/// agtx 9.0% + tmux 24.1% of a core, against 5.3% + 8.4% for 1.0.2, which was
-/// accidentally protected by its own slowness — one `capture-pane` process took
-/// 55 ms, so it could not ask more than ~18 times a second.
+/// Not a micro-optimisation: sharing one ceiling made a pane painting flat out
+/// cost more than the polling it replaced. Every frame is a `capture-pane`, and
+/// a capture makes the tmux server format the whole pane.
 const PANE_OUTPUT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How long after a keystroke captures stay on the fast cadence.
 ///
 /// A keystroke's echo does not arrive with the keystroke: the key reaches the
-/// pane in ~1 ms, the agent repaints some milliseconds later, and *that* is what
-/// the watcher sees — as a paint, indistinguishable from the agent's own output.
+/// pane almost immediately, the agent repaints a little later, and *that* is
+/// what the watcher sees — as a paint, indistinguishable from the agent's own
+/// output.
 /// Rate-limiting paints to [`PANE_OUTPUT_MIN_INTERVAL`] without this window would
 /// therefore delay the echo of every character by that much, which is the one
 /// thing this whole lane exists to avoid.
@@ -9447,16 +9435,19 @@ const PANE_TYPING_WINDOW: std::time::Duration = std::time::Duration::from_millis
 /// through the failure path.
 const PANE_PUSH_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Unchanged captures before the watcher backs off — about 200 ms at the fast
-/// cadence, long enough to ride out the gap between two keystrokes.
+/// Unchanged captures before the poll fallback backs off.
+///
+/// Counted in rounds, so the wall-clock settling time is this times
+/// [`SHELL_REFRESH_INTERVAL`] — change one and the other moves with it. It only
+/// has to outlast the gap between two keystrokes.
 const PANE_IDLE_ROUNDS: u32 = 40;
 
 /// How often periodic work runs: the MCP transition queue, the session refresh,
 /// the spinner, expiring warnings.
 ///
-/// 100 ms is set by the spinner, the fastest-moving of them; the DB queue would
-/// be happy at a second. What matters is that it is now *decoupled* from input,
-/// so none of it speeds up because the user is typing.
+/// What matters is that it is *decoupled* from input, so none of it speeds up
+/// because the user is typing. Anything wanting a slower rate keeps its own
+/// interval — see [`TRANSITION_POLL_INTERVAL`].
 const HOUSEKEEPING_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// How long the screen may go unpainted while nothing reports a change.
@@ -9560,6 +9551,66 @@ impl PaneWatch {
         self.cv.notify_all();
     }
 
+    /// Wait for a poke, a paint, a target change or `wait` to elapse, and report
+    /// whether a **poke** was what ended it. `None` means stop.
+    ///
+    /// A method, not an inline block, because the lock must not outlive the
+    /// wait: the watcher takes it again immediately afterwards for the rate
+    /// limit, and `Mutex` is not reentrant. Inline, the arm that does not hand
+    /// its guard to `wait_timeout` kept the guard alive for the rest of the
+    /// iteration and the watcher deadlocked against itself — holding the very
+    /// lock the UI thread calls [`follow`](Self::follow) on every iteration, so
+    /// the whole TUI froze. Here the guard cannot escape the call.
+    fn wait_for_change(
+        &self,
+        poke: u64,
+        signal: u64,
+        wait: std::time::Duration,
+    ) -> Option<WaitOutcome> {
+        let Ok(state) = self.inner.lock() else {
+            return None;
+        };
+        if state.stopped {
+            return None;
+        }
+        if state.poke != poke || state.signal != signal {
+            // Something landed while the capture was in flight; no reason to wait.
+            return Some(WaitOutcome {
+                poked: state.poke != poke,
+                skipped: true,
+            });
+        }
+        let Ok((state, _)) = self.cv.wait_timeout(state, wait) else {
+            return None;
+        };
+        if state.stopped {
+            return None;
+        }
+        Some(WaitOutcome {
+            poked: state.poke != poke,
+            skipped: false,
+        })
+    }
+
+    /// Hold off for `wait`, unless a poke arrives first. `None` means stop.
+    ///
+    /// Same reasoning as [`wait_for_change`](Self::wait_for_change): the guard
+    /// stays inside the call. A plain sleep would be simpler and wrong — it would
+    /// hold the ceiling meant for the agent's paints against the user's own echo.
+    fn wait_out_rate_limit(&self, wait: std::time::Duration) -> Option<bool> {
+        let Ok(state) = self.inner.lock() else {
+            return None;
+        };
+        let before = state.poke;
+        let Ok((state, _)) = self.cv.wait_timeout(state, wait) else {
+            return None;
+        };
+        if state.stopped {
+            return None;
+        }
+        Some(state.poke != before)
+    }
+
     fn set_pane_id(&self, pane_id: Option<String>) {
         if let Ok(mut state) = self.inner.lock() {
             state.pane_id = pane_id;
@@ -9599,6 +9650,15 @@ impl PaneWatch {
     }
 }
 
+/// How a [`PaneWatch::wait_for_change`] ended.
+struct WaitOutcome {
+    /// The user typed. Puts the watcher back on the fast cadence.
+    poked: bool,
+    /// There was no wait at all: a poke or a paint had already landed while the
+    /// capture was in flight, so the pane is known to be moving.
+    skipped: bool,
+}
+
 /// Is this capture different from the last one the watcher sent?
 ///
 /// Geometry counts as much as content: a cursor that moved without the text
@@ -9624,9 +9684,7 @@ fn pane_capture_changed(
 /// back-off that makes it safe. The capture a poke triggers runs *before* the
 /// keystroke that caused it has reached the pane and been echoed, so it sees
 /// nothing new; without the reset the watcher would then wait out another idle
-/// interval and the character would appear a whole one late. Measured on the
-/// version that got this wrong: 94 ms for the first keystroke after a pause
-/// against 40 ms while typing, where the fixed version is 20 ms against 14 ms.
+/// interval and the character would appear a whole one late.
 fn pane_watch_rounds_after_wait(unchanged_rounds: u32, poked: bool) -> u32 {
     if poked {
         0
@@ -9689,8 +9747,7 @@ fn spawn_terminal_reader(tx: mpsc::Sender<Wake>) {
 /// Under push, `SHELL_REFRESH_INTERVAL` stops being a poll period and becomes a
 /// **rate limit**. The signal removes the floor — no capture when nothing
 /// happened — while the interval keeps the ceiling, because a pane painting flat
-/// out emits ~56 notifications a second and capturing per notification would
-/// spin at one per 1.5 ms capture, worse than the timer it replaced.
+/// out notifies far faster than it is worth capturing.
 fn spawn_pane_watcher(
     watch: Arc<PaneWatch>,
     tx: mpsc::Sender<Wake>,
@@ -9709,14 +9766,13 @@ fn spawn_pane_watcher(
             // sampled — see `PANE_TYPING_WINDOW`.
             let mut last_keystroke: Option<Instant> = None;
             loop {
-                // Wait for something to watch. No popup open is the common case
-                // and costs one blocked thread — and, because the output watch is
-                // dropped here, nothing mirrored out of tmux either.
-                // Release the output watch before taking the lock, never while
-                // holding it: dropping it closes a tmux client and reaps the
-                // child, and the UI thread calls `follow()` on this same mutex
-                // every loop iteration — so doing it under the lock stalls the
-                // whole TUI for as long as the client takes to exit.
+                // With no popup open, release the output watch so tmux mirrors
+                // nothing for a session nobody is looking at.
+                //
+                // Outside the lock, never under it: dropping the watch closes a
+                // tmux client and reaps the child, and the UI thread calls
+                // `follow()` on this same mutex every iteration — so holding it
+                // here stalls the whole TUI until that client exits.
                 if watch
                     .inner
                     .lock()
@@ -9725,6 +9781,8 @@ fn spawn_pane_watcher(
                 {
                     push = None;
                 }
+                // Then wait for something to watch. No popup open is the common
+                // case, and costs one blocked thread and nothing else.
                 let (target, poke, signal, history_lines) = {
                     let Ok(mut state) = watch.inner.lock() else {
                         return;
@@ -9801,40 +9859,39 @@ fn spawn_pane_watcher(
                 // *before* the key it announced has reached the pane and been
                 // echoed, so it sees no change. Without the reset the next wait
                 // would be the slow one again and the echo would arrive a whole
-                // idle interval late — measured at 94 ms against 40 ms, which is
-                // the back-off charging exactly what it was built not to.
-                let Ok(state) = watch.inner.lock() else {
+                // idle interval late — the back-off charging exactly what it
+                // was built not to.
+                let Some(outcome) = watch.wait_for_change(poke, signal, wait) else {
                     return;
                 };
-                if state.stopped {
-                    return;
+                if outcome.skipped {
+                    // The pane is moving; do not let a back-off accumulate.
+                    unchanged = 0;
                 }
-                if state.poke == poke && state.signal == signal {
-                    let Ok((state, _)) = watch.cv.wait_timeout(state, wait) else {
-                        return;
-                    };
-                    if state.stopped {
-                        return;
-                    }
-                    if state.poke != poke {
-                        last_keystroke = Some(Instant::now());
-                    }
-                    unchanged = pane_watch_rounds_after_wait(unchanged, state.poke != poke);
-                } else {
-                    if state.poke != poke {
-                        last_keystroke = Some(Instant::now());
-                    }
-                    // A poke or a paint landed while this capture was in flight.
-                    unchanged = pane_watch_rounds_after_wait(unchanged, true);
+                let poked = outcome.poked;
+                if poked {
+                    last_keystroke = Some(Instant::now());
                 }
+                unchanged = pane_watch_rounds_after_wait(unchanged, poked);
 
                 // The rate limit, under push only — polling already paces itself.
+                //
+                // Waited on the condvar rather than slept, so a keystroke still
+                // gets through: a plain sleep here would hold the ceiling meant
+                // for the *agent's* paints against the user's own echo, adding up
+                // to `PANE_OUTPUT_MIN_INTERVAL` to the first character typed
+                // after a pause.
                 if let Some(remaining) = push_rate_limit_wait(
                     pushing,
                     captured_at.elapsed(),
                     last_keystroke.map(|at| at.elapsed()),
                 ) {
-                    std::thread::sleep(remaining);
+                    let Some(poked_during_limit) = watch.wait_out_rate_limit(remaining) else {
+                        return;
+                    };
+                    if poked_during_limit {
+                        last_keystroke = Some(Instant::now());
+                    }
                 }
             }
         });
@@ -9905,9 +9962,9 @@ fn attach_pane_push(
         return None;
     }
     // Both steps below spawn a `tmux` process, and this runs once per watcher
-    // iteration — every 10 ms while a pane is changing. Without a backoff, a
-    // popup left open on a window that has since closed would spawn a hundred
-    // processes a second, which is far worse than the polling this replaces.
+    // iteration. Without a backoff, a popup left open on a window that has since
+    // closed would spawn them continuously — far worse than the polling this
+    // replaces.
     if let Some(at) = retry_at {
         if Instant::now() < *at {
             return None;

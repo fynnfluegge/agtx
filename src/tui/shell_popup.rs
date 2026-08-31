@@ -12,11 +12,9 @@ pub struct ShellPopup {
     pub cached_content: Vec<u8>,
     /// [`cached_content`](Self::cached_content) already parsed into styled lines.
     ///
-    /// Parsed **once, on the watcher thread**, rather than on every frame in
-    /// `draw()`: a repainting agent produces a new capture ~20 times a second and
-    /// the old shape re-parsed the whole pane on each redraw, on the same thread
-    /// that handles keystrokes. Kept beside the bytes because the bytes are what
-    /// change detection compares — a memcmp is 0.1 µs where the parse is ~26 µs.
+    /// Parsed once, on the watcher thread, rather than on every frame in `draw()`.
+    /// Kept beside the bytes because the bytes are what change detection
+    /// compares, and comparing them is far cheaper than parsing them.
     pub cached_lines: Vec<Line<'static>>,
     /// Last known pane dimensions for resize detection
     pub last_pane_size: Option<(u16, u16)>,
@@ -119,8 +117,14 @@ pub struct ShellPopupView<'a> {
 
 /// Compute the visible lines for the shell popup
 /// This is the core testable logic, separated from rendering
+/// Takes a **slice**, not a `Vec`, and clones only the rows it returns.
+///
+/// The caller's lines are cached and reused across frames, so taking them by
+/// value meant cloning every cached row — 100 of them, or 500 once scrolled — to
+/// render the ~30 that fit. Each `Span` owns its text, so those clones are
+/// allocations, on every frame a streaming pane produces.
 pub fn compute_visible_lines<'a>(
-    styled_lines: Vec<Line<'a>>,
+    styled_lines: &[Line<'a>],
     visible_height: usize,
     scroll_offset: i32,
 ) -> (Vec<Line<'a>>, usize, usize) {
@@ -157,10 +161,11 @@ pub fn compute_visible_lines<'a>(
     };
 
     let visible_lines: Vec<Line<'a>> = styled_lines
-        .into_iter()
+        .iter()
         .take(effective_line_count)
         .skip(start_line)
         .take(visible_height)
+        .cloned()
         .collect();
 
     (visible_lines, start_line, total_lines)
@@ -350,7 +355,7 @@ pub fn render_shell_popup(
     popup: &ShellPopup,
     frame: &mut Frame,
     popup_area: Rect,
-    styled_lines: Vec<Line<'_>>,
+    styled_lines: &[Line<'_>],
     colors: &ShellPopupColors,
 ) {
     frame.render_widget(Clear, popup_area);

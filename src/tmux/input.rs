@@ -11,8 +11,8 @@
 //!         ▼
 //!   one broker thread ── coalesces adjacent text, flushes before every key
 //!         │
-//!         ├─► control-mode client   (persistent process, ~0.05 ms/command)
-//!         └─► subprocess fallback   (`tmux send-keys`, ~25 ms/command)
+//!         ├─► control-mode client   (persistent process, cheap per command)
+//!         └─► subprocess fallback   (`tmux send-keys`, one process per command)
 //! ```
 //!
 //! The broker is the **single ordering authority** for popup input. Nothing else
@@ -61,9 +61,9 @@ pub enum PaneInput {
     ///
     /// A *read* in an input queue looks out of place until you ask what it is
     /// ordered against: the capture must show the keys typed before it, and the
-    /// broker is the only thing that knows whether those have been flushed. Two
-    /// `tmux` subprocesses cost ~55 ms on macOS; the same pair down the control
-    /// connection costs ~1 ms, and that gap was most of the popup's echo lag.
+    /// broker is the only thing that knows whether those have been flushed. It
+    /// is also far cheaper here than as a pair of `tmux` processes, which is
+    /// where the popup's echo lag came from.
     ///
     /// The reply is `None` when there is no control connection — the caller
     /// then falls back to the subprocess capture, which is where it started.
@@ -285,17 +285,16 @@ impl Drop for ControlBackend {
 }
 
 /// How long a barrier waits before giving up and letting the paste race. Chosen
-/// well above the measured ~0.05 ms round trip: reaching it means tmux is wedged,
-/// and blocking the broker further would not help.
+/// well above a healthy round trip: reaching it means tmux is wedged, and
+/// blocking the broker further would not help.
 const BARRIER_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// How long a pane capture waits for its reply.
 ///
-/// Measured at ~1 ms (0.87 ms median, 1.13 ms p95 for both commands, tmux 3.5a
-/// on macOS), so this is not a budget but a wedge detector. It is generous
-/// because it is paid on a background refresh thread, not on the input path —
-/// and because giving up costs a frame at the old subprocess speed, not a
-/// dropped keystroke.
+/// Not a budget but a wedge detector: a healthy round trip is far below it. It
+/// is generous because it is paid on a background refresh thread, not on the
+/// input path, and because giving up costs one frame at the fallback's speed,
+/// not a dropped keystroke.
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// How long the *caller* waits for a capture, queue time included.
@@ -418,9 +417,8 @@ pub(crate) enum FlushReason {
 ///
 /// It is not paid by ordinary typing: text is flushed as soon as the queue is
 /// empty, and between two keystrokes a human makes it always is. That is the
-/// difference between a 2 ms tax on every character and one paid only while
-/// characters are genuinely backed up — worth having once the capture path stops
-/// costing 55 ms and 2 ms is a third of the remaining budget.
+/// difference between taxing every character and charging only while characters
+/// are genuinely backed up.
 ///
 /// So this bounds how long a *backlog* may keep growing before it goes out, and
 /// raising it trades echo latency for fewer commands only in that case.
@@ -443,10 +441,9 @@ const RECONNECT_MAX: Duration = Duration::from_secs(5);
 ///
 /// **Not** a second copy of [`BARRIER_TIMEOUT`]. The barrier sits *behind the
 /// queue*, so this wait is dominated by draining whatever is already in it — and
-/// on the subprocess backend every queued command is a ~25 ms process, so a
+/// on the subprocess backend every queued command is its own process, so a
 /// barrier-sized budget expires mid-drain and hands back a guarantee that was
-/// not kept. Measured: 20 queued keys at 25 ms each returned an error after
-/// 300 ms with half of them still in flight.
+/// not kept.
 ///
 /// So this is the "the broker is wedged" guard instead. The work it waits on is
 /// the user's own keystrokes, so in practice it returns in microseconds; the cap
@@ -869,7 +866,7 @@ impl Broker {
     ///
     /// Never falls back to the subprocess itself: the caller already owns that
     /// path, and doing it here would block the broker — and therefore the next
-    /// keystroke — behind ~55 ms of `tmux` process startup.
+    /// keystroke — behind the `tmux` process startup it would cost.
     fn capture(&mut self, target: &str, spec: CaptureSpec) -> Option<PaneSnapshot> {
         self.maybe_connect();
         let started = Instant::now();
@@ -891,7 +888,7 @@ impl Broker {
                 // A read that failed is not the ambiguous write `dispatch`
                 // guards against, so a healthy connection is kept: dropping it
                 // over a slow capture would demote every subsequent *keystroke*
-                // to the 25 ms subprocess path to fix a 1 ms read.
+                // to the subprocess path to fix a read that is far cheaper.
                 if self.control.as_ref().map(|c| c.healthy()) != Some(true) {
                     self.drop_control(&format!("capture failed: {e}"));
                 } else {

@@ -1,11 +1,10 @@
 //! Persistent tmux **control-mode** client.
 //!
 //! Every `send-keys` agtx runs through [`RealTmuxOps`](super::RealTmuxOps) starts
-//! a `tmux` process and waits for it. Measured against tmux 3.5a on macOS that
-//! is **~25 ms per key** — the dominant term in the delay between pressing a key
-//! in a task popup and seeing it echoed. A control-mode client is one long-lived
-//! process that takes commands as lines on stdin, so the same `send-keys` costs
-//! ~0.05 ms round-trip and ~0.001 ms if nothing waits for the reply.
+//! a `tmux` process and waits for it, which is what made typing in a task popup
+//! lag behind the keys. A control-mode client is one long-lived process that
+//! takes commands as lines on stdin, so the same `send-keys` costs a fraction of
+//! that, and nothing at all when no reply is waited for.
 //!
 //! ```text
 //! tmux -L agtx -C attach-session -t <session> -f ignore-size,no-output
@@ -26,12 +25,10 @@
 //!   *this* client the mirror is pure cost, and suppressing it does not suppress
 //!   command replies, which are what a query reads.
 //!
-//!   The cost is not the volume, despite what this comment used to claim: a pane
-//!   painting flat out pushes **29 KB/s across 56 frames/s** (tmux 3.5a, macOS),
-//!   not megabytes. It is that this client has no use for the bytes. That
-//!   distinction matters because `%output` is the only "this pane changed" push
-//!   tmux offers, and it is the one route to a popup that never polls — see
-//!   `docs/planning/pane-output-push.md`, which has the measurements.
+//!   The cost is not the volume — a busy pane pushes far less than it looks —
+//!   but that this client has no use for the bytes. That distinction matters
+//!   because `%output` is the only "this pane changed" push tmux offers, and the
+//!   pane watcher takes it on a second client of its own ([`OutputWatch`]).
 //! - **The session is only an attach point.** Commands carry their own
 //!   `session:window` target and are executed server-wide, so one client drives
 //!   every window on the `agtx` server. Verified: a client attached to session
@@ -430,9 +427,8 @@ impl ControlClient {
     ///
     /// The write path is fire-and-forget by design — ordering, not
     /// acknowledgement, is what pane input needs — so this is the one place that
-    /// reads a reply back. It exists for the popup's pane capture: two
-    /// `tmux` subprocesses cost ~55 ms on macOS against ~1 ms for the same two
-    /// commands here, and that difference is most of the popup's echo latency.
+    /// reads a reply back. It exists for the popup's pane capture, which is far
+    /// cheaper here than as one `tmux` process per command.
     ///
     /// All commands are written before waiting, so a batch costs one round trip
     /// rather than one per command. On timeout the query slot is cleared and the
@@ -518,7 +514,7 @@ impl ControlClient {
     ///
     /// Used before handing work to the subprocess path, which travels a
     /// *different* socket and could otherwise overtake commands still queued
-    /// here. Costs one round trip (~0.05 ms measured), not one per command.
+    /// here. Costs one round trip, not one per command.
     pub fn barrier(&mut self, timeout: Duration) -> bool {
         let want = self.issued + self.offset;
         let deadline = Instant::now() + timeout;
@@ -632,7 +628,7 @@ impl OutputWatch {
                 let mut parser = FrameParser::new();
                 let mut buf = [0u8; 8192];
                 let mut stdout = stdout;
-                loop {
+                'read: loop {
                     let n = match stdout.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => n,
@@ -646,7 +642,11 @@ impl OutputWatch {
                             if let Some(id) = output_pane_id(&line) {
                                 on_output(id);
                             } else if line.starts_with("%exit") {
-                                break;
+                                // Labelled: leaving only the frame loop would
+                                // keep reading a connection tmux has just said
+                                // it is closing, and leave `alive()` true until
+                                // the pipe happened to close.
+                                break 'read;
                             }
                         }
                     }

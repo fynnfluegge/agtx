@@ -1024,11 +1024,10 @@ fn the_interval_becomes_a_rate_limit_under_push() {
 fn output_is_sampled_slower_than_a_keystroke_echo() {
     use std::time::Duration;
     // The two reasons to capture deserve different answers. Sharing one made a
-    // pane painting flat out *worse* than the polling it replaced: a capture
-    // makes the tmux server format the whole pane, and at 10 ms that is 100
-    // formats a second — measured agtx 9.0% + tmux 24.1% of a core against
-    // 5.3% + 8.4% for 1.0.2, which could not ask more than ~18 times a second
-    // because each `capture-pane` cost it a 55 ms process.
+    // pane painting flat out cost more than the polling it replaced: a capture
+    // makes the tmux server format the whole pane, so capturing every frame is
+    // expensive where nobody is watching for one. The polling had been protected
+    // by its own slowness — one `capture-pane` process per capture.
     assert!(PANE_OUTPUT_MIN_INTERVAL > SHELL_REFRESH_INTERVAL);
 
     // Nobody is waiting on one frame of an agent's output.
@@ -1176,6 +1175,58 @@ fn the_popup_renders_the_lines_the_watcher_parsed() {
     );
 }
 
+/// Both waits must release `PaneWatch`'s lock before returning, because the
+/// watcher takes it again straight afterwards and `Mutex` is not reentrant.
+///
+/// This is the invariant that broke: written inline, the arm that did not hand
+/// its guard to `wait_timeout` kept the guard for the rest of the iteration, the
+/// rate limit below re-locked, and the watcher deadlocked *holding the lock the
+/// UI thread calls `follow()` on every iteration* — so the whole TUI froze. The
+/// waits are methods now so the guard cannot escape them; this pins that.
+#[test]
+fn the_waits_release_the_lock_before_returning() {
+    let watch = PaneWatch::default();
+    watch.follow(Some("pj:t1"), SHELL_POPUP_TAIL_LINES);
+
+    // The arm that used to keep its guard: a poke already landed, so the wait is
+    // skipped entirely rather than handed to `wait_timeout`.
+    watch.poke();
+    let outcome = watch
+        .wait_for_change(0, 0, std::time::Duration::from_millis(50))
+        .expect("not stopped");
+    assert!(
+        outcome.skipped,
+        "a poke that already landed must skip the wait"
+    );
+    assert!(outcome.poked);
+    assert!(
+        watch.inner.try_lock().is_ok(),
+        "wait_for_change returned still holding the lock"
+    );
+
+    // And the arm that does wait.
+    let (poke, signal) = {
+        let state = watch.inner.lock().expect("lock");
+        (state.poke, state.signal)
+    };
+    let outcome = watch
+        .wait_for_change(poke, signal, std::time::Duration::from_millis(1))
+        .expect("not stopped");
+    assert!(!outcome.skipped);
+    assert!(
+        watch.inner.try_lock().is_ok(),
+        "wait_for_change returned still holding the lock after waiting"
+    );
+
+    assert!(watch
+        .wait_out_rate_limit(std::time::Duration::from_millis(1))
+        .is_some());
+    assert!(
+        watch.inner.try_lock().is_ok(),
+        "wait_out_rate_limit returned still holding the lock"
+    );
+}
+
 #[test]
 fn a_pane_watch_follows_the_open_popup() {
     let watch = PaneWatch::default();
@@ -1261,8 +1312,8 @@ impl PaneInputSink for CapturingSink {
 }
 
 /// The popup's capture goes to the broker's control connection when there is
-/// one — the ~55 ms of `tmux` process startup this replaces was most of the
-/// delay between typing into a task pane and seeing the character.
+/// one: the `tmux` process startup it replaces was most of the delay between
+/// typing into a task pane and seeing the character.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn the_popup_capture_prefers_the_input_connection() {

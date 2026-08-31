@@ -79,7 +79,7 @@ pub trait TmuxOperations: Send + Sync {
 
     /// Cursor position, pane height, and how much scrollback tmux is holding.
     ///
-    /// One `display -p` for all four: the popup refresh runs this every 50 ms,
+    /// One `display -p` for all four: the popup refresh runs this often,
     /// so a second process to ask about scrollback would cost more than the
     /// answer is worth.
     fn pane_metrics(&self, target: &str) -> Option<PaneMetrics>;
