@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind},
+    event::{DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -11,7 +11,7 @@ use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc, Arc,
+    mpsc, Arc, Condvar, Mutex,
 };
 use std::time::Instant;
 
@@ -115,7 +115,13 @@ fn styled_footer(text: &str, styles: TuiStyles) -> Line<'static> {
 }
 
 fn visible_column_range(selected: usize, width: u16) -> std::ops::Range<usize> {
-    let visible = if width >= 140 { 5 } else if width >= 96 { 3 } else { 2 };
+    let visible = if width >= 140 {
+        5
+    } else if width >= 96 {
+        3
+    } else {
+        2
+    };
     let start = selected
         .saturating_sub(visible / 2)
         .min(5usize.saturating_sub(visible));
@@ -318,9 +324,6 @@ struct AppState {
     show_project_list: bool,
     // Task shell popup
     shell_popup: Option<ShellPopup>,
-    // At most one pane-history capture runs off the input thread at a time.
-    shell_refresh_rx:
-        Option<mpsc::Receiver<(String, Vec<u8>, Option<crate::tmux::PaneMetrics>)>>,
     // File search dropdown
     file_search: Option<FileSearchState>,
     // Skill search dropdown
@@ -359,7 +362,10 @@ struct AppState {
     setup_rx: Option<mpsc::Receiver<SetupResult>>,
     // Phase detection
     phase_status_cache: HashMap<String, (PhaseStatus, Instant)>,
-    spinner_frame: usize,
+    /// Paces the MCP transition-queue read, which is a SQLite query.
+    last_transition_poll: Instant,
+    /// Raised by the control connection when tmux reports a window closing.
+    window_events: Arc<AtomicBool>,
     // Idle detection: (content_hash, last_change_time) per task
     pane_content_hashes: HashMap<String, (u64, Instant)>,
     /// Why a task is Blocked, as reported by its agent's hook payload.
@@ -753,6 +759,11 @@ impl App {
         // control connection at all.
         let mut input_config = InputConfig::new(tmux::AGENT_SERVER, &tmux_project_name);
         input_config.control_mode = control_mode_enabled();
+        // tmux reports a window closing on this same connection, even with
+        // `no-output`. That is how an exited agent becomes an `Exited` card
+        // promptly instead of on the status refresh's next tick.
+        let window_events = Arc::new(AtomicBool::new(false));
+        input_config.window_events = Some(Arc::clone(&window_events));
         let input_sink = tmux::input::spawn(input_config, Arc::clone(&tmux_ops));
 
         // If the project is untrusted, also suppress plugin init_scripts
@@ -795,7 +806,6 @@ impl App {
                 selected_project: 0,
                 show_project_list: false,
                 shell_popup: None,
-                shell_refresh_rx: None,
                 file_search: None,
                 skill_search: None,
                 task_ref_search: None,
@@ -815,7 +825,8 @@ impl App {
                 review_confirm_popup: None,
                 trust_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
-                spinner_frame: 0,
+                last_transition_poll: Instant::now(),
+                window_events,
                 pane_content_hashes: HashMap::new(),
                 blocked_reasons: HashMap::new(),
                 trust_blocked: HashSet::new(),
@@ -1023,7 +1034,6 @@ impl App {
                 selected_project: 0,
                 show_project_list: false,
                 shell_popup: None,
-                shell_refresh_rx: None,
                 file_search: None,
                 skill_search: None,
                 task_ref_search: None,
@@ -1043,7 +1053,8 @@ impl App {
                 review_confirm_popup: None,
                 trust_confirm_popup: None,
                 phase_status_cache: HashMap::new(),
-                spinner_frame: 0,
+                last_transition_poll: Instant::now(),
+                window_events: Arc::new(AtomicBool::new(false)),
                 pane_content_hashes: HashMap::new(),
                 blocked_reasons: HashMap::new(),
                 trust_blocked: HashSet::new(),
@@ -1077,199 +1088,339 @@ impl App {
         self.state.input_sink = sink;
     }
 
+    /// The event loop.
+    ///
+    /// It **blocks** on a channel that two threads feed — terminal input and
+    /// pane captures — and draws only when something actually changed. The
+    /// previous shape polled: `event::poll(interval)` woke the loop on a timer
+    /// whether or not anything had happened, and every wake-up redrew the whole
+    /// screen and re-parsed the pane capture through `parse_ansi_to_lines`. That
+    /// made the poll interval a three-way trade between echo latency, DB
+    /// polling rate and idle CPU, so tuning it for the first made the other two
+    /// expensive.
+    ///
+    /// Splitting them makes each one answer to what it is actually for:
+    ///
+    /// - **latency** is the pane watcher's cadence, and it wakes the loop only
+    ///   when the pane it captured differs from the last one it sent;
+    /// - **housekeeping** — the DB queue, the session refresh, the spinner — runs
+    ///   on its own tick, no faster than it needs to and no longer coupled to
+    ///   how fast the user types;
+    /// - **drawing** happens when state changed, so an idle board with an idle
+    ///   popup costs one backstop frame a second.
     pub async fn run(&mut self) -> Result<()> {
+        let (tx, rx) = mpsc::channel::<Wake>();
+        spawn_terminal_reader(tx.clone());
+        let watch = Arc::new(PaneWatch::default());
+        spawn_pane_watcher(
+            Arc::clone(&watch),
+            tx,
+            Arc::clone(&self.state.input_sink),
+            Arc::clone(&self.state.tmux_ops),
+        );
+
+        // The first frame has nothing to be a change from.
+        let mut dirty = true;
+        let mut last_draw = Instant::now();
+        let mut last_housekeeping = Instant::now() - HOUSEKEEPING_TICK;
+
         while !self.state.should_quit {
-            self.draw()?;
-
-            // Check for PR generation completion
-            if let Some(ref rx) = self.state.pr_generation_rx {
-                if let Ok((pr_title, pr_body)) = rx.try_recv() {
-                    if let Some(ref mut popup) = self.state.pr_confirm_popup {
-                        popup.pr_title = pr_title;
-                        popup.pr_body = pr_body;
-                        popup.generating = false;
-                    }
-                    self.state.pr_generation_rx = None;
-                }
+            // A missed `dirty` would leave a stale screen until the next
+            // keystroke, which is a far worse failure than a wasted frame — so
+            // the loop repaints once a second regardless. A backstop, not the
+            // mechanism: one frame a second is nothing, and if it is ever what
+            // makes the UI look right, something above it is wrong.
+            if dirty || last_draw.elapsed() >= REDRAW_BACKSTOP {
+                self.draw()?;
+                dirty = false;
+                last_draw = Instant::now();
             }
 
-            // Check for PR creation completion
-            if let Some(ref rx) = self.state.pr_creation_rx {
-                if let Ok(result) = rx.try_recv() {
-                    match result {
-                        Ok((_, pr_url)) => {
-                            self.state.pr_status_popup = Some(PrStatusPopup {
-                                status: PrCreationStatus::Success,
-                                pr_url: Some(pr_url),
-                                error_message: None,
-                            });
-                        }
-                        Err(err) => {
-                            self.state.pr_status_popup = Some(PrStatusPopup {
-                                status: PrCreationStatus::Error,
-                                pr_url: None,
-                                error_message: Some(err),
-                            });
-                        }
-                    }
-                    self.state.pr_creation_rx = None;
-                    self.refresh_tasks()?;
-                }
-            }
+            // Point the watcher at whatever popup is open now. Done here rather
+            // than at the three sites that open one and the several that close
+            // one: this cannot be forgotten by a new call site.
+            let (watch_target, watch_depth) = match self.state.shell_popup.as_ref() {
+                Some(popup) => (
+                    Some(popup.window_name.as_str()),
+                    popup_capture_depth(popup.scroll_offset),
+                ),
+                None => (None, SHELL_POPUP_TAIL_LINES),
+            };
+            watch.follow(watch_target, watch_depth);
 
-            // Check for worktree setup completion
-            if let Some(ref rx) = self.state.setup_rx {
-                if let Ok(result) = rx.try_recv() {
-                    self.state.setup_rx = None;
-                    if let Some(err) = result.error {
-                        self.state.warning_message = Some((err, Instant::now()));
-                    } else {
-                        // Update task with worktree info from background setup
-                        if let Some(db) = &self.state.db {
-                            if let Ok(Some(mut task)) = db.get_task(&result.task_id) {
-                                task.session_name = Some(result.session_name);
-                                task.worktree_path = Some(result.worktree_path);
-                                task.branch_name = Some(result.branch_name);
-                                task.agent = result.agent;
-                                task.plugin = result.plugin;
-                                if let Some(status) = result.new_status {
-                                    task.status = status;
-                                }
-                                task.updated_at = chrono::Utc::now();
-                                let _ = db.update_task(&task);
-                            }
-                        }
-                        self.refresh_tasks()?;
+            match rx.recv_timeout(HOUSEKEEPING_TICK) {
+                Ok(wake) => {
+                    // Typing is the case the fast cadence exists for, so a key
+                    // ends the watcher's wait rather than landing in the middle
+                    // of a backed-off one.
+                    if matches!(wake, Wake::Input(_)) {
+                        watch.poke();
                     }
-                    // This setup finished; start the next queued batch task (if any).
-                    self.try_start_next_queued_setup()?;
-                }
-            }
-
-            // Process MCP transition requests from the command queue
-            self.process_transition_requests()?;
-
-            if event::poll(main_event_poll_timeout(self.state.shell_popup.is_some()))? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        self.handle_key(key)?;
-                    }
-                    Event::Paste(text) => {
-                        self.handle_paste(text)?;
-                    }
-                    _ => {}
-                }
-            }
-
-            // Apply a completed pane capture without ever waiting for tmux on
-            // the input thread.
-            if let Some(ref rx) = self.state.shell_refresh_rx {
-                match rx.try_recv() {
-                    Ok((window_name, content, metrics)) => {
-                        self.state.shell_refresh_rx = None;
-                        if let Some(popup) = self.state.shell_popup.as_mut() {
-                            if popup.window_name == window_name {
-                                popup.cached_content = content;
-                                popup.metrics = metrics;
+                    dirty |= self.handle_wake(wake)?;
+                    // Drain what is already queued: a burst of keystrokes, or a
+                    // key and the capture it caused, are one redraw, not four.
+                    loop {
+                        match rx.try_recv() {
+                            Ok(wake) => dirty |= self.handle_wake(wake)?,
+                            Err(mpsc::TryRecvError::Empty) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                self.state.should_quit = true;
+                                break;
                             }
                         }
                     }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        self.state.shell_refresh_rx = None;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                // Both feeder threads are gone; without terminal input there is
+                // no way left to quit.
+                Err(mpsc::RecvTimeoutError::Disconnected) => self.state.should_quit = true,
             }
 
-            // Capturing history invokes tmux twice (content + cursor metadata),
-            // so run it in a single background worker at a responsive 20 FPS.
-            if self.state.shell_refresh_rx.is_none() {
-                if let Some(popup) = self.state.shell_popup.as_mut() {
-                    if popup.content_refresh_due(SHELL_REFRESH_INTERVAL) {
-                        let window_name = popup.window_name.clone();
-                        let tmux_ops = Arc::clone(&self.state.tmux_ops);
-                        let (tx, rx) = mpsc::channel();
-                        popup.mark_content_refreshed();
-                        self.state.shell_refresh_rx = Some(rx);
-                        std::thread::spawn(move || {
-                            let (content, metrics) = capture_tmux_pane_snapshot(
-                                &window_name,
-                                500,
-                                tmux_ops.as_ref(),
-                            );
-                            let _ = tx.send((window_name, content, metrics));
-                        });
-                    }
-                }
-            }
+            dirty |= self.pump_background_results()?;
 
-            // Apply results from background session refresh (non-blocking)
-            if let Some(ref rx) = self.state.session_refresh_rx {
-                match rx.try_recv() {
-                    Ok(result) => {
-                        self.state.session_refresh_rx = None;
-                        self.apply_session_refresh(result);
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        // Thread panicked or dropped sender — clear to allow future spawns
-                        self.state.session_refresh_rx = None;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                }
-            }
-            // Release check result (arrives once, then the channel is dropped)
-            if let Some(ref rx) = self.state.update_rx {
-                match rx.try_recv() {
-                    Ok(info) => {
-                        self.state.update_rx = None;
-                        self.state.update_available = info;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        self.state.update_rx = None;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                }
-            }
-
-            // Result of an install started from the update popup
-            if let Some(ref rx) = self.state.update_install_rx {
-                match rx.try_recv() {
-                    Ok(result) => {
-                        self.state.update_install_rx = None;
-                        if let Some(popup) = self.state.update_popup.as_mut() {
-                            popup.installing = false;
-                            popup.status = Some(match result {
-                                Ok(msg) => msg,
-                                Err(e) => format!("failed: {e}"),
-                            });
-                        }
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        self.state.update_install_rx = None;
-                        if let Some(popup) = self.state.update_popup.as_mut() {
-                            popup.installing = false;
-                            popup.status = Some("failed: the update thread stopped".to_string());
-                        }
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                }
-            }
-
-            // Spawn background refresh if not already running and cache expired
-            self.maybe_spawn_session_refresh();
-
-            // Deliver queued notifications to orchestrator when idle
-            self.deliver_orchestrator_notifications();
-
-            // Clear expired warning messages
-            if let Some((_, created)) = &self.state.warning_message {
-                if created.elapsed() >= std::time::Duration::from_secs(5) {
-                    self.state.warning_message = None;
-                }
+            if last_housekeeping.elapsed() >= HOUSEKEEPING_TICK {
+                last_housekeeping = Instant::now();
+                dirty |= self.run_housekeeping();
             }
         }
 
+        watch.stop();
         Ok(())
+    }
+
+    /// Apply one wake-up. Returns whether the screen needs redrawing.
+    fn handle_wake(&mut self, wake: Wake) -> Result<bool> {
+        match wake {
+            Wake::Input(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                self.handle_key(key)?;
+                Ok(true)
+            }
+            Wake::Input(Event::Paste(text)) => {
+                self.handle_paste(text)?;
+                Ok(true)
+            }
+            Wake::Input(Event::Resize(..)) => Ok(true),
+            Wake::Input(_) => Ok(false),
+            Wake::Pane {
+                window,
+                content,
+                lines,
+                metrics,
+            } => {
+                let Some(popup) = self.state.shell_popup.as_mut() else {
+                    return Ok(false);
+                };
+                // A capture for a popup that has since closed or switched panes
+                // is not this popup's content.
+                if popup.window_name != window {
+                    return Ok(false);
+                }
+                // The watcher already suppresses unchanged captures; this also
+                // covers the first one after a popup seeded its own content
+                // synchronously at open time.
+                if popup.cached_content == content && popup.metrics == metrics {
+                    return Ok(false);
+                }
+                popup.set_content(content, lines);
+                popup.metrics = metrics;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Collect anything the background threads have finished. Returns whether
+    /// any of it changed what is on screen.
+    fn pump_background_results(&mut self) -> Result<bool> {
+        let mut changed = false;
+
+        // Check for PR generation completion
+        if let Some(ref rx) = self.state.pr_generation_rx {
+            if let Ok((pr_title, pr_body)) = rx.try_recv() {
+                if let Some(ref mut popup) = self.state.pr_confirm_popup {
+                    popup.pr_title = pr_title;
+                    popup.pr_body = pr_body;
+                    popup.generating = false;
+                }
+                self.state.pr_generation_rx = None;
+                changed = true;
+            }
+        }
+
+        // Check for PR creation completion
+        if let Some(ref rx) = self.state.pr_creation_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok((_, pr_url)) => {
+                        self.state.pr_status_popup = Some(PrStatusPopup {
+                            status: PrCreationStatus::Success,
+                            pr_url: Some(pr_url),
+                            error_message: None,
+                        });
+                    }
+                    Err(err) => {
+                        self.state.pr_status_popup = Some(PrStatusPopup {
+                            status: PrCreationStatus::Error,
+                            pr_url: None,
+                            error_message: Some(err),
+                        });
+                    }
+                }
+                self.state.pr_creation_rx = None;
+                self.refresh_tasks()?;
+                changed = true;
+            }
+        }
+
+        // Check for worktree setup completion
+        if let Some(ref rx) = self.state.setup_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.state.setup_rx = None;
+                if let Some(err) = result.error {
+                    self.state.warning_message = Some((err, Instant::now()));
+                } else {
+                    // Update task with worktree info from background setup
+                    if let Some(db) = &self.state.db {
+                        if let Ok(Some(mut task)) = db.get_task(&result.task_id) {
+                            task.session_name = Some(result.session_name);
+                            task.worktree_path = Some(result.worktree_path);
+                            task.branch_name = Some(result.branch_name);
+                            task.agent = result.agent;
+                            task.plugin = result.plugin;
+                            if let Some(status) = result.new_status {
+                                task.status = status;
+                            }
+                            task.updated_at = chrono::Utc::now();
+                            let _ = db.update_task(&task);
+                        }
+                    }
+                    self.refresh_tasks()?;
+                }
+                // This setup finished; start the next queued batch task (if any).
+                self.try_start_next_queued_setup()?;
+                changed = true;
+            }
+        }
+
+        // Apply results from background session refresh (non-blocking)
+        if let Some(ref rx) = self.state.session_refresh_rx {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.state.session_refresh_rx = None;
+                    self.apply_session_refresh(result);
+                    changed = true;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Thread panicked or dropped sender — clear to allow future spawns
+                    self.state.session_refresh_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        // Release check result (arrives once, then the channel is dropped)
+        if let Some(ref rx) = self.state.update_rx {
+            match rx.try_recv() {
+                Ok(info) => {
+                    self.state.update_rx = None;
+                    self.state.update_available = info;
+                    changed = true;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.state.update_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        // Result of an install started from the update popup
+        if let Some(ref rx) = self.state.update_install_rx {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.state.update_install_rx = None;
+                    if let Some(popup) = self.state.update_popup.as_mut() {
+                        popup.installing = false;
+                        popup.status = Some(match result {
+                            Ok(msg) => msg,
+                            Err(e) => format!("failed: {e}"),
+                        });
+                    }
+                    changed = true;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.state.update_install_rx = None;
+                    if let Some(popup) = self.state.update_popup.as_mut() {
+                        popup.installing = false;
+                        popup.status = Some("failed: the update thread stopped".to_string());
+                    }
+                    changed = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        Ok(changed)
+    }
+
+    /// Periodic work, on its own tick rather than once per wake-up.
+    ///
+    /// Every item here used to run on every loop iteration — including
+    /// `process_transition_requests`, which queries SQLite — so its rate rose and
+    /// fell with how fast the user happened to be typing. Returns whether
+    /// anything on screen moved.
+    fn run_housekeeping(&mut self) -> bool {
+        let mut changed = false;
+        let now = Instant::now();
+
+        // Process MCP transition requests from the command queue, on their own
+        // interval — this is a SQLite query, and it used to run on every tick.
+        if now.duration_since(self.state.last_transition_poll) >= TRANSITION_POLL_INTERVAL {
+            self.state.last_transition_poll = now;
+            if let Err(e) = self.process_transition_requests() {
+                tracing::warn!(error = %e, "failed to process transition requests");
+            }
+        }
+
+        // tmux said a window closed. The refresh is what turns that into an
+        // `Exited` card, and its per-task cache would otherwise hold the old
+        // status for up to `PHASE_STATUS_CACHE_TTL` — so age the cache out and
+        // let the refresh below run now.
+        if self.state.window_events.swap(false, Ordering::Relaxed) {
+            self.expire_phase_status_cache();
+        }
+
+        // Spawn background refresh if not already running and cache expired.
+        self.maybe_spawn_session_refresh();
+
+        // Nothing on the board animates any more: every indicator is static, so
+        // an idle board asks for no frame at all between real changes.
+
+        // Deliver queued notifications to orchestrator when idle
+        self.deliver_orchestrator_notifications();
+
+        // Clear expired warning messages
+        if let Some((_, created)) = &self.state.warning_message {
+            if created.elapsed() >= WARNING_MESSAGE_TTL {
+                self.state.warning_message = None;
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    /// Make every cached phase status look stale, so the next refresh re-checks
+    /// every task rather than waiting out its per-task TTL.
+    ///
+    /// The timestamps are aged rather than the entries dropped: the previous
+    /// status is what decides `was_ready`, and losing it would suppress the
+    /// "newly ready" notification for a task that had just finished.
+    fn expire_phase_status_cache(&mut self) {
+        let Some(stale) = Instant::now().checked_sub(PHASE_STATUS_CACHE_TTL) else {
+            return;
+        };
+        for (_, ts) in self.state.phase_status_cache.values_mut() {
+            *ts = stale;
+        }
     }
 
     pub fn draw(&mut self) -> Result<()> {
@@ -1329,7 +1480,10 @@ impl App {
 
         // Header
         let plugin_label = state.config.workflow_plugin.as_deref().unwrap_or("agtx");
-        let left = Span::styled(format!("  {}", state.project_name), Style::default().fg(styles.text).bold());
+        let left = Span::styled(
+            format!("  {}", state.project_name),
+            Style::default().fg(styles.text).bold(),
+        );
         let mut right_spans: Vec<Span> = Vec::new();
         if state.flags.experimental {
             let orch_active = state.orchestrator_session.is_some();
@@ -1375,10 +1529,20 @@ impl App {
         let padding = (chunks[0].width as usize).saturating_sub(left_len + right_len + 2);
         let mut spans = vec![left, Span::raw(" ".repeat(padding))];
         spans.extend(right_spans);
-        frame.render_widget(Paragraph::new(Line::from(spans)), Rect { height: 1, ..chunks[0] });
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                height: 1,
+                ..chunks[0]
+            },
+        );
         frame.render_widget(
             Paragraph::new("─".repeat(chunks[0].width as usize)).style(styles.muted()),
-            Rect { y: chunks[0].y + 1, height: 1, ..chunks[0] },
+            Rect {
+                y: chunks[0].y + 1,
+                height: 1,
+                ..chunks[0]
+            },
         );
 
         // Keep cards usable on narrow terminals by showing a window around the
@@ -1412,7 +1576,10 @@ impl App {
                 Style::default().fg(styles.column_header).bold()
             };
 
-            let header_area = Rect { height: 2, ..column_area };
+            let header_area = Rect {
+                height: 2,
+                ..column_area
+            };
             let count = Span::styled(format!("  {}", tasks.len()), styles.muted());
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -1422,13 +1589,24 @@ impl App {
                     ),
                     count,
                 ])),
-                Rect { height: 1, ..header_area },
+                Rect {
+                    height: 1,
+                    ..header_area
+                },
             );
-            let rule_color = if is_selected_column { styles.selected } else { styles.dimmed };
+            let rule_color = if is_selected_column {
+                styles.selected
+            } else {
+                styles.dimmed
+            };
             frame.render_widget(
                 Paragraph::new("─".repeat(header_area.width as usize))
                     .style(Style::default().fg(rule_color)),
-                Rect { y: header_area.y + 1, height: 1, ..header_area },
+                Rect {
+                    y: header_area.y + 1,
+                    height: 1,
+                    ..header_area
+                },
             );
 
             let inner_area = Rect {
@@ -1490,13 +1668,16 @@ impl App {
                     is_selected,
                     &state.config.theme,
                     state.phase_status_cache.get(&task.id),
-                    state.spinner_frame,
                     deps_blocked,
                 );
             }
 
             if tasks.is_empty() {
-                let empty = if is_selected_column { "  No tasks · [o] new" } else { "  No tasks" };
+                let empty = if is_selected_column {
+                    "  No tasks · [o] new"
+                } else {
+                    "  No tasks"
+                };
                 frame.render_widget(Paragraph::new(empty).style(styles.muted()), inner_area);
             }
 
@@ -1574,16 +1755,26 @@ impl App {
 
         frame.render_widget(
             Paragraph::new("─".repeat(chunks[2].width as usize)).style(styles.muted()),
-            Rect { height: 1, ..chunks[2] },
+            Rect {
+                height: 1,
+                ..chunks[2]
+            },
         );
         let footer_line = if footer_style.fg == Some(Color::Yellow) {
-            Line::from(Span::styled(format!("  {}", footer_text.trim()), footer_style))
+            Line::from(Span::styled(
+                format!("  {}", footer_text.trim()),
+                footer_style,
+            ))
         } else {
             styled_footer(&footer_text, styles)
         };
         frame.render_widget(
             Paragraph::new(footer_line).alignment(Alignment::Center),
-            Rect { y: chunks[2].y + 1, height: 1, ..chunks[2] },
+            Rect {
+                y: chunks[2].y + 1,
+                height: 1,
+                ..chunks[2]
+            },
         );
 
         // Input overlay if in input mode
@@ -2840,7 +3031,9 @@ impl App {
         };
 
         // Parse ANSI escape sequences for colors
-        let styled_lines = parse_ansi_to_lines(&popup.cached_content);
+        // Parsed by the watcher, and borrowed rather than cloned: only the rows
+        // that fit on screen are copied, not the whole cached pane.
+        let styled_lines = popup.cached_lines.as_slice();
 
         // Build colors from theme
         let colors = shell_popup::ShellPopupColors {
@@ -2863,7 +3056,6 @@ impl App {
         is_selected: bool,
         theme: &ThemeConfig,
         phase_status: Option<&(PhaseStatus, Instant)>,
-        spinner_frame: usize,
         deps_blocked: bool,
     ) {
         let styles = TuiStyles::from_theme(theme);
@@ -2897,7 +3089,11 @@ impl App {
         let card_block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .border_type(if is_selected { BorderType::Rounded } else { BorderType::Plain });
+            .border_type(if is_selected {
+                BorderType::Rounded
+            } else {
+                BorderType::Plain
+            });
         let block_inner = card_block.inner(area);
         frame.render_widget(card_block, area);
         let inner = Rect {
@@ -2914,17 +3110,17 @@ impl App {
             && task.session_name.is_some());
 
         if show_indicator {
-            const SPINNER_FRAMES: &[&str] = &[
-                "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
-                "\u{2827}", "\u{2807}", "\u{280f}",
-            ];
             let indicator = match phase_status {
                 Some((PhaseStatus::Ready, _)) => {
                     Span::styled("\u{2713} ", Style::default().fg(Color::Green))
                 }
+                // Static, not a spinner. An animated frame is a redraw of the
+                // whole board, and on an otherwise idle board it was the *only*
+                // thing forcing one — ten a second, forever, to rotate a glyph.
+                // The card already says a task is running; the motion added
+                // nothing that the icon does not.
                 Some((PhaseStatus::Working, _)) => {
-                    let spinner = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
-                    Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow))
+                    Span::styled("\u{25b6} ", Style::default().fg(Color::Yellow))
                 }
                 Some((PhaseStatus::Blocked, _)) => Span::styled(
                     "? ",
@@ -3120,7 +3316,11 @@ impl App {
         );
         frame.render_widget(
             Paragraph::new("─".repeat(area.width.saturating_sub(1) as usize)).style(styles.muted()),
-            Rect { y: area.y + 1, height: 1, ..area },
+            Rect {
+                y: area.y + 1,
+                height: 1,
+                ..area
+            },
         );
         frame.render_widget(
             List::new(items),
@@ -4065,10 +4265,10 @@ impl App {
                             .unwrap_or(24);
                         (SHELL_POPUP_CONTENT_WIDTH, height.saturating_sub(4))
                     };
-                    let _ = self
-                        .state
-                        .tmux_ops
-                        .resize_window(&window_name, pane_width, pane_height);
+                    let _ =
+                        self.state
+                            .tmux_ops
+                            .resize_window(&window_name, pane_width, pane_height);
                     popup.last_pane_size = Some((pane_width, pane_height));
                     return Ok(());
                 }
@@ -7031,7 +7231,8 @@ impl App {
             }
             let (content, metrics) =
                 capture_tmux_pane_snapshot(&orch_target, 500, self.state.tmux_ops.as_ref());
-            popup.cached_content = content;
+            let lines = parse_ansi_to_lines(&content);
+            popup.set_content(content, lines);
             popup.metrics = metrics;
             let _ = self.state.input_sink.flush();
             self.state.shell_popup = Some(popup);
@@ -7115,7 +7316,8 @@ impl App {
         }
         let (content, metrics) =
             capture_tmux_pane_snapshot(&orch_target, 500, self.state.tmux_ops.as_ref());
-        popup.cached_content = content;
+        let lines = parse_ansi_to_lines(&content);
+        popup.set_content(content, lines);
         popup.metrics = metrics;
         let _ = self.state.input_sink.flush();
         self.state.shell_popup = Some(popup);
@@ -7207,12 +7409,13 @@ impl App {
 
                 // Capture initial content *and* the pane metrics, so the first
                 // keypress already knows whether this pane has tmux scrollback.
-                // Reading them only in the 50 ms refresh left a window in which
+                // Leaving them to the first refresh left a window in which
                 // `has_scrollback()` fell back to its `true` default and the
                 // scroll keys moved a buffer that could not move.
                 let (content, metrics) =
                     capture_tmux_pane_snapshot(&target, 500, self.state.tmux_ops.as_ref());
-                popup.cached_content = content;
+                let lines = parse_ansi_to_lines(&content);
+                popup.set_content(content, lines);
                 popup.metrics = metrics;
 
                 // A popup opening changes the target; nothing queued for the
@@ -7230,11 +7433,10 @@ impl App {
             popup.fullscreen = true;
             if let Ok((width, height)) = crossterm::terminal::size() {
                 let pane_size = (width.saturating_sub(2), height.saturating_sub(4));
-                let _ = self.state.tmux_ops.resize_window(
-                    &popup.window_name,
-                    pane_size.0,
-                    pane_size.1,
-                );
+                let _ =
+                    self.state
+                        .tmux_ops
+                        .resize_window(&popup.window_name, pane_size.0, pane_size.1);
                 popup.last_pane_size = Some(pane_size);
             }
         }
@@ -7383,12 +7585,11 @@ impl App {
     fn maybe_spawn_session_refresh(&mut self) {
         // Don't spawn if a refresh is already in flight
         if self.state.session_refresh_rx.is_some() {
-            self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
             return;
         }
 
         let now = Instant::now();
-        const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+        const CACHE_TTL: std::time::Duration = PHASE_STATUS_CACHE_TTL;
 
         // Collect tasks that need checking (cache expired or never checked)
         let tasks_to_check: Vec<_> = self
@@ -7431,18 +7632,24 @@ impl App {
             .collect();
 
         if tasks_to_check.is_empty() {
-            self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
             return;
         }
 
         let project_path = self.state.project_path.clone();
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
+        let input_sink = Arc::clone(&self.state.input_sink);
         let auto_trust = self.state.config.auto_trust;
 
         let (tx, rx) = mpsc::channel();
         self.state.session_refresh_rx = Some(rx);
 
         std::thread::spawn(move || {
+            // Every window on the server, once, rather than a `list-windows`
+            // process per task. `window_exists` is a membership test, and asking
+            // tmux N times for the same answer was the largest remaining
+            // per-task subprocess cost on the board.
+            let live_windows = live_window_targets(tmux_ops.as_ref());
+
             let mut plugin_cache: HashMap<Option<String>, Option<WorkflowPlugin>> = HashMap::new();
             let mut statuses = Vec::new();
             let now_secs = chrono::Utc::now().timestamp();
@@ -7528,9 +7735,10 @@ impl App {
 
                 // Check if tmux window still exists — if not, mark as Exited
                 // (unless phase artifact was found, in which case it completed before the crash)
-                let window_gone = session_name
-                    .as_ref()
-                    .map_or(false, |sn| !tmux_ops.window_exists(sn).unwrap_or(true));
+                //
+                // Answered from one listing taken for the whole pass: this used to
+                // be a `list-windows` **process per task**, on a 2-second timer.
+                let window_gone = window_is_gone(session_name.as_deref(), live_windows.as_ref());
                 let phase_status = if window_gone && phase_status == PhaseStatus::Working {
                     PhaseStatus::Exited
                 } else {
@@ -7565,15 +7773,30 @@ impl App {
                     Some(hook_status::HookState::Working)
                 );
                 let mut awaiting_trust: Option<String> = None;
+                // One capture for this pass, shared by the dialog scan below and
+                // the content hash further down. They ask different questions of
+                // the same bytes, and reading the pane twice was a second `tmux`
+                // process per task for every agent that reports no hook status —
+                // which is the case the hash exists for in the first place.
+                // `hook_says_working` implies a hook status exists, so this one
+                // condition is exactly the union of the two below.
+                let pane_text: Option<String> =
+                    if phase_status == PhaseStatus::Working && !window_gone && !hook_says_working {
+                        session_name.as_ref().and_then(|sn| {
+                            capture_pane_text(sn, input_sink.as_ref(), tmux_ops.as_ref())
+                        })
+                    } else {
+                        None
+                    };
                 if phase_status == PhaseStatus::Working && !window_gone && !hook_says_working {
                     if let Some(sn) = session_name.as_ref() {
-                        if let Ok(content) = tmux_ops.capture_pane(sn) {
+                        if let Some(content) = pane_text.as_deref() {
                             // Detected whether or not it is answered: with
                             // `auto_trust` off this is what turns the card
                             // `Blocked`, so the user knows a decision is theirs to
                             // make rather than watching a task sit at "working".
                             if !auto_trust {
-                                awaiting_trust = visible_security_dialog(Some(&agent), &content)
+                                awaiting_trust = visible_security_dialog(Some(&agent), content)
                                     .map(str::to_string);
                             }
                             // A fresh state each poll: the attempt cap guards a
@@ -7584,7 +7807,7 @@ impl App {
                                 &tmux_ops,
                                 sn,
                                 Some(&agent),
-                                &content,
+                                content,
                                 &mut st,
                                 auto_trust,
                             );
@@ -7595,7 +7818,7 @@ impl App {
                             // Matched against this agent's own dialogs only: the
                             // refresh loop knows what runs in the pane, unlike
                             // `wait_for_agent_ready`.
-                            answer_session_dialogs(&tmux_ops, sn, &agent, &content);
+                            answer_session_dialogs(&tmux_ops, sn, &agent, content);
                         }
                     }
                 }
@@ -7607,13 +7830,11 @@ impl App {
                     && !window_gone
                     && hook_status.is_none()
                 {
-                    session_name.as_ref().and_then(|sn| {
-                        tmux_ops.capture_pane(sn).ok().map(|content| {
-                            use std::hash::{Hash, Hasher};
-                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                            content.hash(&mut hasher);
-                            hasher.finish()
-                        })
+                    pane_text.as_ref().map(|content| {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        content.hash(&mut hasher);
+                        hasher.finish()
                     })
                 } else {
                     None
@@ -7909,8 +8130,6 @@ impl App {
                     .remove(&task_status.task_id);
             }
         }
-
-        self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
     }
 
     fn switch_to_project(&mut self, project: &ProjectInfo) -> Result<()> {
@@ -8699,12 +8918,93 @@ fn capture_tmux_pane_snapshot(
     // Lines below the cursor are unused pane buffer space
     let metrics = tmux_ops.pane_metrics(window_name);
 
-    // Trim content to only include lines up to cursor position
-    let trim_info = metrics.map(|m| m.trim_bounds());
+    trim_pane_snapshot(crate::tmux::PaneSnapshot { content, metrics })
+}
+
+/// Cut the unused pane buffer below the cursor off a capture.
+///
+/// Shared by both capture paths so they cannot disagree about what the popup is
+/// shown — the whole point of the control-mode path is to be indistinguishable
+/// from the subprocess one apart from its cost.
+fn trim_pane_snapshot(
+    snapshot: crate::tmux::PaneSnapshot,
+) -> (Vec<u8>, Option<crate::tmux::PaneMetrics>) {
+    let trim_info = snapshot.metrics.map(|m| m.trim_bounds());
     (
-        shell_popup::trim_content_to_cursor(content, trim_info),
-        metrics,
+        shell_popup::trim_content_to_cursor(snapshot.content, trim_info),
+        snapshot.metrics,
     )
+}
+
+/// Capture a pane for the popup: over the input broker's control connection when
+/// there is one, otherwise the two `tmux` processes this has always cost.
+///
+/// The broker is asked first because it already holds a live `tmux -C` client
+/// for keystrokes, and reusing it avoids the process startup that dominated the
+/// delay between typing into a task pane and seeing the character appear. It
+/// also flushes buffered keystrokes ahead of the capture, so a frame can never
+/// be missing text the user has already typed.
+fn capture_pane_for_popup(
+    window_name: &str,
+    history_lines: i32,
+    input_sink: &dyn PaneInputSink,
+    tmux_ops: &dyn TmuxOperations,
+) -> (Vec<u8>, Option<crate::tmux::PaneMetrics>) {
+    match input_sink.capture(window_name, crate::tmux::CaptureSpec::popup(history_lines)) {
+        Some(snapshot) => trim_pane_snapshot(snapshot),
+        None => capture_tmux_pane_snapshot(window_name, history_lines, tmux_ops),
+    }
+}
+
+/// Windows that currently exist, as a set of `session:window` targets, or `None`
+/// when tmux could not be asked.
+///
+/// The `Option` is the whole point and must not be flattened to an empty set.
+/// The per-task check this replaces failed *safe* —
+/// `!window_exists(sn).unwrap_or(true)` leaves a task alone when the check
+/// errors — whereas an empty set reads as "every window is gone" and would mark
+/// every running task `Exited` on one transient tmux hiccup. That is a visible,
+/// wrong status change on the whole board, so a failed listing must mean
+/// "unknown", not "none".
+fn live_window_targets(tmux_ops: &dyn TmuxOperations) -> Option<std::collections::HashSet<String>> {
+    tmux_ops
+        .list_window_targets()
+        .ok()
+        .map(|targets| targets.into_iter().collect())
+}
+
+/// Has this task's tmux window gone away?
+///
+/// Split out because its **failure direction** is the whole subtlety: `None` for
+/// the listing means tmux could not be asked, and must read as "leave the task
+/// alone", never as "every window is gone". Getting that backwards marks a whole
+/// board `Exited` on one transient tmux hiccup.
+fn window_is_gone(session: Option<&str>, live: Option<&std::collections::HashSet<String>>) -> bool {
+    match (session, live) {
+        (Some(sn), Some(live)) => !live.contains(sn),
+        _ => false,
+    }
+}
+
+/// Read a pane as **plain text**, over the input connection when there is one.
+///
+/// The status refresh's counterpart to [`capture_pane_for_popup`]: no escapes,
+/// no scrollback, no geometry — byte-identical to
+/// [`TmuxOperations::capture_pane`], which is what the dialog matcher and the
+/// content hash have always been fed.
+///
+/// Worth routing because this is the last per-task subprocess left on the status
+/// refresh's timer: the fallback is a `tmux` process *per task*, and it scales
+/// with the size of the board.
+fn capture_pane_text(
+    target: &str,
+    input_sink: &dyn PaneInputSink,
+    tmux_ops: &dyn TmuxOperations,
+) -> Option<String> {
+    if let Some(snapshot) = input_sink.capture(target, crate::tmux::CaptureSpec::text()) {
+        return Some(String::from_utf8_lossy(&snapshot.content).into_owned());
+    }
+    tmux_ops.capture_pane(target).ok()
 }
 
 /// Generate PR title and description using the configured agent
@@ -9028,21 +9328,695 @@ fn pane_target(session: &str, window: &str) -> String {
 /// of that decision. The variable stays as a one-run escape hatch, so a bug
 /// report can be bisected across the two lanes without editing anything.
 fn control_mode_enabled() -> bool {
-    !matches!(
-        std::env::var("AGTX_TMUX_CONTROL").ok().as_deref(),
-        Some("0") | Some("false") | Some("no")
-    )
+    control_mode_from_env(std::env::var("AGTX_TMUX_CONTROL").ok().as_deref())
 }
 
-const SHELL_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-const DEFAULT_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+/// The policy half, split from the read so it can be tested without touching
+/// the process environment. `setenv` is not thread-safe against a concurrent
+/// `getenv`, and `cargo test` runs hundreds of tests in parallel threads — a
+/// test that mutates a global to check a `match` is a race for no reason.
+fn control_mode_from_env(value: Option<&str>) -> bool {
+    !matches!(value, Some("0") | Some("false") | Some("no"))
+}
 
-fn main_event_poll_timeout(shell_popup_open: bool) -> std::time::Duration {
-    if shell_popup_open {
-        SHELL_REFRESH_INTERVAL
+/// How fresh the popup's view of its pane is while the **user is typing**.
+///
+/// It means two different things depending on how the watcher is being driven:
+/// under push it is a *rate limit* — the ceiling on how often a paint may cause
+/// a capture — and on the poll fallback it is the sampling period itself.
+///
+/// Either way it is the term a keystroke's echo latency is made of, which is
+/// only true because a capture over the control connection is cheap where two
+/// `tmux` processes were not. Its cost is paid on the far side — a capture makes
+/// the tmux server format the whole pane — so this is not free to lower. [`PANE_OUTPUT_MIN_INTERVAL`] is the same ceiling for the agent's own
+/// output, where nobody is waiting on a single frame.
+const SHELL_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Scrollback lines a popup capture asks for **when the user has scrolled up**.
+///
+/// A pane in the alternate screen — where full-screen agent UIs live — has none,
+/// and returns just the visible rows regardless of this.
+const SHELL_POPUP_CAPTURE_LINES: i32 = 500;
+
+/// Scrollback lines to ask for while the popup sits **at the bottom**.
+///
+/// Only the visible rows are rendered there, so the rest is fetched, formatted
+/// by the tmux server, compared and parsed for nothing. Not zero, because the
+/// first `C-u` needs somewhere to scroll to: 100 lines is ~3 pages, and by the
+/// time the user scrolls past that the deeper capture has arrived.
+///
+/// Worth nothing for the agents that matter today — they take the alternate
+/// screen, where `history_size` is 0 and every depth returns the same bytes. It
+/// is for a pane that *does* accumulate history, where the deeper capture is
+/// many times the size of the screen being rendered.
+const SHELL_POPUP_TAIL_LINES: i32 = 100;
+
+/// How deep the watcher should capture, given where the popup is scrolled.
+fn popup_capture_depth(scroll_offset: i32) -> i32 {
+    if scroll_offset < 0 {
+        SHELL_POPUP_CAPTURE_LINES
     } else {
-        DEFAULT_EVENT_POLL_INTERVAL
+        SHELL_POPUP_TAIL_LINES
     }
+}
+
+/// What the **poll fallback** slows to once a pane has stopped changing.
+///
+/// Only reached when push is unavailable ([`attach_pane_push`]); with an output
+/// watch attached, a still pane produces no captures at all and this never
+/// applies. Once a pane has been unchanged for [`PANE_IDLE_ROUNDS`] nobody is
+/// waiting on a millisecond, and this much staleness is invisible. A keystroke
+/// pokes the watcher back
+/// to [`SHELL_REFRESH_INTERVAL`] before the character is even delivered, so the
+/// first character after a pause is as prompt as the tenth.
+const PANE_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long the watcher waits for a paint that never comes.
+///
+/// Under push this replaces the poll interval entirely, so it is a **safety
+/// net**, not a cadence: `%output` says bytes reached the pty, not that the
+/// rendered pane differs, and the converse happens too — a repaint with no new
+/// bytes still changes what `capture-pane` returns. A missed signal is otherwise
+/// invisible, because the popup simply stops updating. Same reasoning as
+/// [`REDRAW_BACKSTOP`], and if it is ever what makes the popup look right,
+/// something above it is wrong.
+const PANE_PUSH_BACKSTOP: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Slowest a capture may be driven by the **agent painting**, as opposed to by
+/// the user typing.
+///
+/// The two deserve different answers and used to share one. Nobody reads text
+/// scrolling past frame by frame, but everybody notices their own keystroke
+/// arriving late — so the agent's output is sampled at a readable rate while
+/// typing keeps [`SHELL_REFRESH_INTERVAL`].
+///
+/// Not a micro-optimisation: sharing one ceiling made a pane painting flat out
+/// cost more than the polling it replaced. Every frame is a `capture-pane`, and
+/// a capture makes the tmux server format the whole pane.
+const PANE_OUTPUT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long after a keystroke captures stay on the fast cadence.
+///
+/// A keystroke's echo does not arrive with the keystroke: the key reaches the
+/// pane almost immediately, the agent repaints a little later, and *that* is
+/// what the watcher sees — as a paint, indistinguishable from the agent's own
+/// output.
+/// Rate-limiting paints to [`PANE_OUTPUT_MIN_INTERVAL`] without this window would
+/// therefore delay the echo of every character by that much, which is the one
+/// thing this whole lane exists to avoid.
+const PANE_TYPING_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long to wait before trying to attach an output watch again.
+///
+/// Attaching costs two `tmux` processes (the pane id, then the client), and the
+/// attempt sits in a loop that runs every [`SHELL_REFRESH_INTERVAL`]. A popup
+/// left open on a window that has since closed would otherwise spawn a hundred
+/// processes a second — the exact cost this whole change removes, reintroduced
+/// through the failure path.
+const PANE_PUSH_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Unchanged captures before the poll fallback backs off.
+///
+/// Counted in rounds, so the wall-clock settling time is this times
+/// [`SHELL_REFRESH_INTERVAL`] — change one and the other moves with it. It only
+/// has to outlast the gap between two keystrokes.
+const PANE_IDLE_ROUNDS: u32 = 40;
+
+/// How often periodic work runs: the MCP transition queue, the session refresh,
+/// the spinner, expiring warnings.
+///
+/// What matters is that it is *decoupled* from input, so none of it speeds up
+/// because the user is typing. Anything wanting a slower rate keeps its own
+/// interval — see [`TRANSITION_POLL_INTERVAL`].
+const HOUSEKEEPING_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long the screen may go unpainted while nothing reports a change.
+const REDRAW_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How often the MCP transition queue is read.
+///
+/// A SQLite query, previously run on every housekeeping tick — ten times a
+/// second, forever, whether or not anything is connected. A queued transition is
+/// not latency-critical: it is a request to move a task between columns, and the
+/// phase status it acts on is itself refreshed on a 2-second cache.
+const TRANSITION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a phase status is trusted before the refresh looks again.
+const PHASE_STATUS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a warning banner stays up.
+const WARNING_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Why the event loop woke up.
+///
+/// Terminal input and pane content arrive on separate threads and are merged
+/// into one channel, so the loop can block on both at once instead of polling
+/// each on a timer.
+enum Wake {
+    Input(Event),
+    Pane {
+        window: String,
+        content: Vec<u8>,
+        /// Parsed on the watcher thread — see `ShellPopup::cached_lines`.
+        lines: Vec<Line<'static>>,
+        metrics: Option<crate::tmux::PaneMetrics>,
+    },
+}
+
+/// Which pane the watcher should be capturing, if any.
+///
+/// A condvar rather than a channel because the watcher spends most of its life
+/// waiting on exactly one of two things — a target to appear, or its next
+/// capture — and both are this same wait. With no popup open it blocks
+/// indefinitely and costs nothing.
+#[derive(Default)]
+struct PaneWatch {
+    inner: Mutex<PaneWatchState>,
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct PaneWatchState {
+    target: Option<String>,
+    /// tmux pane id of `target` (`%7`), matched against `%output` notifications.
+    /// `None` means push is unavailable for this pane and the timer runs.
+    pane_id: Option<String>,
+    /// Scrollback depth to capture — see [`popup_capture_depth`].
+    history_lines: i32,
+    /// Bumped to make the watcher capture now, at the fast cadence.
+    poke: u64,
+    /// Bumped by the output watch every time *this* pane paints.
+    signal: u64,
+    stopped: bool,
+}
+
+impl PaneWatch {
+    /// Point the watcher at `target` (or nothing). Cheap enough to call every
+    /// iteration, which is the point: no popup call site has to remember to.
+    fn follow(&self, target: Option<&str>, history_lines: i32) {
+        let Ok(mut state) = self.inner.lock() else {
+            return;
+        };
+        if state.target.as_deref() == target {
+            if state.history_lines != history_lines {
+                // The user scrolled: re-capture at the new depth now, rather
+                // than leaving them looking at a buffer with nothing above it.
+                state.history_lines = history_lines;
+                state.poke = state.poke.wrapping_add(1);
+                drop(state);
+                self.cv.notify_all();
+            }
+            return;
+        }
+        state.history_lines = history_lines;
+        state.target = target.map(str::to_string);
+        // The id belongs to the old pane; the watcher resolves the new one.
+        state.pane_id = None;
+        state.poke = state.poke.wrapping_add(1);
+        drop(state);
+        self.cv.notify_all();
+    }
+
+    /// Record that `pane_id` painted. Called from the output-watch reader
+    /// thread, for **every** pane in the session, so it filters before waking.
+    fn mark_output(&self, pane_id: &str) {
+        let Ok(mut state) = self.inner.lock() else {
+            return;
+        };
+        if state.pane_id.as_deref() != Some(pane_id) {
+            return;
+        }
+        state.signal = state.signal.wrapping_add(1);
+        drop(state);
+        self.cv.notify_all();
+    }
+
+    /// Wait for a poke, a paint, a target change or `wait` to elapse, and report
+    /// whether a **poke** was what ended it. `None` means stop.
+    ///
+    /// A method, not an inline block, because the lock must not outlive the
+    /// wait: the watcher takes it again immediately afterwards for the rate
+    /// limit, and `Mutex` is not reentrant. Inline, the arm that does not hand
+    /// its guard to `wait_timeout` kept the guard alive for the rest of the
+    /// iteration and the watcher deadlocked against itself — holding the very
+    /// lock the UI thread calls [`follow`](Self::follow) on every iteration, so
+    /// the whole TUI froze. Here the guard cannot escape the call.
+    fn wait_for_change(
+        &self,
+        poke: u64,
+        signal: u64,
+        wait: std::time::Duration,
+    ) -> Option<WaitOutcome> {
+        let Ok(state) = self.inner.lock() else {
+            return None;
+        };
+        if state.stopped {
+            return None;
+        }
+        if state.poke != poke || state.signal != signal {
+            // Something landed while the capture was in flight; no reason to wait.
+            return Some(WaitOutcome {
+                poked: state.poke != poke,
+                skipped: true,
+            });
+        }
+        let Ok((state, _)) = self.cv.wait_timeout(state, wait) else {
+            return None;
+        };
+        if state.stopped {
+            return None;
+        }
+        Some(WaitOutcome {
+            poked: state.poke != poke,
+            skipped: false,
+        })
+    }
+
+    /// Hold off for `wait`, unless a poke arrives first. `None` means stop.
+    ///
+    /// Same reasoning as [`wait_for_change`](Self::wait_for_change): the guard
+    /// stays inside the call. A plain sleep would be simpler and wrong — it would
+    /// hold the ceiling meant for the agent's paints against the user's own echo.
+    fn wait_out_rate_limit(&self, wait: std::time::Duration) -> Option<bool> {
+        let Ok(state) = self.inner.lock() else {
+            return None;
+        };
+        let before = state.poke;
+        let Ok((state, _)) = self.cv.wait_timeout(state, wait) else {
+            return None;
+        };
+        if state.stopped {
+            return None;
+        }
+        Some(state.poke != before)
+    }
+
+    fn set_pane_id(&self, pane_id: Option<String>) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.pane_id = pane_id;
+        }
+    }
+
+    /// Capture now and go back to the fast cadence: the user just typed.
+    fn poke(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.poke = state.poke.wrapping_add(1);
+        }
+        self.cv.notify_all();
+    }
+
+    fn stop(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.stopped = true;
+        }
+        self.cv.notify_all();
+    }
+
+    fn target(&self) -> Option<String> {
+        self.inner.lock().ok().and_then(|s| s.target.clone())
+    }
+
+    /// Pokes issued so far. The watcher compares it across its wait to notice a
+    /// poke that arrived *while* it was capturing; tests read it to assert that
+    /// following the same target twice is not one.
+    fn poke_count(&self) -> u64 {
+        self.inner.lock().map(|s| s.poke).unwrap_or(0)
+    }
+
+    /// Paint signals accepted so far. Tests read it to assert the filtering.
+    #[cfg(test)]
+    fn signal_count(&self) -> u64 {
+        self.inner.lock().map(|s| s.signal).unwrap_or(0)
+    }
+}
+
+/// How a [`PaneWatch::wait_for_change`] ended.
+struct WaitOutcome {
+    /// The user typed. Puts the watcher back on the fast cadence.
+    poked: bool,
+    /// There was no wait at all: a poke or a paint had already landed while the
+    /// capture was in flight, so the pane is known to be moving.
+    skipped: bool,
+}
+
+/// Is this capture different from the last one the watcher sent?
+///
+/// Geometry counts as much as content: a cursor that moved without the text
+/// changing still has to be repainted, and a capture whose target has changed is
+/// not this pane's content at all.
+fn pane_capture_changed(
+    last: &Option<(String, Vec<u8>, Option<crate::tmux::PaneMetrics>)>,
+    target: &str,
+    content: &[u8],
+    metrics: &Option<crate::tmux::PaneMetrics>,
+) -> bool {
+    match last {
+        Some((window, seen, seen_metrics)) => {
+            window != target || seen != content || seen_metrics != metrics
+        }
+        None => true,
+    }
+}
+
+/// Still rounds to carry into the next wait.
+///
+/// A poke resets the count, and that is not bookkeeping — it is the half of the
+/// back-off that makes it safe. The capture a poke triggers runs *before* the
+/// keystroke that caused it has reached the pane and been echoed, so it sees
+/// nothing new; without the reset the watcher would then wait out another idle
+/// interval and the character would appear a whole one late.
+fn pane_watch_rounds_after_wait(unchanged_rounds: u32, poked: bool) -> u32 {
+    if poked {
+        0
+    } else {
+        unchanged_rounds
+    }
+}
+
+/// How long to wait before the next capture, given how long the pane has been
+/// still. See [`PANE_IDLE_INTERVAL`] for why this has two speeds.
+fn pane_watch_interval(unchanged_rounds: u32) -> std::time::Duration {
+    if unchanged_rounds >= PANE_IDLE_ROUNDS {
+        PANE_IDLE_INTERVAL
+    } else {
+        SHELL_REFRESH_INTERVAL
+    }
+}
+
+/// Read terminal events on their own thread.
+///
+/// `event::read()` blocks, which is exactly what is wanted now: the loop learns
+/// about a keystroke when there is one instead of asking every few milliseconds.
+fn spawn_terminal_reader(tx: mpsc::Sender<Wake>) {
+    let _ = std::thread::Builder::new()
+        .name("agtx-terminal-input".to_string())
+        .spawn(move || loop {
+            match crossterm::event::read() {
+                Ok(event) => {
+                    if tx.send(Wake::Input(event)).is_err() {
+                        break;
+                    }
+                }
+                // The terminal is gone; the loop's channel will disconnect and
+                // it will quit on its own.
+                Err(e) => {
+                    tracing::debug!(error = %e, "terminal input reader stopped");
+                    break;
+                }
+            }
+        });
+}
+
+/// Capture the open popup's pane, and wake the loop **only when it changed**.
+///
+/// Comparing here rather than in the loop is what makes an idle popup free: an
+/// agent that is painting nothing produces no wake-ups at all, so no frame is
+/// drawn and no capture is re-parsed.
+///
+/// **How it learns the pane painted** has two modes, and the second is not a
+/// degraded copy of the first — it is the whole design when control mode is off:
+///
+/// - **push**, when an [`OutputWatch`](crate::tmux::OutputWatch) is attached:
+///   the thread sleeps until tmux says *this* pane produced output. Typing at
+///   human speed changes the pane 5–8 times a second where the timer sampled it
+///   100 times, so most of those captures found nothing new; push removes
+///   exactly that waste.
+/// - **poll**, otherwise: the historical timer, fast while the pane changes and
+///   backing off once it settles.
+///
+/// Under push, `SHELL_REFRESH_INTERVAL` stops being a poll period and becomes a
+/// **rate limit**. The signal removes the floor — no capture when nothing
+/// happened — while the interval keeps the ceiling, because a pane painting flat
+/// out notifies far faster than it is worth capturing.
+fn spawn_pane_watcher(
+    watch: Arc<PaneWatch>,
+    tx: mpsc::Sender<Wake>,
+    input_sink: Arc<dyn PaneInputSink>,
+    tmux_ops: Arc<dyn TmuxOperations>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("agtx-pane-watch".to_string())
+        .spawn(move || {
+            let mut last: Option<(String, Vec<u8>, Option<crate::tmux::PaneMetrics>)> = None;
+            let mut unchanged: u32 = 0;
+            let mut push: Option<PanePush> = None;
+            let mut push_retry_at: Option<Instant> = None;
+            let mut watched_target = String::new();
+            // When the user last typed, which decides how fast paints are
+            // sampled — see `PANE_TYPING_WINDOW`.
+            let mut last_keystroke: Option<Instant> = None;
+            loop {
+                // With no popup open, release the output watch so tmux mirrors
+                // nothing for a session nobody is looking at.
+                //
+                // Outside the lock, never under it: dropping the watch closes a
+                // tmux client and reaps the child, and the UI thread calls
+                // `follow()` on this same mutex every iteration — so holding it
+                // here stalls the whole TUI until that client exits.
+                if watch
+                    .inner
+                    .lock()
+                    .map(|state| state.target.is_none())
+                    .unwrap_or(true)
+                {
+                    push = None;
+                }
+                // Then wait for something to watch. No popup open is the common
+                // case, and costs one blocked thread and nothing else.
+                let (target, poke, signal, history_lines) = {
+                    let Ok(mut state) = watch.inner.lock() else {
+                        return;
+                    };
+                    while state.target.is_none() && !state.stopped {
+                        let Ok(next) = watch.cv.wait(state) else {
+                            return;
+                        };
+                        state = next;
+                    }
+                    if state.stopped {
+                        return;
+                    }
+                    (
+                        state.target.clone(),
+                        state.poke,
+                        state.signal,
+                        state.history_lines,
+                    )
+                };
+                let Some(target) = target else { continue };
+
+                if target != watched_target {
+                    // A new pane deserves an immediate attempt rather than
+                    // whatever backoff the previous one had accumulated.
+                    push_retry_at = None;
+                    watched_target = target.clone();
+                }
+                push =
+                    attach_pane_push(push, &target, &watch, tmux_ops.as_ref(), &mut push_retry_at);
+
+                let captured_at = Instant::now();
+                let (content, metrics) = capture_pane_for_popup(
+                    &target,
+                    history_lines,
+                    input_sink.as_ref(),
+                    tmux_ops.as_ref(),
+                );
+                if pane_capture_changed(&last, &target, &content, &metrics) {
+                    unchanged = 0;
+                    last = Some((target.clone(), content.clone(), metrics));
+                    // Parsed here, off the thread that handles keystrokes, and
+                    // once per *change* rather than once per frame.
+                    let lines = parse_ansi_to_lines(&content);
+                    if tx
+                        .send(Wake::Pane {
+                            window: target,
+                            content,
+                            lines,
+                            metrics,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                } else {
+                    unchanged = unchanged.saturating_add(1);
+                }
+
+                let pushing = push.is_some();
+                // Under push there is nothing to poll for: the next capture is
+                // caused by the pane painting, and this is only the net for a
+                // signal that never came.
+                let wait = if pushing {
+                    PANE_PUSH_BACKSTOP
+                } else {
+                    pane_watch_interval(unchanged)
+                };
+                // A poke, a paint, or a target change ends the wait early, so
+                // backing off never costs the first keystroke after a pause.
+                //
+                // A poke also puts the watcher back on the fast cadence, and
+                // that half is not optional: the capture a poke triggers runs
+                // *before* the key it announced has reached the pane and been
+                // echoed, so it sees no change. Without the reset the next wait
+                // would be the slow one again and the echo would arrive a whole
+                // idle interval late — the back-off charging exactly what it
+                // was built not to.
+                let Some(outcome) = watch.wait_for_change(poke, signal, wait) else {
+                    return;
+                };
+                if outcome.skipped {
+                    // The pane is moving; do not let a back-off accumulate.
+                    unchanged = 0;
+                }
+                let poked = outcome.poked;
+                if poked {
+                    last_keystroke = Some(Instant::now());
+                }
+                unchanged = pane_watch_rounds_after_wait(unchanged, poked);
+
+                // The rate limit, under push only — polling already paces itself.
+                //
+                // Waited on the condvar rather than slept, so a keystroke still
+                // gets through: a plain sleep here would hold the ceiling meant
+                // for the *agent's* paints against the user's own echo, adding up
+                // to `PANE_OUTPUT_MIN_INTERVAL` to the first character typed
+                // after a pause.
+                if let Some(remaining) = push_rate_limit_wait(
+                    pushing,
+                    captured_at.elapsed(),
+                    last_keystroke.map(|at| at.elapsed()),
+                ) {
+                    let Some(poked_during_limit) = watch.wait_out_rate_limit(remaining) else {
+                        return;
+                    };
+                    if poked_during_limit {
+                        last_keystroke = Some(Instant::now());
+                    }
+                }
+            }
+        });
+}
+
+/// How long to hold off the next capture, given how long ago the last one
+/// started. `None` means capture now.
+///
+/// Only meaningful under push: it turns `SHELL_REFRESH_INTERVAL` from "how often
+/// to look" into "no more often than this", which is what stops a pane painting
+/// flat out from driving one capture per notification.
+fn push_rate_limit_wait(
+    pushing: bool,
+    since_last_capture: std::time::Duration,
+    since_last_keystroke: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    if !pushing {
+        return None;
+    }
+    let floor = match since_last_keystroke {
+        // The user is typing: their own echo is what is being waited on.
+        Some(since) if since < PANE_TYPING_WINDOW => SHELL_REFRESH_INTERVAL,
+        // Nobody is waiting on a single frame of the agent's output.
+        _ => PANE_OUTPUT_MIN_INTERVAL,
+    };
+    if since_last_capture >= floor {
+        return None;
+    }
+    Some(floor - since_last_capture)
+}
+
+/// The output-watch connection for the pane currently being followed.
+struct PanePush {
+    /// Session the watch is attached to. `%output` never crosses sessions, so a
+    /// popup in another session needs a different client.
+    session: String,
+    watch: crate::tmux::OutputWatch,
+}
+
+/// Keep the output watch pointed at `target`'s session, reconnecting when the
+/// popup moves and giving up — to the timer — when tmux will not cooperate.
+///
+/// `None` is a supported state, not a failure: `AGTX_TMUX_CONTROL=0`, a tmux
+/// that refuses the attach, and a pane whose id cannot be read all land here and
+/// get the poll path instead.
+fn attach_pane_push(
+    current: Option<PanePush>,
+    target: &str,
+    watch: &Arc<PaneWatch>,
+    tmux_ops: &dyn TmuxOperations,
+    retry_at: &mut Option<Instant>,
+) -> Option<PanePush> {
+    if !control_mode_enabled() || !output_push_enabled() {
+        return None;
+    }
+    let session = pane_push_session(target);
+    if let Some(push) = current {
+        if push.session == session && push.watch.alive() {
+            return Some(push);
+        }
+        // Dropping it closes the client, so nothing stays mirrored for a session
+        // nobody is looking at.
+        // Also outside any lock, for the same reason: this runs on the watcher
+        // thread with nothing held, and closing the client can take a moment.
+        drop(push);
+        // A watch that died is retried like a first attempt, not immediately.
+        *retry_at = Some(Instant::now() + PANE_PUSH_RETRY);
+        return None;
+    }
+    // Both steps below spawn a `tmux` process, and this runs once per watcher
+    // iteration. Without a backoff, a popup left open on a window that has since
+    // closed would spawn them continuously — far worse than the polling this
+    // replaces.
+    if let Some(at) = retry_at {
+        if Instant::now() < *at {
+            return None;
+        }
+    }
+    *retry_at = Some(Instant::now() + PANE_PUSH_RETRY);
+    // The id is what every `%output` line is matched against; without it the
+    // watch could only say "some pane in this session painted", which is not a
+    // signal — it would fire on every other task's output.
+    let pane_id = tmux_ops.pane_id(target)?;
+    watch.set_pane_id(Some(pane_id));
+
+    let signal_watch = Arc::clone(watch);
+    match crate::tmux::OutputWatch::connect(crate::tmux::AGENT_SERVER, &session, move |id| {
+        signal_watch.mark_output(id);
+    }) {
+        Ok(client) => {
+            tracing::debug!(session, "pane output watch attached");
+            *retry_at = None;
+            Some(PanePush {
+                session,
+                watch: client,
+            })
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "pane output watch unavailable; polling instead");
+            watch.set_pane_id(None);
+            None
+        }
+    }
+}
+
+/// Is `%output` push on for this run?
+///
+/// On unless `AGTX_TMUX_PUSH` says otherwise, and there is no config field for
+/// the same reason [`control_mode_enabled`] has none: an attach that fails falls
+/// back to polling on its own, so a persisted setting could only hold a staler
+/// copy of a decision made at runtime. The escape hatch exists because a bug
+/// report needs to bisect the two capture lanes — push against poll — the way
+/// `AGTX_TMUX_CONTROL` bisects the two input lanes.
+fn output_push_enabled() -> bool {
+    control_mode_from_env(std::env::var("AGTX_TMUX_PUSH").ok().as_deref())
+}
+
+/// The session half of a `session:window` target — the only thing `%output` is
+/// scoped to, so it is what decides whether an existing watch can be reused.
+fn pane_push_session(target: &str) -> String {
+    target
+        .split_once(':')
+        .map(|(session, _)| session)
+        .unwrap_or(target)
+        .to_string()
 }
 
 /// Parse ANSI escape sequences to ratatui Lines with colors
@@ -9295,9 +10269,7 @@ fn wizard_plugin_option_lines(
 
     let marker_width = Span::raw(marker.to_string()).width();
     let prefix_width = marker_width + LABEL_WIDTH + CHECK_WIDTH;
-    let description_width = width
-        .saturating_sub(prefix_width + RIGHT_PADDING)
-        .max(1);
+    let description_width = width.saturating_sub(prefix_width + RIGHT_PADDING).max(1);
     let mut description_lines = wrap_spans(
         vec![Span::styled(description.to_string(), description_style)],
         description_width,
@@ -11333,10 +12305,7 @@ fn claude_shaped_hooks(
         if let (Some(m), Some(obj)) = (matcher, group.as_object_mut()) {
             obj.insert("matcher".to_string(), serde_json::json!(m));
         }
-        out.insert(
-            (*event).to_string(),
-            serde_json::Value::Array(vec![group]),
-        );
+        out.insert((*event).to_string(), serde_json::Value::Array(vec![group]));
     }
     serde_json::Value::Object(out)
 }
@@ -11504,7 +12473,12 @@ fn merge_hook_events(
         let mut defs: Vec<serde_json::Value> = existing
             .get(event)
             .and_then(|d| d.as_array())
-            .map(|a| a.iter().filter(|d| !is_agtx_hook_entry(d)).cloned().collect())
+            .map(|a| {
+                a.iter()
+                    .filter(|d| !is_agtx_hook_entry(d))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
         if let Some(arr) = our_defs.as_array() {
             defs.extend(arr.iter().cloned());
@@ -11640,12 +12614,7 @@ fn write_skills_to_worktree(
 ///
 /// The writers whose file is shared with an MCP config, or may be committed,
 /// merge; the rest own their file and are written outright.
-fn write_hook_config(
-    spec: &agent::AgentSpec,
-    worktree_path: &str,
-    agtx_bin: &str,
-    enabled: bool,
-) {
+fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &str, enabled: bool) {
     let Some(kind) = spec.hook_config else {
         return;
     };
@@ -11738,7 +12707,10 @@ fn write_hook_config(
         agent::HookConfigKind::GrokHooksJson => {
             let dir = wt.join(".grok").join("hooks");
             let _ = std::fs::create_dir_all(&dir);
-            write_json(&dir.join("agtx.json"), &serde_json::json!({ "hooks": ours }));
+            write_json(
+                &dir.join("agtx.json"),
+                &serde_json::json!({ "hooks": ours }),
+            );
         }
         // Keyed by hook *name* first, event second; every handler carries its own
         // `--event` because the payload has no event name. `.agents/` is
@@ -11819,7 +12791,10 @@ fn read_json_object(path: &Path) -> serde_json::Map<String, serde_json::Value> {
 }
 
 fn write_json(path: &Path, value: &serde_json::Value) {
-    let _ = std::fs::write(path, serde_json::to_string_pretty(value).unwrap_or_default());
+    let _ = std::fs::write(
+        path,
+        serde_json::to_string_pretty(value).unwrap_or_default(),
+    );
 }
 
 /// Merge agtx's hooks into a settings file it shares with other keys.
@@ -11979,10 +12954,7 @@ fn write_mcp_config(
                     "trust": true
                 }),
             );
-            settings.insert(
-                "mcpServers".to_string(),
-                serde_json::Value::Object(servers),
-            );
+            settings.insert("mcpServers".to_string(), serde_json::Value::Object(servers));
             write_json(&path, &serde_json::Value::Object(settings));
         }
         agent::McpConfigKind::CursorJson => {

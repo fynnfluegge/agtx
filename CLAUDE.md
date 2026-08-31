@@ -279,21 +279,31 @@ waiting on: the keys forwarded from an open task popup.
 crossterm key event
         │  popup_key_input()          — Char → Text, everything else → Key
         ▼
- PaneInputSink::send                  — enqueue, ~1 µs, never waits for tmux
+ PaneInputSink::send                  — enqueue only, never waits for tmux
    bounded channel (1024)
         ▼
    one broker thread                  — the single ordering authority
-        ├─ coalesces adjacent Text for the same target (2 ms window, 4 KiB cap)
+        ├─ coalesces adjacent Text for the same target (only while more is queued)
         ├─ flushes before every Key, Paste, target change, popup close, shutdown
         ├─► control backend  `tmux -C attach-session`   (persistent, opt-in)
         └─► subprocess backend  `tmux send-keys`        (default, and the fallback)
+
+  popup refresh thread ──► PaneInputSink::capture ──┘   same queue, same connection
+        │                    (flushes first, then `capture-pane` + `display -p`)
+        ▼
+   ShellPopup.cached_content                          — drawn on the next frame
 ```
 
-**Every key used to be a process.** `send_key` starts a `tmux` client and waits for it: **~20 ms
-p95** idle, 40–50 ms under load, on the input thread, per keystroke. That is the whole reason this
-lane exists. Enqueueing costs ~1 µs, and end-to-end delivery over the control connection is **0.32 ms
-p95** against 38 ms for the subprocess path (tmux 3.5a, macOS; the measurement lives in
-`tests/tmux_control_tests.rs`, and `docs/planning/tmux-control-mode-input.md` has the full table).
+`SHELL_REFRESH_INTERVAL` bounds how stale the pane on screen is, and it only became a real knob
+once the capture stopped costing a pair of `tmux` processes. Its cost is paid per capture rather
+than per wake-up, and on the far side: a capture makes the tmux server format the whole pane. The
+ANSI parse is done **once per change on the watcher thread**, not once per frame on the UI thread —
+`ShellPopup` carries `cached_lines` beside `cached_content`, set together by `set_content` so the
+bytes change detection compares and the lines the popup renders cannot drift.
+
+**Every key used to be a process.** `send_key` started a `tmux` client and waited for it, on the
+input thread, per keystroke — that is the whole reason this lane exists. Enqueueing is now
+effectively free, and delivery rides a persistent control connection.
 
 - **`PaneInput` is typed, not a formatted command**, because the broker must be able to tell literal
   text from a key name: text goes out with `send-keys -l` (no key-name lookup), a key without it.
@@ -302,13 +312,21 @@ p95** against 38 ms for the subprocess path (tmux 3.5a, macOS; the measurement l
   tmux separates commands.
 - **Batching never delays a key.** Enter, Escape, arrows, and anything Ctrl/Alt-modified flush the
   buffer first and go immediately. A delayed Enter is a visibly broken editor.
+- **Nor does it delay ordinary typing.** Buffered text is flushed as soon as the queue is empty, and
+  between two keystrokes a human makes it always is: waiting out `DEFAULT_BATCH_WINDOW` would have
+  taxed *every* character while coalescing nothing, since there was no successor to merge with. The window survives as the bound on a genuine backlog — a paste arriving as
+  keystrokes, a held key — which is the only case it was ever for. That also makes coalescing
+  opportunistic by nature, so `input_tests.rs` pre-queues input before starting the broker rather
+  than racing it: a test that sends three characters to a running broker is asserting how fast the
+  machine is.
 - **A target change flushes.** Queued characters belong to the pane they were typed into; the popup
   close, popup open and fullscreen-toggle paths all flush so nothing can follow the target.
 - **The control connection is on, and there is no config field for it.** A connect that fails, and a
   connection lost later, both fall back to the subprocess backend on their own (`maybe_connect` /
   `drop_control`), so a persisted setting could only hold a staler copy of a decision the broker
   already makes at runtime. `AGTX_TMUX_CONTROL=0` turns it off for one run, which is what a bug
-  report needs to bisect the two lanes. The non-blocking broker is *not* conditional either way —
+  report needs to bisect the two lanes; `AGTX_TMUX_PUSH=0` does the same for the two *capture*
+  lanes, leaving control mode on but forcing the watcher back onto its timer. The non-blocking broker is *not* conditional either way —
   the backend choice only decides what the broker thread writes through, so the subprocess path gets
   the same ordering and the same responsive input thread.
 - **`tmux -C` is attached with `-f ignore-size,no-output`.** `ignore-size` keeps it out of tmux's
@@ -333,6 +351,34 @@ p95** against 38 ms for the subprocess path (tmux 3.5a, macOS; the measurement l
   place, keeping its order.
 - **A full queue warns rather than reordering.** Sending synchronously would put that key ahead of
   everything already queued, so agtx keeps the prefix and tells the user.
+- **The popup's pane capture rides the same connection**, as a `Capture` request in the input queue.
+  A *read* in an input queue looks misplaced until you ask what it is ordered against: the capture
+  must show the keys typed before it, and the broker is the only thing that knows whether those have
+  been flushed. It is also where the popup's lag actually lived: two `tmux` processes
+  (`capture-pane` + `display -p`) against the same pair over the control connection. Process
+  *startup* was the whole cost, not the work — `display -p`, which reads four variables, cost the
+  same as capturing 500 lines.
+  - The broker **declines** rather than falling back: with no control connection the caller's own
+    `capture-pane` is the same two processes for the same price, and running them on the broker
+    thread would park the next keystroke behind that `fork`/`exec`. `capture_pane_for_popup` owns
+    that fallback, and a declined capture costs one frame at the old speed.
+  - A failed capture **keeps** a healthy connection, unlike a failed write. A write error is
+    ambiguous and tears the connection down; a read error is not, and demoting every later keystroke
+    to the subprocess path over one failed read would trade the fix for the bug.
+  - Both commands go in **one round trip**, which is also what keeps them consistent — the cursor row
+    is an index *into* the content, so metrics fetched a frame later can trim off a line the user
+    just typed. `PANE_METRICS_FORMAT` and `parse_pane_metrics` are shared with the subprocess path so
+    the two cannot drift, and a real-tmux test asserts the captures are **byte-identical**: they
+    parse different things (a process's stdout against reassembled `%begin`/`%end` payload lines) and
+    the popup would happily draw a subtly wrong frame without failing.
+  - The format literal is **single-quoted, not `tmux_quote`d**: tmux performs no replacements inside
+    single quotes, so `#{cursor_x}` reaches `display-message` intact instead of being escaped to a
+    literal `\#{cursor_x}`. Verified on 3.5a that `-t` is honoured for the expansion, so a client
+    attached to one session reports the *target* pane and not its own active one.
+  - Because a payload is now a whole pane capture, `FrameParser` closes a block only on an `%end`
+    whose command id matches the `%begin`'s. An agent that paints a line starting `%end ` would
+    otherwise end the block early, hand back half a capture, and leave `completed` permanently ahead
+    of the commands actually run — which every barrier and query counts on.
 - **A paste stays on `load-buffer`** (it needs a pipe, not a command argument) and is issued behind a
   `ControlClient::barrier` — the two travel different sockets, and only the barrier keeps the paste
   behind the text typed before it.
@@ -758,15 +804,108 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 - Migrations via `ALTER TABLE ... ADD COLUMN` (ignores errors if column exists)
 - DateTime stored as RFC3339 strings
 
+### The Event Loop
+`App::run` **blocks** on one `mpsc` channel that two threads feed, and draws only when something
+changed. It used to poll: `event::poll(interval)` woke it on a timer whether or not anything had
+happened, and every wake-up redrew the whole screen, re-parsed the pane capture, and queried SQLite.
+
+```text
+agtx-terminal-input ──┐                     blocking `event::read()`
+                      ├──► mpsc<Wake> ──► run(): recv_timeout(HOUSEKEEPING_TICK)
+agtx-pane-watch ──────┘                          │
+   captures the open popup's pane,               ├─ draw, if anything set `dirty`
+   sends only when it CHANGED                    └─ housekeeping, on its own tick
+```
+
+That one interval had been standing in for three unrelated things, and tuning it for any one of them
+priced the other two wrongly. They are now separate:
+
+- **Echo latency** is the pane watcher's cadence, and the watcher learns a pane painted in one of
+  two ways:
+  - **push** — a second control client attached **without** `no-output` (`OutputWatch`), open only
+    while a popup is, whose `%output` notifications say which pane painted. `SHELL_REFRESH_INTERVAL`
+    then stops being a poll period and becomes a **rate limit**: the signal removes the floor, the
+    interval keeps the ceiling, since a pane painting flat out notifies far faster than it is worth
+    capturing.
+  - **The ceiling has two heights, and that is load-bearing.** A capture makes the *tmux server*
+    format the whole pane, so capturing every frame is expensive where nobody is watching for one:
+    `PANE_OUTPUT_MIN_INTERVAL` paces the agent's output, `SHELL_REFRESH_INTERVAL` paces the user's
+    own echo, and `PANE_TYPING_WINDOW` keeps the fast one in force after a keystroke — because the
+    echo arrives as a *paint*, indistinguishable from the agent's output, so pacing paints without
+    the window would delay every character. Sharing one interval made a pane painting flat out cost
+    more than the polling it replaced, which had been protected by its own slowness: one
+    `capture-pane` process per capture is a low ceiling of its own.
+  - **poll** — the timer, when push is unavailable (`AGTX_TMUX_PUSH=0`, control mode off, or a pane
+    whose id cannot be read). Not a degraded copy: it is the whole design in that case.
+
+  Either way the watcher *compares* and wakes the loop only on a difference — far cheaper than the
+  capture that feeds it. `docs/planning/pane-output-push.md` has the design notes.
+- **Capture depth follows the scroll position.** At the bottom only the visible rows are rendered,
+  so `SHELL_POPUP_TAIL_LINES` (100) is asked for and `SHELL_POPUP_CAPTURE_LINES` (500) only once the
+  user scrolls up (`popup_capture_depth`); a scroll is not a target change but it does poke the
+  watcher, so the deeper capture arrives immediately rather than after the next paint. This is worth
+  nothing for the agents that matter — they take the alternate screen, where `history_size` is 0 and
+  every depth returns the same bytes — and a lot for a pane that accumulates history, where the
+  deeper capture is many times the size of the screen being rendered.
+- **Three things about `%output` shape that design.** It is scoped to the **attached session** and
+  no other, so the watch client attaches to the popup's own session. `no-output` is fixed at attach
+  time — it survives every `refresh-client` form on 3.5a — which is why this is a *second* client
+  rather than a flag flip on the input one, and why nothing is mirrored while no popup is open. And
+  it means *bytes reached the pty*, not that the rendered pane differs, so `PANE_PUSH_BACKSTOP`
+  stays as the net for a signal that never came.
+- **Housekeeping** — `maybe_spawn_session_refresh`, expiring warnings, the MCP transition queue —
+  runs on `HOUSEKEEPING_TICK`. It used to run once per loop iteration, so its rate rose and fell
+  with how fast the user typed — and it contains a SQLite query. That query has since moved to its
+  own `TRANSITION_POLL_INTERVAL`: a request to move a task between columns is acted on against a
+  phase status that is itself only as fresh as `PHASE_STATUS_CACHE_TTL`, so reading it faster buys
+  nothing.
+- **Nothing on the board animates.** The `Working` indicator is a static `▶`, not a spinner. On an
+  otherwise idle board the spinner was the *only* thing forcing a redraw, and the card already said
+  the task was running. A future animated indicator brings that cost back, and
+  `nothing_on_the_board_animates` fails if one appears.
+- **A closing window is pushed, not polled.** tmux sends `%window-close` / `%unlinked-window-close`
+  to a `no-output` client — verified on 3.5a — so the connection agtx already holds for keystrokes
+  reports an agent exiting. It raises a flag (`InputConfig::window_events`); housekeeping ages out
+  the phase-status cache so the next refresh looks immediately. A flag rather than the window id,
+  because the id would have to be resolved to a task anyway and "look again" is the whole signal.
+  An `Exited` card then appears promptly instead of on the refresh's next tick.
+- **Drawing** happens when `dirty` was set: input, a changed capture, or a background result.
+  Nothing else asks for a frame, so an idle board and an idle popup both cost only the backstop.
+
+Two details worth keeping:
+
+- **`REDRAW_BACKSTOP` is a safety net, not the mechanism.** A missed `dirty` would leave a stale
+  screen until the next keystroke, which is far worse than one wasted frame a second. If it is ever
+  what makes the UI look right, something above it is wrong.
+- **The poll fallback backs off** to `PANE_IDLE_INTERVAL` after `PANE_IDLE_ROUNDS` still captures,
+  and a keystroke pokes it back to the fast cadence. The reset is the half that makes the back-off
+  safe: the capture a poke triggers runs *before* the key that caused it has reached the pane and
+  been echoed, so it sees nothing new — leaving the count alone made the first keystroke after a
+  pause wait out another whole idle interval. `pane_watch_rounds_after_wait` exists so a test can
+  pin that.
+
 ### Background Operations
 - PR description generation runs in background thread
 - PR creation runs in background thread
 - Phase status polling runs in background thread (`maybe_spawn_session_refresh`)
-- Uses `mpsc` channels to communicate results back to main thread via `try_recv()` (non-blocking)
+- Results come back over `mpsc` and are collected by `pump_background_results()` on each wake-up
+  (non-blocking `try_recv`), which reports whether anything it applied needs a redraw
 - Loading spinners shown during async operations
 
 ### Phase Status Polling
 - `maybe_spawn_session_refresh()` spawns a background thread with 2-second cache TTL per task, covering Planning/Running/Review tasks plus Backlog tasks with an active research session
+- **Its tmux work is per pass, not per task.** One `list-windows -a` answers `window_exists` for
+  every task (`live_window_targets`), and each task's pane is captured **once**, over the control
+  connection (`capture_pane_text` → `CaptureSpec::text()`), shared by the dialog scan and the content
+  hash. The old shape ran a `list-windows` process and up to two `capture-pane` processes *per
+  task*, every refresh, so its cost grew with the board
+- `CaptureSpec::text()` is deliberately **not** the popup's spec: no `-e`, so no SGR escapes land in
+  the middle of a dialog's wording, which is what the matcher and the hash have always been fed. A
+  real-tmux test asserts it is byte-identical to `TmuxOperations::capture_pane`
+- `live_window_targets` returns `Option`, and the `None` must not be flattened to an empty set: one
+  listing now answers for the whole board, so "tmux could not be asked" read as "no windows" would
+  mark every running task `Exited` on a transient hiccup. The per-task check it replaced failed safe
+  (`!window_exists(sn).unwrap_or(true)`), and `window_is_gone` keeps that direction
 - Overlap guard: only one refresh thread runs at a time (`session_refresh_rx.is_some()`)
 - Thread does all expensive work: plugin TOML loading, artifact file checks, `tmux capture-pane`, copy-back side effects
 - `apply_session_refresh()` applies results on main thread (non-blocking `try_recv`)

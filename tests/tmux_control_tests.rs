@@ -20,10 +20,11 @@
 //! they are skipped they say so by name rather than passing quietly.
 
 use agtx::tmux::input::{spawn, InputConfig, PaneInput, PaneInputSink};
-use agtx::tmux::TmuxOperations;
+use agtx::tmux::{CaptureSpec, TmuxOperations};
 use anyhow::Result;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Skip guard. Returns the reason, so a skipped test names itself.
@@ -116,6 +117,12 @@ impl Server {
             .unwrap_or(0)
     }
 
+    fn client_count(&self) -> usize {
+        self.tmux(&["list-clients", "-F", "#{client_name}"])
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
+    }
+
     fn pane_size(&self, target: &str) -> String {
         self.tmux(&[
             "display",
@@ -177,8 +184,32 @@ impl TmuxOperations for TestTmuxOps {
     fn kill_window(&self, _target: &str) -> Result<()> {
         unimplemented!("not used by the input broker")
     }
-    fn window_exists(&self, _target: &str) -> Result<bool> {
-        unimplemented!("not used by the input broker")
+    fn pane_id(&self, target: &str) -> Option<String> {
+        let out = Command::new("tmux")
+            .args(["-L", &self.server])
+            .args(["display", "-p", "-t", target, "#{pane_id}"])
+            .output()
+            .ok()?;
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!id.is_empty()).then_some(id)
+    }
+    fn list_window_targets(&self) -> Result<Vec<String>> {
+        let out = Command::new("tmux")
+            .args(["-L", &self.server])
+            .args(["list-windows", "-a", "-F", "#{session_name}:#{window_name}"])
+            .output()?;
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+    fn window_exists(&self, target: &str) -> Result<bool> {
+        Ok(Command::new("tmux")
+            .args(["-L", &self.server])
+            .args(["list-windows", "-t", target])
+            .output()?
+            .status
+            .success())
     }
     fn send_keys(&self, target: &str, keys: &str) -> Result<()> {
         self.run(&["send-keys", "-t", target, keys]);
@@ -206,14 +237,41 @@ impl TmuxOperations for TestTmuxOps {
         self.run(&["paste-buffer", "-p", "-t", target]);
         Ok(())
     }
-    fn capture_pane(&self, _target: &str) -> Result<String> {
-        unimplemented!("not used by the input broker")
+    fn capture_pane(&self, target: &str) -> Result<String> {
+        let out = Command::new("tmux")
+            .args(["-L", &self.server])
+            .args(["capture-pane", "-t", target, "-p"])
+            .output()?;
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
-    fn capture_pane_with_history(&self, _target: &str, _history_lines: i32) -> Vec<u8> {
-        unimplemented!("not used by the input broker")
+    /// The subprocess capture path, verbatim from `RealTmuxOps` but on the
+    /// test server's socket. It is the reference the control capture is
+    /// compared against, so it must not be a simplification of it.
+    fn capture_pane_with_history(&self, target: &str, history_lines: i32) -> Vec<u8> {
+        Command::new("tmux")
+            .args(["-L", &self.server])
+            .args(["capture-pane", "-t", target, "-p", "-e"])
+            .args(["-S", &format!("-{history_lines}")])
+            .output()
+            .map(|o| o.stdout)
+            .unwrap_or_default()
     }
-    fn pane_metrics(&self, _target: &str) -> Option<agtx::tmux::PaneMetrics> {
-        None
+    fn pane_metrics(&self, target: &str) -> Option<agtx::tmux::PaneMetrics> {
+        let out = Command::new("tmux")
+            .args(["-L", &self.server])
+            .args([
+                "display",
+                "-p",
+                "-t",
+                target,
+                agtx::tmux::PANE_METRICS_FORMAT,
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        agtx::tmux::parse_pane_metrics(&String::from_utf8_lossy(&out.stdout))
     }
     fn resize_window(&self, _target: &str, _width: u16, _height: u16) -> Result<()> {
         unimplemented!("not used by the input broker")
@@ -523,6 +581,406 @@ fn the_subprocess_backend_delivers_the_same_bytes() {
     sink.shutdown();
 
     assert_eq!(settle(&server, "subproc"), b"abc\x1b[DX\n".to_vec());
+}
+
+// --- reading the pane back over the same connection ---
+
+/// A pane painted with known text, captured both ways, must come back
+/// **byte-identical**.
+///
+/// The two paths parse different things — one reads a process's stdout, the
+/// other reassembles `%begin`/`%end` payload lines — and the popup renders the
+/// result through an ANSI parser that will happily draw a subtly wrong frame
+/// without failing. Only a byte comparison catches a dropped trailing newline,
+/// a mangled escape or a lost blank row.
+#[test]
+fn a_control_capture_is_byte_identical_to_the_subprocess_one() {
+    guard!();
+    let server = Server::start("capture");
+    // A plain shell, not a recording window: this test needs a pane with
+    // *content on screen*, which is what a capture reads.
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "cap", "cat"])
+        .expect("create the capture window");
+    std::thread::sleep(Duration::from_millis(300));
+    let target = "it:cap";
+    // Colour, a blank line, a trailing space and a line that looks like a
+    // control-mode tag — the payload shapes that could each break framing.
+    server
+        .tmux(&[
+            "send-keys",
+            "-t",
+            target,
+            "-l",
+            "plain\n\x1b[31mred\x1b[0m\n\n%end 1 7 0\ntrailing \n",
+        ])
+        .expect("paint the pane");
+    std::thread::sleep(Duration::from_millis(300));
+
+    let ops = TestTmuxOps {
+        server: server.name.clone(),
+    };
+    let expected_content = ops.capture_pane_with_history(target, 500);
+    let expected_metrics = ops.pane_metrics(target);
+
+    let sink = sink_for(&server, true);
+    let snapshot = sink
+        .capture(target, CaptureSpec::popup(500))
+        .expect("the control connection served the capture");
+    sink.shutdown();
+
+    assert_eq!(
+        String::from_utf8_lossy(&snapshot.content),
+        String::from_utf8_lossy(&expected_content),
+        "the two capture paths disagree about the pane"
+    );
+    assert_eq!(
+        snapshot.metrics, expected_metrics,
+        "the two metrics paths disagree about the pane geometry"
+    );
+    assert!(
+        snapshot.content.windows(10).any(|w| w == b"%end 1 7 0"),
+        "the tag-shaped line was lost, so framing closed the block early"
+    );
+}
+
+/// A `CaptureSpec::text()` capture must be **byte-identical** to
+/// `TmuxOperations::capture_pane`.
+///
+/// The status refresh matches trust dialogs and hashes pane content against
+/// these bytes. An `-e` left on would embed SGR escapes through the middle of a
+/// dialog's wording, so the match would fail and the task would sit at "working"
+/// forever with nobody told a decision was waiting — silent, and exactly the
+/// class of bug the popup's byte-identity test was written for.
+#[test]
+fn a_text_capture_matches_the_subprocess_capture_pane() {
+    guard!();
+    let server = Server::start("captext");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "cap", "cat"])
+        .expect("create the capture window");
+    std::thread::sleep(Duration::from_millis(300));
+    let target = "it:cap";
+    server
+        .tmux(&[
+            "send-keys",
+            "-t",
+            target,
+            "-l",
+            "plain\n\x1b[31mDo you trust the files in this folder?\x1b[0m\n",
+        ])
+        .expect("paint the pane");
+    std::thread::sleep(Duration::from_millis(300));
+
+    let ops = TestTmuxOps {
+        server: server.name.clone(),
+    };
+    let expected = ops.capture_pane(target).expect("subprocess capture");
+
+    let sink = sink_for(&server, true);
+    let snapshot = sink
+        .capture(target, CaptureSpec::text())
+        .expect("the control connection served the capture");
+    sink.shutdown();
+
+    let got = String::from_utf8_lossy(&snapshot.content).into_owned();
+    assert_eq!(got, expected, "the two text-capture paths disagree");
+    assert!(
+        !got.contains('\u{1b}'),
+        "a text capture must carry no escapes: {got:?}"
+    );
+    assert!(
+        got.contains("Do you trust the files in this folder?"),
+        "the dialog wording must survive intact for the matcher"
+    );
+    assert_eq!(
+        snapshot.metrics, None,
+        "a text capture skips the second command"
+    );
+}
+
+/// One listing answers `window_exists` for every task on the board.
+#[test]
+fn the_window_listing_names_every_window_as_session_colon_window() {
+    guard!();
+    let server = Server::start("winlist");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "alpha", "cat"])
+        .expect("create a window");
+    std::thread::sleep(Duration::from_millis(200));
+    let ops = TestTmuxOps {
+        server: server.name.clone(),
+    };
+    let targets = ops.list_window_targets().expect("listing");
+    assert!(
+        targets.iter().any(|t| t == "it:alpha"),
+        "the listing must use the same `session:window` form task.session_name holds: {targets:?}"
+    );
+    // What the refresh actually asks of it.
+    assert!(ops.window_exists("it:alpha").unwrap_or(false));
+    assert!(!targets.iter().any(|t| t == "it:missing"));
+}
+
+/// With control mode off there is no connection to serve a capture, and the
+/// broker must say so rather than running the subprocess itself — the caller
+/// owns that path, and paying for it here would block the next keystroke.
+#[test]
+fn a_capture_is_declined_when_control_mode_is_off() {
+    guard!();
+    let server = Server::start("nocapture");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "cap", "cat"])
+        .expect("create the capture window");
+    std::thread::sleep(Duration::from_millis(300));
+    let sink = sink_for(&server, false);
+    assert!(sink.capture("it:cap", CaptureSpec::popup(500)).is_none());
+    sink.shutdown();
+}
+
+/// The number this change was made for: a capture over the input connection
+/// against the two `tmux` processes it replaces.
+#[test]
+fn a_control_capture_beats_two_tmux_processes() {
+    guard!();
+    let server = Server::start("capbench");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "cap", "cat"])
+        .expect("create the capture window");
+    std::thread::sleep(Duration::from_millis(300));
+    let target = "it:cap";
+    let samples = 50;
+
+    let ops = TestTmuxOps {
+        server: server.name.clone(),
+    };
+    let mut subprocess = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let started = Instant::now();
+        let _ = ops.capture_pane_with_history(target, 500);
+        let _ = ops.pane_metrics(target);
+        subprocess.push(started.elapsed());
+    }
+
+    let sink = sink_for(&server, true);
+    // One warm-up: the first capture may pay for the connect.
+    let _ = sink.capture(target, CaptureSpec::popup(500));
+    let mut control = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let started = Instant::now();
+        let snapshot = sink.capture(target, CaptureSpec::popup(500));
+        control.push(started.elapsed());
+        assert!(snapshot.is_some(), "the control capture stopped working");
+    }
+    sink.shutdown();
+
+    let (sub_p95, ctl_p95) = (p95(subprocess), p95(control));
+    eprintln!(
+        "capture p95 — two tmux processes {:?}, control connection {:?} ({})",
+        sub_p95,
+        ctl_p95,
+        agtx_tmux_version()
+    );
+    // Deliberately loose: this asserts the order of magnitude the popup's
+    // refresh rate depends on, not a number a loaded CI box has to hit.
+    assert!(
+        ctl_p95 * 5 < sub_p95,
+        "a control capture ({ctl_p95:?}) should be far cheaper than two processes ({sub_p95:?})"
+    );
+}
+
+/// tmux must tell the **input** connection that a window closed, even though it
+/// is attached with `no-output`.
+///
+/// This is what turns an exited agent into an `Exited` card promptly rather than
+/// on the status refresh's next tick, and it costs nothing: the notification
+/// arrives on a connection agtx already holds open for keystrokes.
+#[test]
+fn a_closing_window_is_reported_on_the_input_connection() {
+    guard!();
+    let server = Server::start("winclose");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "doomed", "cat"])
+        .expect("create the window");
+    std::thread::sleep(Duration::from_millis(300));
+
+    let flag = Arc::new(AtomicBool::new(false));
+    let client =
+        agtx::tmux::ControlClient::connect_with(&server.name, "it", 1, Some(Arc::clone(&flag)))
+            .expect("attach the control client");
+    std::thread::sleep(Duration::from_millis(400));
+    // The attach itself must not look like a window closing.
+    assert!(!flag.load(Ordering::Relaxed), "attaching raised the flag");
+
+    server
+        .tmux(&["kill-window", "-t", "it:doomed"])
+        .expect("kill the window");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !flag.load(Ordering::Relaxed) {
+        assert!(
+            Instant::now() < deadline,
+            "a closing window was never reported on the input connection"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    client.shutdown();
+}
+
+// --- %output push: does tmux actually tell us a pane painted? ---
+
+/// The scope assumption the push design rests on, pinned so a tmux upgrade
+/// cannot change it in silence: `%output` covers every pane in the **attached**
+/// session and no pane outside it.
+#[test]
+fn output_notifications_cover_the_attached_session_only() {
+    guard!();
+    let server = Server::start("outscope");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "mine", "cat"])
+        .expect("window in the attached session");
+    server
+        .tmux(&["new-session", "-d", "-s", "other", "-n", "theirs", "cat"])
+        .expect("window in another session");
+    std::thread::sleep(Duration::from_millis(300));
+
+    let ops = TestTmuxOps {
+        server: server.name.clone(),
+    };
+    let mine = ops.pane_id("it:mine").expect("pane id");
+    let theirs = ops.pane_id("other:theirs").expect("pane id");
+    assert_ne!(mine, theirs);
+
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&seen);
+    let watch = agtx::tmux::OutputWatch::connect(&server.name, "it", move |id| {
+        sink.lock().unwrap().push(id.to_string());
+    })
+    .expect("attach the output watch");
+    std::thread::sleep(Duration::from_millis(400));
+
+    server
+        .tmux(&["send-keys", "-t", "it:mine", "-l", "painted\n"])
+        .expect("paint the watched pane");
+    server
+        .tmux(&["send-keys", "-t", "other:theirs", "-l", "painted\n"])
+        .expect("paint the other session's pane");
+    std::thread::sleep(Duration::from_millis(600));
+
+    let ids = seen.lock().unwrap().clone();
+    drop(watch);
+    assert!(
+        ids.iter().any(|id| *id == mine),
+        "the attached session's pane must notify: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| *id == theirs),
+        "a pane outside the attached session must not: {ids:?}"
+    );
+}
+
+/// A pane that paints notifies **promptly** — this is what replaces the timer,
+/// so it has to beat one.
+#[test]
+fn a_paint_notifies_faster_than_the_poll_interval() {
+    guard!();
+    let server = Server::start("outlat");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "p", "cat"])
+        .expect("create the window");
+    std::thread::sleep(Duration::from_millis(300));
+    let ops = TestTmuxOps {
+        server: server.name.clone(),
+    };
+    let pane = ops.pane_id("it:p").expect("pane id");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let want = pane.clone();
+    let watch = agtx::tmux::OutputWatch::connect(&server.name, "it", move |id| {
+        if id == want {
+            let _ = tx.send(Instant::now());
+        }
+    })
+    .expect("attach the output watch");
+    std::thread::sleep(Duration::from_millis(400));
+    while rx.try_recv().is_ok() {}
+
+    let mut samples = Vec::new();
+    for i in 0..10 {
+        // Drain *per iteration*: one paint produces several `%output` frames, and
+        // reading a leftover from the previous round would time an event that
+        // happened before the send — which saturates to zero and makes the whole
+        // measurement look perfect.
+        while rx.try_recv().is_ok() {}
+        let started = Instant::now();
+        server
+            .tmux(&["send-keys", "-t", "it:p", "-l", &format!("x{i}\n")])
+            .expect("paint");
+        let at = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a paint must notify");
+        samples.push(at.duration_since(started));
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    drop(watch);
+    let p95 = p95(samples);
+    eprintln!("paint -> %output p95 {p95:?} ({})", agtx_tmux_version());
+    // Loose on purpose: the `send-keys` process in front of it costs more than
+    // the notification does. It only has to be in a different class from a poll.
+    assert!(
+        p95 < Duration::from_millis(100),
+        "a paint notification should be prompt, got {p95:?}"
+    );
+}
+
+/// An idle pane must produce **nothing**. This is the property that makes an
+/// open popup free, and the one a timer can never have.
+#[test]
+fn an_idle_pane_notifies_nothing() {
+    guard!();
+    let server = Server::start("outidle");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "quiet", "cat"])
+        .expect("create the window");
+    std::thread::sleep(Duration::from_millis(400));
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&count);
+    let watch = agtx::tmux::OutputWatch::connect(&server.name, "it", move |_| {
+        seen.fetch_add(1, Ordering::Relaxed);
+    })
+    .expect("attach the output watch");
+    // Let the attach settle: a client attaching makes tmux repaint.
+    std::thread::sleep(Duration::from_millis(700));
+    count.store(0, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_secs(2));
+    let n = count.load(Ordering::Relaxed);
+    drop(watch);
+    assert_eq!(n, 0, "an idle pane produced {n} notifications");
+}
+
+/// Dropping the watch must close the tmux client. Left running it would mirror
+/// the whole session's output for the life of the server, which is the cost the
+/// dedicated-client design exists to avoid paying while no popup is open.
+#[test]
+fn dropping_the_watch_closes_its_client() {
+    guard!();
+    let server = Server::start("outdrop");
+    std::thread::sleep(Duration::from_millis(200));
+    let before = server.client_count();
+    let watch = agtx::tmux::OutputWatch::connect(&server.name, "it", |_| {})
+        .expect("attach the output watch");
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        server.client_count(),
+        before + 1,
+        "the watch did not attach"
+    );
+    drop(watch);
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(
+        server.client_count(),
+        before,
+        "the watch client outlived the watch"
+    );
 }
 
 // --- the measurement the whole change exists for ---

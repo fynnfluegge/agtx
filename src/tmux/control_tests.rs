@@ -169,6 +169,105 @@ fn a_payload_line_starting_with_percent_is_payload() {
 }
 
 #[test]
+fn a_window_closing_is_recognised_in_either_form() {
+    // tmux emits `%window-close` for a window still linked elsewhere and
+    // `%unlinked-window-close` for one that is gone; a task's window is the
+    // second, but both mean "the set of windows changed, look again".
+    assert!(is_window_close("%unlinked-window-close @1"));
+    assert!(is_window_close("%window-close @7"));
+    assert!(is_window_close("%window-close"));
+    // Not a window closing. `%window-closed` does not exist today, but matching
+    // it would age out every task's status on a notification we misread.
+    for line in [
+        "%window-add @2",
+        "%window-closed @2",
+        "%unlinked-window-add @2",
+        "%exit",
+        "%output %1 data",
+    ] {
+        assert!(!is_window_close(line), "{line:?} is not a window closing");
+    }
+}
+
+#[test]
+fn an_output_notification_yields_its_pane_id() {
+    assert_eq!(output_pane_id("%output %7 hello"), Some("%7"));
+    assert_eq!(output_pane_id("%output %12 "), Some("%12"));
+    // The payload is arbitrary bytes, escaped by tmux; only the id is taken.
+    assert_eq!(
+        output_pane_id("%output %3 \\033[31mred\\033[0m %output %9 not-an-id"),
+        Some("%3")
+    );
+}
+
+#[test]
+fn a_notification_that_is_not_an_output_yields_no_pane_id() {
+    // Guessing an id from a notification we do not understand would signal the
+    // wrong pane, which reads as "some other task painted" and captures for it.
+    for line in [
+        "%exit",
+        "%window-add @2",
+        "%output",
+        "%output notapane data",
+        "%output % data",
+        "%output %x1 data",
+        "%outputs %1 data",
+    ] {
+        assert_eq!(
+            output_pane_id(line),
+            None,
+            "{line:?} must not parse as a pane id"
+        );
+    }
+}
+
+#[test]
+fn a_payload_line_that_looks_like_an_output_notification_is_payload() {
+    // A capture of a pane that is itself showing control-mode output. Inside a
+    // block it is that command's reply, not a pane painting — position decides,
+    // as it does for every other tag.
+    assert_eq!(
+        frames(&["%begin 1 4 0\n%output %9 painted\n%end 1 4 0\n"]),
+        vec![
+            Frame::Begin { cmd: 4 },
+            Frame::Payload("%output %9 painted".to_string()),
+            Frame::End { cmd: 4 },
+        ]
+    );
+}
+
+#[test]
+fn a_payload_line_that_looks_like_an_end_tag_does_not_close_the_block() {
+    // A block's payload is now a whole pane capture, so its lines are whatever
+    // an agent chose to paint — `%end 1 7 0` included. Closing on the tag alone
+    // would end the block early, hand the caller half a capture, and leave
+    // `completed` permanently ahead of the commands that were actually run,
+    // which every barrier and query counts on. tmux pairs each `%end` with its
+    // `%begin`'s id, so the id is what decides.
+    assert_eq!(
+        frames(&["%begin 1 4 0\n%end 1 7 0\nreal content\n%end 1 4 0\n"]),
+        vec![
+            Frame::Begin { cmd: 4 },
+            Frame::Payload("%end 1 7 0".to_string()),
+            Frame::Payload("real content".to_string()),
+            Frame::End { cmd: 4 },
+        ]
+    );
+}
+
+#[test]
+fn a_payload_line_that_looks_like_an_error_tag_does_not_fail_the_block() {
+    assert_eq!(
+        frames(&["%begin 1 4 0\n%error 1 9 0\n%end 1 4 0\n"]),
+        vec![
+            Frame::Begin { cmd: 4 },
+            Frame::Payload("%error 1 9 0".to_string()),
+            Frame::End { cmd: 4 },
+        ]
+    );
+}
+
+#[test]
 fn a_malformed_begin_still_frames_the_block() {
     // Losing the command number costs a log field. Losing the framing would
     // desynchronise every later reply, so the parser is lenient here.

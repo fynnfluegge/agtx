@@ -2,7 +2,9 @@ pub mod control;
 pub mod input;
 mod operations;
 
-pub use control::{tmux_quote, ControlClient, Frame, FrameParser};
+pub use control::{
+    is_window_close, output_pane_id, tmux_quote, ControlClient, Frame, FrameParser, OutputWatch,
+};
 pub use input::{
     InputConfig, InputError, PaneInput, PaneInputSink, DEFAULT_BATCH_WINDOW, DEFAULT_QUEUE_CAPACITY,
 };

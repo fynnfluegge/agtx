@@ -1,11 +1,10 @@
 //! Persistent tmux **control-mode** client.
 //!
 //! Every `send-keys` agtx runs through [`RealTmuxOps`](super::RealTmuxOps) starts
-//! a `tmux` process and waits for it. Measured against tmux 3.5a on macOS that
-//! is **~25 ms per key** — the dominant term in the delay between pressing a key
-//! in a task popup and seeing it echoed. A control-mode client is one long-lived
-//! process that takes commands as lines on stdin, so the same `send-keys` costs
-//! ~0.05 ms round-trip and ~0.001 ms if nothing waits for the reply.
+//! a `tmux` process and waits for it, which is what made typing in a task popup
+//! lag behind the keys. A control-mode client is one long-lived process that
+//! takes commands as lines on stdin, so the same `send-keys` costs a fraction of
+//! that, and nothing at all when no reply is waited for.
 //!
 //! ```text
 //! tmux -L agtx -C attach-session -t <session> -f ignore-size,no-output
@@ -21,8 +20,15 @@
 //!   On 3.5a a control client with no size set turned out to be size-neutral
 //!   already, but the flag makes that a guarantee rather than an observation.
 //! - **`no-output`.** Without it every byte an agent paints is mirrored down our
-//!   stdout as `%output`. The popup gets its content from `capture-pane`, so that
-//!   is pure cost — a busy agent would push megabytes through the reader thread.
+//!   stdout as `%output`. The popup gets its content from `capture-pane` — issued
+//!   as a command on this same connection, see [`ControlClient::query`] — so for
+//!   *this* client the mirror is pure cost, and suppressing it does not suppress
+//!   command replies, which are what a query reads.
+//!
+//!   The cost is not the volume — a busy pane pushes far less than it looks —
+//!   but that this client has no use for the bytes. That distinction matters
+//!   because `%output` is the only "this pane changed" push tmux offers, and the
+//!   pane watcher takes it on a second client of its own ([`OutputWatch`]).
 //! - **The session is only an attach point.** Commands carry their own
 //!   `session:window` target and are executed server-wide, so one client drives
 //!   every window on the `agtx` server. Verified: a client attached to session
@@ -34,6 +40,7 @@
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -118,7 +125,15 @@ pub enum Frame {
 #[derive(Default)]
 pub struct FrameParser {
     buf: Vec<u8>,
-    in_block: bool,
+    /// Command id of the block currently open, if any.
+    ///
+    /// Not a bool, because a block's payload is arbitrary text and a *pane
+    /// capture* is the most arbitrary there is: an agent that prints a line
+    /// beginning `%end ` would otherwise close the block early and desync
+    /// `completed`, which barriers and queries both count on. tmux pairs every
+    /// `%end`/`%error` with its `%begin`'s id, so requiring the match costs
+    /// nothing and makes the spoof need today's exact command number.
+    open_cmd: Option<u64>,
 }
 
 impl FrameParser {
@@ -146,21 +161,39 @@ impl FrameParser {
         // A `%begin` block's payload is arbitrary text, so it is classified by
         // position, never by a leading `%`.
         if let Some(cmd) = frame_cmd(&line, "%begin") {
-            self.in_block = true;
+            self.open_cmd = Some(cmd);
             return Frame::Begin { cmd };
         }
-        if self.in_block {
-            if let Some(cmd) = frame_cmd(&line, "%end") {
-                self.in_block = false;
-                return Frame::End { cmd };
+        if let Some(open) = self.open_cmd {
+            if frame_cmd(&line, "%end") == Some(open) {
+                self.open_cmd = None;
+                return Frame::End { cmd: open };
             }
-            if let Some(cmd) = frame_cmd(&line, "%error") {
-                self.in_block = false;
-                return Frame::Error { cmd };
+            if frame_cmd(&line, "%error") == Some(open) {
+                self.open_cmd = None;
+                return Frame::Error { cmd: open };
             }
             return Frame::Payload(line);
         }
         Frame::Notify(line)
+    }
+}
+
+/// `%output %7 some\015bytes` → `Some("%7")`.
+///
+/// Only the pane id is taken; the payload is dropped without being decoded.
+/// `%output` is used as a **signal** that a pane painted, never as content — the
+/// pane is still read with `capture-pane`, which is what renders correctly and is
+/// byte-verified against the subprocess path.
+pub fn output_pane_id(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("%output ")?;
+    let id = rest.split(' ').next()?;
+    // A pane id is `%` followed by digits. Anything else is a notification we do
+    // not understand, and guessing at it would signal the wrong pane.
+    if id.len() >= 2 && id.starts_with('%') && id[1..].bytes().all(|b| b.is_ascii_digit()) {
+        Some(id)
+    } else {
+        None
     }
 }
 
@@ -193,6 +226,49 @@ struct ClientState {
     /// name the target, not the keys.
     last_error: Option<String>,
     errors: u64,
+    /// The one in-flight [`ControlClient::query`], if any. Single-slot because
+    /// the client is owned by one thread, which is blocked while it waits.
+    query: Option<QueryState>,
+}
+
+/// A command whose *output* a caller wants, identified by the completion
+/// indices its blocks will carry.
+///
+/// Commands complete in the order they were issued, so `completed` — the same
+/// counter [`ControlClient::barrier`] waits on — is enough to tell which block
+/// belongs to the query. Nothing has to parse `%begin`'s command id.
+#[derive(Debug)]
+struct QueryState {
+    first: u64,
+    last: u64,
+    blocks: Vec<Vec<String>>,
+    /// First `%error` payload in the range. A query is reported as failed even
+    /// when later commands in the same batch succeed.
+    failed: Option<String>,
+    done: bool,
+}
+
+impl ClientState {
+    /// Hand a just-closed block to the waiting query, if it belongs to one.
+    ///
+    /// Called with `completed` already incremented, so it *is* the index of the
+    /// block that closed.
+    fn record_block(&mut self, payload: Vec<String>, error: Option<String>) {
+        let idx = self.completed;
+        let Some(query) = self.query.as_mut() else {
+            return;
+        };
+        if query.done || idx < query.first || idx > query.last {
+            return;
+        }
+        if let Some(err) = error {
+            query.failed.get_or_insert(err);
+        }
+        query.blocks.push(payload);
+        if idx >= query.last {
+            query.done = true;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -235,6 +311,24 @@ impl ControlClient {
     /// Returns only once the connection has round-tripped a command, so a
     /// caller that gets a `ControlClient` has one that works.
     pub fn connect(server: &str, session: &str, generation: u64) -> Result<Self> {
+        Self::connect_with(server, session, generation, None)
+    }
+
+    /// As [`connect`](Self::connect), but raising `window_events` whenever tmux
+    /// reports a window closing.
+    ///
+    /// Those notifications arrive on a `no-output` client — verified on 3.5a —
+    /// so the connection agtx already holds for keystrokes can tell it an agent
+    /// exited, instead of the status refresh noticing up to its poll interval
+    /// later. It is a flag rather than the window id because the id would have
+    /// to be resolved to a task anyway: "some window closed, look again" is the
+    /// whole signal, and the refresh already knows how to look.
+    pub fn connect_with(
+        server: &str,
+        session: &str,
+        generation: u64,
+        window_events: Option<Arc<AtomicBool>>,
+    ) -> Result<Self> {
         let mut child = Command::new("tmux")
             .args(["-L", server, "-C", "attach-session", "-t", session])
             // See the module docs: size-neutral, and no pane output mirrored at us.
@@ -265,7 +359,7 @@ impl ControlClient {
         let reader_shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name(format!("agtx-tmux-control-{generation}"))
-            .spawn(move || read_loop(stdout, reader_shared))
+            .spawn(move || read_loop(stdout, reader_shared, window_events))
             .context("failed to start the control-mode reader thread")?;
 
         let mut client = Self {
@@ -329,11 +423,98 @@ impl ControlClient {
         Ok(())
     }
 
+    /// Run commands and return the **output** of each, block by block.
+    ///
+    /// The write path is fire-and-forget by design — ordering, not
+    /// acknowledgement, is what pane input needs — so this is the one place that
+    /// reads a reply back. It exists for the popup's pane capture, which is far
+    /// cheaper here than as one `tmux` process per command.
+    ///
+    /// All commands are written before waiting, so a batch costs one round trip
+    /// rather than one per command. On timeout the query slot is cleared and the
+    /// blocks collected so far are discarded: a late reply must not be handed to
+    /// whoever asks next.
+    ///
+    /// An `Err` from the write half is **ambiguous** in exactly the way
+    /// [`write_command`](Self::write_command) documents, and callers must treat
+    /// it the same way.
+    pub fn query(&mut self, cmds: &[String], timeout: Duration) -> Result<Vec<Vec<String>>> {
+        if cmds.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Indices the replies will carry. Every block for a command issued
+        // earlier has a smaller index, so one closing between here and the write
+        // below is ignored rather than mistaken for ours.
+        let first = self.issued + self.offset + 1;
+        let last = first + cmds.len() as u64 - 1;
+        {
+            let mut st = self
+                .shared
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("control-mode state poisoned"))?;
+            if !st.alive {
+                anyhow::bail!("tmux control client is gone");
+            }
+            st.query = Some(QueryState {
+                first,
+                last,
+                blocks: Vec::new(),
+                failed: None,
+                done: false,
+            });
+        }
+        for cmd in cmds {
+            if let Err(e) = self.write_command(cmd) {
+                self.clear_query();
+                return Err(e);
+            }
+        }
+
+        let deadline = Instant::now() + timeout;
+        let mut st = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("control-mode state poisoned"))?;
+        loop {
+            let done = st.query.as_ref().map(|q| q.done).unwrap_or(true);
+            if done || !st.alive {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                st.query = None;
+                anyhow::bail!("tmux control query timed out after {timeout:?}");
+            }
+            match self.shared.cv.wait_timeout(st, remaining) {
+                Ok((next, _)) => st = next,
+                Err(_) => anyhow::bail!("control-mode state poisoned"),
+            }
+        }
+        let Some(query) = st.query.take() else {
+            anyhow::bail!("tmux control query was never registered");
+        };
+        if let Some(err) = query.failed {
+            anyhow::bail!("tmux rejected the command: {err}");
+        }
+        if !query.done {
+            anyhow::bail!("tmux control client exited during the query");
+        }
+        Ok(query.blocks)
+    }
+
+    fn clear_query(&mut self) {
+        if let Ok(mut st) = self.shared.state.lock() {
+            st.query = None;
+        }
+    }
+
     /// Block until every command written so far has been executed by the server.
     ///
     /// Used before handing work to the subprocess path, which travels a
     /// *different* socket and could otherwise overtake commands still queued
-    /// here. Costs one round trip (~0.05 ms measured), not one per command.
+    /// here. Costs one round trip, not one per command.
     pub fn barrier(&mut self, timeout: Duration) -> bool {
         let want = self.issued + self.offset;
         let deadline = Instant::now() + timeout;
@@ -400,7 +581,128 @@ impl ControlClient {
     }
 }
 
-fn read_loop(mut stdout: std::process::ChildStdout, shared: Arc<Shared>) {
+/// A control client attached **without** `no-output`, whose only job is to say
+/// which panes painted.
+///
+/// Separate from [`ControlClient`] on purpose, and the separation is forced:
+/// `no-output` is fixed at attach time — it survives every `refresh-client`
+/// form on 3.5a — so push cannot be switched on for the input connection when a
+/// popup opens. A second client also means the mirrored bytes never touch the
+/// path a keystroke takes, and that nothing is mirrored at all while no popup is
+/// open, because this is connected only for as long as one is.
+pub struct OutputWatch {
+    child: Child,
+    alive: Arc<AtomicBool>,
+}
+
+impl OutputWatch {
+    /// Attach and call `on_output` with a pane id every time that pane paints.
+    ///
+    /// The callback runs on the reader thread and must be cheap: a busy pane
+    /// produces ~56 frames a second, and every pane in the session is mirrored
+    /// here, not just the one being watched.
+    pub fn connect(
+        server: &str,
+        session: &str,
+        on_output: impl Fn(&str) + Send + 'static,
+    ) -> Result<Self> {
+        let mut child = Command::new("tmux")
+            .args(["-L", server, "-C", "attach-session", "-t", session])
+            // `ignore-size` for the same reason as the input client; `no-output`
+            // deliberately absent, since the output is the entire point.
+            .args(["-f", "ignore-size"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("failed to start the tmux output-watch client")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("tmux output-watch client has no stdout")?;
+        let alive = Arc::new(AtomicBool::new(true));
+        let reader_alive = Arc::clone(&alive);
+        std::thread::Builder::new()
+            .name("agtx-tmux-output".to_string())
+            .spawn(move || {
+                let mut parser = FrameParser::new();
+                let mut buf = [0u8; 8192];
+                let mut stdout = stdout;
+                'read: loop {
+                    let n = match stdout.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    parser.push(&buf[..n]);
+                    while let Some(frame) = parser.next_frame() {
+                        // Only notifications: a `%output`-shaped line *inside* a
+                        // command's reply is that command's output, not a pane
+                        // painting. The parser already draws that line.
+                        if let Frame::Notify(line) = frame {
+                            if let Some(id) = output_pane_id(&line) {
+                                on_output(id);
+                            } else if line.starts_with("%exit") {
+                                // Labelled: leaving only the frame loop would
+                                // keep reading a connection tmux has just said
+                                // it is closing, and leave `alive()` true until
+                                // the pipe happened to close.
+                                break 'read;
+                            }
+                        }
+                    }
+                }
+                reader_alive.store(false, Ordering::Relaxed);
+            })
+            .context("failed to start the output-watch reader thread")?;
+        Ok(Self { child, alive })
+    }
+
+    pub fn alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for OutputWatch {
+    fn drop(&mut self) {
+        // Closing stdin asks tmux to exit; the kill is for a client that ignores
+        // it. Left running, it would mirror the whole session's output forever.
+        drop(self.child.stdin.take());
+        let deadline = Instant::now() + Duration::from_millis(300);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => break,
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Does this notification mean a window went away?
+///
+/// tmux emits `%window-close` for a window still linked elsewhere and
+/// `%unlinked-window-close` for one that is gone entirely; a task's window is
+/// the second, but both mean "the set of windows changed, look again".
+pub fn is_window_close(line: &str) -> bool {
+    for tag in ["%window-close", "%unlinked-window-close"] {
+        if let Some(rest) = line.strip_prefix(tag) {
+            if rest.is_empty() || rest.starts_with(' ') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn read_loop(
+    mut stdout: std::process::ChildStdout,
+    shared: Arc<Shared>,
+    window_events: Option<Arc<AtomicBool>>,
+) {
     let mut parser = FrameParser::new();
     let mut buf = [0u8; 8192];
     let mut block_payload: Vec<String> = Vec::new();
@@ -414,29 +716,37 @@ fn read_loop(mut stdout: std::process::ChildStdout, shared: Arc<Shared>) {
             match frame {
                 Frame::Begin { .. } => block_payload.clear(),
                 Frame::End { .. } => {
-                    let ready = block_payload.iter().any(|l| l == READY_SENTINEL);
-                    shared.signal(|st| {
+                    // Moved, not copied: a capture block is the whole pane, and
+                    // this runs on every command the broker issues.
+                    let payload = std::mem::take(&mut block_payload);
+                    let ready = payload.iter().any(|l| l == READY_SENTINEL);
+                    shared.signal(move |st| {
                         st.completed += 1;
                         if ready {
                             st.ready = true;
                         }
+                        st.record_block(payload, None);
                     });
-                    block_payload.clear();
                 }
                 Frame::Error { cmd } => {
-                    let msg = block_payload.join("; ");
+                    let payload = std::mem::take(&mut block_payload);
+                    let msg = payload.join("; ");
                     tracing::debug!(cmd, error = %msg, "tmux control command failed");
-                    shared.signal(|st| {
+                    shared.signal(move |st| {
                         st.completed += 1;
                         st.errors += 1;
-                        st.last_error = Some(msg);
+                        st.last_error = Some(msg.clone());
+                        st.record_block(Vec::new(), Some(msg));
                     });
-                    block_payload.clear();
                 }
                 Frame::Payload(line) => block_payload.push(line),
                 Frame::Notify(line) => {
                     if line.starts_with("%exit") {
                         shared.signal(|st| st.alive = false);
+                    } else if is_window_close(&line) {
+                        if let Some(flag) = window_events.as_ref() {
+                            flag.store(true, Ordering::Relaxed);
+                        }
                     }
                 }
             }
