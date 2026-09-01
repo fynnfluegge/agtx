@@ -1156,7 +1156,7 @@ fn the_popup_renders_the_lines_the_watcher_parsed() {
     let content = b"\x1b[31mred\x1b[0m\nplain\n".to_vec();
     let lines = parse_ansi_to_lines(&content);
     assert_eq!(lines.len(), 2);
-    popup.set_content(content.clone(), lines);
+    popup.set_content(content.clone(), lines, Some(1));
     assert_eq!(popup.cached_content, content);
     assert_eq!(popup.cached_lines.len(), 2);
     // Scrolling still reads the byte side, so the two must describe one pane.
@@ -1273,7 +1273,8 @@ fn test_capture_tmux_pane_snapshot() {
             })
         });
 
-    let (content, metrics) = capture_tmux_pane_snapshot("test-window", 500, &mock_tmux);
+    let (content, metrics, _cursor_line) =
+        capture_tmux_pane_snapshot("test-window", 500, &mock_tmux);
 
     // Content should be trimmed to cursor position
     assert!(!content.is_empty());
@@ -1326,7 +1327,8 @@ fn the_popup_capture_prefers_the_input_connection() {
         }),
     }));
 
-    let (content, metrics) = capture_pane_for_popup("test-window", 500, &sink, &mock_tmux);
+    let (content, metrics, _cursor_line) =
+        capture_pane_for_popup("test-window", 500, &sink, &mock_tmux);
     // Trimmed to the cursor, exactly as the subprocess path is.
     assert_eq!(content, b"from control".to_vec());
     assert_eq!(metrics.map(|m| m.history_size), Some(7));
@@ -1351,7 +1353,7 @@ fn the_popup_capture_falls_back_to_the_subprocess_path() {
         })
     });
 
-    let (content, metrics) =
+    let (content, metrics, _cursor_line) =
         capture_pane_for_popup("test-window", 500, &CapturingSink(None), &mock_tmux);
     assert_eq!(content, b"from subprocess".to_vec());
     assert_eq!(metrics.map(|m| m.history_size), Some(3));

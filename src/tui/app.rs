@@ -1311,6 +1311,7 @@ impl App {
                 content,
                 lines,
                 metrics,
+                cursor_line,
             } => {
                 let Some(popup) = self.state.shell_popup.as_mut() else {
                     return Ok(false);
@@ -1326,7 +1327,7 @@ impl App {
                 if popup.cached_content == content && popup.metrics == metrics {
                     return Ok(false);
                 }
-                popup.set_content(content, lines);
+                popup.set_content(content, lines, cursor_line);
                 popup.metrics = metrics;
                 Ok(true)
             }
@@ -7503,10 +7504,10 @@ impl App {
                 popup.last_pane_size = Some((pane_width, pane_height));
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            let (content, metrics) =
+            let (content, metrics, cursor_line) =
                 capture_tmux_pane_snapshot(&orch_target, 500, self.state.tmux_ops.as_ref());
             let lines = parse_ansi_to_lines(&content);
-            popup.set_content(content, lines);
+            popup.set_content(content, lines, cursor_line);
             popup.metrics = metrics;
             let _ = self.state.input_sink.flush();
             self.state.shell_popup = Some(popup);
@@ -7588,10 +7589,10 @@ impl App {
                 .resize_window(&orch_target, pane_width, pane_height);
             popup.last_pane_size = Some((pane_width, pane_height));
         }
-        let (content, metrics) =
+        let (content, metrics, cursor_line) =
             capture_tmux_pane_snapshot(&orch_target, 500, self.state.tmux_ops.as_ref());
         let lines = parse_ansi_to_lines(&content);
-        popup.set_content(content, lines);
+        popup.set_content(content, lines, cursor_line);
         popup.metrics = metrics;
         let _ = self.state.input_sink.flush();
         self.state.shell_popup = Some(popup);
@@ -7686,10 +7687,10 @@ impl App {
                 // Leaving them to the first refresh left a window in which
                 // `has_scrollback()` fell back to its `true` default and the
                 // scroll keys moved a buffer that could not move.
-                let (content, metrics) =
+                let (content, metrics, cursor_line) =
                     capture_tmux_pane_snapshot(&target, 500, self.state.tmux_ops.as_ref());
                 let lines = parse_ansi_to_lines(&content);
-                popup.set_content(content, lines);
+                popup.set_content(content, lines, cursor_line);
                 popup.metrics = metrics;
 
                 // A popup opening changes the target; nothing queued for the
@@ -9185,7 +9186,7 @@ fn capture_tmux_pane_snapshot(
     window_name: &str,
     history_lines: i32,
     tmux_ops: &dyn TmuxOperations,
-) -> (Vec<u8>, Option<crate::tmux::PaneMetrics>) {
+) -> PaneCapture {
     let content = tmux_ops.capture_pane_with_history(window_name, history_lines);
 
     // Get the cursor position and pane height to know where the "real" content ends
@@ -9195,19 +9196,21 @@ fn capture_tmux_pane_snapshot(
     trim_pane_snapshot(crate::tmux::PaneSnapshot { content, metrics })
 }
 
+/// A trimmed pane capture: what the popup draws, plus where the cursor is in it.
+///
+/// The cursor's row travels with the content because trimming is what makes it
+/// underivable later — see [`ShellPopup::cursor_line`].
+type PaneCapture = (Vec<u8>, Option<crate::tmux::PaneMetrics>, Option<usize>);
+
 /// Cut the unused pane buffer below the cursor off a capture.
 ///
 /// Shared by both capture paths so they cannot disagree about what the popup is
 /// shown — the whole point of the control-mode path is to be indistinguishable
 /// from the subprocess one apart from its cost.
-fn trim_pane_snapshot(
-    snapshot: crate::tmux::PaneSnapshot,
-) -> (Vec<u8>, Option<crate::tmux::PaneMetrics>) {
+fn trim_pane_snapshot(snapshot: crate::tmux::PaneSnapshot) -> PaneCapture {
     let trim_info = snapshot.metrics.map(|m| m.trim_bounds());
-    (
-        shell_popup::trim_content_to_cursor(snapshot.content, trim_info),
-        snapshot.metrics,
-    )
+    let (content, cursor_line) = shell_popup::trim_content_to_cursor(snapshot.content, trim_info);
+    (content, snapshot.metrics, cursor_line)
 }
 
 /// Capture a pane for the popup: over the input broker's control connection when
@@ -9223,7 +9226,7 @@ fn capture_pane_for_popup(
     history_lines: i32,
     input_sink: &dyn PaneInputSink,
     tmux_ops: &dyn TmuxOperations,
-) -> (Vec<u8>, Option<crate::tmux::PaneMetrics>) {
+) -> PaneCapture {
     match input_sink.capture(window_name, crate::tmux::CaptureSpec::popup(history_lines)) {
         Some(snapshot) => trim_pane_snapshot(snapshot),
         None => capture_tmux_pane_snapshot(window_name, history_lines, tmux_ops),
@@ -9774,6 +9777,8 @@ enum Wake {
         /// Parsed on the watcher thread — see `ShellPopup::cached_lines`.
         lines: Vec<Line<'static>>,
         metrics: Option<crate::tmux::PaneMetrics>,
+        /// Where the cursor is in `content` — see `ShellPopup::cursor_line`.
+        cursor_line: Option<usize>,
     },
 }
 
@@ -10109,7 +10114,7 @@ fn spawn_pane_watcher(
                     attach_pane_push(push, &target, &watch, tmux_ops.as_ref(), &mut push_retry_at);
 
                 let captured_at = Instant::now();
-                let (content, metrics) = capture_pane_for_popup(
+                let (content, metrics, cursor_line) = capture_pane_for_popup(
                     &target,
                     history_lines,
                     input_sink.as_ref(),
@@ -10127,6 +10132,7 @@ fn spawn_pane_watcher(
                             content,
                             lines,
                             metrics,
+                            cursor_line,
                         })
                         .is_err()
                     {

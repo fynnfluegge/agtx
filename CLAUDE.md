@@ -378,6 +378,14 @@ the input thread, per keystroke, is what it avoids.
     the two cannot drift, and a real-tmux test asserts the captures are **byte-identical**: they
     parse different things (a process's stdout against reassembled `%begin`/`%end` payload lines) and
     the popup would happily draw a subtly wrong frame without failing.
+  - **The cursor's row is resolved at trim time, not at draw time.** `trim_content_to_cursor` cuts
+    the unused buffer below the cursor off the capture, so the last cached line is no longer the
+    pane's last row and `total_lines - pane_height` under-counts by however many rows it dropped.
+    It therefore returns the cursor's line index alongside the content and `ShellPopup::cursor_line`
+    carries it to the renderer. A pane with **no scrollback hides the error** — the subtraction
+    saturates at 0 — so this only ever showed as a drifting cursor under agents that stay on the
+    normal screen and accumulate history (codex), and never under one that lives on the alternate
+    screen (claude), which is what made it look agent-specific rather than arithmetic.
   - The format literal is **single-quoted, not `tmux_quote`d**: tmux performs no replacements inside
     single quotes, so `#{cursor_x}` reaches `display-message` intact instead of being escaped to a
     literal `\#{cursor_x}`. Verified on 3.5a that `-t` is honoured for the expansion, so a client
