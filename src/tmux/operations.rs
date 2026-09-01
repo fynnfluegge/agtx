@@ -564,11 +564,11 @@ mod tests {
     /// The orchestrator command is the other thing `create_window` wraps, and it
     /// carries a single-quoted JSON blob for `claude mcp add-json`.
     ///
-    /// It used to pre-escape its own wrapping quotes because it was interpolated
-    /// raw. Now that `single_quote` quotes the whole command, that pre-escape
-    /// double-escapes: the pane dies on an unterminated quote before `add-json`
-    /// runs, silently, because the window is created either way. Nothing else
-    /// covers this path — the TUI tests mock the command builder.
+    /// It must not pre-escape its own wrapping quotes: `single_quote` already
+    /// quotes the whole command, so a pre-escape double-escapes and the pane
+    /// dies on an unterminated quote before `add-json` runs — silently, because
+    /// the window is created either way. Nothing else covers this path; the TUI
+    /// tests mock the command builder.
     #[cfg(unix)]
     #[test]
     fn the_orchestrator_command_reaches_claude_with_its_json_intact() {

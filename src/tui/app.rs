@@ -1209,8 +1209,8 @@ impl App {
     /// - **latency** is the pane watcher's cadence, and it wakes the loop only
     ///   when the pane it captured differs from the last one it sent;
     /// - **housekeeping** — the DB queue, the session refresh, the spinner — runs
-    ///   on its own tick, no faster than it needs to and no longer coupled to
-    ///   how fast the user types;
+    ///   on its own tick, no faster than it needs to and independent of how fast
+    ///   the user types;
     /// - **drawing** happens when state changed, so an idle board with an idle
     ///   popup costs one backstop frame a second.
     pub async fn run(&mut self) -> Result<()> {
@@ -1468,16 +1468,16 @@ impl App {
 
     /// Periodic work, on its own tick rather than once per wake-up.
     ///
-    /// Every item here used to run on every loop iteration — including
-    /// `process_transition_requests`, which queries SQLite — so its rate rose and
-    /// fell with how fast the user happened to be typing. Returns whether
-    /// anything on screen moved.
+    /// Running these per loop iteration would tie their rate to how fast the
+    /// user happens to be typing — `process_transition_requests` queries SQLite.
+    /// Returns whether anything on screen moved.
     fn run_housekeeping(&mut self) -> bool {
         let mut changed = false;
         let now = Instant::now();
 
         // Process MCP transition requests from the command queue, on their own
-        // interval — this is a SQLite query, and it used to run on every tick.
+        // interval: this is a SQLite query, and housekeeping's tick is faster
+        // than a queued transition needs.
         if now.duration_since(self.state.last_transition_poll) >= TRANSITION_POLL_INTERVAL {
             self.state.last_transition_poll = now;
             if let Err(e) = self.process_transition_requests() {
@@ -8010,8 +8010,8 @@ impl App {
                 // Check if tmux window still exists — if not, mark as Exited
                 // (unless phase artifact was found, in which case it completed before the crash)
                 //
-                // Answered from one listing taken for the whole pass: this used to
-                // be a `list-windows` **process per task**, on a 2-second timer.
+                // Answered from one listing taken for the whole pass, rather
+                // than a `list-windows` process per task on a 2-second timer.
                 let window_gone = window_is_gone(session_name.as_deref(), live_windows.as_ref());
                 let phase_status = if window_gone && phase_status == PhaseStatus::Working {
                     PhaseStatus::Exited
@@ -8037,11 +8037,11 @@ impl App {
                 // had closed and nothing was left watching for it.
                 // Only a *fresh `Working`* report proves the pane is dialog-free: the
                 // agent is mid-turn, so it is past whatever gated its startup.
-                // `read_status` ages out a stale `Working`, but a `waiting`/`ended`
-                // record never expires (`hook_status.rs:102`) — so a leftover file
-                // from an earlier phase used to suppress this capture entirely, and a
-                // dialog rendered after a relaunch was never seen. That is exactly the
-                // resume path.
+                // Only a *fresh* `Working` skips it. `read_status` ages out a
+                // stale `Working`, but a `waiting`/`ended` record never expires
+                // (`hook_status.rs:102`), so letting one suppress the capture
+                // would hide a dialog rendered after a relaunch — which is
+                // exactly the resume path.
                 let hook_says_working = matches!(
                     hook_status.as_ref().map(|h| h.state),
                     Some(hook_status::HookState::Working)
@@ -9408,11 +9408,10 @@ fn push_changes_to_existing_pr(
 /// key-name lookup, and a key goes out without it, which is what makes `Enter`
 /// an Enter.
 ///
-/// An unmodified character is therefore **text**, where it used to be a key.
-/// That is a fix, not just a reclassification: `send-keys -t x ";"` never
-/// reached the pane at all, because a standalone semicolon is how tmux separates
-/// commands — it was parsed as one and the keystroke vanished. The same lookup
-/// is why a batched run of characters could not have been sent as a key.
+/// An unmodified character is therefore **text**, not a key: `send-keys -t x
+/// ";"` never reaches the pane, because a standalone semicolon is how tmux
+/// separates commands and it is parsed as one. The same lookup is why a batched
+/// run of characters cannot be sent as a key.
 fn popup_key_input(target: &str, key: crossterm::event::KeyEvent) -> Option<PaneInput> {
     use crossterm::event::KeyModifiers;
     let has_alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -9700,14 +9699,14 @@ const PANE_PUSH_BACKSTOP: std::time::Duration = std::time::Duration::from_millis
 /// Slowest a capture may be driven by the **agent painting**, as opposed to by
 /// the user typing.
 ///
-/// The two deserve different answers and used to share one. Nobody reads text
-/// scrolling past frame by frame, but everybody notices their own keystroke
-/// arriving late — so the agent's output is sampled at a readable rate while
-/// typing keeps [`SHELL_REFRESH_INTERVAL`].
+/// The two deserve different answers. Nobody reads text scrolling past frame by
+/// frame, but everybody notices their own keystroke arriving late — so the
+/// agent's output is sampled at a readable rate while typing keeps
+/// [`SHELL_REFRESH_INTERVAL`].
 ///
-/// Not a micro-optimisation: sharing one ceiling made a pane painting flat out
-/// cost more than the polling it replaced. Every frame is a `capture-pane`, and
-/// a capture makes the tmux server format the whole pane.
+/// Not a micro-optimisation: one shared ceiling makes a pane painting flat out
+/// cost more than polling would. Every frame is a `capture-pane`, and a capture
+/// makes the tmux server format the whole pane.
 const PANE_OUTPUT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How long after a keystroke captures stay on the fast cadence.
@@ -9750,7 +9749,7 @@ const REDRAW_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How often the MCP transition queue is read.
 ///
-/// A SQLite query, previously run on every housekeeping tick — ten times a
+/// A SQLite query, so it does not belong on the housekeeping tick — ten times a
 /// second, forever, whether or not anything is connected. A queued transition is
 /// not latency-critical: it is a request to move a task between columns, and the
 /// phase status it acts on is itself refreshed on a 2-second cache.
@@ -11284,11 +11283,11 @@ fn send_skill_and_prompt(
             // which the echo-poll this replaces was only working around:
             //
             // 1. It is atomic. `send-keys` streams characters into a TUI that may
-            //    not have attached its stdin reader yet, so the old code typed the
-            //    text and then polled `capture_pane` for up to 4s waiting for it to
-            //    render before daring to press Enter. A paste arrives as one write
-            //    wrapped in \x1b[200~ … \x1b[201~, so there is no window to lose
-            //    keystrokes in and nothing to poll for.
+            //    not have attached its stdin reader yet, which forces a poll of
+            //    `capture_pane` for up to 4s to see the text render before daring
+            //    to press Enter. A paste arrives as one write wrapped in
+            //    \x1b[200~ … \x1b[201~, so there is no window to lose keystrokes
+            //    in and nothing to poll for.
             // 2. It keeps newlines as newlines. A skill command and its prompt are
             //    joined by "\n\n", and `send-keys` delivers those as real Enter
             //    presses — an Ink composer submits on the first one and the rest of
@@ -12044,7 +12043,7 @@ fn launch_dialogs_for(agent_name: Option<&str>) -> Vec<&'static agent::AgentDial
 
 /// The readiness indicators to look for in a pane running `agent_name`.
 ///
-/// Same reasoning: "Ask anything" appearing in a Claude pane used to read as
+/// Same reasoning: "Ask anything" in a Claude pane would otherwise read as
 /// OpenCode being ready. Unknown agents keep the flat list.
 fn active_indicators_for(agent_name: Option<&str>) -> Vec<&'static str> {
     match agent_name.and_then(agent::spec) {
@@ -12245,10 +12244,10 @@ fn wait_for_agent_ready(
         // 30s (30 * 1s)
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        // A blocking dialog is checked BEFORE anything that can break out of this
-        // loop. A native-binary agent (claude, grok) changes
-        // `pane_current_command` to its own name the moment it execs — before it
-        // has rendered anything — so Check 1 used to win this race and leave the
+        // A blocking dialog is checked BEFORE anything that can break out of
+        // this loop. A native-binary agent (claude, grok) changes
+        // `pane_current_command` to its own name the moment it execs, before it
+        // has rendered anything — so Check 1 wins that race and would leave the
         // dialog standing, with the task prompt then typed into the menu.
         let content = tmux_ops.capture_pane(target).ok();
         if let Some(ref c) = content {
@@ -12583,10 +12582,9 @@ fn agtx_task_env(task_id: &str, worktree: &str) -> Vec<(String, String)> {
 /// Merge agtx's hook entries into an existing `hooks` object, preserving the
 /// user's own entries on the same events.
 ///
-/// agtx's previous entries (identified by the agtx binary path in the command,
-/// the same way orca matches on its managed script filename) are dropped first,
-/// so re-running against an existing worktree replaces them rather than
-/// accumulating duplicates that would fire the hook N times per event.
+/// agtx's previous entries (identified by the agtx binary path in the command)
+/// are dropped first, so re-running against an existing worktree replaces them
+/// rather than accumulating duplicates that would fire the hook N times per event.
 fn merge_claude_hooks(
     settings: &mut serde_json::Map<String, serde_json::Value>,
     ours: serde_json::Value,
@@ -13084,21 +13082,18 @@ fn write_mcp_config(
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(dir.join("config.toml"), toml);
 
-            // agtx used to append `[projects."<worktree>"] trust_level = "trusted"`
-            // to the user's global ~/.codex/config.toml here, on the belief that
-            // codex would otherwise ignore the project-local config written above
-            // and lose its MCP server.
+            // No `[projects."<worktree>"] trust_level = "trusted"` entry is
+            // written into the user's global ~/.codex/config.toml. Measured
+            // against codex 0.144.5: codex resolves trust to the **git
+            // repository root** — its own dialog says so, "You're in a
+            // subdirectory of a Git project. Trusting will apply to the
+            // repository root." With only the root trusted, a worktree beneath
+            // it shows no dialog *and* loads its own .codex/config.toml, and
+            // `/mcp` lists agtx either way. A per-worktree entry buys nothing
+            // and accumulates one line per worktree in the user's config.
             //
-            // Measured against codex 0.144.5 and removed. Codex resolves trust to
-            // the **git repository root** — its own dialog says so: "You're in a
-            // subdirectory of a Git project. Trusting will apply to the repository
-            // root." With only the root trusted, a worktree beneath it showed no
-            // dialog *and* loaded its own .codex/config.toml: `/mcp` listed agtx
-            // either way, with or without a per-worktree entry. The entry bought
-            // nothing, and one had accumulated per worktree in the user's config.
-            //
-            // What remains is the case where the user never trusted the project at
-            // all. That is a decision for them, surfaced rather than made here —
+            // That leaves the case where the user never trusted the project at
+            // all. It is a decision for them, surfaced rather than made here —
             // see `agent_trust`.
         }
         agent::McpConfigKind::GeminiJson => {

@@ -32,7 +32,7 @@ fn section_titles_are_unique() {
 /// The footer cannot show everything, so these keys are advertised only here.
 /// Dropped from the table, they become undiscoverable.
 #[test]
-fn the_previously_unadvertised_keys_are_listed() {
+fn the_keys_advertised_nowhere_else_are_listed() {
     let listed: Vec<&str> = HELP
         .iter()
         .flat_map(|s| s.entries.iter().map(|e| e.keys))

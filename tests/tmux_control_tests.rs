@@ -992,7 +992,7 @@ fn control_mode_is_faster_than_a_process_per_key() {
     let samples = 200;
 
     // (1) The baseline this whole change exists to remove: one `tmux` process
-    //     per key, timed the way the TUI thread used to pay for it.
+    //     per key, timed the way an input thread would pay for it.
     let bench_target = server.recording_window("bench");
     let mut subprocess_spawn = Vec::with_capacity(samples);
     for _ in 0..samples {

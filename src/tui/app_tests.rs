@@ -796,10 +796,9 @@ fn test_fuzzy_score_consecutive_bonus() {
 // =============================================================================
 // Tests for popup key translation
 //
-// These used to assert against a mock `TmuxOperations`, because a keystroke went
-// straight out as a `send-keys` subprocess. Translation is now a pure function
-// and delivery is `tmux::input`'s job, so the key names — the part agents
-// actually depend on — are pinned here without a mock in sight.
+// Translation is a pure function and delivery is `tmux::input`'s job, so the key
+// names — the part agents actually depend on — are pinned here without a mock in
+// sight.
 // =============================================================================
 
 #[cfg(test)]
@@ -874,10 +873,9 @@ fn an_unreadable_window_listing_never_marks_a_task_exited() {
     assert!(!window_is_gone(Some("pj:t1"), Some(&live)));
     assert!(window_is_gone(Some("pj:gone"), Some(&live)));
 
-    // The direction that matters. One listing now answers for every task, so a
-    // failed listing read as "no windows" would mark the whole board `Exited` —
-    // a visible, wrong status change — where the per-task check it replaced
-    // failed safe (`!window_exists(sn).unwrap_or(true)`).
+    // The direction that matters. One listing answers for every task, so a
+    // failed listing read as "no windows" would mark the whole board `Exited`:
+    // a visible, wrong status change. Unknown has to stay unknown.
     assert!(
         !window_is_gone(Some("pj:t1"), None),
         "an unreadable listing must mean unknown, not gone"
@@ -1019,11 +1017,10 @@ fn the_interval_becomes_a_rate_limit_under_push() {
 #[test]
 fn output_is_sampled_slower_than_a_keystroke_echo() {
     use std::time::Duration;
-    // The two reasons to capture deserve different answers. Sharing one made a
-    // pane painting flat out cost more than the polling it replaced: a capture
+    // The two reasons to capture deserve different answers. One shared ceiling
+    // makes a pane painting flat out cost more than polling would: a capture
     // makes the tmux server format the whole pane, so capturing every frame is
-    // expensive where nobody is watching for one. The polling had been protected
-    // by its own slowness — one `capture-pane` process per capture.
+    // expensive where nobody is watching for one.
     assert!(PANE_OUTPUT_MIN_INTERVAL > SHELL_REFRESH_INTERVAL);
 
     // Nobody is waiting on one frame of an agent's output.
@@ -1084,8 +1081,8 @@ fn the_output_watch_is_reused_only_within_one_session() {
 
 #[test]
 fn the_transition_queue_paces_itself() {
-    // A SQLite query that used to run on every housekeeping tick — ten times a
-    // second, forever, whether or not anything was connected. A transition is a
+    // A SQLite query, so it does not belong on the housekeeping tick — ten times
+    // a second, forever, whether or not anything is connected. A transition is a
     // request to move a task between columns, acted on against a phase status
     // that is itself only as fresh as its cache, so polling the queue faster
     // than that cache buys nothing.
@@ -1095,10 +1092,10 @@ fn the_transition_queue_paces_itself() {
 
 #[test]
 fn nothing_on_the_board_animates() {
-    // The `Working` indicator used to be a spinner, and on an otherwise idle
-    // board it was the *only* thing forcing a redraw — ten a second, forever, to
-    // rotate a glyph. Every indicator is now static, so a board with running
-    // tasks asks for no frame at all between real changes. If a future indicator
+    // Every indicator is static. A spinner on an otherwise idle board would be
+    // the *only* thing forcing a redraw — ten a second, forever, to rotate a
+    // glyph — so a board with running tasks asks for no frame at all between
+    // real changes. If a future indicator
     // animates, `run_housekeeping` has to start reporting a change again, and
     // the idle cost comes back with it.
     let src = include_str!("app.rs");
@@ -1184,7 +1181,7 @@ fn the_waits_release_the_lock_before_returning() {
     let watch = PaneWatch::default();
     watch.follow(Some("pj:t1"), SHELL_POPUP_TAIL_LINES);
 
-    // The arm that used to keep its guard: a poke already landed, so the wait is
+    // The arm that keeps its guard: a poke already landed, so the wait is
     // skipped entirely rather than handed to `wait_timeout`.
     watch.poke();
     let outcome = watch
@@ -1337,7 +1334,7 @@ fn the_popup_capture_prefers_the_input_connection() {
 
 /// And falls back untouched when it does not: control mode is off, the
 /// connection is down, or the queue is full. A missed capture costs one frame at
-/// the old speed, never a blank popup.
+/// the fallback's speed, never a blank popup.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn the_popup_capture_falls_back_to_the_subprocess_path() {
@@ -4373,9 +4370,9 @@ fn test_send_skill_and_prompt_codex_combined() {
     assert_eq!(pasted.len(), 1, "exactly one paste");
     assert!(pasted[0].contains("$agtx-plan") && pasted[0].contains("do the thing"));
 
-    // Codex used to need a second Enter to dismiss its `$skill` command picker.
-    // That picker opens on *typing*, not on a paste, so with bracketed paste there
-    // is nothing to dismiss and a second Enter would fire into an empty composer.
+    // Codex's `$skill` command picker opens on *typing*, not on a paste, so with
+    // bracketed paste there is nothing to dismiss and a second Enter would fire
+    // into an empty composer.
     // Verified against codex-cli 0.144.5.
     let calls = literal_calls.lock().unwrap();
     assert_eq!(
@@ -8437,8 +8434,8 @@ fn refresh_with_hook(
     app.state.phase_status_cache["t1"].0
 }
 
-/// The regression that motivates the whole change: an agent thinking silently
-/// for longer than 15s used to be reported as Idle.
+/// An agent's own report beats the pane-hash heuristic: thinking silently for
+/// longer than 15s is Working, not Idle.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_hook_working_beats_a_stale_pane_hash() {
@@ -12989,9 +12986,9 @@ fn test_handle_paste_noop_in_normal_mode() {
     );
 }
 
-/// Test that switching projects via the sidebar reloads the config from the new project.
-/// Before the fix, config was only loaded at startup so switching projects in the sidebar
-/// would keep the old project's agent settings, causing incorrect agent selection.
+/// Switching projects via the sidebar reloads the config from the new project.
+/// Loading it only at startup would leave the previous project's agent settings
+/// in place and pick the wrong agent.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_switch_to_project_reloads_config() {
@@ -13478,8 +13475,9 @@ fn test_argv_event_agents_carry_their_event_in_the_command() {
 // ── submitting a message ────────────────────────────────────────────────────
 //
 // Pane text below is captured verbatim from live sessions. The bare-command case
-// is the one that mattered: a repaint used to count as a submit, so a command
-// parked in a picker looked delivered and the phase never advanced.
+// is the one that matters: a repaint is not a submit, and counting it as one
+// leaves a command parked in a picker looking delivered while the phase never
+// advances.
 
 /// codex 0.144.5, after pasting a bare `$agtx-review`: the picker is open and the
 /// command is still in the composer. Enter here *inserts*; it does not submit.
@@ -13564,11 +13562,10 @@ fn test_submit_message_presses_enter_again_when_the_picker_ate_the_first() {
 
 // ── first-launch dialog handling (wait_for_agent_ready) ──────────────────────
 
-/// Regression: a native-binary agent changes `pane_current_command` the moment
-/// it execs, so the process check used to break out of the readiness loop before
-/// the dialog check below it ever ran. Observed live in a swebench container:
-/// Claude sat on the bypass warning for 300s and the task prompt was typed into
-/// the menu.
+/// A native-binary agent changes `pane_current_command` the moment it execs, so
+/// the process check wins that race — the dialog check has to run first or it
+/// never runs at all. Observed live in a swebench container: Claude sat on the
+/// bypass warning for 300s and the task prompt was typed into the menu.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_answers_claude_bypass_warning() {
@@ -14238,9 +14235,9 @@ fn assert_covers_every_agent(covered: &[&str], table: &str) {
     assert!(missing.is_empty(), "{table} is missing: {missing:?}");
 }
 
-/// `LAUNCH_DIALOGS` is now derived from `AGENT_SPECS`. Pinned against the
-/// literals it replaced, and asserting `Session`-scope dialogs stay out — they
-/// are matched per agent, not against any pane.
+/// `LAUNCH_DIALOGS` is derived from `AGENT_SPECS`. Pinned against literals, and
+/// asserting `Session`-scope dialogs stay out — they are matched per agent, not
+/// against any pane.
 #[test]
 fn test_launch_dialog_derivation_matches_the_previous_literals() {
     let mut got: Vec<(Vec<&str>, Vec<&str>)> = LAUNCH_DIALOGS
@@ -14290,7 +14287,7 @@ fn test_launch_dialog_derivation_matches_the_previous_literals() {
     );
 }
 
-/// Codex's mid-session MCP approval, previously hand-rolled in the refresh loop.
+/// Codex's mid-session MCP approval, answered from the spec table.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_answer_session_dialogs_handles_codex_mcp_approval() {
@@ -14340,9 +14337,9 @@ fn test_answer_session_dialogs_requires_every_pattern() {
 // Per-agent attribution of indicators and launch dialogs (open question 1)
 // =============================================================================
 
-/// Another agent's readiness string in this agent's pane no longer counts.
-/// "Ask anything" is OpenCode's; a Claude pane showing it — in conversation
-/// output, say — used to read as an agent being up.
+/// Another agent's readiness string in this agent's pane does not count.
+/// "Ask anything" is OpenCode's, and a Claude pane showing it — in conversation
+/// output, say — must not read as an agent being up.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_active_indicators_are_scoped_to_their_agent() {
@@ -15019,9 +15016,8 @@ fn a_printable_key_is_enqueued_as_literal_text() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn a_character_that_tmux_would_read_as_syntax_is_still_text() {
-    // `;` used to be sent through tmux's key-name lookup, where a standalone
-    // semicolon is a command separator — the keystroke never reached the pane.
-    // As text it is just a semicolon.
+    // Through tmux's key-name lookup a standalone `;` is a command separator and
+    // the keystroke never reaches the pane. As text it is just a semicolon.
     let (mut app, sink) = app_with_open_popup();
     for c in [';', '$', '#', '"', '\\'] {
         app.handle_key(key_event(KeyCode::Char(c), KeyModifiers::NONE))

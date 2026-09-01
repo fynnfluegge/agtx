@@ -190,7 +190,7 @@ Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin
 - **supported_agents**: Agent whitelist (empty = all supported)
 - **auto_dismiss**: Rules to auto-dismiss interactive prompts before sending the task prompt
 
-Phase gating is derived from the config: if a phase's command or prompt contains `{task}`, the phase can be entered directly from Backlog. Otherwise, it requires a prior phase artifact. If a phase has no command AND no prompt (e.g. void plugin), it is ungated and can be entered freely. This replaces the old `research_required` flag — all behavior is now inferred from the plugin TOML.
+Phase gating is derived from the config: if a phase's command or prompt contains `{task}`, the phase can be entered directly from Backlog. Otherwise, it requires a prior phase artifact. If a phase has no command AND no prompt (e.g. void plugin), it is ungated and can be entered freely. There is no `research_required` flag: every gating decision is inferred from the plugin TOML.
 
 Plugin resolution: project-local `.agtx/plugins/{name}/` → global `~/.config/agtx/plugins/{name}/` → bundled. `load_task_plugin` falls back to bundled plugins when disk load fails, so tasks always resolve their plugin correctly even if the on-disk copy is missing.
 
@@ -228,7 +228,7 @@ Four writers **merge** instead of overwriting, because their file may already ex
 
 Claude needs an extra side-effect to avoid an interactive dialog on first open: `.claude/settings.local.json` gets `enableAllProjectMcpServers: true` plus `skipDangerousModePermissionPrompt: true`, which is what actually preflights the bypass-permissions warning (see the dialog table).
 
-agtx used to append a `[projects."<worktree>"] trust_level = "trusted"` entry to the user's global `~/.codex/config.toml` here too. **Removed, measured:** codex resolves trust to the *git repository root*, and a worktree under a trusted root both skips the dialog and loads its own `.codex/config.toml` — `/mcp` listed agtx with and without the entry. It bought nothing and accumulated one entry per worktree.
+No `[projects."<worktree>"] trust_level = "trusted"` entry goes into the user's global `~/.codex/config.toml`. **Measured:** codex resolves trust to the *git repository root*, and a worktree under a trusted root both skips the dialog and loads its own `.codex/config.toml` — `/mcp` lists agtx with or without the entry. It buys nothing and accumulates one entry per worktree.
 
 `write_skills_to_worktree` also seeds antigravity's `trustedWorkspaces` for the new worktree, when the project root is already trusted there (`agent::trust`). It is the right call site for both worktree creation *and* an agent switch: with a per-phase agent config, the switched-in agent sees the worktree for the first time at switch time. Home-directory lookups go through `agent_trust_home()`, which honours `AGTX_AGENT_HOME` so the test suite never touches the real user's config.
 
@@ -257,12 +257,12 @@ Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used
 **Mid-session lane — phase advances into an already-running agent.** `send_skill_and_prompt()`, three paths, because agent TUIs disagree about how a slash command plus arguments must arrive:
 
 1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter. Still on the typed path: it is the one flow where the text has to arrive in two pieces by design
-2. **gemini / codex / cursor / antigravity / pi** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone; pi's composer takes a paste as literal text but leaves a combined text+Enter `send_keys` sitting unsent. **How many Enters this takes is not fixed** — see *Submitting is its own delivery problem* below
+2. **gemini / codex / cursor / antigravity / pi** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so nothing has to poll until it renders, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone; pi's composer takes a paste as literal text but leaves a combined text+Enter `send_keys` sitting unsent. **How many Enters this takes is not fixed** — see *Submitting is its own delivery problem* below
 3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
 
 **Submitting is its own delivery problem.** A message with a prompt after the command submits on the first Enter. A **bare skill command** — what a phase whose command carries no `{task}`/`{task_id}` sends, which is `review` — exactly matches a skill name, so the composer's command picker opens *on the paste*. That Enter is then consumed by the picker ("Press enter to insert"), which inserts the command and repaints, leaving it parked. Measured against codex-cli 0.144.5 and cursor-agent 2026.08.25: both open the picker on a pasted bare command, and both submit on the second Enter.
 
-So `submit_message()` counts nothing and watches the composer instead: it presses Enter until the text is **gone from the bottom `COMPOSER_TAIL_LINES` of the pane**, bounded by `SUBMIT_ATTEMPTS`. A repaint is not a submit — that was the old test, and a picker opening satisfies it. The window is 14 lines because the picker draws its suggestions *below* the composer and cursor's footer wraps the worktree path, putting the text eight or more lines off the bottom; sizing it from the tidy pane left behind *after* a failure is how a too-narrow window looks correct. Erring wide costs one inert Enter into a submitted composer; erring narrow parks the command forever.
+So `submit_message()` counts nothing and watches the composer instead: it presses Enter until the text is **gone from the bottom `COMPOSER_TAIL_LINES` of the pane**, bounded by `SUBMIT_ATTEMPTS`. A repaint is not a submit: a picker opening is a repaint. The window is 14 lines because the picker draws its suggestions *below* the composer and cursor's footer wraps the worktree path, putting the text eight or more lines off the bottom; sizing it from the tidy pane left behind *after* a failure is how a too-narrow window looks correct. Erring wide costs one inert Enter into a submitted composer; erring narrow parks the command forever.
 
 **Atomic is not the same as delivered.** An agent TUI that has not attached its stdin reader yet discards what it is sent — bracketed paste included, because the discard happens in the application, not in the pty — and `wait_for_agent_ready` cannot prove otherwise. So paths 1 and 2 go through `deliver_message()`, which resends **while the pane is unchanged** (three attempts, 2s each) and stops the moment it redraws, on the same reasoning `dismiss_launch_dialog` uses: a redraw means it landed, and resending would double the message. Landing is judged by the pane changing rather than by finding the text, because a composer wraps, re-indents and box-draws what it echoes.
 
@@ -309,15 +309,14 @@ ANSI parse is done **once per change on the watcher thread**, not once per frame
 `ShellPopup` carries `cached_lines` beside `cached_content`, set together by `set_content` so the
 bytes change detection compares and the lines the popup renders cannot drift.
 
-**Every key used to be a process.** `send_key` started a `tmux` client and waited for it, on the
-input thread, per keystroke — that is the whole reason this lane exists. Enqueueing is now
-effectively free, and delivery rides a persistent control connection.
+**No key is a process.** Enqueueing is effectively free and delivery rides a persistent control
+connection, which is the whole reason this lane exists: a `tmux` client started and waited for on
+the input thread, per keystroke, is what it avoids.
 
 - **`PaneInput` is typed, not a formatted command**, because the broker must be able to tell literal
   text from a key name: text goes out with `send-keys -l` (no key-name lookup), a key without it.
-  An unmodified character is therefore **`Text`**, where it used to be a key — a fix, not a
-  reclassification: `send-keys -t x ";"` never arrived at all, because a standalone semicolon is how
-  tmux separates commands.
+  An unmodified character is therefore **`Text`**, not a key: `send-keys -t x ";"` never arrives at
+  all, because a standalone semicolon is how tmux separates commands.
 - **Batching never delays a key.** Enter, Escape, arrows, and anything Ctrl/Alt-modified flush the
   buffer first and go immediately. A delayed Enter is a visibly broken editor.
 - **Nor does it delay ordinary typing.** Buffered text is flushed as soon as the queue is empty, and
@@ -369,7 +368,7 @@ effectively free, and delivery rides a persistent control connection.
   - The broker **declines** rather than falling back: with no control connection the caller's own
     `capture-pane` is the same two processes for the same price, and running them on the broker
     thread would park the next keystroke behind that `fork`/`exec`. `capture_pane_for_popup` owns
-    that fallback, and a declined capture costs one frame at the old speed.
+    that fallback, and a declined capture costs one frame at the fallback's speed.
   - A failed capture **keeps** a healthy connection, unlike a failed write. A write error is
     ambiguous and tears the connection down; a read error is not, and demoting every later keystroke
     to the subprocess path over one failed read would trade the fix for the bug.
@@ -507,8 +506,8 @@ agtx tells the user when a newer release exists and replaces its own binary on r
 
 - **The binary must know its own version.** `env!("CARGO_PKG_VERSION")` is the only source, and
   `release.yml`'s *Tag matches Cargo.toml* step fails the build when the pushed tag disagrees with
-  the manifest. Before this existed the tags had reached `v0.2.7` while `Cargo.toml` still said
-  `0.1.0` — a released binary could not answer the question every part of this feature compares
+  the manifest. Without that check the two drift — tags at `v0.2.7` against a manifest still saying
+  `0.1.0` — and a released binary cannot answer the question every part of this feature compares
   against
 - `--version` / `-V` / `version` and `update` are handled in the **early fast path** in `main.rs`,
   beside the `hook` arm, for two reasons: neither wants a daily log appender built for it, and the
@@ -688,7 +687,7 @@ Project config can execute shell commands (`init_script`, `cleanup_script`) and 
 ### Help Overlay
 `?` opens `tui::help`'s table: every binding, grouped by where it applies, scrollable, and closed with `?`/`Esc`/`q`.
 
-**`HELP` is the complete list of bindings.** `build_footer_text` shows only the column-specific actions plus `[?] help` and `[q] quit`, because the footer is one line and gets truncated on a narrow terminal — `every_footer_fits_a_narrow_terminal` caps every variant at 120 characters. Several keys (`C-n/p` scrolling, `M`, `D`) are advertised nowhere else, and `the_previously_unadvertised_keys_are_listed` fails if one drops out of the table.
+**`HELP` is the complete list of bindings.** `build_footer_text` shows only the column-specific actions plus `[?] help` and `[q] quit`, because the footer is one line and gets truncated on a narrow terminal — `every_footer_fits_a_narrow_terminal` caps every variant at 120 characters. Several keys (`C-n/p` scrolling, `M`, `D`) are advertised nowhere else, and `the_keys_advertised_nowhere_else_are_listed` fails if one drops out of the table.
 
 The overlay swallows the keys it does not use, rather than letting them fall through to the board behind it.
 
@@ -915,8 +914,8 @@ The prompt step's `#`/`@`, `/` and `!` dropdowns are each their own handler (`ha
 
 ### The Event Loop
 `App::run` **blocks** on one `mpsc` channel that two threads feed, and draws only when something
-changed. It used to poll: `event::poll(interval)` woke it on a timer whether or not anything had
-happened, and every wake-up redrew the whole screen, re-parsed the pane capture, and queried SQLite.
+changed. Polling instead — `event::poll(interval)` waking on a timer whether or not anything
+happened — costs a full redraw, a pane re-parse and a SQLite query per wake-up.
 
 ```text
 agtx-terminal-input ──┐                     blocking `event::read()`
@@ -941,9 +940,9 @@ priced the other two wrongly. They are now separate:
     `PANE_OUTPUT_MIN_INTERVAL` paces the agent's output, `SHELL_REFRESH_INTERVAL` paces the user's
     own echo, and `PANE_TYPING_WINDOW` keeps the fast one in force after a keystroke — because the
     echo arrives as a *paint*, indistinguishable from the agent's output, so pacing paints without
-    the window would delay every character. Sharing one interval made a pane painting flat out cost
-    more than the polling it replaced, which had been protected by its own slowness: one
-    `capture-pane` process per capture is a low ceiling of its own.
+    the window would delay every character. One shared interval makes a pane painting flat out cost
+    more than polling would — polling is protected by its own slowness, since one `capture-pane`
+    process per capture is a low ceiling of its own.
   - **poll** — the timer, when push is unavailable (`AGTX_TMUX_PUSH=0`, control mode off, or a pane
     whose id cannot be read). Not a degraded copy: it is the whole design in that case.
 
@@ -963,11 +962,10 @@ priced the other two wrongly. They are now separate:
   it means *bytes reached the pty*, not that the rendered pane differs, so `PANE_PUSH_BACKSTOP`
   stays as the net for a signal that never came.
 - **Housekeeping** — `maybe_spawn_session_refresh`, expiring warnings, the MCP transition queue —
-  runs on `HOUSEKEEPING_TICK`. It used to run once per loop iteration, so its rate rose and fell
-  with how fast the user typed — and it contains a SQLite query. That query has since moved to its
-  own `TRANSITION_POLL_INTERVAL`: a request to move a task between columns is acted on against a
-  phase status that is itself only as fresh as `PHASE_STATUS_CACHE_TTL`, so reading it faster buys
-  nothing.
+  runs on `HOUSEKEEPING_TICK`, not once per loop iteration — that would tie its rate to how fast the
+  user types, and it contains a SQLite query. That query has its own `TRANSITION_POLL_INTERVAL`: a
+  request to move a task between columns is acted on against a phase status that is itself only as
+  fresh as `PHASE_STATUS_CACHE_TTL`, so reading it faster buys nothing.
 - **Nothing on the board animates.** The `Working` indicator is a static `▶`, not a spinner. On an
   otherwise idle board the spinner was the *only* thing forcing a redraw, and the card already said
   the task was running. A future animated indicator brings that cost back, and
@@ -1012,9 +1010,9 @@ Two details worth keeping:
   the middle of a dialog's wording, which is what the matcher and the hash have always been fed. A
   real-tmux test asserts it is byte-identical to `TmuxOperations::capture_pane`
 - `live_window_targets` returns `Option`, and the `None` must not be flattened to an empty set: one
-  listing now answers for the whole board, so "tmux could not be asked" read as "no windows" would
-  mark every running task `Exited` on a transient hiccup. The per-task check it replaced failed safe
-  (`!window_exists(sn).unwrap_or(true)`), and `window_is_gone` keeps that direction
+  listing answers for the whole board, so "tmux could not be asked" read as "no windows" would mark
+  every running task `Exited` on a transient hiccup. `window_is_gone` fails safe, treating an
+  unreadable listing as unknown rather than gone
 - Overlap guard: only one refresh thread runs at a time (`session_refresh_rx.is_some()`)
 - Thread does all expensive work: plugin TOML loading, artifact file checks, `tmux capture-pane`, copy-back side effects
 - `apply_session_refresh()` applies results on main thread (non-blocking `try_recv`)

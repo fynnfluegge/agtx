@@ -124,10 +124,9 @@ async fn main() -> Result<()> {
         }
         config::FirstRunAction::NewUserPrompt => {
             // Write the defaults so a config file always exists after a first
-            // launch, then let the TUI ask which agent to use — the config
-            // editor already *is* that question, plus every other one. There
-            // used to be a hand-rolled raw-mode menu here that shared neither
-            // code nor styling with the rest of the app.
+            // launch, then let the TUI ask which agent to use: the config editor
+            // already *is* that question, plus every other one, and answering it
+            // there keeps first run looking like the rest of the app.
             let mut cfg = GlobalConfig::default();
             if let Some(first) = agent::detect_available_agents().first() {
                 cfg.default_agent = first.name.clone();

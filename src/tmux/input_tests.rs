@@ -793,7 +793,7 @@ fn changing_project_repoints_the_next_connection() {
     // alone — it still delivers, because every target is `session:window`
     // (`pane_target`) and is therefore resolved server-wide rather than inside
     // the attached session. What the switch does change is where a *reconnect*
-    // attaches, since the old project's session may be killed.
+    // attaches, since the previous project's session may be killed.
     let (tx, _rx) = sync_channel(2);
     let sink = BrokerSink {
         tx,

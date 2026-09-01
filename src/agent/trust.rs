@@ -1,12 +1,12 @@
 //! Reading — and where unavoidable, seeding — each agent's own workspace-trust store.
 //!
 //! Every supported agent gates a directory it has not seen behind an interactive
-//! prompt, and every task gets a fresh worktree. agtx used to clear those prompts
-//! by watching the tmux pane and sending the answer. That is a security decision
-//! taken on the user's behalf, and measurement showed it is usually unnecessary:
-//! most agents record trust per *repository root* or per *ancestor directory*, so
-//! a user who opens the agent once in the project never sees the prompt again in a
-//! worktree beneath it.
+//! prompt, and every task gets a fresh worktree. agtx does not clear those
+//! prompts by watching the pane and sending an answer: that is a security
+//! decision taken on the user's behalf, and measurement shows it is usually
+//! unnecessary. Most agents record trust per *repository root* or per *ancestor
+//! directory*, so a user who opens the agent once in the project never sees the
+//! prompt again in a worktree beneath it.
 //!
 //! This module answers "is path P already trusted for agent A?" by reading the
 //! agent's own file — which is also how consent given **outside** agtx is
