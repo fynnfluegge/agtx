@@ -58,6 +58,7 @@
 <a href="https://github.com/google-gemini/gemini-cli"><kbd><img src="docs/logos/gemini.svg" width="18" valign="middle" /> Gemini CLI</kbd></a>
 <a href="https://github.com/github/copilot-cli"><kbd><img src="docs/logos/copilot-dark.svg" width="18" valign="middle" /> Copilot</kbd></a>
 <a href="https://github.com/earendil-works/pi"><kbd><img src="docs/logos/pi-dark.svg" width="18" valign="middle" /> pi</kbd></a>
+<a href="https://github.com/MoonshotAI/kimi-code"><kbd>Kimi Code</kbd></a>
 - **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching.
 - **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI.
 - **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously.
@@ -359,6 +360,19 @@ Register `agtx mcp-serve` with the adapter, then in any pi session:
 </details>
 
 <details>
+<summary><strong>Kimi Code</strong></summary>
+
+```bash
+mkdir -p ~/.kimi-code/skills/agtx-sweep
+cp skills/sweep/SKILL.md ~/.kimi-code/skills/agtx-sweep/SKILL.md
+```
+
+Add `agtx mcp-serve` to `~/.kimi-code/mcp.json` under `mcpServers`, then in any
+kimi session: `/skill:agtx-sweep` / `/skill:agtx-brainstorm`
+
+</details>
+
+<details>
 <summary><strong>Other</strong></summary>
 
 Register `agtx mcp-serve` as an MCP server, then copy `skills/sweep/SKILL.md` into your agent's context.
@@ -469,21 +483,21 @@ Press `P` to switch plugins. Ships with 10 built-in:
 
 Commands are written once in canonical format and automatically translated per agent:
 
-| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode | Cursor | Grok | Antigravity | pi |
-|--------------------------|-----------------|-------|----------|--------|------|-------------|----|
-| `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/skill:agtx-plan` |
+| Canonical (plugin.toml) | Claude / Gemini | Codex | OpenCode | Cursor | Grok | Antigravity | pi | Kimi |
+|--------------------------|-----------------|-------|----------|--------|------|-------------|----|------|
+| `/agtx:plan` | `/agtx:plan` | `$agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/agtx-plan` | `/skill:agtx-plan` | `/skill:agtx-plan` |
 
-|  | Claude | Codex | Gemini | OpenCode | Cursor | Copilot | Grok | Antigravity | pi |
-|--|:------:|:-----:|:------:|:--------:|:------:|:-------:|:----:|:-----------:|:--:|
-| **agtx** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ |
-| **gsd** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ |
-| **spec-kit** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 |
-| **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 |
-| **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 |
-| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
-| **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+|  | Claude | Codex | Gemini | OpenCode | Cursor | Copilot | Grok | Antigravity | pi | Kimi |
+|--|:------:|:-----:|:------:|:--------:|:------:|:-------:|:----:|:-----------:|:--:|:----:|
+| **agtx** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ |
+| **gsd** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **spec-kit** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 | 🟡 |
+| **openspec** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 | 🟡 |
+| **bmad** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | 🟡 | 🟡 |
+| **superpowers** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **oh-my-claudecode** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **agent-skills** | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
+| **void** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 
 ✅ Skills, commands, and prompts fully supported · 🟡 Prompt only, no interactive skill support · ❌ Not supported

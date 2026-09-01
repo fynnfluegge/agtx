@@ -29,9 +29,11 @@ trusted, a dialog during a *task* is a real defect.
 
 It also makes the run a test of the inheritance property itself. claude, codex and
 gemini inherit the root's trust into their worktrees, so a dialog there means that
-stopped being true. antigravity matches paths exactly and never inherits, so agtx
-must seed each worktree from that consent — if the seeding breaks, its cases park
-and the run says so.
+stopped being true. antigravity and kimi match paths exactly and never inherit, so
+agtx must seed each worktree from that consent — if the seeding breaks, their cases
+park and the run says so. kimi's park is the worst of the set: its dialog
+preselects "Don't trust" and choosing that exits the process, so a broken seed
+leaves a dead shell rather than a waiting prompt.
 
 Usage:
     tests/smoke/agent_smoke.py                      # installed agents x agtx plugin
@@ -46,6 +48,7 @@ real agent auth. Spends real tokens — opt-in, never CI.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import queue
@@ -497,7 +500,13 @@ AGENT_TRUST_STORES = {
     "codex": "codex",
     "gemini": "gemini",
     "antigravity": "antigravity",
+    "kimi": "kimi",
 }
+
+# The stores agtx *seeds and prunes* — the exact-matching ones, where a trusted
+# project root cannot cover a worktree. Only these are meaningful to
+# `trust_store_lists`: the rest record an ancestor agtx neither wrote nor removes.
+SEEDED_TRUST_STORES = ("antigravity", "kimi")
 
 
 def setup_agent_trust(agent: str, repo: Path) -> bool:
@@ -511,9 +520,13 @@ def setup_agent_trust(agent: str, repo: Path) -> bool:
 
     It also turns the run into a test of the inheritance property itself: claude,
     codex and gemini trust the root and their worktrees inherit it, so a dialog in
-    a worktree means that stopped being true. antigravity matches exactly and never
-    inherits, so agtx must seed each worktree from this consent — if that seeding
-    breaks, its cases park and the run says so.
+    a worktree means that stopped being true. antigravity and kimi match exactly and
+    never inherit, so agtx must seed each worktree from this consent — if that
+    seeding breaks, their cases park and the run says so.
+
+    kimi's park is the worst of the set: its dialog preselects "Don't trust" and
+    choosing that exits the process, so a broken seed leaves a dead shell rather
+    than a waiting prompt.
 
     Returns whether anything was written. cursor and grok pass `--trust` at launch
     and pi passes `--approve`, opencode has no trust gate, and copilot is
@@ -551,26 +564,77 @@ def setup_agent_trust(agent: str, repo: Path) -> bool:
         if root not in entries:
             entries.append(root)
         atomic_write_json(path, data)
+    elif kind == "kimi":
+        # One extensionless JSON file per trusted directory, in a directory of
+        # its own. kimi's own check is only that the file exists and parses.
+        path = kimi_home() / "workspace-trust" / kimi_trust_key(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, {"root": root, "trustedAt": int(time.time() * 1000)})
     return True
+
+
+def kimi_home() -> Path:
+    """Kimi's data root: `$KIMI_CODE_HOME`, else `~/.kimi-code`.
+
+    Mirrors `kimi_home` in `src/agent/trust.rs`, minus its `AGTX_AGENT_HOME`
+    guard — the runner drives the real binary against the real home on purpose.
+    """
+    env = os.environ.get("KIMI_CODE_HOME")
+    return Path(env) if env else Path.home() / ".kimi-code"
+
+
+def kimi_trust_key(root: str) -> str:
+    """The filename kimi stores a directory's trust record under.
+
+    Mirrors `kimi_trust_key` in `src/agent/trust.rs`, which is itself a port of
+    kimi's `encodeWorkDirKey ∘ canonicalWorkspaceRoot`. Restated rather than
+    shelled out to, so that a drift between agtx's derivation and kimi's shows up
+    here as a parked dialog instead of being hidden by agtx agreeing with itself.
+
+    Deliberately **not** `realpath`: kimi's normalization is lexical, so
+    `/tmp/x` stays `/tmp/x` rather than becoming `/private/tmp/x` on macOS.
+    """
+    normalized = root.replace("\\", "/").rstrip("/")
+    base = normalized.rsplit("/", 1)[-1]
+    # `[^a-z0-9._-]+` — one dash per *run*, not per character.
+    slug = re.sub(r"[^a-z0-9._-]+", "-", base.lower())
+    slug = slug.strip("-")[:40].strip("-")
+    if slug in ("", ".", ".."):
+        slug = "workspace"
+    digest = hashlib.sha256(normalized.encode()).hexdigest()[:12]
+    return f"wd_{slug}_{digest}"
 
 
 def trust_store_lists(agent: str, path: Path) -> bool | None:
     """Whether `agent`'s trust store still lists `path` exactly.
 
-    `None` for agents with no store agtx seeds. Only the exact-match store
-    (antigravity) is meaningful here: the others record an ancestor, which agtx
-    neither wrote nor prunes.
+    `None` for agents with no store agtx seeds. Only the exact-match stores
+    (antigravity, kimi) are meaningful here: the others record an ancestor, which
+    agtx neither wrote nor prunes.
+
+    Dispatched on the store kind rather than hard-coded to antigravity, because
+    the two shapes have nothing in common — one is a JSON array to search, the
+    other a directory of files to stat. This is the assertion that catches the
+    prune leaking one dead record per task.
     """
-    if AGENT_TRUST_STORES.get(agent) != "antigravity":
+    kind = AGENT_TRUST_STORES.get(agent)
+    if kind not in SEEDED_TRUST_STORES:
         return None
-    store = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
-    if not store.exists():
-        return False
-    try:
-        entries = json.loads(store.read_text()).get("trustedWorkspaces", [])
-    except (json.JSONDecodeError, OSError):
-        return False
-    return str(path.resolve()) in entries or str(path) in entries
+    if kind == "antigravity":
+        store = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+        if not store.exists():
+            return False
+        try:
+            entries = json.loads(store.read_text()).get("trustedWorkspaces", [])
+        except (json.JSONDecodeError, OSError):
+            return False
+        return str(path.resolve()) in entries or str(path) in entries
+    # kimi: one file per path spelling, named by the key kimi computes.
+    store = kimi_home() / "workspace-trust"
+    return any(
+        (store / kimi_trust_key(form)).exists()
+        for form in (str(path), str(path.resolve()))
+    )
 
 
 def atomic_write_json(path: Path, data) -> None:

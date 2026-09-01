@@ -69,6 +69,7 @@ fn test_known_agents_includes_all_expected() {
         "cursor",
         "grok",
         "antigravity",
+        "kimi",
     ] {
         assert!(names.contains(expected), "missing agent: {}", expected);
     }
@@ -162,6 +163,10 @@ fn test_build_resume_command_all_agents() {
     assert_eq!(
         by_name("antigravity").build_resume_command(),
         "agy --dangerously-skip-permissions --mode accept-edits --continue"
+    );
+    assert_eq!(
+        by_name("kimi").build_resume_command(),
+        "kimi --auto --continue"
     );
 }
 
@@ -409,5 +414,77 @@ fn test_antigravity_transform_plugin_command() {
     assert_eq!(
         transform_plugin_command("/gsd:plan-phase 1", "antigravity"),
         Some("/gsd-plan-phase 1".to_string())
+    );
+}
+
+// =============================================================================
+// Tests for kimi (Moonshot AI Kimi Code CLI) integration
+// =============================================================================
+
+#[test]
+fn test_known_agents_includes_kimi() {
+    let agents = known_agents();
+    let kimi = agents.iter().find(|a| a.name == "kimi");
+    assert!(kimi.is_some(), "kimi should be in known_agents");
+    let kimi = kimi.unwrap();
+    assert_eq!(kimi.command, "kimi");
+    assert_eq!(kimi.co_author, "Kimi <noreply@moonshot.cn>");
+}
+
+#[test]
+fn test_build_interactive_command_kimi_no_prompt() {
+    let agents = known_agents();
+    let kimi = agents.iter().find(|a| a.name == "kimi").unwrap();
+    // `--auto` is "fully autonomous, the agent will not ask questions".
+    // `--yolo` is a *different* flag that auto-approves tools while still
+    // allowing questions, which would hang a session nobody is watching.
+    assert_eq!(kimi.build_interactive_command(""), "kimi --auto");
+}
+
+/// The single highest-value assertion in the kimi integration.
+///
+/// Kimi's CLI takes no opening message: `program.argument('[args...]')` is
+/// followed by `program.error("unknown command '<arg>'")`, so a positional
+/// prompt kills the process before it draws its TUI, and its only prompt flag
+/// (`-p`) is print mode. agtx must therefore compose a *bare* launch command and
+/// deliver the task on the typed mid-session lane.
+#[test]
+fn test_build_interactive_command_kimi_never_carries_a_prompt() {
+    let agents = known_agents();
+    let kimi = agents.iter().find(|a| a.name == "kimi").unwrap();
+    assert_eq!(
+        kimi.build_interactive_command("do something"),
+        "kimi --auto"
+    );
+    assert_eq!(kimi.build_interactive_command("it's a test"), "kimi --auto");
+}
+
+#[test]
+fn test_kimi_does_not_take_the_launch_lane() {
+    use agtx::agent::PromptInjection;
+    let agents = known_agents();
+    let kimi = agents.iter().find(|a| a.name == "kimi").unwrap();
+    assert_eq!(kimi.prompt_injection(), PromptInjection::Unknown);
+}
+
+#[test]
+fn test_kimi_has_native_skill_dir() {
+    // Its own dotdir, not the vendor-neutral `.agents/` tree kimi also scans —
+    // that one is antigravity's, and both may deploy into the same worktree.
+    let dir = agent_native_skill_dir("kimi");
+    assert_eq!(dir, Some((".kimi-code/skills", "")));
+}
+
+#[test]
+fn test_kimi_transform_plugin_command() {
+    // One `skill:` namespace for every skill, like pi: the plugin namespace is
+    // folded into the skill name rather than kept as a prefix.
+    assert_eq!(
+        transform_plugin_command("/agtx:plan", "kimi"),
+        Some("/skill:agtx-plan".to_string())
+    );
+    assert_eq!(
+        transform_plugin_command("/gsd:plan-phase 1", "kimi"),
+        Some("/skill:gsd-plan-phase 1".to_string())
     );
 }

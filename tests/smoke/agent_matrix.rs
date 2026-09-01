@@ -117,6 +117,10 @@ fn main() {
             "prompt_form": match s.prompt_form {
                 spec::PromptForm::Argv => Value::String("argv".into()),
                 spec::PromptForm::Flag(f) => Value::String(format!("flag:{f}")),
+                // The CLI takes no opening message at all, so the runner must
+                // expect the prompt on the typed lane however
+                // `launch_prompt_verified` reads.
+                spec::PromptForm::None => Value::String("none".into()),
             },
             "send_strategy": match s.send_strategy {
                 spec::SendStrategy::Generic => "generic",

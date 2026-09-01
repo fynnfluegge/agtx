@@ -1,6 +1,6 @@
 # AGTX - Terminal Kanban for Coding Agents
 
-A terminal-native kanban board for managing multiple coding agent sessions (Claude Code, Codex, Gemini, Copilot, OpenCode, Cursor, Grok, Antigravity) with isolated git worktrees.
+A terminal-native kanban board for managing multiple coding agent sessions (Claude Code, Codex, Gemini, Copilot, OpenCode, Cursor, Grok, Antigravity, pi, Kimi Code) with isolated git worktrees.
 
 ## Quick Start
 
@@ -198,6 +198,8 @@ Skills are markdown files with YAML frontmatter deployed to agent-native discove
 - Cursor: `.cursor/skills/agtx-plan/SKILL.md`
 - Grok: `.grok/skills/agtx-plan/SKILL.md`
 - Antigravity: `.agents/skills/agtx-plan/SKILL.md` (vendor-neutral tree, not an agent dotdir)
+- pi: `.pi/skills/agtx-plan/SKILL.md`
+- Kimi: `.kimi-code/skills/agtx-plan/SKILL.md` (**not** `.agents/`, which kimi also scans — that tree is antigravity's, and both may be configured for different phases of one worktree)
 - OpenCode: `.opencode/command/agtx-plan.md` (frontmatter stripped)
 - Copilot: `.github/agents/agtx/plan.md`
 
@@ -215,8 +217,9 @@ Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
 | antigravity | `.agents/mcp_config.json` | JSON, `mcpServers` |
 | opencode | opencode config | JSON, `mcp` |
 | pi | `.pi/mcp.json` | JSON, `mcpServers` |
+| kimi | `.kimi-code/mcp.json` | JSON, `mcpServers` |
 
-Four writers **merge** instead of overwriting, because their file may already exist in the worktree — either tracked in the repo, or (for `.gemini`, `.grok` and `.agents`) copied in from the project root by `AGENT_CONFIG_DIRS`; `.pi` is not in that list, so only the tracked-in-the-repo half applies to it. Grok appends `[mcp_servers.agtx]` to any existing `.grok/config.toml`; antigravity parses `.agents/mcp_config.json` and inserts `mcpServers.agtx`, preserving other servers and top-level sibling keys (`.agents/` is vendor-neutral, so a project is more likely to ship one); gemini inserts into `.gemini/settings.json`, which otherwise loses the user's theme, model and any other `mcpServers`; pi's `.pi/mcp.json` is where the `pi-mcp-adapter` package persists its own per-server `disabled` flags, so clobbering it re-enables servers the user switched off. pi has no MCP client of its own — without that package the file is inert, not harmful. Claude's `settings.local.json` side-effect below merges for the same reason.
+Five writers **merge** instead of overwriting, because their file may already exist in the worktree — either tracked in the repo, or (for `.gemini`) copied in from the project root by `AGENT_CONFIG_DIRS`; `.grok`, `.agents`, `.pi` and `.kimi-code` are not in that list, so only the tracked-in-the-repo half applies to them. Grok appends `[mcp_servers.agtx]` to any existing `.grok/config.toml`; antigravity parses `.agents/mcp_config.json` and inserts `mcpServers.agtx`, preserving other servers and top-level sibling keys (`.agents/` is vendor-neutral, so a project is more likely to ship one); gemini inserts into `.gemini/settings.json`, which otherwise loses the user's theme, model and any other `mcpServers`; pi's `.pi/mcp.json` is where the `pi-mcp-adapter` package persists its own per-server `disabled` flags, so clobbering it re-enables servers the user switched off. pi has no MCP client of its own — without that package the file is inert, not harmful. Kimi's `.kimi-code/mcp.json` is the standard `mcpServers` shape and is also what its in-TUI `/mcp-config` writes, so a task must not drop what the user or the repo put there. Claude's `settings.local.json` side-effect below merges for the same reason.
 
 Claude needs an extra side-effect to avoid an interactive dialog on first open: `.claude/settings.local.json` gets `enableAllProjectMcpServers: true` plus `skipDangerousModePermissionPrompt: true`, which is what actually preflights the bypass-permissions warning (see the dialog table).
 
@@ -230,6 +233,7 @@ agtx used to append a `[projects."<worktree>"] trust_level = "trusted"` entry to
 Commands are written once in canonical format (`/ns:command`) and auto-translated:
 - Claude/Gemini: `/ns:command` (unchanged)
 - OpenCode/Cursor/Grok/Antigravity: `/ns-command` (colon → hyphen, slash kept)
+- pi/Kimi: `/skill:ns-command` — both keep every skill in one `skill:` namespace, so the plugin's namespace folds into the skill *name* rather than staying a prefix
 - Codex: `$ns-command` (slash → dollar, colon → hyphen)
 - Copilot: no interactive skill invocation (prompt only, no commands sent)
 
@@ -249,7 +253,7 @@ Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used
 **Mid-session lane — phase advances into an already-running agent.** `send_skill_and_prompt()`, three paths, because agent TUIs disagree about how a slash command plus arguments must arrive:
 
 1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter. Still on the typed path: it is the one flow where the text has to arrive in two pieces by design
-2. **gemini / codex / cursor / antigravity / pi** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone; pi's composer takes a paste as literal text but leaves a combined text+Enter `send_keys` sitting unsent. **How many Enters this takes is not fixed** — see *Submitting is its own delivery problem* below
+2. **gemini / codex / cursor / antigravity / pi / kimi** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone; pi's composer takes a paste as literal text but leaves a combined text+Enter `send_keys` sitting unsent, and kimi's is the same pi-tui composer. **How many Enters this takes is not fixed** — see *Submitting is its own delivery problem* below
 3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
 
 **Submitting is its own delivery problem.** A message with a prompt after the command submits on the first Enter. A **bare skill command** — what a phase whose command carries no `{task}`/`{task_id}` sends, which is `review` — exactly matches a skill name, so the composer's command picker opens *on the paste*. That Enter is then consumed by the picker ("Press enter to insert"), which inserts the command and repaints, leaving it parked. Measured against codex-cli 0.144.5 and cursor-agent 2026.08.25: both open the picker on a pasted bare command, and both submit on the second Enter.
@@ -455,6 +459,7 @@ Dialogs are declared per agent on `AgentSpec::dialogs` and **matched against the
 | gemini | folder trust | `Do you trust the files in this folder?` | `1` `Enter` | Launch — answering it restarts the process |
 | cursor | workspace trust | `Workspace Trust Required` | `a` alone | Launch — its question line is *identical* to codex's, so it is matched on the heading. Answered with the access key the dialog advertises, which survives an option being added above the highlighted row |
 | antigravity | project trust | `Do you trust the contents of this project?` | `Enter` alone | Launch — arrow-navigated with "Yes, I trust this folder" preselected, so a digit would land in the composer. Its own wording, not Claude's; codex's differs by one word (`directory`) |
+| kimi | workspace trust | `Trust this folder?` | `Up` `Enter` | Launch — per directory, and **the default answer exits the process**: it is arrow-navigated with `Don't trust` preselected (`selectedIndex = 1`), and choosing it calls `stop()` before a session exists. So never a bare Enter, and never a digit (which would be typed as text). The exact inverse of antigravity's identically-shaped prompt above; do not generalise between them. Mostly moot in practice — `agent::trust` seeds the worktree first |
 
 `require_all` distinguishes alternatives (several wordings of one prompt) from conjunctions (a prompt identified only by a combination of phrases). `security` marks the rows agtx will not answer unless `auto_trust` is on.
 
@@ -939,6 +944,7 @@ pane-hash heuristic — is a supported state, not a degraded one.
 | antigravity | `.agents/hooks.json` | keyed by hook *name*, then event | **none** — passed as `--event` | no |
 | codex | `.codex/hooks.json` | `{description, hooks:{…}}` | `hook_event_name`, PascalCase | mapped, **not deployed** |
 | opencode, copilot, pi | — | — | — | no hooks; see `HookConfigKind` |
+| kimi | — | — | — | Claude-shaped hooks exist, but `[[hooks]]` is **user-global only** (`~/.kimi-code/config.toml`); the one project-local file, `.kimi-code/local.toml`, takes a `[workspace]` table and nothing else |
 
 The formats are **not interchangeable**, and every mismatch below fails silently — a valid-looking
 config in the worktree and no status file ever written. This is why `tests/smoke/agent_smoke.py` is
@@ -1058,7 +1064,7 @@ writes one.
 - Every per-agent value below is one field of that agent's `AgentSpec` in `src/agent/spec.rs`; the
   functions here read the table rather than matching on the agent's name
 - Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
-- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`), Copilot (`--allow-all-tools`), Cursor (`agent --yolo`), Grok (`--yolo --trust`, where `--trust` also ungates the repo-local `.grok/config.toml` MCP server and suppresses the directory-trust dialog), Antigravity (`agy --dangerously-skip-permissions --mode accept-edits` — two orthogonal controls: the flag governs shell/MCP/URL approvals, `--mode` governs the file-edit diff review, and both are needed to run unattended)
+- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`), Copilot (`--allow-all-tools`), Cursor (`agent --yolo`), Grok (`--yolo --trust`, where `--trust` also ungates the repo-local `.grok/config.toml` MCP server and suppresses the directory-trust dialog), Antigravity (`agy --dangerously-skip-permissions --mode accept-edits` — two orthogonal controls: the flag governs shell/MCP/URL approvals, `--mode` governs the file-edit diff review, and both are needed to run unattended), pi (`--approve`), Kimi (`--auto`, **not** `-y/--yolo`: they are separate flags and yolo's own help says the agent "may still ask questions", which hangs an unattended session, where `--auto` is "fully autonomous")
 - `build_resume_command()` is the recovery variant used after a tmux/server restart — mostly `--continue` appended to the launch flags (`ResumeArgs::Append`), but Gemini uses `--resume` and Codex's `resume --last` *replaces* them (`ResumeArgs::Replace`: `codex resume` rejects `--sandbox`)
 - `tests/agent_parity_tests.rs` pins every one of these strings per agent. It is written against
   behaviour, not derived from the table, so a diff there means something actually changed
@@ -1156,10 +1162,10 @@ Half of this is now one table entry; the other half is still per-agent match arm
    a `.agtx/status/*.json`: a wrong handler shape or event spelling fails silently (see
    *Hook-Based Phase Status*), and `None` is a supported state, not a failure
 10. Add an agent label color in the task-card footer `match task.agent.as_str()`
-11. If Ink/Node TUI: add to the combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
+11. If Ink/Node TUI: set `send_strategy: SendStrategy::Combined` on the spec, which is what `send_skill_and_prompt()` selects the bracketed-paste path from. `submit_message()` counts nothing and watches the composer, so a command picker needing a second Enter needs no extra handling
 
 **Plugins**
-12. Add the agent to `supported_agents` in any `plugins/*/plugin.toml` that whitelists agents
+12. Add the agent to `supported_agents` in any `plugins/*/plugin.toml` that whitelists agents. Only `gsd`, `superpowers` and `oh-my-claudecode` whitelist; the precedent for a newly added agent is to leave it out until a live run says otherwise, as pi, antigravity and kimi are
 
 ### Adding a keyboard shortcut
 1. Find the appropriate `handle_*_key` function in `src/tui/app.rs`
@@ -1195,6 +1201,8 @@ Detected automatically via `known_agents()` in order of preference:
 6. **cursor** - Cursor Agent CLI (binary is `agent`)
 7. **grok** - xAI's Grok Build CLI
 8. **antigravity** - Google's Antigravity CLI (binary is `agy`)
+9. **pi** - Earendil's pi coding agent
+10. **kimi** - Moonshot AI's Kimi Code CLI
 
 ## Future Enhancements
 - Reopen Done tasks (recreate worktree from preserved branch)

@@ -18,6 +18,7 @@
 //! | codex | `~/.codex/config.toml` → `[projects."<dir>"] trust_level` | ancestor (git repo root) |
 //! | gemini | `~/.gemini/trustedFolders.json` → `{"<dir>": "TRUST_FOLDER"}`, **lowercased** | ancestor |
 //! | antigravity | `~/.gemini/antigravity-cli/settings.json` → `trustedWorkspaces: [...]` | **exact** |
+//! | kimi | `~/.kimi-code/workspace-trust/wd_<slug>_<hash>` → `{"root": "<dir>"}` | **exact** |
 //! | cursor, grok | launch flag `--trust` | n/a |
 //! | pi | launch flag `--approve` (store is `~/.pi/agent/trust.json`) | n/a |
 //! | opencode | no trust concept | n/a |
@@ -25,6 +26,11 @@
 //!
 //! Versions the table was measured against: claude 2.1.246, codex 0.144.5,
 //! gemini 0.46.0, agy 1.1.21, cursor-agent 2026.08.11, opencode 1.18.20, pi 0.84.3.
+//!
+//! kimi is the one store that is a **directory of one-record files** rather than
+//! a single document, so its `trusted_paths` scans instead of parsing, and its
+//! `forget` unlinks instead of editing. Each record carries the directory
+//! verbatim under `root`, which is what lets it be read generically.
 //!
 //! **copilot is deliberately `NotApplicable`, not "assumed inherited".** It is not
 //! installed on any machine this was measured on, so nothing is known about its
@@ -67,6 +73,13 @@ enum Store {
     GeminiTrustedFolders,
     /// `~/.gemini/antigravity-cli/settings.json`, `trustedWorkspaces: ["<dir>", …]`.
     AntigravityWorkspaces,
+    /// `<kimi_home>/workspace-trust/`, one extensionless JSON file per trusted
+    /// directory, named `wd_<slug>_<sha256(root)[..12]>` and holding
+    /// `{"root": "<dir>", "trustedAt": <unix millis>}`.
+    ///
+    /// Unlike the other four this is a *directory*, so [`Store::path`] returns
+    /// the directory and everything that reads it scans rather than parses.
+    KimiWorkspaceTrust,
 }
 
 impl Store {
@@ -86,6 +99,11 @@ impl Store {
             // brand-new directory created *directly under it* still prompted. No
             // inheritance at any depth.
             Store::AntigravityWorkspaces => Match::Exact,
+            // `WorkspaceTrustService` sets `this.root = workspace.cwd` and looks
+            // up `encodeWorkDirKey(canonicalWorkspaceRoot(root))` — a hash of
+            // that one directory. There is no ancestor walk, so a trusted
+            // project root cannot cover a worktree beneath it.
+            Store::KimiWorkspaceTrust => Match::Exact,
         }
     }
 
@@ -98,11 +116,28 @@ impl Store {
                 .join(".gemini")
                 .join("antigravity-cli")
                 .join("settings.json"),
+            // A directory, not a file — the only such store here.
+            Store::KimiWorkspaceTrust => kimi_home(home).join("workspace-trust"),
         }
     }
 
     /// Every path this store currently trusts, in the form the agent stores them.
     fn trusted_paths(self, home: &Path) -> Vec<String> {
+        // Handled before the read below, because this store is a directory of
+        // one-record files rather than one document. Each record carries the
+        // trusted directory verbatim under `root`, so the generic `is_covered`
+        // comparison works on the result unchanged — and consent the user gave
+        // outside agtx is discovered the same way it is for every other agent.
+        if self == Store::KimiWorkspaceTrust {
+            return std::fs::read_dir(self.path(home))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+                .filter_map(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .filter_map(|v| v.get("root")?.as_str().map(str::to_string))
+                .collect();
+        }
         let raw = match std::fs::read_to_string(self.path(home)) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
@@ -167,6 +202,8 @@ impl Store {
                         .collect()
                 })
                 .unwrap_or_default(),
+            // Returned above, before the file read this arm follows.
+            Store::KimiWorkspaceTrust => Vec::new(),
         }
     }
 
@@ -185,6 +222,7 @@ fn store_for(agent: &str) -> Option<Store> {
         "codex" => Some(Store::CodexToml),
         "gemini" => Some(Store::GeminiTrustedFolders),
         "antigravity" => Some(Store::AntigravityWorkspaces),
+        "kimi" => Some(Store::KimiWorkspaceTrust),
         // cursor and grok pass `--trust` at launch and pi passes `--approve`;
         // opencode has no trust gate; copilot is unmeasured. None of them are a
         // blocker agtx can reason about. pi does keep a store
@@ -192,6 +230,80 @@ fn store_for(agent: &str) -> Option<Store> {
         // the flag decides the run, and unlike codex it writes nothing global.
         _ => None,
     }
+}
+
+/// Kimi's data root: `$KIMI_CODE_HOME` if set, else `<home>/.kimi-code`.
+///
+/// The environment variable is honoured **only when `AGTX_AGENT_HOME` is unset**.
+/// Same reasoning as `agent_trust_home()` itself: a developer who exports
+/// `KIMI_CODE_HOME` for their own use would otherwise have the test suite — which
+/// redirects the home directory precisely so it cannot touch real agent config —
+/// write into their live kimi store anyway.
+fn kimi_home(home: &Path) -> PathBuf {
+    if std::env::var_os("AGTX_AGENT_HOME").is_none() {
+        if let Some(dir) = std::env::var_os("KIMI_CODE_HOME") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir);
+            }
+        }
+    }
+    home.join(".kimi-code")
+}
+
+/// The filename kimi stores a directory's trust record under.
+///
+/// A pure port of `encodeWorkDirKey ∘ canonicalWorkspaceRoot`:
+///
+/// ```text
+/// normalized: backslashes → "/", trailing "/" stripped
+/// slug:       basename(normalized) → lowercase → s/[^a-z0-9._-]+/-/g
+///             → trim "-" → take 40 → trim "-"
+///             → "" | "." | ".." becomes "workspace"
+/// key:        wd_<slug>_<sha256(normalized)[..12 hex chars]>
+/// ```
+///
+/// **Not `realpath`.** `canonicalWorkspaceRoot` uses pathe's lexical `resolve()`,
+/// so `/tmp/x` stays `/tmp/x` rather than becoming `/private/tmp/x` on macOS.
+/// Canonicalising here would compute a key kimi never looks up — the same
+/// mismatch that invalidated the first codex measurement. [`seed_kimi`] writes
+/// one record per [`path_forms`] spelling instead, each keyed from *that*
+/// spelling.
+fn kimi_trust_key(root: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let normalized = root.replace('\\', "/");
+    let normalized = normalized.trim_end_matches('/');
+    let base = normalized.rsplit('/').next().unwrap_or(normalized);
+
+    // The JS regex `[^a-z0-9._-]+` replaces each *run* with a single dash, so
+    // collapse runs rather than mapping character-for-character. Done after
+    // lowercasing, and the result is pure ASCII — which is what makes the
+    // 40-byte truncation below equal JS's 40-UTF-16-unit `slice`.
+    let mut slug = String::new();
+    let mut in_run = false;
+    for c in base.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            slug.push(c);
+            in_run = false;
+        } else if !in_run {
+            slug.push('-');
+            in_run = true;
+        }
+    }
+    // Trimmed twice, and that is deliberate: the first trim is the JS `replace`
+    // chain's own, and the second catches a dash left exposed by a truncation
+    // that cut through a run.
+    let slug = slug.trim_matches('-');
+    let slug = &slug[..slug.len().min(40)];
+    let slug = slug.trim_matches('-');
+    let slug = match slug {
+        "" | "." | ".." => "workspace",
+        other => other,
+    };
+
+    let digest = Sha256::digest(normalized.as_bytes());
+    let hash: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    format!("wd_{slug}_{hash}")
 }
 
 /// The forms of `path` an agent might have recorded.
@@ -253,8 +365,8 @@ pub fn status(agent: &str, path: &Path, home: &Path) -> Trust {
 
 /// Whether this agent needs a per-directory entry that agtx can write for it.
 ///
-/// True only for antigravity: it matches exactly, so a project-level consent the
-/// user has already given cannot cover a new worktree on its own. Every other
+/// True for antigravity and kimi: both match exactly, so a project-level consent
+/// the user has already given cannot cover a new worktree on its own. Every other
 /// agent either inherits from an ancestor (nothing to write) or has no store.
 pub fn needs_seeding(agent: &str) -> bool {
     store_for(agent).map(Store::matching) == Some(Match::Exact)
@@ -290,6 +402,7 @@ pub fn seed_from_project(
     }
     match store {
         Store::AntigravityWorkspaces => seed_antigravity(worktree, home).map(|()| true),
+        Store::KimiWorkspaceTrust => seed_kimi(worktree, home).map(|()| true),
         _ => Ok(false),
     }
 }
@@ -331,6 +444,40 @@ fn seed_antigravity(worktree: &Path, home: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Write kimi's trust record for the worktree, one file per path spelling.
+///
+/// Kimi's `readWorkspaceTrust` returns true if the file merely **exists and
+/// parses as JSON** — the contents are not validated — but the record carries
+/// `root` verbatim anyway, because that is what lets [`Store::trusted_paths`]
+/// read the store back generically.
+///
+/// One record per [`path_forms`] spelling, as [`seed_antigravity`] does: on macOS
+/// `/tmp` and `/private/tmp` are both live spellings of one directory and kimi
+/// hashes whichever it is handed. Each key is computed from *its own* spelling —
+/// canonicalising first would produce a key kimi never looks up.
+fn seed_kimi(worktree: &Path, home: &Path) -> Result<()> {
+    let dir = Store::KimiWorkspaceTrust.path(home);
+    std::fs::create_dir_all(&dir)?;
+    let trusted_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    for form in path_forms(worktree) {
+        let record = serde_json::json!({ "root": form, "trustedAt": trusted_at });
+        let file = dir.join(kimi_trust_key(&form));
+        // Written-then-renamed like the others: kimi reads these files while it
+        // starts, and a half-written one would parse as untrusted.
+        let tmp = dir.join(format!(
+            ".agtx-tmp{}-{}",
+            std::process::id(),
+            kimi_trust_key(&form)
+        ));
+        std::fs::write(&tmp, serde_json::to_string(&record)?)?;
+        std::fs::rename(&tmp, &file)?;
+    }
+    Ok(())
+}
+
 /// Drop `worktree` from an agent's trust store.
 ///
 /// Called when a worktree is removed. Without it these lists grow one entry per
@@ -340,10 +487,24 @@ pub fn forget(agent: &str, worktree: &Path, home: &Path) -> Result<()> {
     let Some(store) = store_for(agent) else {
         return Ok(());
     };
-    if store.matching() != Match::Exact {
-        return Ok(());
+    // Dispatched on the store, not merely gated on `Match::Exact`: there are two
+    // exact-matching stores now and their shapes have nothing in common — one is
+    // a JSON array to edit, the other a directory of files to unlink. Falling
+    // through to antigravity's JSON surgery would try to parse kimi's directory
+    // and silently prune nothing, leaving one dead record per task forever,
+    // which is the exact leak the `forget` call sites were added to stop.
+    match store {
+        Store::AntigravityWorkspaces => forget_antigravity(worktree, home),
+        Store::KimiWorkspaceTrust => forget_kimi(worktree, home),
+        // An inheriting store holds records agtx never wrote, so it is not
+        // agtx's to prune.
+        _ => Ok(()),
     }
-    let file = store.path(home);
+}
+
+/// Remove the worktree's entries from antigravity's `trustedWorkspaces` array.
+fn forget_antigravity(worktree: &Path, home: &Path) -> Result<()> {
+    let file = Store::AntigravityWorkspaces.path(home);
     let Ok(raw) = std::fs::read_to_string(&file) else {
         return Ok(());
     };
@@ -366,6 +527,19 @@ pub fn forget(agent: &str, worktree: &Path, home: &Path) -> Result<()> {
     let tmp = file.with_extension(format!("agtx-tmp{}", std::process::id()));
     std::fs::write(&tmp, serde_json::to_string_pretty(&root)?)?;
     std::fs::rename(&tmp, &file)?;
+    Ok(())
+}
+
+/// Unlink the worktree's trust records from kimi's `workspace-trust` directory.
+///
+/// One key per path spelling, matching what [`seed_kimi`] wrote. A missing file
+/// is not an error — the user may have removed it, or the seed may never have
+/// run because the project root was untrusted.
+fn forget_kimi(worktree: &Path, home: &Path) -> Result<()> {
+    let dir = Store::KimiWorkspaceTrust.path(home);
+    for form in path_forms(worktree) {
+        let _ = std::fs::remove_file(dir.join(kimi_trust_key(&form)));
+    }
     Ok(())
 }
 

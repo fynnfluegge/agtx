@@ -3564,6 +3564,29 @@ fn test_is_pane_at_shell_returns_false_for_codex() {
     assert!(!is_pane_at_shell(&mock, "sess:win"));
 }
 
+/// Both of kimi's process names read as a live agent, and a shell does not.
+///
+/// `kimi-code` is what `process.title` sets, which Linux picks up and macOS
+/// ignores (`p_comm` is fixed at exec) — so both spellings have to match, and
+/// on macOS neither may, which is what `scoped_indicators` covers.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_is_pane_at_shell_detects_kimi() {
+    for cmd in ["kimi", "kimi-code"] {
+        let mut mock = MockTmuxOperations::new();
+        mock.expect_pane_current_command()
+            .returning(move |_| Some(cmd.to_string()));
+        assert!(
+            !is_pane_at_shell(&mock, "sess:win"),
+            "{cmd} must read as a live agent"
+        );
+    }
+    let mut mock = MockTmuxOperations::new();
+    mock.expect_pane_current_command()
+        .returning(|_| Some("zsh".to_string()));
+    assert!(is_pane_at_shell(&mock, "sess:win"));
+}
+
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_is_pane_at_shell_returns_false_when_none() {
@@ -5081,6 +5104,200 @@ fn test_write_skills_to_worktree_mcp_pi_preserves_existing_config() {
         "top-level sibling keys must survive: {content}"
     );
     assert!(v["mcpServers"]["agtx"]["command"].is_string());
+}
+
+#[test]
+fn test_write_skills_to_worktree_mcp_kimi() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["kimi"], false);
+
+    let cfg = dir.path().join(".kimi-code/mcp.json");
+    assert!(
+        cfg.exists(),
+        ".kimi-code/mcp.json should be written for kimi"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+    assert_eq!(v["mcpServers"]["agtx"]["args"][0], "mcp-serve");
+    // Plain `{command, args}` — none of the extra keys other agents' formats
+    // carry. kimi rejects a config it cannot parse, taking its MCP with it.
+    let entry = v["mcpServers"]["agtx"].as_object().unwrap();
+    assert!(
+        entry.get("lifecycle").is_none() && entry.get("transport").is_none(),
+        "kimi's entry shape is {{command, args}} only: {entry:?}"
+    );
+}
+
+/// A repo may track its own `.kimi-code/mcp.json`, and kimi's in-TUI
+/// `/mcp-config` writes the same file, so a task must not clobber either.
+#[test]
+fn test_write_skills_to_worktree_mcp_kimi_preserves_existing_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let kimi_dir = dir.path().join(".kimi-code");
+    std::fs::create_dir_all(&kimi_dir).unwrap();
+    std::fs::write(
+        kimi_dir.join("mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"other"}},"somethingElse":true}"#,
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["kimi"], false);
+
+    let content = std::fs::read_to_string(kimi_dir.join("mcp.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        v["mcpServers"]["other"]["command"], "other",
+        "a project's own .kimi-code/mcp.json must not be clobbered: {content}"
+    );
+    assert_eq!(
+        v["somethingElse"], true,
+        "top-level sibling keys must survive: {content}"
+    );
+    assert!(v["mcpServers"]["agtx"]["command"].is_string());
+}
+
+#[test]
+fn test_write_skills_to_worktree_kimi_skills() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["kimi"], false);
+
+    let skill = dir.path().join(".kimi-code/skills/agtx-plan/SKILL.md");
+    assert!(
+        skill.exists(),
+        "kimi skills go to .kimi-code/skills/<name>/SKILL.md, not the .agents/ \
+         tree it also scans — that one is antigravity's"
+    );
+    let content = std::fs::read_to_string(&skill).unwrap();
+    assert!(
+        content.starts_with("---"),
+        "frontmatter must be kept for kimi: its directory-form skills require \
+         `name` and `description`"
+    );
+    // Canonical copy is always written too
+    assert!(dir.path().join(".agtx/skills/agtx-plan/SKILL.md").exists());
+    // And nothing lands in antigravity's tree when only kimi is configured.
+    assert!(
+        !dir.path().join(".agents/skills").exists(),
+        "kimi must not deploy into .agents/, which antigravity owns"
+    );
+}
+
+/// Kimi names MCP tools the Claude way (`mcp__<server>__<tool>`), so the skill
+/// bodies need no rewriting — the references in them resolve as written.
+#[test]
+fn test_write_skills_to_worktree_kimi_preserves_mcp_tool_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["kimi"], false);
+
+    let content =
+        std::fs::read_to_string(dir.path().join(".kimi-code/skills/agtx-plan/SKILL.md")).unwrap();
+    assert!(
+        content.contains("mcp__agtx__"),
+        "kimi resolves mcp__<server>__<tool> verbatim; rewriting would break it"
+    );
+}
+
+/// Kimi matches trusted paths **exactly**, so every worktree needs its own
+/// record — and `write_skills_to_worktree` is where it is written, because that
+/// is the one call site reached by both worktree creation and an agent switch.
+#[test]
+fn test_write_skills_to_worktree_kimi_seeds_workspace_trust() {
+    let (home, _guard) = redirect_agent_home();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("proj");
+    let wt = project.join(".agtx/worktrees/w1");
+    std::fs::create_dir_all(&wt).unwrap();
+
+    // Trust the project root the way the user's own first `kimi` run does.
+    let store = home.join(".kimi-code").join("workspace-trust");
+    std::fs::create_dir_all(&store).unwrap();
+    let project_key = kimi_trust_key_for_test(&project.to_string_lossy());
+    std::fs::write(
+        store.join(&project_key),
+        serde_json::json!({ "root": project.to_string_lossy() }).to_string(),
+    )
+    .unwrap();
+
+    write_skills_to_worktree(&wt.to_string_lossy(), &project, &None, &["kimi"], false);
+
+    let record = store.join(kimi_trust_key_for_test(&wt.to_string_lossy()));
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&record)
+            .expect("the worktree must be seeded at the key kimi computes"),
+    )
+    .unwrap();
+    assert_eq!(v["root"], wt.to_string_lossy().to_string());
+
+    // This HOME is shared across the tests that redirect it — leave it clean.
+    let _ = agent::trust::forget("kimi", &wt, &home);
+    let _ = std::fs::remove_file(store.join(&project_key));
+}
+
+/// The negative twin, and the policy the whole design rests on: with the project
+/// root untrusted, agtx writes nothing. Granting a consent the user never gave
+/// would be a different feature from replaying one they did.
+#[test]
+fn test_write_skills_to_worktree_kimi_does_not_seed_an_untrusted_project() {
+    let (home, _guard) = redirect_agent_home();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("untrusted-proj");
+    let wt = project.join(".agtx/worktrees/w1");
+    std::fs::create_dir_all(&wt).unwrap();
+
+    write_skills_to_worktree(&wt.to_string_lossy(), &project, &None, &["kimi"], false);
+
+    let record = home
+        .join(".kimi-code")
+        .join("workspace-trust")
+        .join(kimi_trust_key_for_test(&wt.to_string_lossy()));
+    assert!(
+        !record.exists(),
+        "no record may be written for a worktree whose project was never trusted"
+    );
+}
+
+/// The key derivation, restated here rather than exported from `agent::trust`.
+///
+/// Deliberate duplication: `kimi_trust_key` is private to the trust module and
+/// pinned by its own tests. Restating it means this test asserts kimi would find
+/// the record, not merely that agtx and agtx agree with each other.
+fn kimi_trust_key_for_test(root: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized = root.replace('\\', "/");
+    let normalized = normalized.trim_end_matches('/');
+    let base = normalized.rsplit('/').next().unwrap_or(normalized);
+    let mut slug = String::new();
+    let mut in_run = false;
+    for c in base.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            slug.push(c);
+            in_run = false;
+        } else if !in_run {
+            slug.push('-');
+            in_run = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = &slug[..slug.len().min(40)];
+    let slug = slug.trim_matches('-');
+    let slug = match slug {
+        "" | "." | ".." => "workspace",
+        other => other,
+    };
+    let hash: String = Sha256::digest(normalized.as_bytes())
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("wd_{slug}_{hash}")
 }
 
 #[test]
@@ -12826,8 +13043,14 @@ fn test_agent_commands_derivation_matches_the_previous_literals() {
         // `node` itself must never join this list: it is every Ink agent's pane
         // name, and would make any node process read as a live agent.
         "pi",
+        // kimi. Same Linux/macOS split as pi: `process.title = 'kimi-code'` is
+        // picked up on Linux and ignored on macOS, where the scoped
+        // `context: ` indicator does the detecting instead.
+        "kimi",
+        "kimi-code",
         // Not agent binaries, but a Python entry point must not read as "shell".
-        "python3", "python",
+        "python3",
+        "python",
     ];
     want.sort_unstable();
     assert_eq!(got, want);
@@ -12851,6 +13074,9 @@ fn test_active_indicator_derivation_matches_the_previous_literals() {
         // fallback needs three. Its trust dialog's footer reads
         // "↑/↓ Navigate · enter Confirm", so this cannot fire while blocked.
         "? for shortcuts",
+        // kimi's splash, shown until output scrolls it away. Its footer
+        // `context: ` needle is scoped, not here — see below.
+        "Welcome to Kimi Code!",
     ];
     want.sort_unstable();
     // pi's "%/" is deliberately absent: it lives in `scoped_indicators`, which
@@ -12858,6 +13084,9 @@ fn test_active_indicator_derivation_matches_the_previous_literals() {
     // used for panes whose agent is unknown — it would report an exited claude
     // or codex as still running the moment output contained "85%/90%".
     assert!(!got.contains(&"%/"));
+    // kimi's "context: " is absent for the same reason: it is the unconditional
+    // half of its footer, but the phrase occurs in ordinary agent output too.
+    assert!(!got.contains(&"context: "));
     assert_eq!(got, want);
 }
 
@@ -12873,6 +13102,7 @@ fn test_exit_command_per_agent() {
         ("gemini", Some("/quit")),
         ("grok", Some("/quit")),
         ("pi", Some("/quit")),
+        ("kimi", Some("/exit")),
         ("codex", None),
         ("cursor", None),
     ];
@@ -12903,6 +13133,8 @@ fn test_send_strategy_per_agent() {
         ("cursor", SendStrategy::Combined),
         ("antigravity", SendStrategy::Combined),
         ("pi", SendStrategy::Combined),
+        // pi-tui composer, same class as pi's.
+        ("kimi", SendStrategy::Combined),
         ("opencode", SendStrategy::OpenCodePicker),
     ];
     for (agent, want) in table {
@@ -12923,6 +13155,9 @@ fn test_clear_context_command_per_agent() {
     let table = [
         ("claude", Some("/clear")),
         ("pi", Some("/new")),
+        // Documented (`/new`, alias `/clear`), not yet measured against the
+        // binary — the one kimi spec field taken from docs alone.
+        ("kimi", Some("/new")),
         ("codex", None),
         ("gemini", None),
         ("cursor", None),
@@ -13023,6 +13258,10 @@ fn test_launch_dialog_derivation_matches_the_previous_literals() {
         ),
         // Cursor advertises its own access key, so that is what it is sent.
         (vec!["Workspace Trust Required"], vec!["a"]),
+        // Kimi's is arrow-navigated with the *unsafe* option preselected and
+        // takes no digit, so `Up` then `Enter` — the inverse of antigravity's
+        // identically-shaped prompt above.
+        (vec!["Trust this folder?"], vec!["Up", "Enter"]),
     ];
     want.sort();
     assert_eq!(got, want);
@@ -13439,6 +13678,7 @@ fn test_dialog_security_classification() {
         ("gemini", "Do you trust the files in this folder?"),
         ("cursor", "Workspace Trust Required"),
         ("antigravity", "Do you trust the contents of this project?"),
+        ("kimi", "Trust this folder?"),
     ];
     for (agent, pattern) in secure {
         let d = agent::spec(agent)
