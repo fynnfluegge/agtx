@@ -29,9 +29,12 @@ use crate::tmux::{
 use crate::AppMode;
 
 use super::board::BoardState;
-use super::input::InputMode;
+use super::config_editor::{ConfigEditor, EditorAction, FieldKind};
+use super::help;
 use super::shell_popup::{self, ShellPopup};
+use super::text_input::TextInput;
 use super::theme::TuiStyles;
+use super::wizard::{PickOption, WizardState, WizardStep};
 
 /// Helper to convert hex color string to ratatui Color
 fn hex_to_color(hex: &str) -> Color {
@@ -42,49 +45,50 @@ fn hex_to_color(hex: &str) -> Color {
 
 /// Build footer help text based on current UI state
 fn build_footer_text(
-    input_mode: InputMode,
+    wizard_step: Option<WizardStep>,
     sidebar_focused: bool,
     selected_column: usize,
     has_cyclic_plugin: bool,
     fullscreen_on_enter: bool,
 ) -> String {
-    match input_mode {
-        InputMode::Normal => {
+    // Only the column-specific actions plus the two universal ones. Everything
+    // else moved to the `?` overlay: this string had reached 155 characters and
+    // was being truncated on a 150-column terminal, which silently hid whatever
+    // happened to be last.
+    match wizard_step {
+        None => {
             if sidebar_focused {
-                "[j/k] navigate  [Enter] open  [l] board  ·  [e] hide sidebar  [q] quit".to_string()
+                "[j/k] navigate  [Enter] board  ·  [e] hide  [?] help  [q] quit".to_string()
             } else {
+                let fullscreen = if fullscreen_on_enter {
+                    ""
+                } else {
+                    "  [C-f] fullscreen"
+                };
                 match selected_column {
-                    0 => "[o] new  [/] search  ·  [Enter] open  [d] diff  [D] deps  ·  [m] plan  [M] run  [R] research  ·  [x] delete  [e] sidebar  [q] quit".to_string(),
-                    1 => if fullscreen_on_enter {
-                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [m] run  ·  [x] delete  [e] sidebar  [q] quit".to_string()
-                    } else {
-                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [m] run  ·  [x] delete  [e] sidebar  [q] quit".to_string()
-                    },
-                    2 => if fullscreen_on_enter {
-                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
-                    } else {
-                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
-                    },
-                    3 if has_cyclic_plugin => if fullscreen_on_enter {
-                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [r] resume  [p] next phase  [m] done  ·  [x] delete  [e] sidebar  [q] quit".to_string()
-                    } else {
-                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [r] resume  [p] next phase  [m] done  ·  [x] delete  [e] sidebar  [q] quit".to_string()
-                    },
-                    3 => if fullscreen_on_enter {
-                        "[o] new  [/] search  ·  [Enter] open  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
-                    } else {
-                        "[o] new  [/] search  ·  [Enter] open  [C-f] fullscreen  [d] diff  ·  [r] move back  [m] move  ·  [x] delete  [e] sidebar  [q] quit".to_string()
-                    },
-                    _ => "[o] new  [/] search  ·  [Enter] open  ·  [x] delete  [e] sidebar  [q] quit".to_string(),
+                    0 => "[o] new  [Enter] edit  [d] diff  ·  [m] plan  [M] run  [R] research  ·  [?] help  [q] quit".to_string(),
+                    1 => format!("[o] new  [Enter] open{fullscreen}  [d] diff  ·  [m] run  ·  [?] help  [q] quit"),
+                    2 => format!("[o] new  [Enter] open{fullscreen}  [d] diff  ·  [r] back  [m] move  ·  [?] help  [q] quit"),
+                    3 if has_cyclic_plugin => format!(
+                        "[o] new  [Enter] open{fullscreen}  ·  [r] resume  [p] next phase  [m] done  ·  [?] help  [q] quit"
+                    ),
+                    3 => format!("[o] new  [Enter] open{fullscreen}  [d] diff  ·  [r] back  [m] move  ·  [?] help  [q] quit"),
+                    _ => "[o] new  [Enter] open  [x] delete  ·  [?] help  [q] quit".to_string(),
                 }
             }
         }
-        InputMode::InputTitle => " Enter task title... [Esc] cancel [Enter] next ".to_string(),
-        InputMode::SelectPlugin => {
-            " [j/k] select plugin  [Tab] cycle  [Enter] next  [Esc] cancel ".to_string()
+        // Every step advertises how to leave it in both directions. `Esc` is
+        // the back key now, and only cancels from the first step — which is
+        // why the first step says "cancel" and the others say "back".
+        Some(WizardStep::Title) => {
+            " Enter task title...  [Enter] next  [C-s] save  [Esc] cancel ".to_string()
         }
-        InputMode::InputDescription => {
-            " [#] files  [/] skills  [!] tasks  [Esc] cancel  [\\+Enter] newline  [Enter] save "
+        Some(WizardStep::Agent) | Some(WizardStep::Plugin) => {
+            " [j/k] select  [/] filter  [Enter] next  [S-Tab] back  [C-s] save  [Esc] cancel "
+                .to_string()
+        }
+        Some(WizardStep::Prompt) => {
+            " [#] files  [/] skills  [!] tasks  ·  [\\+Enter] newline  [S-Tab] back  [Enter] save  [Esc] cancel "
                 .to_string()
         }
     }
@@ -277,6 +281,20 @@ impl ratatui::backend::Backend for AppBackend {
 }
 
 /// Shell popup dimensions - used for both rendering and tmux window sizing
+/// Horizontal breathing room inside the task wizard, in cells per side.
+///
+/// Without it a wrapped prompt line starts hard against the left border and
+/// every line ends hard against the right one. The literals below therefore
+/// carry no leading spaces of their own — the padding is the only indent, so
+/// wrapped continuation rows line up with the row they came from.
+const WIZARD_PADDING: u16 = 2;
+
+/// Longest task title the wizard accepts.
+///
+/// Not a database limit — the board draws a title on one card line, and a title
+/// long enough to be truncated everywhere it appears is not a useful name.
+const MAX_TASK_TITLE_CHARS: usize = 120;
+
 const SHELL_POPUP_WIDTH: u16 = 128; // Total width including borders
 const SHELL_POPUP_CONTENT_WIDTH: u16 = 126; // Content width (SHELL_POPUP_WIDTH - 2 for borders)
 const SHELL_POPUP_HEIGHT_PERCENT: u16 = 75; // Percentage of terminal height
@@ -287,15 +305,23 @@ struct AppState {
     flags: crate::FeatureFlags,
     should_quit: bool,
     board: BoardState,
-    input_mode: InputMode,
-    input_buffer: String,
-    input_cursor: usize, // Cursor position in input_buffer
-    // For task creation/editing wizard
-    pending_task_title: String,
-    editing_task_id: Option<String>, // Some(id) when editing, None when creating
-    wizard_selected_plugin: usize,
-    wizard_plugin_options: Vec<PluginOption>,
-    wizard_referenced_task_ids: HashSet<String>,
+    /// The task creation / edit wizard, open or not. `Some` *is* the input
+    /// mode: there is no second flag that could disagree with it.
+    wizard: Option<WizardState>,
+    /// The config editor, open or not. See `tui::config_editor`.
+    config_editor: Option<ConfigEditor>,
+    /// The `?` overlay's scroll offset, when it is open. See `tui::help`.
+    help_scroll: Option<usize>,
+    /// The furthest the overlay can actually scroll, recorded by the renderer
+    /// because only it knows how many rows fit.
+    ///
+    /// Without it the handler clamps to the *table* length instead, so `C-g`
+    /// parks the offset far past the last screenful and the next `C-u` moves
+    /// nothing — which reads exactly like a broken scroll.
+    help_max_scroll: Cell<usize>,
+    /// The agent the open wizard's plugin list was filtered by, so a change on
+    /// the agent step can rebuild it and nothing else has to.
+    plugins_filtered_for: Option<String>,
     db: Option<Database>,
     #[allow(dead_code)]
     global_db: Database,
@@ -330,8 +356,6 @@ struct AppState {
     skill_search: Option<SkillSearchState>,
     // Task reference search dropdown
     task_ref_search: Option<TaskRefSearchState>,
-    // References inserted via file search, skill search, or task search (for highlighting)
-    highlighted_references: HashSet<String>,
     // Task search popup
     task_search: Option<TaskSearchState>,
     // PR creation confirmation popup
@@ -573,7 +597,7 @@ struct FileSearchState {
     pattern: String,
     matches: Vec<String>,
     selected: usize,
-    start_pos: usize,   // Position in input_buffer where trigger was typed
+    start_pos: usize,   // Position in the input buffer where trigger was typed
     trigger_char: char, // The character that triggered the search (# or @)
 }
 
@@ -603,6 +627,55 @@ struct TaskRefSearchState {
     start_pos: usize, // cursor position where `!` was typed
 }
 
+/// The list behaviour shared by the three prompt dropdowns.
+///
+/// All of them are a match list with a cursor, and all of them are driven by
+/// the same four keys — the only thing that differs is what a match *is*.
+trait SearchList {
+    fn match_count(&self) -> usize;
+    fn selected_index(&mut self) -> &mut usize;
+
+    fn select_prev(&mut self) {
+        let selected = self.selected_index();
+        *selected = selected.saturating_sub(1);
+    }
+
+    fn select_next(&mut self) {
+        let last = self.match_count().saturating_sub(1);
+        let selected = self.selected_index();
+        if *selected < last {
+            *selected += 1;
+        }
+    }
+}
+
+impl SearchList for FileSearchState {
+    fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+    fn selected_index(&mut self) -> &mut usize {
+        &mut self.selected
+    }
+}
+
+impl SearchList for SkillSearchState {
+    fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+    fn selected_index(&mut self) -> &mut usize {
+        &mut self.selected
+    }
+}
+
+impl SearchList for TaskRefSearchState {
+    fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+    fn selected_index(&mut self) -> &mut usize {
+        &mut self.selected
+    }
+}
+
 /// State for delete confirmation popup
 #[derive(Debug, Clone)]
 struct DeleteConfirmPopup {
@@ -614,6 +687,12 @@ struct DeleteConfirmPopup {
 #[derive(Debug, Clone)]
 struct TrustConfirmPopup {
     project_path: std::path::PathBuf,
+    /// The suppressed fields, verbatim.
+    ///
+    /// `App::new` strips these before anything can run them, so the popup
+    /// re-reads the file to show them: consenting to a script you cannot see is
+    /// not consent. Each entry is (field name, value).
+    dangerous: Vec<(&'static str, String)>,
 }
 
 /// State for asking if user wants to create PR when moving to Review
@@ -627,7 +706,7 @@ struct ReviewConfirmPopup {
 #[derive(Debug, Clone)]
 struct PluginSelectPopup {
     selected: usize,
-    options: Vec<PluginOption>,
+    options: Vec<PickOption>,
 }
 
 /// The `[u]` popup: what is available, and one key to install it.
@@ -641,12 +720,12 @@ struct UpdatePopup {
     installing: bool,
 }
 
-#[derive(Debug, Clone)]
-struct PluginOption {
-    name: String,        // "" for none, "gsd", "spec-kit", etc.
-    label: String,       // Display name
-    description: String, // One-line description
-    active: bool,        // Currently active for this project
+impl AppState {
+    /// Which wizard step is open, if any. The one place anything outside the
+    /// wizard asks about input mode.
+    fn wizard_step(&self) -> Option<WizardStep> {
+        self.wizard.as_ref().map(|w| w.step())
+    }
 }
 
 pub struct App {
@@ -678,6 +757,12 @@ impl App {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+        // No Kitty-keyboard-protocol push here, deliberately. It was added so
+        // `Shift+Enter` could be told apart from `Enter` — both are a bare CR
+        // otherwise — but `supports_keyboard_enhancement()` **blocks for up to
+        // two seconds** on any terminal that does not answer the query, which
+        // is a real cost on every launch for a chord that then still did not
+        // arrive through tmux. `\`+Enter and `C-j` need no negotiation.
         let backend = CrosstermBackend::new(stdout);
         let terminal = ratatui::Terminal::new(AppBackend::Crossterm(backend))?;
 
@@ -780,14 +865,11 @@ impl App {
                 flags,
                 should_quit: false,
                 board: BoardState::new(),
-                input_mode: InputMode::Normal,
-                input_buffer: String::new(),
-                input_cursor: 0,
-                pending_task_title: String::new(),
-                editing_task_id: None,
-                wizard_selected_plugin: 0,
-                wizard_plugin_options: vec![],
-                wizard_referenced_task_ids: HashSet::new(),
+                wizard: None,
+                config_editor: None,
+                help_scroll: None,
+                help_max_scroll: Cell::new(0),
+                plugins_filtered_for: None,
                 db,
                 global_db,
                 config,
@@ -809,7 +891,6 @@ impl App {
                 file_search: None,
                 skill_search: None,
                 task_ref_search: None,
-                highlighted_references: HashSet::new(),
                 task_search: None,
                 pr_confirm_popup: None,
                 review_to_running_task_id: None,
@@ -949,11 +1030,17 @@ impl App {
             });
         }
 
+        app.open_first_run_editor();
+
         // Display trust confirmation popup if project config was suppressed
         if trust_warning.is_some() {
             if let Some(ref path) = app.state.project_path {
+                // Re-read from disk: the merged config has already had these
+                // stripped, which is the whole reason the popup exists.
+                let on_disk = ProjectConfig::load(path).unwrap_or_default();
                 app.state.trust_confirm_popup = Some(TrustConfirmPopup {
                     project_path: path.clone(),
+                    dangerous: dangerous_fields(&on_disk),
                 });
             }
         }
@@ -970,6 +1057,25 @@ impl App {
         git_ops: Arc<dyn GitOperations>,
         git_provider_ops: Arc<dyn GitProviderOperations>,
         agent_registry: Arc<dyn agent::AgentRegistry>,
+    ) -> Result<Self> {
+        Self::new_for_test_with_flags(
+            project_path,
+            tmux_ops,
+            git_ops,
+            git_provider_ops,
+            agent_registry,
+            crate::FeatureFlags::default(),
+        )
+    }
+
+    #[cfg(feature = "test-mocks")]
+    pub fn new_for_test_with_flags(
+        project_path: Option<PathBuf>,
+        tmux_ops: Arc<dyn TmuxOperations>,
+        git_ops: Arc<dyn GitOperations>,
+        git_provider_ops: Arc<dyn GitProviderOperations>,
+        agent_registry: Arc<dyn agent::AgentRegistry>,
+        flags: crate::FeatureFlags,
     ) -> Result<Self> {
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let terminal = ratatui::Terminal::new(AppBackend::Test(backend))?;
@@ -999,21 +1105,18 @@ impl App {
 
         let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
 
-        Ok(Self {
+        let mut app = Self {
             terminal,
             state: AppState {
                 mode,
-                flags: crate::FeatureFlags::default(),
+                flags,
                 should_quit: false,
                 board: BoardState::new(),
-                input_mode: InputMode::Normal,
-                input_buffer: String::new(),
-                input_cursor: 0,
-                pending_task_title: String::new(),
-                editing_task_id: None,
-                wizard_selected_plugin: 0,
-                wizard_plugin_options: vec![],
-                wizard_referenced_task_ids: HashSet::new(),
+                wizard: None,
+                config_editor: None,
+                help_scroll: None,
+                help_max_scroll: Cell::new(0),
+                plugins_filtered_for: None,
                 db,
                 global_db,
                 config,
@@ -1037,7 +1140,6 @@ impl App {
                 file_search: None,
                 skill_search: None,
                 task_ref_search: None,
-                highlighted_references: HashSet::new(),
                 task_search: None,
                 pr_confirm_popup: None,
                 review_to_running_task_id: None,
@@ -1079,7 +1181,11 @@ impl App {
                 setup_queue: VecDeque::new(),
                 instance_id: uuid::Uuid::new_v4().to_string(),
             },
-        })
+        };
+        // The same call the real constructor makes, so a test exercises the
+        // first-run path rather than a copy of it.
+        app.open_first_run_editor();
+        Ok(app)
     }
 
     /// Swap in a recording sink so a test can assert what the UI enqueued.
@@ -1731,7 +1837,7 @@ impl App {
             } else {
                 (
                     build_footer_text(
-                        state.input_mode,
+                        state.wizard_step(),
                         state.sidebar_focused,
                         state.board.selected_column,
                         has_cyclic_plugin,
@@ -1743,7 +1849,7 @@ impl App {
         } else {
             (
                 build_footer_text(
-                    state.input_mode,
+                    state.wizard_step(),
                     state.sidebar_focused,
                     state.board.selected_column,
                     has_cyclic_plugin,
@@ -1777,250 +1883,13 @@ impl App {
             },
         );
 
-        // Input overlay if in input mode
-        if matches!(
-            state.input_mode,
-            InputMode::InputTitle | InputMode::SelectPlugin | InputMode::InputDescription
-        ) {
-            let input_area = centered_rect(55, 55, area);
-            frame.render_widget(Clear, input_area);
-
-            let is_editing = state.editing_task_id.is_some();
-            let block_title = if is_editing {
-                " Edit Task "
-            } else {
-                " New Task "
-            };
-            let text_color = hex_to_color(&state.config.theme.color_text);
-            let highlight_color = hex_to_color(&state.config.theme.color_accent);
-            let dimmed_color = hex_to_color(&state.config.theme.color_dimmed);
-            let selected_color = hex_to_color(&state.config.theme.color_selected);
-            let desc_color = hex_to_color(&state.config.theme.color_description);
-
-            // Determine current step index: Title=0, Plugin=1, Prompt=2
-            let step = match state.input_mode {
-                InputMode::InputTitle => 0,
-                InputMode::SelectPlugin => 1,
-                InputMode::InputDescription => 2,
-                _ => 0,
-            };
-            let step_labels = ["Title", "Plugin", "Prompt"];
-
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            // Pre-wrap every line we push so `lines.len()` always reflects the
-            // exact visual-row count. The cursor anchor below depends on this:
-            // if any preceding line wrapped silently in the Paragraph, the
-            // cursor would land one row too high.
-            let wrap_width = input_area.width.saturating_sub(2) as usize;
-            let push_wrapped = |dst: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>| {
-                for visual in wrap_spans(spans, wrap_width) {
-                    dst.push(visual);
-                }
-            };
-
-            // Step indicator breadcrumb
-            let mut breadcrumb_spans: Vec<Span<'static>> = Vec::new();
-            breadcrumb_spans.push(Span::raw("  ".to_string()));
-            for (i, label) in step_labels.iter().enumerate() {
-                let style = if i == step {
-                    Style::default()
-                        .fg(selected_color)
-                        .add_modifier(Modifier::BOLD)
-                } else if i < step {
-                    Style::default().fg(highlight_color)
-                } else {
-                    Style::default().fg(dimmed_color)
-                };
-                breadcrumb_spans.push(Span::styled((*label).to_string(), style));
-                if i < step_labels.len() - 1 {
-                    breadcrumb_spans.push(Span::styled(
-                        "  ›  ".to_string(),
-                        Style::default().fg(dimmed_color),
-                    ));
-                }
-            }
-            push_wrapped(&mut lines, breadcrumb_spans);
-
-            // Separator
-            let inner_width = input_area.width.saturating_sub(4) as usize;
-            push_wrapped(
-                &mut lines,
-                vec![Span::styled(
-                    format!("  {}", "─".repeat(inner_width.saturating_sub(2))),
-                    Style::default().fg(dimmed_color),
-                )],
-            );
-            lines.push(Line::from(String::new()));
-
-            // Completed fields shown as read-only context
-            if step >= 1 {
-                push_wrapped(
-                    &mut lines,
-                    vec![
-                        Span::styled("  Title: ".to_string(), Style::default().fg(dimmed_color)),
-                        Span::styled(
-                            state.pending_task_title.clone(),
-                            Style::default().fg(text_color),
-                        ),
-                    ],
-                );
-            }
-            if step >= 2 {
-                let plugin_name = state
-                    .wizard_plugin_options
-                    .get(state.wizard_selected_plugin)
-                    .map(|o| o.label.as_str())
-                    .unwrap_or("agtx")
-                    .to_string();
-                push_wrapped(
-                    &mut lines,
-                    vec![
-                        Span::styled("  Plugin: ".to_string(), Style::default().fg(dimmed_color)),
-                        Span::styled(plugin_name, Style::default().fg(text_color)),
-                    ],
-                );
-            }
-            if step >= 1 {
-                lines.push(Line::from(String::new()));
-            }
-
-            // Active area content. Track the insertion point so the native
-            // terminal cursor can be anchored there — this lets the OS render
-            // IME composition (Korean, Japanese, Chinese) inline at the cursor
-            // instead of drifting to wherever the last text was written.
-            let mut cursor_display: Option<(u16, u16)> = None;
-            let mut selected_plugin_rows: Option<std::ops::Range<usize>> = None;
-            let cursor_line_start = lines.len();
-            match state.input_mode {
-                InputMode::InputTitle => {
-                    let prefix_cols = Span::raw("  Title: ").width();
-                    let (col, row) = wrapped_cursor_pos(
-                        &state.input_buffer,
-                        state.input_cursor,
-                        prefix_cols,
-                        wrap_width,
-                    );
-                    cursor_display = Some((col as u16, (cursor_line_start + row) as u16));
-                    push_wrapped(
-                        &mut lines,
-                        vec![
-                            Span::styled(
-                                "  Title: ".to_string(),
-                                Style::default()
-                                    .fg(selected_color)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                state.input_buffer.clone(),
-                                Style::default().fg(text_color),
-                            ),
-                        ],
-                    );
-                }
-                InputMode::SelectPlugin => {
-                    let active_plugin = state.config.workflow_plugin.as_deref().unwrap_or("");
-                    for (i, opt) in state.wizard_plugin_options.iter().enumerate() {
-                        let option_start = lines.len();
-                        let is_sel = i == state.wizard_selected_plugin;
-                        let marker = if is_sel { "  > " } else { "    " };
-                        let is_project_default = (opt.name.is_empty() && active_plugin.is_empty())
-                            || opt.name == active_plugin;
-                        let check = if is_project_default { " ✓" } else { "" };
-                        let name_style = if is_sel {
-                            Style::default()
-                                .fg(selected_color)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(text_color)
-                        };
-                        lines.extend(wizard_plugin_option_lines(
-                            marker,
-                            &opt.label,
-                            &opt.description,
-                            check,
-                            name_style,
-                            Style::default().fg(desc_color),
-                            wrap_width,
-                        ));
-                        if is_sel {
-                            selected_plugin_rows = Some(option_start..lines.len());
-                        }
-                    }
-                }
-                InputMode::InputDescription => {
-                    let prefix_cols = Span::raw("  Prompt: ").width();
-                    let (col, row) = wrapped_cursor_pos(
-                        &state.input_buffer,
-                        state.input_cursor,
-                        prefix_cols,
-                        wrap_width,
-                    );
-                    cursor_display = Some((col as u16, (cursor_line_start + row) as u16));
-                    let full_text = format!("  Prompt: {}", state.input_buffer);
-                    // Split on newlines to handle multi-line descriptions.
-                    // Each logical line is then pre-wrapped via push_wrapped so
-                    // visual layout matches wrapped_cursor_pos exactly.
-                    for part in full_text.split('\n') {
-                        if !state.highlighted_references.is_empty() {
-                            let styled = build_highlighted_text(
-                                part,
-                                &state.highlighted_references,
-                                text_color,
-                                highlight_color,
-                            );
-                            for line in styled.lines {
-                                let owned_spans: Vec<Span<'static>> = line
-                                    .spans
-                                    .into_iter()
-                                    .map(|s| Span::styled(s.content.into_owned(), s.style))
-                                    .collect();
-                                push_wrapped(&mut lines, owned_spans);
-                            }
-                        } else {
-                            push_wrapped(
-                                &mut lines,
-                                vec![Span::styled(
-                                    part.to_string(),
-                                    Style::default().fg(text_color),
-                                )],
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            }
-
-            // No `.wrap(...)` — `lines` is already pre-wrapped by `wrap_spans`
-            // to fit `wrap_width`. Letting Ratatui re-wrap would re-introduce
-            // the two-source-of-truth bug between renderer and cursor.
-            let viewport_height = input_area.height.saturating_sub(2) as usize;
-            let wizard_scroll = selected_plugin_rows
-                .map(|selected| wizard_plugin_scroll_offset(lines.len(), viewport_height, selected))
-                .unwrap_or(0);
-            let content = Paragraph::new(Text::from(lines))
-                .style(Style::default().fg(text_color))
-                .scroll((wizard_scroll as u16, 0))
-                .block(
-                    Block::default()
-                        .title(block_title)
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(selected_color)),
-                );
-            frame.render_widget(content, input_area);
-
-            // +1 offsets account for the surrounding Block border.
-            if let Some((col, row)) = cursor_display {
-                let abs_x = input_area.x.saturating_add(1).saturating_add(col);
-                let abs_y = input_area.y.saturating_add(1).saturating_add(row);
-                if abs_x < input_area.x + input_area.width
-                    && abs_y < input_area.y + input_area.height
-                {
-                    frame.set_cursor_position((abs_x, abs_y));
-                }
-            }
+        // The task wizard overlay
+        if let Some(ref wizard) = state.wizard {
+            let input_area = centered_rect(60, 60, area);
+            draw_wizard(state, wizard, frame, input_area);
 
             // Search dropdowns (only in InputDescription mode)
-            if state.input_mode == InputMode::InputDescription {
+            if wizard.step() == WizardStep::Prompt {
                 // File search dropdown
                 if let Some(ref search) = state.file_search {
                     if !search.matches.is_empty() {
@@ -2583,7 +2452,29 @@ impl App {
 
         // Trust confirmation popup
         if let Some(ref popup) = state.trust_confirm_popup {
-            let popup_area = centered_rect(60, 30, area);
+            // Sized to the content. At a fixed 30% height the answer line fell
+            // off the bottom as soon as a project declared two fields — a
+            // consent dialog that hides how to answer it.
+            let path = popup.project_path.display().to_string();
+            let widest = popup
+                .dangerous
+                .iter()
+                .map(|(f, v)| f.len() + v.chars().count() + 5)
+                .chain(std::iter::once(path.chars().count()))
+                .max()
+                .unwrap_or(60)
+                .max(52);
+            let width = (widest as u16 + 6).min(area.width.saturating_sub(4));
+            // path + intro + blank + heading + fields + blank + answer, then
+            // borders and the vertical margin.
+            let rows = 4 + popup.dangerous.len().max(1) as u16 + 2;
+            let height = (rows + 4).min(area.height.saturating_sub(2));
+            let popup_area = Rect {
+                x: area.x + area.width.saturating_sub(width) / 2,
+                y: area.y + area.height.saturating_sub(height) / 2,
+                width,
+                height,
+            };
             frame.render_widget(Clear, popup_area);
 
             let main_block = Block::default()
@@ -2594,19 +2485,50 @@ impl App {
 
             let inner = popup_area.inner(ratatui::layout::Margin {
                 horizontal: 2,
-                vertical: 2,
+                vertical: 1,
             });
-            let text = format!(
-                "This project's .agtx/config.toml has not been trusted yet.\n\n\
-                Dangerous fields (init_script, cleanup_script, copy_files) are\n\
-                currently disabled to protect against untrusted code execution.\n\n\
-                Project: {}\n\n\
-                Press any key to trust this project and continue.",
-                popup.project_path.display()
-            );
-            let content = Paragraph::new(text)
+            // Left-aligned, and showing the actual values: this is a consent
+            // dialog, and a centred summary of "dangerous fields" tells the
+            // user nothing about what would run.
+            let mut lines: Vec<Line<'static>> = vec![
+                Line::from(Span::styled(
+                    format!("{}", popup.project_path.display()),
+                    Style::default().fg(Color::White).bold(),
+                )),
+                Line::from(Span::styled(
+                    "ships an .agtx/config.toml agtx has not seen before.".to_string(),
+                    Style::default().fg(Color::White),
+                )),
+                Line::from(String::new()),
+            ];
+            if popup.dangerous.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "It declares no scripts or file copies.".to_string(),
+                    Style::default().fg(Color::White),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "Trusting it lets agtx run:".to_string(),
+                    Style::default().fg(Color::White),
+                )));
+                for (field, value) in &popup.dangerous {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {field} = "),
+                            Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
+                        ),
+                        Span::styled(value.clone(), Style::default().fg(Color::Yellow)),
+                    ]));
+                }
+            }
+            lines.push(Line::from(String::new()));
+            lines.push(Line::from(Span::styled(
+                "[y] trust and enable    [n] leave disabled".to_string(),
+                Style::default().fg(hex_to_color(&state.config.theme.color_selected)),
+            )));
+
+            let content = Paragraph::new(Text::from(lines))
                 .style(Style::default().fg(Color::White))
-                .alignment(ratatui::layout::Alignment::Center)
                 .wrap(Wrap { trim: false });
             frame.render_widget(content, inner);
         }
@@ -2723,6 +2645,16 @@ impl App {
 
             let content = Paragraph::new(lines);
             frame.render_widget(content, inner);
+        }
+
+        // The `?` overlay
+        if let Some(scroll) = state.help_scroll {
+            draw_help(state, scroll, frame, area);
+        }
+
+        // The config editor
+        if let Some(ref editor) = state.config_editor {
+            draw_config_editor(state, editor, frame, area);
         }
 
         // Git diff popup
@@ -3514,6 +3446,16 @@ impl App {
             return self.handle_plugin_select_key(key);
         }
 
+        // Handle the config editor if open
+        if self.state.config_editor.is_some() {
+            return self.handle_config_editor_key(key);
+        }
+
+        // Handle the help overlay if open
+        if self.state.help_scroll.is_some() {
+            return self.handle_help_key(key);
+        }
+
         // Handle task search popup if open
         if self.state.task_search.is_some() {
             return self.handle_task_search_key(key);
@@ -3527,23 +3469,19 @@ impl App {
         // Handle based on mode (Dashboard vs Project)
         match &self.state.mode {
             AppMode::Dashboard => self.handle_dashboard_key(key.code),
-            AppMode::Project(_) => match self.state.input_mode {
-                InputMode::Normal => {
-                    // Ctrl+f = open the selected task in the in-app fullscreen view.
-                    if key.code == KeyCode::Char('f')
-                        && key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL)
-                    {
-                        self.open_selected_task_fullscreen()?;
-                        return Ok(());
-                    }
-                    self.handle_normal_key(key.code)
+            AppMode::Project(_) if self.state.wizard.is_some() => self.handle_wizard_key(key),
+            AppMode::Project(_) => {
+                // Ctrl+f = open the selected task in the in-app fullscreen view.
+                if key.code == KeyCode::Char('f')
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                {
+                    self.open_selected_task_fullscreen()?;
+                    return Ok(());
                 }
-                InputMode::InputTitle => self.handle_title_input(key),
-                InputMode::SelectPlugin => self.handle_plugin_select_wizard(key),
-                InputMode::InputDescription => self.handle_description_input(key),
-            },
+                self.handle_normal_key(key.code)
+            }
         }
     }
 
@@ -3679,8 +3617,28 @@ impl App {
         Ok(())
     }
 
+    /// Answer the trust prompt.
+    ///
+    /// This decides whether shell commands the user has not read are allowed to
+    /// run, so it takes a deliberate `y`. It used to accept **any** key,
+    /// `Esc` included — which meant typing ahead after launch, or reaching for
+    /// an unrelated shortcut, silently granted it.
     fn handle_trust_confirm_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
-        let _ = key;
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {}
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
+                self.state.trust_confirm_popup = None;
+                self.state.warning_message = Some((
+                    "Left untrusted. init_script, cleanup_script and copy_files stay disabled."
+                        .to_string(),
+                    Instant::now(),
+                ));
+                return Ok(());
+            }
+            // Anything else leaves the question on screen rather than guessing.
+            _ => return Ok(()),
+        }
+
         if let Some(popup) = self.state.trust_confirm_popup.clone() {
             self.state.trust_confirm_popup = None;
             // Trust the project: save hash to trust store
@@ -3705,6 +3663,156 @@ impl App {
         Ok(())
     }
 
+    /// Keys while the `?` overlay is up. It is a reference, so it only scrolls
+    /// and closes.
+    fn handle_help_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let Some(scroll) = self.state.help_scroll else {
+            return Ok(());
+        };
+        // The renderer clamps to what actually fits; this only has to keep the
+        // offset inside the table.
+        // Clamp to what the last frame could actually show, not to the table
+        // length: an offset past the final screenful looks like a dead key.
+        let last = self.state.help_max_scroll.get();
+        let clamp = |row: i64| -> usize { row.clamp(0, last as i64) as usize };
+
+        // The same chords the task pane scrolls with, from the same table.
+        if let Some(action) = scroll_action_for(key) {
+            self.state.help_scroll = Some(match action {
+                PopupScroll::Up(lines) => clamp(scroll as i64 - lines as i64),
+                PopupScroll::Down(lines) => clamp(scroll as i64 + lines as i64),
+                PopupScroll::Bottom => last,
+            });
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                self.state.help_scroll = None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.state.help_scroll = Some(clamp(scroll as i64 + 1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.state.help_scroll = Some(clamp(scroll as i64 - 1));
+            }
+            KeyCode::Home => self.state.help_scroll = Some(0),
+            KeyCode::End => self.state.help_scroll = Some(last),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Open the config editor on the configs as they are on disk.
+    ///
+    /// Loaded fresh rather than reconstructed from `state.config`: that is a
+    /// *merged* view, and writing it back would bake every global default into
+    /// the project file as an explicit override.
+    fn open_config_editor(&mut self) {
+        let global = GlobalConfig::load().unwrap_or_default();
+        let project = self
+            .state
+            .project_path
+            .as_ref()
+            .map(|path| ProjectConfig::load(path).unwrap_or_default());
+
+        let agents: Vec<String> = agent::known_agents().into_iter().map(|a| a.name).collect();
+
+        let mut plugins: Vec<String> = skills::BUNDLED_PLUGINS
+            .iter()
+            .map(|(name, _, _)| name.to_string())
+            .collect();
+        for custom in skills::discover_custom_plugins(self.state.project_path.as_deref()) {
+            if !plugins.contains(&custom.name) {
+                plugins.push(custom.name);
+            }
+        }
+
+        self.state.config_editor = Some(ConfigEditor::open(global, project, &agents, &plugins));
+    }
+
+    fn handle_config_editor_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let Some(editor) = self.state.config_editor.as_mut() else {
+            return Ok(());
+        };
+        let action = editor.handle_key(key);
+        // Preview the theme as it is edited. Theme is global-only, so the
+        // merged config's copy can simply be replaced — no merge to redo, and
+        // every draw call already reads it. `reload_config` on close is what
+        // puts back an unsaved experiment.
+        let previewed = editor.global.theme.clone();
+        self.state.config.theme = previewed;
+
+        match action {
+            EditorAction::None => Ok(()),
+            EditorAction::Close => {
+                self.state.config_editor = None;
+                // Drop any previewed theme that was never saved.
+                self.reload_config();
+                Ok(())
+            }
+            EditorAction::Save => self.save_config_editor(),
+        }
+    }
+
+    /// Write both configs, restore the project's trust, and re-merge.
+    fn save_config_editor(&mut self) -> Result<()> {
+        let Some(editor) = self.state.config_editor.as_mut() else {
+            return Ok(());
+        };
+        let global = editor.global.clone();
+        let project = editor.project.clone();
+
+        if let Err(e) = global.save() {
+            editor.status = Some(format!("Could not save global config: {e}"));
+            return Ok(());
+        }
+
+        if let (Some(project), Some(path)) = (project, self.state.project_path.clone()) {
+            // Trust is a hash of this file, so read it before the write. See
+            // `TrustStore::retrust_after_agtx_write` — the user authored these
+            // changes in agtx's own UI, which is the consent the hash protects.
+            let was_trusted = crate::config::TrustStore::load()
+                .map(|store| store.is_trusted(&path))
+                .unwrap_or(false);
+            if let Err(e) = project.save(&path) {
+                if let Some(editor) = self.state.config_editor.as_mut() {
+                    editor.status = Some(format!("Could not save project config: {e}"));
+                }
+                return Ok(());
+            }
+            if let Err(e) = crate::config::TrustStore::retrust_after_agtx_write(&path, was_trusted)
+            {
+                self.state.warning_message = Some((
+                    format!("Config saved, but re-trusting the project failed: {e}"),
+                    Instant::now(),
+                ));
+            }
+        }
+
+        self.reload_config();
+        if let Some(editor) = self.state.config_editor.as_mut() {
+            editor.mark_saved("Saved. Worktree settings apply to new tasks.");
+        }
+        Ok(())
+    }
+
+    /// Re-read both configs from disk and rebuild everything derived from them.
+    fn reload_config(&mut self) {
+        let global = GlobalConfig::load().unwrap_or_default();
+        let project = self
+            .state
+            .project_path
+            .as_ref()
+            .map(|path| ProjectConfig::load(path).unwrap_or_default())
+            .unwrap_or_default();
+        self.state.config = MergedConfig::merge(&global, &project);
+        self.state.cached_plugin = Some(load_plugin_if_configured(
+            &self.state.config,
+            self.state.project_path.as_deref(),
+        ));
+    }
+
     fn open_plugin_select_popup(&mut self) {
         let current = self
             .state
@@ -3712,7 +3820,7 @@ impl App {
             .workflow_plugin
             .as_deref()
             .unwrap_or("agtx");
-        let mut options = vec![PluginOption {
+        let mut options = vec![PickOption {
             name: "agtx".to_string(),
             label: "agtx".to_string(),
             description: "Built-in workflow with skills and prompts".to_string(),
@@ -3722,7 +3830,7 @@ impl App {
             if *name == "agtx" {
                 continue;
             }
-            options.push(PluginOption {
+            options.push(PickOption {
                 name: name.to_string(),
                 label: name.to_string(),
                 description: desc.to_string(),
@@ -3734,7 +3842,7 @@ impl App {
             if !custom.plugin.supports_agent(agent_name) {
                 continue;
             }
-            options.push(PluginOption {
+            options.push(PickOption {
                 name: custom.name.clone(),
                 label: custom.name.clone(),
                 description: custom.description,
@@ -3777,6 +3885,12 @@ impl App {
             return Ok(());
         };
 
+        // Read trust *before* the write: saving the config changes its hash,
+        // which is what trust is. See `TrustStore::retrust_after_agtx_write`.
+        let was_trusted = crate::config::TrustStore::load()
+            .map(|store| store.is_trusted(&project_path))
+            .unwrap_or(false);
+
         // Load current project config
         let mut project_config = ProjectConfig::load(&project_path).unwrap_or_default();
 
@@ -3798,6 +3912,18 @@ impl App {
 
         // Save project config
         project_config.save(&project_path)?;
+
+        // The save just invalidated the trust hash. Restore the prior decision
+        // so picking a plugin does not untrust the project behind the user's
+        // back; a project that was already untrusted stays that way.
+        if let Err(e) =
+            crate::config::TrustStore::retrust_after_agtx_write(&project_path, was_trusted)
+        {
+            self.state.warning_message = Some((
+                format!("Plugin set, but re-trusting the project failed: {}", e),
+                Instant::now(),
+            ));
+        }
 
         // Refresh merged config and cached plugin
         let global_config = GlobalConfig::load().unwrap_or_default();
@@ -4207,16 +4333,7 @@ impl App {
                 return Ok(());
             }
 
-            let scroll_action = match key.code {
-                KeyCode::Char('p') | KeyCode::Up if has_ctrl => Some(PopupScroll::Up(5)),
-                KeyCode::Char('n') | KeyCode::Down if has_ctrl => Some(PopupScroll::Down(5)),
-                KeyCode::Char('u') if has_ctrl => Some(PopupScroll::Up(20)),
-                KeyCode::PageUp => Some(PopupScroll::Up(20)),
-                KeyCode::Char('d') if has_ctrl => Some(PopupScroll::Down(20)),
-                KeyCode::PageDown => Some(PopupScroll::Down(20)),
-                KeyCode::Char('g') if has_ctrl => Some(PopupScroll::Bottom),
-                _ => None,
-            };
+            let scroll_action = scroll_action_for(key);
             if let Some(action) = scroll_action {
                 handle_popup_scroll(
                     popup,
@@ -4304,11 +4421,12 @@ impl App {
             return Ok(());
         }
 
-        // Description editor open: insert pasted text at cursor
-        if self.state.input_mode == InputMode::InputDescription {
-            let cursor = self.state.input_cursor;
-            self.state.input_buffer.insert_str(cursor, &text);
-            self.state.input_cursor += text.len();
+        // Prompt step open: insert pasted text at the caret.
+        if self.state.wizard_step() == Some(WizardStep::Prompt) {
+            let prompt = self.prompt_mut();
+            let cursor = prompt.cursor;
+            prompt.buffer.insert_str(cursor, &text);
+            prompt.cursor += text.len();
         }
 
         Ok(())
@@ -4485,10 +4603,8 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.state.board.move_up(),
             KeyCode::Char('o') => {
                 // New task
-                self.state.input_mode = InputMode::InputTitle;
-                self.state.input_buffer.clear();
-                self.state.pending_task_title.clear();
-                self.state.editing_task_id = None;
+                self.state.wizard = Some(WizardState::creating());
+                self.seed_wizard_lists();
             }
             KeyCode::Enter => {
                 if let Some(task) = self.state.board.selected_task() {
@@ -4501,11 +4617,9 @@ impl App {
                         }
                     } else if task.status == TaskStatus::Backlog {
                         // Edit task
-                        self.state.editing_task_id = Some(task.id.clone());
-                        self.state.input_buffer = task.title.clone();
-                        self.state.input_cursor = self.state.input_buffer.len();
-                        self.state.pending_task_title.clear();
-                        self.state.input_mode = InputMode::InputTitle;
+                        self.state.wizard =
+                            Some(WizardState::editing(task.id.clone(), task.title.clone()));
+                        self.seed_wizard_lists();
                     } else if task.session_name.is_some() {
                         // Open shell popup or fullscreen
                         if self.state.config.fullscreen_on_enter {
@@ -4565,6 +4679,8 @@ impl App {
                 // Open plugin selection popup
                 self.open_plugin_select_popup();
             }
+            KeyCode::Char(',') => self.open_config_editor(),
+            KeyCode::Char('?') => self.state.help_scroll = Some(0),
             KeyCode::Char('u') if self.state.update_available.is_some() => {
                 self.open_update_popup();
             }
@@ -4577,444 +4693,489 @@ impl App {
         Ok(())
     }
 
+    /// The wizard's state. Only reachable while it is open, which the key
+    /// dispatch guarantees before routing anything here.
+    fn wizard_mut(&mut self) -> &mut WizardState {
+        self.state
+            .wizard
+            .as_mut()
+            .expect("wizard handlers only run while the wizard is open")
+    }
+
+    /// Every key the wizard sees, whichever step it is on.
+    ///
+    /// The navigation keys are handled first and identically on all three
+    /// steps — that is the whole point of one handler. Only what is left over
+    /// is dispatched to the step.
+    fn handle_wizard_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let ctrl = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+
+        // A dropdown on the prompt step owns its keys entirely, including Esc
+        // and Enter — closing the picker must not also step the wizard back.
+        if self.wizard_mut().step() == WizardStep::Prompt
+            && (self.handle_task_ref_search_key(key)
+                || self.handle_skill_search_key(key)
+                || self.handle_file_search_key(key))
+        {
+            return Ok(());
+        }
+
+        // Any keystroke means the user is acting on the complaint, so it goes.
+        self.wizard_mut().validation = None;
+
+        match key.code {
+            // Save from anywhere, so a correction made on step one does not
+            // require walking forward through the rest of the flow again.
+            KeyCode::Char('s') if ctrl => {
+                self.try_save_wizard()?;
+                return Ok(());
+            }
+            // Esc leaves the wizard outright, from any step. Stepping back is
+            // Shift+Tab / Ctrl+B below — one key that always means "get me out
+            // of here" beats one whose effect depends on where you are.
+            KeyCode::Esc => {
+                self.cancel_wizard();
+                return Ok(());
+            }
+            // Legacy terminals send BackTab; the Kitty protocol sends Tab with
+            // SHIFT. Both mean the same thing.
+            KeyCode::BackTab => {
+                self.wizard_mut().back();
+                return Ok(());
+            }
+            KeyCode::Tab
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::SHIFT) =>
+            {
+                self.wizard_mut().back();
+                return Ok(());
+            }
+            KeyCode::Char('b') if ctrl => {
+                self.wizard_mut().back();
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        match self.wizard_mut().step() {
+            WizardStep::Title => self.handle_title_input(key),
+            WizardStep::Agent | WizardStep::Plugin => self.handle_list_step_key(key),
+            WizardStep::Prompt => self.handle_prompt_input(key),
+        }
+    }
+
     fn handle_title_input(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
-        let has_alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
         match key.code {
-            KeyCode::Esc => {
-                self.cancel_wizard();
+            KeyCode::Enter => self.advance_wizard()?,
+            // Motion, deletion and ordinary characters are the same in every
+            // text field; only the keys above mean something particular here.
+            _ => {
+                self.wizard_mut().title.handle_edit_key(key);
             }
-            KeyCode::Enter => {
-                if !self.state.input_buffer.is_empty() {
-                    self.state.pending_task_title = self.state.input_buffer.clone();
-                    self.state.input_buffer.clear();
-                    self.state.input_cursor = 0;
-                    self.advance_from_title();
+        }
+        Ok(())
+    }
+
+    /// Keys on the agent and plugin steps. Both are pick-one-from-a-list, so
+    /// they share a handler.
+    ///
+    /// `/` starts a filter, and while one is open ordinary characters go to it
+    /// — which is why navigation there is arrows and `C-n`/`C-p` rather than
+    /// `j`/`k`. Without the filter open, `j`/`k` navigate as usual.
+    fn handle_list_step_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let ctrl = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+        if key.code == KeyCode::Enter {
+            return self.advance_wizard();
+        }
+        let Some(list) = self.wizard_mut().current_list_mut() else {
+            return Ok(());
+        };
+
+        if list.is_filtering() {
+            match key.code {
+                KeyCode::Down => list.select_next(),
+                KeyCode::Up => list.select_prev(),
+                KeyCode::Char('n') if ctrl => list.select_next(),
+                KeyCode::Char('p') if ctrl => list.select_prev(),
+                KeyCode::Tab => list.cycle(),
+                _ => {
+                    let filter = list.filter.as_mut().expect("filtering");
+                    if filter.handle_edit_key(key) {
+                        // Backspacing the filter away is how you leave it, so
+                        // the whole list comes back rather than the step
+                        // staying in a mode with nothing typed.
+                        if filter.is_empty() && key.code == KeyCode::Backspace {
+                            list.stop_filter();
+                        }
+                        list.settle();
+                    }
                 }
             }
-            KeyCode::Left if has_alt => {
-                self.state.input_cursor =
-                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Char('/') => list.start_filter(),
+            KeyCode::Char('j') | KeyCode::Down => list.select_next(),
+            KeyCode::Char('k') | KeyCode::Up => list.select_prev(),
+            KeyCode::Char('n') if ctrl => list.select_next(),
+            KeyCode::Char('p') if ctrl => list.select_prev(),
+            KeyCode::Tab => list.cycle(),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Move to the next step, seeding it if this is the first time through, or
+    /// save when there is no next step.
+    fn advance_wizard(&mut self) -> Result<()> {
+        if self.wizard_mut().step() == WizardStep::Title {
+            // Nothing downstream can proceed without a title, so refuse here
+            // rather than letting the user reach the last step and be told.
+            if let Some(problem) = self.title_problem() {
+                self.wizard_mut().validation = Some(problem);
+                return Ok(());
             }
-            KeyCode::Right if has_alt => {
-                self.state.input_cursor =
-                    word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+        }
+        // The plugin list is filtered by the agent the task will run on, so a
+        // change on the agent step has to rebuild it — otherwise the user is
+        // offered plugins their agent does not support.
+        if self.wizard_mut().step() == WizardStep::Agent {
+            self.reseed_plugins_for_agent();
+        }
+        if !self.wizard_mut().advance() {
+            return self.try_save_wizard();
+        }
+        if self.wizard_mut().step() == WizardStep::Prompt {
+            self.seed_prompt_step();
+        }
+        Ok(())
+    }
+
+    /// Save if the wizard has what it needs, and say why not if it does not.
+    ///
+    /// The refusal used to be silent: `Enter` on an empty title simply did
+    /// nothing, which reads as a broken key rather than a rejected input.
+    /// What is wrong with the title, if anything.
+    ///
+    /// One function so `Enter` on the title step and `Ctrl+S` from anywhere
+    /// refuse for the same reasons and say the same thing.
+    fn title_problem(&self) -> Option<String> {
+        let wizard = self.state.wizard.as_ref()?;
+        let title = wizard.title.as_str().trim();
+        if title.is_empty() {
+            return Some("A title is required.".to_string());
+        }
+        if title.chars().count() > MAX_TASK_TITLE_CHARS {
+            return Some(format!(
+                "Title is {} characters; the limit is {MAX_TASK_TITLE_CHARS}.",
+                title.chars().count()
+            ));
+        }
+        // A duplicate is legal but almost never intended, and the board shows
+        // titles alone — two identical cards are indistinguishable.
+        let editing = wizard.editing_task_id.as_deref();
+        let clash = self
+            .state
+            .board
+            .tasks
+            .iter()
+            .any(|t| Some(t.id.as_str()) != editing && t.title.trim() == title);
+        if clash {
+            return Some(format!("Another task is already called \"{title}\"."));
+        }
+        None
+    }
+
+    fn try_save_wizard(&mut self) -> Result<()> {
+        if let Some(problem) = self.title_problem() {
+            let wizard = self.wizard_mut();
+            // Send the user where the problem is, not where the key was pressed.
+            // `back` clears the message on the way, so it is set afterwards.
+            while wizard.step() != WizardStep::Title && wizard.back() {}
+            wizard.validation = Some(problem);
+            return Ok(());
+        }
+        self.save_task()?;
+        self.cancel_wizard();
+        Ok(())
+    }
+
+    /// The wizard's prompt field.
+    ///
+    /// The dropdown handlers below only run while the prompt step is open, so a
+    /// missing wizard there is a routing bug rather than a state to handle.
+    fn prompt_mut(&mut self) -> &mut TextInput {
+        &mut self
+            .state
+            .wizard
+            .as_mut()
+            .expect("prompt handlers only run while the wizard is open")
+            .prompt
+    }
+
+    /// Splice `replacement` over the trigger character and the pattern typed
+    /// after it, keeping whatever follows.
+    ///
+    /// All three dropdowns commit and cancel this way; only the text differs.
+    /// The caret lands at the end of the inserted text rather than the end of
+    /// the line, which is what lets the user keep typing mid-sentence.
+    fn splice_search_region(&mut self, start: usize, pattern_len: usize, replacement: &str) {
+        let prompt = self.prompt_mut();
+        // +1 for the trigger character itself.
+        let end = (start + 1 + pattern_len).min(prompt.buffer.len());
+        let start = start.min(prompt.buffer.len());
+        let suffix = prompt.buffer[end..].to_string();
+        prompt.buffer.truncate(start);
+        prompt.buffer.push_str(replacement);
+        prompt.cursor = prompt.buffer.len();
+        prompt.buffer.push_str(&suffix);
+    }
+
+    /// Keys belonging to the `!` task-reference dropdown. `false` when it is
+    /// not open, so the caller falls through to the ordinary prompt handling.
+    ///
+    /// The dropdown state is **taken out** for the duration. Every arm needs it
+    /// alongside the wizard's prompt field, and several also call back into
+    /// `self` to refresh the match list; holding a borrow across those is what
+    /// forced the old re-`if let` dance.
+    fn handle_task_ref_search_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(mut search) = self.state.task_ref_search.take() else {
+            return false;
+        };
+        let ctrl = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+        let mut keep_open = true;
+        let mut refresh = false;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.splice_search_region(search.start_pos, search.pattern.len(), "");
+                keep_open = false;
             }
-            // macOS: Option+Left/Right sends Alt+b / Alt+f
-            KeyCode::Char('b') if has_alt => {
-                self.state.input_cursor =
-                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+            KeyCode::Enter | KeyCode::Tab => {
+                if let Some((task_id, title, _status)) =
+                    search.matches.get(search.selected).cloned()
+                {
+                    let ref_text = format!("![{}]", title);
+                    self.splice_search_region(search.start_pos, search.pattern.len(), &ref_text);
+                    let wizard = self.wizard_mut();
+                    wizard.highlighted_references.insert(ref_text);
+                    wizard.referenced_task_ids.insert(task_id);
+                }
+                keep_open = false;
             }
-            KeyCode::Char('f') if has_alt => {
-                self.state.input_cursor =
-                    word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
-            }
-            // Alt+Backspace: delete word backward (macOS Option+Delete)
-            KeyCode::Backspace if has_alt => {
-                let new_pos = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
-                self.state
-                    .input_buffer
-                    .drain(new_pos..self.state.input_cursor);
-                self.state.input_cursor = new_pos;
-            }
-            KeyCode::Left => {
-                self.state.input_cursor =
-                    prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
-            }
-            KeyCode::Right => {
-                self.state.input_cursor =
-                    next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
-            }
-            KeyCode::Home => {
-                self.state.input_cursor = 0;
-            }
-            KeyCode::End => {
-                self.state.input_cursor = self.state.input_buffer.len();
-            }
+            KeyCode::Up => search.select_prev(),
+            KeyCode::Down => search.select_next(),
+            KeyCode::Char('k') | KeyCode::Char('p') if ctrl => search.select_prev(),
+            KeyCode::Char('j') | KeyCode::Char('n') if ctrl => search.select_next(),
             KeyCode::Backspace => {
-                if self.state.input_cursor > 0 {
-                    let new_pos =
-                        prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
-                    self.state
-                        .input_buffer
-                        .drain(new_pos..self.state.input_cursor);
-                    self.state.input_cursor = new_pos;
-                }
-            }
-            KeyCode::Delete => {
-                if self.state.input_cursor < self.state.input_buffer.len() {
-                    let end = next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
-                    self.state.input_buffer.drain(self.state.input_cursor..end);
-                }
-            }
-            KeyCode::Char(c) => {
-                self.state.input_buffer.insert(self.state.input_cursor, c);
-                self.state.input_cursor += c.len_utf8();
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn handle_plugin_select_wizard(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Esc => {
-                self.cancel_wizard();
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                let max = self.state.wizard_plugin_options.len().saturating_sub(1);
-                if self.state.wizard_selected_plugin < max {
-                    self.state.wizard_selected_plugin += 1;
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.state.wizard_selected_plugin > 0 {
-                    self.state.wizard_selected_plugin -= 1;
-                }
-            }
-            KeyCode::Tab => {
-                let len = self.state.wizard_plugin_options.len();
-                if len > 0 {
-                    self.state.wizard_selected_plugin =
-                        (self.state.wizard_selected_plugin + 1) % len;
-                }
-            }
-            KeyCode::Enter => {
-                self.init_description_input();
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn handle_description_input(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
-        // Handle task reference search mode if active
-        if let Some(ref mut search) = self.state.task_ref_search {
-            match key.code {
-                KeyCode::Esc => {
-                    // Cancel task ref search, remove `!` + pattern from buffer
-                    let remove_end = search.start_pos + 1 + search.pattern.len();
-                    let suffix = self.state.input_buffer[remove_end..].to_string();
-                    self.state.input_buffer.truncate(search.start_pos);
-                    self.state.input_buffer.push_str(&suffix);
-                    self.state.input_cursor = search.start_pos;
-                    self.state.task_ref_search = None;
-                }
-                KeyCode::Enter | KeyCode::Tab => {
-                    if let Some((task_id, title, _status)) =
-                        search.matches.get(search.selected).cloned()
-                    {
-                        // Replace `!` + pattern with ![task-title]
-                        let pattern_end = search.start_pos + 1 + search.pattern.len();
-                        let suffix = self.state.input_buffer[pattern_end..].to_string();
-                        self.state.input_buffer.truncate(search.start_pos);
-                        let ref_text = format!("![{}]", title);
-                        self.state.input_buffer.push_str(&ref_text);
-                        self.state.input_cursor = self.state.input_buffer.len();
-                        self.state.input_buffer.push_str(&suffix);
-                        self.state.highlighted_references.insert(ref_text);
-                        self.state.wizard_referenced_task_ids.insert(task_id);
-                    }
-                    self.state.task_ref_search = None;
-                }
-                KeyCode::Up => {
-                    if search.selected > 0 {
-                        search.selected -= 1;
-                    }
-                }
-                KeyCode::Down => {
-                    if search.selected < search.matches.len().saturating_sub(1) {
-                        search.selected += 1;
-                    }
-                }
-                KeyCode::Backspace => {
-                    if search.pattern.is_empty() {
-                        // Remove the `!` trigger character
-                        if self.state.input_cursor > 0 {
-                            self.state.input_cursor -= 1;
-                            self.state.input_buffer.remove(self.state.input_cursor);
-                        }
-                        self.state.task_ref_search = None;
-                    } else {
-                        search.pattern.pop();
-                        if self.state.input_cursor > 0 {
-                            let new_pos = prev_char_boundary(
-                                &self.state.input_buffer,
-                                self.state.input_cursor,
-                            );
-                            self.state
-                                .input_buffer
-                                .drain(new_pos..self.state.input_cursor);
-                            self.state.input_cursor = new_pos;
-                        }
-                        let query = search.pattern.clone();
-                        let matches = self.get_all_task_matches(&query);
-                        if let Some(ref mut search) = self.state.task_ref_search {
-                            search.matches = matches;
-                            search.selected = 0;
-                        }
-                    }
-                }
-                KeyCode::Char(c) => {
-                    if let Some(ref mut search) = self.state.task_ref_search {
-                        search.pattern.push(c);
-                    }
-                    self.state.input_buffer.insert(self.state.input_cursor, c);
-                    self.state.input_cursor += c.len_utf8();
-                    let query = self
-                        .state
-                        .task_ref_search
-                        .as_ref()
-                        .map(|s| s.pattern.clone())
-                        .unwrap_or_default();
-                    let matches = self.get_all_task_matches(&query);
-                    if let Some(ref mut search) = self.state.task_ref_search {
-                        search.matches = matches;
-                        search.selected = 0;
-                    }
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        // Handle skill search mode if active
-        if let Some(ref mut search) = self.state.skill_search {
-            match key.code {
-                KeyCode::Esc => {
-                    // Cancel skill search, remove `/` + pattern from buffer
-                    let remove_end = search.start_pos + 1 + search.pattern.len();
-                    let suffix = self.state.input_buffer[remove_end..].to_string();
-                    self.state.input_buffer.truncate(search.start_pos);
-                    self.state.input_buffer.push_str(&suffix);
-                    self.state.input_cursor = search.start_pos;
-                    self.state.skill_search = None;
-                }
-                KeyCode::Enter | KeyCode::Tab => {
-                    if let Some(entry) = search.matches.get(search.selected).cloned() {
-                        // Replace `/` + pattern with the full command
-                        let pattern_end = search.start_pos + 1 + search.pattern.len();
-                        let suffix = self.state.input_buffer[pattern_end..].to_string();
-                        self.state.input_buffer.truncate(search.start_pos);
-                        self.state.input_buffer.push_str(&entry.command);
-                        self.state.input_cursor = self.state.input_buffer.len();
-                        self.state.input_buffer.push_str(&suffix);
-                        self.state.highlighted_references.insert(entry.command);
-                    }
-                    self.state.skill_search = None;
-                }
-                KeyCode::Up => {
-                    if search.selected > 0 {
-                        search.selected -= 1;
-                    }
-                }
-                KeyCode::Down => {
-                    if search.selected < search.matches.len().saturating_sub(1) {
-                        search.selected += 1;
-                    }
-                }
-                KeyCode::Char('k') | KeyCode::Char('p')
-                    if key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    if search.selected > 0 {
-                        search.selected -= 1;
-                    }
-                }
-                KeyCode::Char('j') | KeyCode::Char('n')
-                    if key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    if search.selected < search.matches.len().saturating_sub(1) {
-                        search.selected += 1;
-                    }
-                }
-                KeyCode::Backspace => {
-                    if search.pattern.is_empty() {
-                        // Cancel search if pattern is empty
-                        self.state.input_buffer.remove(search.start_pos); // Remove the `/`
-                        self.state.input_cursor = search.start_pos;
-                        self.state.skill_search = None;
-                    } else {
-                        search.pattern.pop();
-                        let new_pos =
-                            prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
-                        self.state
-                            .input_buffer
-                            .drain(new_pos..self.state.input_cursor);
-                        self.state.input_cursor = new_pos;
-                        self.update_skill_search_matches();
-                    }
-                }
-                KeyCode::Char(c) => {
-                    search.pattern.push(c);
-                    self.state.input_buffer.insert(self.state.input_cursor, c);
-                    self.state.input_cursor += c.len_utf8();
-                    self.update_skill_search_matches();
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        // Handle file search mode if active
-        if let Some(ref mut search) = self.state.file_search {
-            match key.code {
-                KeyCode::Esc => {
-                    // Cancel file search
-                    self.state.file_search = None;
-                }
-                KeyCode::Enter | KeyCode::Tab => {
-                    // Select current match
-                    if let Some(selected_file) = search.matches.get(search.selected).cloned() {
-                        // Replace trigger+pattern with the selected file path, preserving text after
-                        let pattern_end = search.start_pos + 1 + search.pattern.len(); // +1 for trigger char
-                        let suffix = self.state.input_buffer[pattern_end..].to_string();
-                        self.state.input_buffer.truncate(search.start_pos);
-                        self.state.input_buffer.push_str(&selected_file);
-                        self.state.input_cursor = self.state.input_buffer.len();
-                        self.state.input_buffer.push_str(&suffix);
-                        self.state.highlighted_references.insert(selected_file);
-                    }
-                    self.state.file_search = None;
-                }
-                KeyCode::Up => {
-                    if search.selected > 0 {
-                        search.selected -= 1;
-                    }
-                }
-                KeyCode::Down => {
-                    if search.selected < search.matches.len().saturating_sub(1) {
-                        search.selected += 1;
-                    }
-                }
-                KeyCode::Char('k') | KeyCode::Char('p')
-                    if key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    if search.selected > 0 {
-                        search.selected -= 1;
-                    }
-                }
-                KeyCode::Char('j') | KeyCode::Char('n')
-                    if key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    if search.selected < search.matches.len().saturating_sub(1) {
-                        search.selected += 1;
-                    }
-                }
-                KeyCode::Backspace => {
-                    if search.pattern.is_empty() {
-                        // Cancel search if pattern is empty
-                        self.state.input_buffer.pop(); // Remove the trigger char (ASCII)
-                        self.state.input_cursor = self.state.input_cursor.saturating_sub(1);
-                        self.state.file_search = None;
-                    } else {
-                        search.pattern.pop();
-                        self.state.input_buffer.pop();
-                        self.state.input_cursor = self.state.input_buffer.len();
-                        self.update_file_search_matches();
-                    }
-                }
-                KeyCode::Char(c) => {
-                    search.pattern.push(c);
-                    self.state.input_buffer.push(c);
-                    self.state.input_cursor += c.len_utf8();
-                    self.update_file_search_matches();
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        match key.code {
-            KeyCode::Esc => {
-                self.cancel_wizard();
-            }
-            KeyCode::Enter => {
-                // Check if line ends with backslash for line continuation
-                if self.state.input_buffer.ends_with('\\') {
-                    // Remove backslash and insert newline
-                    self.state.input_buffer.pop();
-                    self.state.input_buffer.push('\n');
-                    self.state.input_cursor = self.state.input_buffer.len();
+                if search.pattern.is_empty() {
+                    // Nothing typed yet: backspace removes the `!` and closes.
+                    self.prompt_mut().backspace();
+                    keep_open = false;
                 } else {
-                    // Save task (create or update)
-                    self.save_task()?;
-                    self.cancel_wizard();
+                    search.pattern.pop();
+                    self.prompt_mut().backspace();
+                    refresh = true;
                 }
             }
-            KeyCode::Left if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
-                self.state.input_cursor =
-                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+            // A chord the picker did not claim is not text: `Ctrl+X` typed a
+            // literal "x" into the pattern before this guard, and `Ctrl+J`
+            // means newline once the picker is closed.
+            KeyCode::Char(c) if !ctrl && !alt => {
+                search.pattern.push(c);
+                self.prompt_mut().insert_char(c);
+                refresh = true;
             }
-            KeyCode::Right if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
-                self.state.input_cursor =
-                    word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+            _ => {}
+        }
+
+        if keep_open {
+            if refresh {
+                search.matches = self.get_all_task_matches(&search.pattern);
+                search.selected = 0;
             }
-            // macOS: Option+Left/Right sends Alt+b / Alt+f
-            KeyCode::Char('b') if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
-                self.state.input_cursor =
-                    word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
+            self.state.task_ref_search = Some(search);
+        }
+        true
+    }
+
+    /// Keys belonging to the `/` skill dropdown. See
+    /// `handle_task_ref_search_key` for why the state is taken out.
+    fn handle_skill_search_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(mut search) = self.state.skill_search.take() else {
+            return false;
+        };
+        let ctrl = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+        let mut keep_open = true;
+        let mut refresh = false;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.splice_search_region(search.start_pos, search.pattern.len(), "");
+                keep_open = false;
             }
-            KeyCode::Char('f') if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
-                self.state.input_cursor =
-                    word_boundary_right(&self.state.input_buffer, self.state.input_cursor);
+            KeyCode::Enter | KeyCode::Tab => {
+                if let Some(entry) = search.matches.get(search.selected).cloned() {
+                    self.splice_search_region(
+                        search.start_pos,
+                        search.pattern.len(),
+                        &entry.command,
+                    );
+                    self.wizard_mut()
+                        .highlighted_references
+                        .insert(entry.command);
+                }
+                keep_open = false;
             }
-            // Alt+Backspace: delete word backward (macOS Option+Delete)
-            KeyCode::Backspace if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
-                let new_pos = word_boundary_left(&self.state.input_buffer, self.state.input_cursor);
-                self.state
-                    .input_buffer
-                    .drain(new_pos..self.state.input_cursor);
-                self.state.input_cursor = new_pos;
-            }
-            KeyCode::Left => {
-                self.state.input_cursor =
-                    prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
-            }
-            KeyCode::Right => {
-                self.state.input_cursor =
-                    next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
-            }
-            KeyCode::Home => {
-                self.state.input_cursor = 0;
-            }
-            KeyCode::End => {
-                self.state.input_cursor = self.state.input_buffer.len();
-            }
+            KeyCode::Up => search.select_prev(),
+            KeyCode::Down => search.select_next(),
+            KeyCode::Char('k') | KeyCode::Char('p') if ctrl => search.select_prev(),
+            KeyCode::Char('j') | KeyCode::Char('n') if ctrl => search.select_next(),
             KeyCode::Backspace => {
-                if self.state.input_cursor > 0 {
-                    let new_pos =
-                        prev_char_boundary(&self.state.input_buffer, self.state.input_cursor);
-                    self.state
-                        .input_buffer
-                        .drain(new_pos..self.state.input_cursor);
-                    self.state.input_cursor = new_pos;
+                if search.pattern.is_empty() {
+                    self.prompt_mut().backspace();
+                    keep_open = false;
+                } else {
+                    search.pattern.pop();
+                    self.prompt_mut().backspace();
+                    refresh = true;
                 }
             }
-            KeyCode::Delete => {
-                if self.state.input_cursor < self.state.input_buffer.len() {
-                    let end = next_char_boundary(&self.state.input_buffer, self.state.input_cursor);
-                    self.state.input_buffer.drain(self.state.input_cursor..end);
+            KeyCode::Char(c) if !ctrl && !alt => {
+                search.pattern.push(c);
+                self.prompt_mut().insert_char(c);
+                refresh = true;
+            }
+            _ => {}
+        }
+
+        if keep_open {
+            self.state.skill_search = Some(search);
+            if refresh {
+                self.update_skill_search_matches();
+            }
+        }
+        true
+    }
+
+    /// Keys belonging to the `#` / `@` file dropdown. See
+    /// `handle_task_ref_search_key` for why the state is taken out.
+    fn handle_file_search_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(mut search) = self.state.file_search.take() else {
+            return false;
+        };
+        let ctrl = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+        let mut keep_open = true;
+        let mut refresh = false;
+
+        match key.code {
+            // Unlike the other two, Esc leaves the typed text in place — the
+            // `#` was a real character the user may have meant.
+            KeyCode::Esc => keep_open = false,
+            KeyCode::Enter | KeyCode::Tab => {
+                if let Some(selected_file) = search.matches.get(search.selected).cloned() {
+                    self.splice_search_region(
+                        search.start_pos,
+                        search.pattern.len(),
+                        &selected_file,
+                    );
+                    self.wizard_mut()
+                        .highlighted_references
+                        .insert(selected_file);
+                }
+                keep_open = false;
+            }
+            KeyCode::Up => search.select_prev(),
+            KeyCode::Down => search.select_next(),
+            KeyCode::Char('k') | KeyCode::Char('p') if ctrl => search.select_prev(),
+            KeyCode::Char('j') | KeyCode::Char('n') if ctrl => search.select_next(),
+            KeyCode::Backspace => {
+                if search.pattern.is_empty() {
+                    self.prompt_mut().backspace();
+                    keep_open = false;
+                } else {
+                    search.pattern.pop();
+                    self.prompt_mut().backspace();
+                    refresh = true;
+                }
+            }
+            KeyCode::Char(c) if !ctrl && !alt => {
+                search.pattern.push(c);
+                self.prompt_mut().insert_char(c);
+                refresh = true;
+            }
+            _ => {}
+        }
+
+        if keep_open {
+            self.state.file_search = Some(search);
+            if refresh {
+                self.update_file_search_matches();
+            }
+        }
+        true
+    }
+
+    /// Keys on the wizard's prompt step, once no dropdown has claimed them.
+    fn handle_prompt_input(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        match key.code {
+            // Two chords that need no negotiation from the terminal, beside
+            // the `\`+Enter escape below:
+            //
+            // - `Ctrl+J` always works: in raw mode crossterm parses 0x0A as
+            //   Ctrl+J rather than as Enter.
+            // - `Alt+Enter` arrives as ESC then CR on most terminals, though
+            //   macOS Terminal and iTerm2 only send it once Option is
+            //   configured as Meta.
+            //
+            // `Shift+Enter` is deliberately absent: a terminal sends a bare CR
+            // for both it and Enter unless the Kitty keyboard protocol is
+            // negotiated, so the binding would fire almost never and read as
+            // "save" the rest of the time. See `with_ops`.
+            KeyCode::Char('j')
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                self.prompt_mut().insert_char('\n');
+            }
+            KeyCode::Enter if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
+                self.prompt_mut().insert_char('\n');
+            }
+            KeyCode::Enter => {
+                // A trailing backslash is the line-continuation escape.
+                if self.prompt_mut().buffer.ends_with('\\') {
+                    let prompt = self.prompt_mut();
+                    prompt.buffer.pop();
+                    prompt.buffer.push('\n');
+                    prompt.cursor = prompt.buffer.len();
+                } else {
+                    self.try_save_wizard()?;
                 }
             }
             KeyCode::Char('#') | KeyCode::Char('@') => {
-                // Start file search at cursor position
                 let trigger = if let KeyCode::Char(c) = key.code {
                     c
                 } else {
                     '#'
                 };
-                let start_pos = self.state.input_cursor;
-                self.state
-                    .input_buffer
-                    .insert(self.state.input_cursor, trigger);
-                self.state.input_cursor += 1;
+                let start_pos = self.prompt_mut().cursor;
+                self.prompt_mut().insert_char(trigger);
                 self.state.file_search = Some(FileSearchState {
                     pattern: String::new(),
                     matches: vec![],
@@ -5024,20 +5185,9 @@ impl App {
                 });
                 self.update_file_search_matches();
             }
-            KeyCode::Char('/')
-                if self.state.input_cursor == 0
-                    || matches!(
-                        self.state
-                            .input_buffer
-                            .as_bytes()
-                            .get(self.state.input_cursor.wrapping_sub(1)),
-                        Some(&b'\n') | Some(&b' ')
-                    ) =>
-            {
-                // Start skill search at cursor position (at start of line or after space)
-                let start_pos = self.state.input_cursor;
-                self.state.input_buffer.insert(self.state.input_cursor, '/');
-                self.state.input_cursor += 1;
+            KeyCode::Char('/') if self.prompt_at_word_start() => {
+                let start_pos = self.prompt_mut().cursor;
+                self.prompt_mut().insert_char('/');
 
                 // Start with bundled skills (always available, no filesystem needed)
                 let mut seen = std::collections::HashSet::new();
@@ -5075,25 +5225,9 @@ impl App {
                     start_pos,
                 });
             }
-            KeyCode::Char('!')
-                if self.state.input_cursor == 0
-                    || self
-                        .state
-                        .input_buffer
-                        .as_bytes()
-                        .get(self.state.input_cursor.wrapping_sub(1))
-                        == Some(&b'\n')
-                    || self
-                        .state
-                        .input_buffer
-                        .as_bytes()
-                        .get(self.state.input_cursor.wrapping_sub(1))
-                        == Some(&b' ') =>
-            {
-                // Start task reference search at cursor position (at start of line or after space)
-                let start_pos = self.state.input_cursor;
-                self.state.input_buffer.insert(self.state.input_cursor, '!');
-                self.state.input_cursor += 1;
+            KeyCode::Char('!') if self.prompt_at_word_start() => {
+                let start_pos = self.prompt_mut().cursor;
+                self.prompt_mut().insert_char('!');
 
                 let matches = self.get_all_task_matches("");
                 self.state.task_ref_search = Some(TaskRefSearchState {
@@ -5103,13 +5237,31 @@ impl App {
                     start_pos,
                 });
             }
-            KeyCode::Char(c) => {
-                self.state.input_buffer.insert(self.state.input_cursor, c);
-                self.state.input_cursor += c.len_utf8();
+            // Everything the trigger guards above declined — including a `/`
+            // mid-word, which must arrive as ordinary text — plus all motion
+            // and deletion. See `tui::text_input`.
+            _ => {
+                self.prompt_mut().handle_edit_key(key);
             }
-            _ => {}
         }
         Ok(())
+    }
+
+    /// Whether the caret sits where `/` and `!` open their pickers: at the very
+    /// start, or just after a space or newline. Mid-word they are ordinary
+    /// characters — a path like `src/main.rs` must not open the skill list.
+    fn prompt_at_word_start(&self) -> bool {
+        let Some(wizard) = self.state.wizard.as_ref() else {
+            return false;
+        };
+        let cursor = wizard.prompt.cursor;
+        if cursor == 0 {
+            return true;
+        }
+        matches!(
+            wizard.prompt.buffer.as_bytes().get(cursor - 1),
+            Some(&b'\n') | Some(&b' ')
+        )
     }
 
     fn update_file_search_matches(&mut self) {
@@ -5151,181 +5303,289 @@ impl App {
     }
 
     fn save_task(&mut self) -> Result<()> {
-        if let Some(db) = &self.state.db {
-            let agent = self.state.config.default_agent.clone();
-            let plugin_name = self
-                .state
-                .wizard_plugin_options
-                .get(self.state.wizard_selected_plugin)
-                .map(|o| o.name.clone())
-                .unwrap_or_default();
-            let plugin = if plugin_name.is_empty() {
-                None
-            } else {
-                Some(plugin_name)
-            };
-            let refs = if self.state.wizard_referenced_task_ids.is_empty() {
-                None
-            } else {
-                Some(
-                    self.state
-                        .wizard_referenced_task_ids
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(","),
-                )
-            };
+        let Some(wizard) = self.state.wizard.as_ref() else {
+            return Ok(());
+        };
+        let Some(db) = self.state.db.as_ref() else {
+            return Ok(());
+        };
+        // The agent step's pick when it offered one, else the configured
+        // default. `Task::agent` is what every later phase reads.
+        let agent = wizard
+            .agent_name()
+            .map(str::to_string)
+            .unwrap_or_else(|| self.state.config.default_agent.clone());
+        let plugin = wizard.plugin_name().map(str::to_string);
+        let refs = if wizard.referenced_task_ids.is_empty() {
+            None
+        } else {
+            Some(
+                wizard
+                    .referenced_task_ids
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        };
+        // `can_save` has already rejected a blank title, so trimming here only
+        // strips the padding a real one may have picked up.
+        let title = wizard.title.as_str().trim().to_string();
+        let description = if wizard.prompt.is_empty() {
+            None
+        } else {
+            Some(wizard.prompt.buffer.clone())
+        };
 
-            if let Some(task_id) = &self.state.editing_task_id {
-                // Editing existing task
-                if let Some(mut task) = db.get_task(task_id)? {
-                    task.title = self.state.pending_task_title.clone();
-                    task.description = if self.state.input_buffer.is_empty() {
-                        None
-                    } else {
-                        Some(self.state.input_buffer.clone())
-                    };
+        match wizard.editing_task_id.clone() {
+            Some(task_id) => {
+                if let Some(mut task) = db.get_task(&task_id)? {
+                    task.title = title;
+                    task.description = description;
                     task.agent = agent;
                     task.plugin = plugin;
                     task.referenced_tasks = refs;
                     task.updated_at = chrono::Utc::now();
                     db.update_task(&task)?;
                 }
-            } else {
-                // Creating new task
+            }
+            None => {
                 let project_id = self.state.project_name.clone();
-
-                let mut task = Task::new(&self.state.pending_task_title, agent, project_id);
-                if !self.state.input_buffer.is_empty() {
-                    task.description = Some(self.state.input_buffer.clone());
-                }
+                let mut task = Task::new(&title, agent, project_id);
+                task.description = description;
                 task.plugin = plugin;
                 task.referenced_tasks = refs;
-                // Task starts in Backlog without tmux window
+                // Task starts in Backlog without tmux window.
+                // No orchestrator notification — it only manages Planning/Running.
                 db.create_task(&task)?;
-
-                // No orchestrator notification for Backlog — orchestrator only manages Planning/Running
             }
-            self.refresh_tasks()?;
         }
-        Ok(())
+        self.refresh_tasks()
     }
 
-    /// Initialize plugin selection options for the wizard, filtered by selected agent.
-    fn init_plugin_selection(&mut self) {
-        let current = if let Some(task_id) = &self.state.editing_task_id {
-            self.state
+    /// On a first launch, ask which agent to use in the editor that owns that
+    /// question rather than in a menu of its own.
+    ///
+    /// A no-op on every other launch, so the caller does not have to check.
+    fn open_first_run_editor(&mut self) {
+        if !self.state.flags.first_run {
+            return;
+        }
+        self.open_config_editor();
+        if let Some(editor) = self.state.config_editor.as_mut() {
+            editor.focus(super::config_editor::FieldId::DefaultAgent);
+            // Kept shorter than the footer, which is what sets the box width.
+            editor.status = Some("Welcome — pick your default agent.".to_string());
+        }
+    }
+
+    /// Fill both list steps as soon as the wizard opens.
+    ///
+    /// Done here rather than on the first `Enter` so the breadcrumb shows the
+    /// real flow from the first frame — otherwise it reads "Title › Prompt"
+    /// and then grows two steps once you commit to a title.
+    fn seed_wizard_lists(&mut self) {
+        self.seed_agent_step();
+        self.seed_plugin_step();
+    }
+
+    /// Rebuild the plugin list when the agent it was filtered by has changed.
+    ///
+    /// Keeps the user's pick when that plugin survives the new filter, because
+    /// switching agent is not a decision about the plugin.
+    fn reseed_plugins_for_agent(&mut self) {
+        let agent = self.wizard_mut().agent_name().map(str::to_string);
+        if agent.as_deref() == self.state.plugins_filtered_for.as_deref() {
+            return;
+        }
+        let previous = self
+            .wizard_mut()
+            .plugin
+            .selected_option()
+            .map(|o| o.name.clone());
+        self.wizard_mut().plugin = super::wizard::ListPick::default();
+        self.seed_plugin_step();
+        if let Some(name) = previous {
+            let wizard = self.wizard_mut();
+            if let Some(index) = wizard.plugin.options.iter().position(|o| o.name == name) {
+                wizard.plugin.selected = index;
+            }
+        }
+    }
+
+    /// Build the agent list and decide whether the step is worth showing.
+    ///
+    /// The choice is per task: `Task::agent` is a database field, and before
+    /// this the only way to run one task on a different agent was to edit the
+    /// config, start it, and edit back.
+    fn seed_agent_step(&mut self) {
+        if !self.wizard_mut().agent.take_seed() {
+            return;
+        }
+        let default_agent = self.state.config.default_agent.clone();
+        // Editing keeps whatever the task already runs on, which may no longer
+        // be the project default.
+        let current = self
+            .wizard_mut()
+            .editing_task_id
+            .clone()
+            .and_then(|id| {
+                self.state
+                    .db
+                    .as_ref()
+                    .and_then(|db| db.get_task(&id).ok().flatten())
+            })
+            .map(|t| t.agent)
+            .unwrap_or_else(|| default_agent.clone());
+
+        let options: Vec<PickOption> = self
+            .state
+            .available_agents
+            .iter()
+            .map(|agent| {
+                PickOption::new(
+                    &agent.name,
+                    &agent.name,
+                    &agent.description,
+                    agent.name == current,
+                )
+            })
+            .collect();
+
+        let selected = options.iter().position(|o| o.active).unwrap_or(0);
+        let offer_step = options.len() > 1;
+        let wizard = self.wizard_mut();
+        wizard.agent.options = options;
+        wizard.agent.selected = selected;
+        wizard.set_optional_step(WizardStep::Agent, offer_step);
+    }
+
+    /// Build the plugin list and decide whether the step is worth showing.
+    ///
+    /// Runs once per wizard: re-entering the title step and advancing again
+    /// must not rebuild the list, or the user's pick resets to the project
+    /// default they just chose against.
+    fn seed_plugin_step(&mut self) {
+        if !self.wizard_mut().plugin.take_seed() {
+            return;
+        }
+        // With no detected agents there is no compatibility to filter on and
+        // nothing meaningful to choose between.
+        if self.state.available_agents.is_empty() {
+            self.wizard_mut()
+                .set_optional_step(WizardStep::Plugin, false);
+            return;
+        }
+
+        let editing = self.wizard_mut().editing_task_id.clone();
+        let current = match editing {
+            Some(task_id) => self
+                .state
                 .db
                 .as_ref()
-                .and_then(|db| db.get_task(task_id).ok().flatten())
+                .and_then(|db| db.get_task(&task_id).ok().flatten())
                 .and_then(|t| t.plugin.clone())
                 .or_else(|| self.state.config.workflow_plugin.clone())
-                .unwrap_or_else(|| "agtx".to_string())
-        } else {
-            self.state
+                .unwrap_or_else(|| "agtx".to_string()),
+            None => self
+                .state
                 .config
                 .workflow_plugin
                 .as_deref()
                 .unwrap_or("agtx")
-                .to_string()
+                .to_string(),
         };
 
-        let selected_agent_name = &self.state.config.default_agent;
+        // Filtered against the agent the *task* will run on, which the agent
+        // step may just have changed — a plugin that does not support it should
+        // not be offered.
+        let selected_agent_name = self
+            .wizard_mut()
+            .agent_name()
+            .map(str::to_string)
+            .unwrap_or_else(|| self.state.config.default_agent.clone());
 
-        let mut options = vec![PluginOption {
-            name: "agtx".to_string(),
-            label: "agtx".to_string(),
-            description: "Built-in workflow with skills and prompts".to_string(),
-            active: current == "agtx",
-        }];
+        let mut options = vec![PickOption::new(
+            "agtx",
+            "agtx",
+            "Built-in workflow with skills and prompts",
+            current == "agtx",
+        )];
         for (name, desc, content) in skills::BUNDLED_PLUGINS {
             if *name == "agtx" {
                 continue;
             }
             // Filter by agent compatibility
             if let Ok(plugin) = toml::from_str::<WorkflowPlugin>(content) {
-                if !plugin.supports_agent(selected_agent_name) {
+                if !plugin.supports_agent(&selected_agent_name) {
                     continue;
                 }
             }
-            options.push(PluginOption {
-                name: name.to_string(),
-                label: name.to_string(),
-                description: desc.to_string(),
-                active: current == *name,
-            });
+            options.push(PickOption::new(name, name, desc, current == *name));
         }
         for custom in skills::discover_custom_plugins(self.state.project_path.as_deref()) {
-            if !custom.plugin.supports_agent(selected_agent_name) {
+            if !custom.plugin.supports_agent(&selected_agent_name) {
                 continue;
             }
-            options.push(PluginOption {
-                name: custom.name.clone(),
-                label: custom.name.clone(),
-                description: custom.description,
-                active: current == custom.name,
-            });
+            let active = current == custom.name;
+            options.push(PickOption::new(
+                &custom.name,
+                &custom.name,
+                &custom.description,
+                active,
+            ));
         }
         let selected = options.iter().position(|o| o.active).unwrap_or(0);
-        self.state.wizard_plugin_options = options;
-        self.state.wizard_selected_plugin = selected;
+        let offer_step = options.len() > 1;
+        self.state.plugins_filtered_for = Some(selected_agent_name);
+        let wizard = self.wizard_mut();
+        wizard.plugin.options = options;
+        wizard.plugin.selected = selected;
+        wizard.set_optional_step(WizardStep::Plugin, offer_step);
     }
 
-    /// Initialize the description input step of the wizard.
-    fn init_description_input(&mut self) {
-        if let Some(task_id) = &self.state.editing_task_id {
-            if let Some(db) = &self.state.db {
-                if let Ok(Some(task)) = db.get_task(task_id) {
-                    self.state.input_buffer = task.description.unwrap_or_default();
-                    // Restore referenced task IDs if editing
-                    self.state.wizard_referenced_task_ids = task
-                        .referenced_tasks
-                        .as_deref()
-                        .map(|s| {
-                            s.split(',')
-                                .filter(|id| !id.is_empty())
-                                .map(String::from)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                } else {
-                    self.state.input_buffer.clear();
-                }
-            } else {
-                self.state.input_buffer.clear();
-            }
-        }
-        self.state.input_cursor = self.state.input_buffer.len();
-        self.state.input_mode = InputMode::InputDescription;
-    }
-
-    /// Cancel the task creation/edit wizard entirely.
-    fn cancel_wizard(&mut self) {
-        self.state.input_mode = InputMode::Normal;
-        self.state.input_buffer.clear();
-        self.state.input_cursor = 0;
-        self.state.pending_task_title.clear();
-        self.state.editing_task_id = None;
-        self.state.highlighted_references.clear();
-        self.state.wizard_plugin_options.clear();
-        self.state.wizard_referenced_task_ids.clear();
-        self.state.task_ref_search = None;
-    }
-
-    /// Advance from title step to plugin selection or description.
-    fn advance_from_title(&mut self) {
-        // Skip plugin selection when no agents detected (e.g. test mode)
-        if self.state.available_agents.is_empty() {
-            self.init_description_input();
+    /// Load an edited task's existing prompt and references.
+    ///
+    /// Runs once per wizard, for the same reason as `seed_plugin_step` and with
+    /// worse consequences: reloading from the database on the way forward would
+    /// throw away every edit made before the user stepped back.
+    fn seed_prompt_step(&mut self) {
+        if !self.wizard_mut().take_prompt_seed() {
             return;
         }
-        self.init_plugin_selection();
-        if self.state.wizard_plugin_options.len() <= 1 {
-            self.init_description_input();
-        } else {
-            self.state.input_mode = InputMode::SelectPlugin;
+        let Some(task_id) = self.wizard_mut().editing_task_id.clone() else {
+            return;
+        };
+        let existing = self
+            .state
+            .db
+            .as_ref()
+            .and_then(|db| db.get_task(&task_id).ok().flatten());
+        let wizard = self.wizard_mut();
+        match existing {
+            Some(task) => {
+                wizard.prompt.set_text(task.description.unwrap_or_default());
+                wizard.referenced_task_ids = task
+                    .referenced_tasks
+                    .as_deref()
+                    .map(|s| {
+                        s.split(',')
+                            .filter(|id| !id.is_empty())
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            None => wizard.prompt.clear(),
         }
+    }
+
+    /// Close the wizard, discarding it. Any open dropdown goes with it.
+    fn cancel_wizard(&mut self) {
+        self.state.wizard = None;
+        self.state.task_ref_search = None;
+        self.state.skill_search = None;
+        self.state.file_search = None;
     }
 
     fn delete_selected_task(&mut self) -> Result<()> {
@@ -9256,6 +9516,27 @@ enum PopupScroll {
     Bottom,
 }
 
+/// The scroll chords, in one place.
+///
+/// Every scrollable surface in agtx reads them from here — the task pane and
+/// the `?` overlay — so a user who learns `C-d` once does not find it inert
+/// somewhere else, and the two cannot drift apart.
+fn scroll_action_for(key: crossterm::event::KeyEvent) -> Option<PopupScroll> {
+    let ctrl = key
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('p') | KeyCode::Up if ctrl => Some(PopupScroll::Up(5)),
+        KeyCode::Char('n') | KeyCode::Down if ctrl => Some(PopupScroll::Down(5)),
+        KeyCode::Char('u') if ctrl => Some(PopupScroll::Up(20)),
+        KeyCode::PageUp => Some(PopupScroll::Up(20)),
+        KeyCode::Char('d') if ctrl => Some(PopupScroll::Down(20)),
+        KeyCode::PageDown => Some(PopupScroll::Down(20)),
+        KeyCode::Char('g') if ctrl => Some(PopupScroll::Bottom),
+        _ => None,
+    }
+}
+
 /// Apply one logical popup scroll action to whichever component owns history.
 ///
 /// A pane in the alternate screen keeps no tmux scrollback (`history_size == 0`),
@@ -10249,133 +10530,6 @@ fn wrap_spans(spans: Vec<Span<'static>>, wrap_width: usize) -> Vec<Line<'static>
         }
     }
     visual.into_iter().map(Line::from).collect()
-}
-
-/// Render one plugin choice with a fixed metadata column and an independently
-/// wrapped description column. Continuation rows start beneath the description
-/// rather than at the wizard's left border.
-fn wizard_plugin_option_lines(
-    marker: &str,
-    label: &str,
-    description: &str,
-    check: &str,
-    name_style: Style,
-    description_style: Style,
-    width: usize,
-) -> Vec<Line<'static>> {
-    const LABEL_WIDTH: usize = 14;
-    const CHECK_WIDTH: usize = 2;
-    const RIGHT_PADDING: usize = 2;
-
-    let marker_width = Span::raw(marker.to_string()).width();
-    let prefix_width = marker_width + LABEL_WIDTH + CHECK_WIDTH;
-    let description_width = width.saturating_sub(prefix_width + RIGHT_PADDING).max(1);
-    let mut description_lines = wrap_spans(
-        vec![Span::styled(description.to_string(), description_style)],
-        description_width,
-    );
-    if description_lines.is_empty() {
-        description_lines.push(Line::default());
-    }
-
-    let short_label = truncate_str(label, LABEL_WIDTH);
-    let check = format!("{:<CHECK_WIDTH$}", check);
-    for (index, line) in description_lines.iter_mut().enumerate() {
-        let mut spans = if index == 0 {
-            vec![
-                Span::styled(marker.to_string(), name_style),
-                Span::styled(format!("{short_label:<LABEL_WIDTH$}"), name_style),
-                Span::styled(check.clone(), Style::default().fg(Color::Green)),
-            ]
-        } else {
-            vec![Span::raw(" ".repeat(prefix_width))]
-        };
-        spans.append(&mut line.spans);
-        *line = Line::from(spans);
-    }
-    description_lines
-}
-
-/// Keep the complete selected plugin entry inside the wizard viewport while
-/// retaining as much preceding context as possible.
-fn wizard_plugin_scroll_offset(
-    total_rows: usize,
-    viewport_rows: usize,
-    selected_rows: std::ops::Range<usize>,
-) -> usize {
-    if viewport_rows == 0 || total_rows <= viewport_rows {
-        return 0;
-    }
-
-    selected_rows
-        .end
-        .saturating_sub(viewport_rows)
-        .min(total_rows.saturating_sub(viewport_rows))
-}
-
-/// Snap `pos` back to the nearest UTF-8 char boundary at or before it.
-/// Cursor arithmetic tracks bytes, but String indexing panics mid-codepoint —
-/// callers use this to stay valid after moving across multi-byte chars.
-fn prev_char_boundary(s: &str, pos: usize) -> usize {
-    if pos == 0 {
-        return 0;
-    }
-    let mut new_pos = pos - 1;
-    while new_pos > 0 && !s.is_char_boundary(new_pos) {
-        new_pos -= 1;
-    }
-    new_pos
-}
-
-/// Snap `pos` forward to the next UTF-8 char boundary (or `s.len()` if none).
-/// See `prev_char_boundary` for why byte-indexed cursors need this.
-fn next_char_boundary(s: &str, pos: usize) -> usize {
-    let len = s.len();
-    if pos >= len {
-        return len;
-    }
-    let mut new_pos = pos + 1;
-    while new_pos < len && !s.is_char_boundary(new_pos) {
-        new_pos += 1;
-    }
-    new_pos
-}
-
-/// Find the previous word boundary (for Option+Left)
-fn word_boundary_left(s: &str, pos: usize) -> usize {
-    if pos == 0 {
-        return 0;
-    }
-    let bytes = s.as_bytes();
-    let mut i = pos - 1;
-    // Skip whitespace/punctuation
-    while i > 0 && !bytes[i].is_ascii_alphanumeric() {
-        i -= 1;
-    }
-    // Skip word characters
-    while i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
-        i -= 1;
-    }
-    i
-}
-
-/// Find the next word boundary (for Option+Right)
-fn word_boundary_right(s: &str, pos: usize) -> usize {
-    let len = s.len();
-    if pos >= len {
-        return len;
-    }
-    let bytes = s.as_bytes();
-    let mut i = pos;
-    // Skip current word characters
-    while i < len && bytes[i].is_ascii_alphanumeric() {
-        i += 1;
-    }
-    // Skip whitespace/punctuation
-    while i < len && !bytes[i].is_ascii_alphanumeric() {
-        i += 1;
-    }
-    i
 }
 
 /// Build styled Text with highlighted file paths
@@ -13148,3 +13302,780 @@ fn resolve_skill_content(
 #[cfg(test)]
 #[path = "app_tests.rs"]
 mod tests;
+
+/// The fields a trust prompt is asking permission for, with their values.
+///
+/// These are exactly the three `App::new` strips from an untrusted project, and
+/// the prompt shows them verbatim: consenting to a script you cannot see is not
+/// consent. Order is fixed so the dialog does not reshuffle between launches.
+fn dangerous_fields(config: &ProjectConfig) -> Vec<(&'static str, String)> {
+    [
+        ("init_script", config.init_script.as_ref()),
+        ("cleanup_script", config.cleanup_script.as_ref()),
+        ("copy_files", config.copy_files.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.map(|v| (name, v.clone())))
+    .collect()
+}
+
+/// Draw the config editor: sections down the left, the selected section's
+/// fields on the right, and the selected field's help line at the bottom.
+///
+/// The help line is where a setting that only affects *new* worktrees says so,
+/// rather than leaving the user to discover that the change looked like it
+/// applied and did not.
+fn draw_config_editor(
+    state: &AppState,
+    editor: &super::config_editor::ConfigEditor,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    // Size to the content rather than to a percentage of the screen: a fixed
+    // 72x78% box left everything huddled in the top-left corner of a mostly
+    // empty dialog. Measured across *all* sections so switching tabs does not
+    // resize the box under the cursor.
+    let popup_area = config_editor_area(editor, area);
+    frame.render_widget(Clear, popup_area);
+
+    let selected = hex_to_color(&state.config.theme.color_selected);
+    let text_color = hex_to_color(&state.config.theme.color_text);
+    let dimmed = hex_to_color(&state.config.theme.color_dimmed);
+    let accent = hex_to_color(&state.config.theme.color_accent);
+    let desc = hex_to_color(&state.config.theme.color_description);
+
+    let dirty_marker = if editor.dirty { " ●" } else { "" };
+    let block = Block::default()
+        .title(format!(" Configuration{dirty_marker} "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // section tabs
+            Constraint::Min(3),    // fields
+            Constraint::Length(2), // help
+            Constraint::Length(1), // footer
+        ])
+        .split(inner);
+
+    // --- section tabs ---
+    let mut tab_spans: Vec<Span<'static>> = vec![Span::raw(" ".to_string())];
+    for (i, section) in editor.sections.iter().enumerate() {
+        let style = if i == editor.section {
+            Style::default().fg(selected).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(dimmed)
+        };
+        tab_spans.push(Span::styled(section.title.to_string(), style));
+        if i + 1 < editor.sections.len() {
+            tab_spans.push(Span::styled(
+                "  ·  ".to_string(),
+                Style::default().fg(dimmed),
+            ));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(tab_spans)), rows[0]);
+
+    // --- fields ---
+    let label_width = editor
+        .current_section()
+        .fields
+        .iter()
+        .map(|f| f.label.len())
+        .max()
+        .unwrap_or(12)
+        .max(12);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, field) in editor.current_section().fields.iter().enumerate() {
+        let is_selected = i == editor.field;
+        let marker = if is_selected { " > " } else { "   " };
+        let label_style = if is_selected {
+            Style::default().fg(selected).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(text_color)
+        };
+
+        let mut spans = vec![
+            Span::styled(marker.to_string(), label_style),
+            Span::styled(format!("{:<label_width$}  ", field.label), label_style),
+        ];
+
+        let editing_here = is_selected.then_some(editor.editing.as_ref()).flatten();
+        match (&field.kind, editing_here) {
+            // A text or colour field open for typing shows a caret.
+            (_, Some(super::config_editor::EditState::Text(input))) => {
+                spans.push(Span::styled(
+                    format!("{}▏", input.as_str()),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ));
+            }
+            (FieldKind::Toggle, _) => {
+                let on = editor.value(field.id).as_bool();
+                spans.push(Span::styled(
+                    if on { "[x] on" } else { "[ ] off" }.to_string(),
+                    Style::default().fg(if on { accent } else { dimmed }),
+                ));
+            }
+            (FieldKind::Color, _) => {
+                let value = editor.value(field.id);
+                let hex = value.as_text().to_string();
+                // The swatch is the point: a hex string is not a colour anyone
+                // can read off the page.
+                spans.push(Span::styled(
+                    "███ ".to_string(),
+                    Style::default().fg(hex_to_color(&hex)),
+                ));
+                spans.push(Span::styled(hex, Style::default().fg(text_color)));
+            }
+            (kind, _) => {
+                let value = editor.value(field.id);
+                let raw = value.as_text();
+                let shown = match kind {
+                    FieldKind::Choice(choices) => choices
+                        .iter()
+                        .find(|c| c.value == raw)
+                        .map(|c| c.label.clone())
+                        .unwrap_or_else(|| raw.to_string()),
+                    _ if raw.is_empty() => "(unset)".to_string(),
+                    _ => raw.to_string(),
+                };
+                let style = if raw.is_empty() {
+                    Style::default().fg(dimmed)
+                } else {
+                    Style::default().fg(text_color)
+                };
+                spans.push(Span::styled(shown, style));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // Keep the selected row on screen without a scrollbar's worth of machinery:
+    // the field list is short and the cursor moves one row at a time.
+    let viewport = rows[1].height as usize;
+    let offset = editor.field.saturating_sub(viewport.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).scroll((offset as u16, 0)),
+        rows[1],
+    );
+
+    // --- help / status ---
+    let help = editor
+        .current_field()
+        .map(|f| f.help.to_string())
+        .unwrap_or_default();
+    let mut help_lines = vec![Line::from(Span::styled(
+        format!(" {help}"),
+        Style::default().fg(desc),
+    ))];
+    if let Some(ref status) = editor.status {
+        help_lines.push(Line::from(Span::styled(
+            format!(" {status}"),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    frame.render_widget(Paragraph::new(Text::from(help_lines)), rows[2]);
+
+    // --- footer ---
+    let footer = if editor.confirming_discard {
+        " Unsaved changes. [y] discard  [s] save  [any] back ".to_string()
+    } else if let Some(super::config_editor::EditState::Choice { .. }) = editor.editing {
+        " [j/k] choose  [Enter] pick  [Esc] cancel ".to_string()
+    } else if editor.editing.is_some() {
+        " [Enter] accept  [Esc] cancel ".to_string()
+    } else {
+        " [h/l] section  [j/k] field  [Enter] edit  [C-s] save  [Esc] close ".to_string()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            footer,
+            Style::default().fg(dimmed),
+        ))),
+        rows[3],
+    );
+
+    // --- open choice list, drawn over the form ---
+    if let Some(super::config_editor::EditState::Choice { selected: pick }) = editor.editing {
+        if let Some(FieldKind::Choice(choices)) = editor.current_field().map(|f| &f.kind) {
+            let height = (choices.len() as u16 + 2).min(rows[1].height.max(3));
+            // Anchor under the *value* column and one row below the field, so
+            // the list reads as a dropdown from the thing it is replacing
+            // rather than covering the labels beside it.
+            let value_column = 3 + label_width as u16 + 2;
+            let row = (editor.field.saturating_sub(offset) as u16).saturating_add(1);
+            let list_area = Rect {
+                x: rows[1].x + value_column,
+                y: rows[1].y + row.min(rows[1].height),
+                width: rows[1]
+                    .width
+                    .saturating_sub(value_column + 2)
+                    .min(40)
+                    .max(12),
+                height,
+            };
+            let list_area = if list_area.y + list_area.height > inner.y + inner.height {
+                Rect {
+                    y: (inner.y + inner.height).saturating_sub(list_area.height),
+                    ..list_area
+                }
+            } else {
+                list_area
+            };
+            frame.render_widget(Clear, list_area);
+            let items: Vec<ListItem> = choices
+                .iter()
+                .enumerate()
+                .map(|(i, choice)| {
+                    let style = if i == pick {
+                        Style::default().bg(selected).fg(Color::Black)
+                    } else {
+                        Style::default().fg(text_color)
+                    };
+                    ListItem::new(format!(" {} ", choice.label)).style(style)
+                })
+                .collect();
+            frame.render_widget(
+                List::new(items).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(accent)),
+                ),
+                list_area,
+            );
+        }
+    }
+}
+
+/// How wide the value column has to be for one field, in cells.
+fn config_field_value_width(
+    editor: &super::config_editor::ConfigEditor,
+    field: &super::config_editor::Field,
+) -> usize {
+    use super::config_editor::FieldKind;
+    match &field.kind {
+        FieldKind::Toggle => "[ ] off".len(),
+        // The stored value is a swatch plus the hex it names.
+        FieldKind::Color => "███ #ffffff".chars().count(),
+        // A choice field must fit its longest label, not just the current one:
+        // the value changes as the user picks, and a box that grew mid-edit
+        // would be worse than one that was always big enough.
+        FieldKind::Choice(choices) => choices
+            .iter()
+            .map(|c| c.label.chars().count())
+            .max()
+            .unwrap_or(0),
+        FieldKind::Text => editor
+            .value(field.id)
+            .as_text()
+            .chars()
+            .count()
+            .max("(unset)".len()),
+    }
+}
+
+/// The config editor's box: as small as its content allows, centred, and
+/// clamped to the terminal.
+fn config_editor_area(editor: &super::config_editor::ConfigEditor, area: Rect) -> Rect {
+    const MARKER: usize = 3; // " > "
+    const GAP: usize = 2; // between label and value
+    const BORDERS: u16 = 2;
+    const CHROME_ROWS: u16 = 1 /* tabs */ + 2 /* help + status */ + 1 /* footer */;
+
+    let mut content_width = 0usize;
+    let mut rows = 0usize;
+    for section in &editor.sections {
+        let label_width = section
+            .fields
+            .iter()
+            .map(|f| f.label.chars().count())
+            .max()
+            .unwrap_or(12)
+            .max(12);
+        for field in &section.fields {
+            let width = MARKER + label_width + GAP + config_field_value_width(editor, field);
+            content_width = content_width.max(width);
+            // The help line sits inside the same box, so it is part of how wide
+            // the box has to be.
+            content_width = content_width.max(field.help.chars().count() + 1);
+        }
+        rows = rows.max(section.fields.len());
+    }
+
+    // The tab strip and the footer are as long as they are, whatever the fields
+    // measure.
+    let tabs: usize = editor
+        .sections
+        .iter()
+        .map(|s| s.title.chars().count())
+        .sum::<usize>()
+        + editor.sections.len().saturating_sub(1) * 5
+        + 1;
+    content_width = content_width.max(tabs);
+    content_width = content_width
+        .max(" [h/l] section  [j/k] field  [Enter] edit  [C-s] save  [Esc] close ".len());
+
+    let width = (content_width as u16 + BORDERS).min(area.width.saturating_sub(4));
+    let height = (rows as u16 + CHROME_ROWS + BORDERS).min(area.height.saturating_sub(2));
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+/// Draw the `?` overlay: every binding, grouped, scrollable.
+///
+/// Two columns where the terminal is wide enough, which roughly halves the
+/// height — in one column the whole reference is a tall thin strip that has to
+/// be scrolled even in a large window. Falls back to one column on a narrow
+/// terminal, where two would not fit side by side at all.
+fn draw_help(state: &AppState, scroll: usize, frame: &mut Frame, area: Rect) {
+    const PADDING: u16 = 2;
+    const GUTTER: u16 = 3;
+
+    let column_width = help::content_width() as u16;
+    let chrome = 2 + PADDING * 2; // borders + padding
+    let two_columns = area.width.saturating_sub(4) >= column_width * 2 + GUTTER + chrome;
+    let columns = help::columns(if two_columns { 2 } else { 1 });
+
+    let tallest = columns.iter().map(|c| c.len()).max().unwrap_or(0);
+    let inner_width = if two_columns {
+        column_width * 2 + GUTTER
+    } else {
+        column_width
+    };
+    let width = (inner_width + chrome).min(area.width.saturating_sub(4));
+    // +2 borders, +1 footer.
+    let height = (tallest as u16 + 3).min(area.height.saturating_sub(2));
+    let popup_area = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup_area);
+
+    let title_color = hex_to_color(&state.config.theme.color_selected);
+    let key_color = hex_to_color(&state.config.theme.color_accent);
+    let text_color = hex_to_color(&state.config.theme.color_text);
+    let dimmed = hex_to_color(&state.config.theme.color_dimmed);
+
+    let block = Block::default()
+        .title(" Keys ")
+        .borders(Borders::ALL)
+        .padding(Padding::horizontal(PADDING))
+        .border_style(Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let body = Rect {
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    let visible = body.height as usize;
+    // Never scroll past the last screenful — an overlay that can be scrolled
+    // into empty space looks broken. Paced by the tallest column so the two
+    // stay in step.
+    let max_scroll = tallest.saturating_sub(visible);
+    state.help_max_scroll.set(max_scroll);
+    let scroll = scroll.min(max_scroll);
+
+    let areas: Vec<Rect> = if two_columns {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(column_width),
+                Constraint::Length(GUTTER),
+                Constraint::Min(0),
+            ])
+            .split(body)
+            .to_vec()
+    } else {
+        vec![body]
+    };
+
+    for (index, column) in columns.iter().enumerate() {
+        // The gutter is chunk 1, so the second column is chunk 2.
+        let Some(target) = areas.get(if index == 0 { 0 } else { 2 }) else {
+            continue;
+        };
+        let lines: Vec<Line<'static>> = column
+            .iter()
+            .skip(scroll)
+            .take(visible)
+            .map(|(indent, text)| {
+                if !*indent {
+                    return Line::from(Span::styled(
+                        text.clone(),
+                        Style::default()
+                            .fg(title_color)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
+                // The key column is fixed-width in `help::rows`, so splitting on
+                // it keeps the two colours aligned without measuring anything.
+                let split = text.char_indices().nth(18).map_or(text.len(), |(i, _)| i);
+                let (keys, action) = text.split_at(split);
+                Line::from(vec![
+                    Span::raw("  ".to_string()),
+                    Span::styled(keys.to_string(), Style::default().fg(key_color)),
+                    Span::styled(action.to_string(), Style::default().fg(text_color)),
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(Text::from(lines)), *target);
+    }
+
+    let more = if max_scroll > 0 {
+        format!("  ({}/{})", scroll + 1, max_scroll + 1)
+    } else {
+        String::new()
+    };
+    let hint = if max_scroll > 0 {
+        format!("[C-d/u] page  [j/k] line  [Esc] close{more}")
+    } else {
+        "[Esc] close".to_string()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(dimmed)))),
+        Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            height: 1,
+            ..inner
+        },
+    );
+}
+
+/// Draw the task wizard./// Draw the task wizard.
+///
+/// A real `Layout` — breadcrumb, the steps already behind you, the active step,
+/// a validation line — rather than one flat `Paragraph` of pre-wrapped lines.
+/// The old shape meant the plugin list scrolled by hand (bottom-anchored, no
+/// scrollbar) and the prompt ran edge to edge with no frame around it.
+fn draw_wizard(
+    state: &AppState,
+    wizard: &super::wizard::WizardState,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    frame.render_widget(Clear, area);
+
+    let selected = hex_to_color(&state.config.theme.color_selected);
+    let text_color = hex_to_color(&state.config.theme.color_text);
+    let dimmed = hex_to_color(&state.config.theme.color_dimmed);
+    let accent = hex_to_color(&state.config.theme.color_accent);
+    let desc_color = hex_to_color(&state.config.theme.color_description);
+
+    let block = Block::default()
+        .title(if wizard.is_editing() {
+            " Edit Task "
+        } else {
+            " New Task "
+        })
+        .borders(Borders::ALL)
+        .padding(Padding::horizontal(WIZARD_PADDING))
+        .border_style(Style::default().fg(selected));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Rows behind the cursor are read-only context; the prompt is never one of
+    // them, so it is excluded rather than special-cased below.
+    let steps = wizard.steps();
+    let index = wizard.step_index();
+    let context: Vec<(&str, String)> = steps
+        .iter()
+        .take(index)
+        .filter_map(|step| match step {
+            WizardStep::Title => Some(("Title", wizard.title.as_str().to_string())),
+            WizardStep::Agent => Some((
+                "Agent",
+                wizard.agent_name().unwrap_or("default").to_string(),
+            )),
+            WizardStep::Plugin => Some(("Plugin", wizard.plugin_label().to_string())),
+            WizardStep::Prompt => None,
+        })
+        .collect();
+
+    // A title is one line; a prompt and a list want the room. Sizing the body
+    // per step is why the title step no longer draws a full-height box around a
+    // single word, and the trailing slack is what stops it stretching to fill.
+    let body_height = match wizard.step() {
+        WizardStep::Title => Constraint::Length(3),
+        _ => Constraint::Min(3),
+    };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),                    // breadcrumb
+            Constraint::Length(1),                    // rule
+            Constraint::Length(context.len() as u16), // completed steps
+            Constraint::Length(if context.is_empty() { 0 } else { 1 }),
+            body_height,           // the active step
+            Constraint::Length(1), // validation
+            Constraint::Min(0),    // slack
+        ])
+        .split(inner);
+
+    // --- breadcrumb ---
+    let mut crumbs: Vec<Span<'static>> = Vec::new();
+    for (i, step) in steps.iter().enumerate() {
+        let style = if i == index {
+            Style::default().fg(selected).add_modifier(Modifier::BOLD)
+        } else if i < index {
+            Style::default().fg(accent)
+        } else {
+            Style::default().fg(dimmed)
+        };
+        crumbs.push(Span::styled(step.label().to_string(), style));
+        if i + 1 < steps.len() {
+            crumbs.push(Span::styled(
+                "  ›  ".to_string(),
+                Style::default().fg(dimmed),
+            ));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(crumbs)), rows[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(rows[1].width as usize),
+            Style::default().fg(dimmed),
+        ))),
+        rows[1],
+    );
+
+    // --- completed steps ---
+    let context_lines: Vec<Line<'static>> = context
+        .into_iter()
+        .map(|(label, value)| {
+            Line::from(vec![
+                Span::styled(format!("{label}: "), Style::default().fg(dimmed)),
+                Span::styled(value, Style::default().fg(text_color)),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(context_lines)), rows[2]);
+
+    // --- the active step ---
+    let body = rows[4];
+    match wizard.step() {
+        WizardStep::Title => draw_wizard_text_field(
+            "Title",
+            &wizard.title,
+            state,
+            frame,
+            body,
+            "What should this task be called?",
+            &HashSet::new(),
+        ),
+        WizardStep::Prompt => draw_wizard_text_field(
+            "Prompt",
+            &wizard.prompt,
+            state,
+            frame,
+            body,
+            "# files   / skills   ! tasks",
+            &wizard.highlighted_references,
+        ),
+        WizardStep::Agent | WizardStep::Plugin => {
+            if let Some(list) = wizard.current_list() {
+                draw_wizard_list(wizard.step().label(), list, state, frame, body);
+            }
+        }
+    }
+
+    // --- validation ---
+    //
+    // Drawn inside the wizard rather than in the footer because the footer is
+    // also the background-warning channel, and an unrelated warning must not be
+    // able to replace this while the user is reading it.
+    if let Some(ref message) = wizard.validation {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                message.clone(),
+                Style::default().fg(Color::Yellow),
+            ))),
+            rows[5],
+        );
+    } else if wizard.step() == WizardStep::Prompt {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Leave empty to let the plugin's own prompt stand.".to_string(),
+                Style::default().fg(desc_color),
+            ))),
+            rows[5],
+        );
+    }
+}
+
+/// A bordered text area with the caret anchored in it.
+///
+/// The caret is a real terminal cursor rather than a drawn block so the OS can
+/// render IME composition (Korean, Japanese, Chinese) inline where the text
+/// will land.
+fn draw_wizard_text_field(
+    title: &str,
+    input: &TextInput,
+    state: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    hint: &str,
+    highlights: &HashSet<String>,
+) {
+    let text_color = hex_to_color(&state.config.theme.color_text);
+    let accent = hex_to_color(&state.config.theme.color_accent);
+    let dimmed = hex_to_color(&state.config.theme.color_dimmed);
+
+    let block = Block::default()
+        .title(format!(" {title} "))
+        .borders(Borders::ALL)
+        .padding(Padding::horizontal(1))
+        .border_style(Style::default().fg(accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if input.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint.to_string(),
+                Style::default().fg(dimmed),
+            ))),
+            inner,
+        );
+    } else {
+        let wrap_width = inner.width as usize;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for part in input.as_str().split('\n') {
+            let spans: Vec<Span<'static>> = if highlights.is_empty() {
+                vec![Span::styled(
+                    part.to_string(),
+                    Style::default().fg(text_color),
+                )]
+            } else {
+                build_highlighted_text(part, highlights, text_color, accent)
+                    .lines
+                    .into_iter()
+                    .flat_map(|l| l.spans)
+                    .map(|s| Span::styled(s.content.into_owned(), s.style))
+                    .collect()
+            };
+            lines.extend(wrap_spans(spans, wrap_width));
+        }
+        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    }
+
+    // No prefix any more: the field's own border is the label, so the caret
+    // starts at column 0 of the inner area.
+    let (col, row) = wrapped_cursor_pos(input.as_str(), input.cursor, 0, inner.width as usize);
+    let x = inner.x.saturating_add(col as u16);
+    let y = inner.y.saturating_add(row as u16);
+    if x < inner.x + inner.width && y < inner.y + inner.height {
+        frame.set_cursor_position((x, y));
+    }
+}
+
+/// A pick-one list with a scrollbar and, when open, a filter row.
+///
+/// Ratatui's own `List` does the scrolling, which is what removes the
+/// hand-rolled bottom-anchored offset the old wizard used — it kept the
+/// selection glued to the last row and gave no indication there was more.
+fn draw_wizard_list(
+    title: &str,
+    list: &super::wizard::ListPick,
+    state: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let selected = hex_to_color(&state.config.theme.color_selected);
+    let text_color = hex_to_color(&state.config.theme.color_text);
+    let dimmed = hex_to_color(&state.config.theme.color_description);
+    let accent = hex_to_color(&state.config.theme.color_accent);
+
+    let block_title = match list.filter.as_ref() {
+        Some(filter) => format!(" {title}  /{}▏", filter.as_str()),
+        None => format!(" {title} "),
+    };
+    let block = Block::default()
+        .title(block_title)
+        .borders(Borders::ALL)
+        .padding(Padding::horizontal(1))
+        .border_style(Style::default().fg(accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let visible = list.matching();
+    if visible.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Nothing matches that.".to_string(),
+                Style::default().fg(dimmed),
+            ))),
+            inner,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = visible
+        .iter()
+        .map(|i| {
+            let option = &list.options[*i];
+            let is_selected = *i == list.selected;
+            let name_style = if is_selected {
+                Style::default().fg(selected).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(text_color)
+            };
+            let mut spans = vec![
+                Span::styled(
+                    if is_selected { "› " } else { "  " }.to_string(),
+                    name_style,
+                ),
+                Span::styled(
+                    format!("{:<14}", truncate_str(&option.label, 14)),
+                    name_style,
+                ),
+            ];
+            if option.active {
+                spans.push(Span::styled(
+                    "✓ ".to_string(),
+                    Style::default().fg(Color::Green),
+                ));
+            } else {
+                spans.push(Span::raw("  ".to_string()));
+            }
+            spans.push(Span::styled(
+                option.description.clone(),
+                Style::default().fg(dimmed),
+            ));
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let mut list_state = ListState::default().with_selected(Some(list.position()));
+    frame.render_stateful_widget(List::new(items), inner, &mut list_state);
+
+    if visible.len() > inner.height as usize {
+        let mut scrollbar_state = ScrollbarState::new(visible.len()).position(list.position());
+        // Inset to the rows the list actually occupies. Handed the whole `area`
+        // the track starts on the block's top border and eats its corners.
+        let track = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(2),
+            ..area
+        };
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .style(Style::default().fg(dimmed)),
+            track,
+            &mut scrollbar_state,
+        );
+    }
+}
