@@ -8,6 +8,7 @@ use crate::agent::MockAgentOperations;
 use crate::git::{MockGitOperations, MockGitProviderOperations};
 #[cfg(feature = "test-mocks")]
 use crate::tmux::MockTmuxOperations;
+use crossterm::event::KeyModifiers;
 
 #[test]
 fn visible_columns_use_all_columns_on_wide_terminals() {
@@ -55,10 +56,21 @@ fn board_scrollbar_is_hidden_without_overflow_or_height() {
 fn styled_footer_emphasizes_shortcuts_without_changing_text() {
     let styles = TuiStyles::from_theme(&ThemeConfig::default());
     let line = styled_footer(" [o] new  [Enter] open ", styles);
-    let rendered: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+    let rendered: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
     assert_eq!(rendered, "[o] new  [Enter] open");
     assert_eq!(line.spans[0].style.fg, Some(styles.selected));
     assert_eq!(line.spans[1].style.fg, Some(styles.dimmed));
+}
+
+#[test]
+fn footer_groups_related_shortcuts() {
+    let text = build_footer_text(InputMode::Normal, false, 1, false, false);
+    assert!(text.contains("search  ·  [Enter] open"));
+    assert!(text.contains("[m] run  ·  [x] delete"));
 }
 
 #[test]
@@ -75,7 +87,11 @@ fn wizard_plugin_descriptions_wrap_and_align() {
 
     assert!(lines.len() > 1);
     for line in &lines {
-        assert!(line.width() <= 40, "line reached the right margin: {:?}", line);
+        assert!(
+            line.width() <= 40,
+            "line reached the right margin: {:?}",
+            line
+        );
     }
     let continuation: String = lines[1]
         .spans
@@ -782,236 +798,466 @@ fn test_fuzzy_score_consecutive_bonus() {
 }
 
 // =============================================================================
-// Tests for send_key_to_tmux
+// Tests for popup key translation
+//
+// These used to assert against a mock `TmuxOperations`, because a keystroke went
+// straight out as a `send-keys` subprocess. Translation is now a pure function
+// and delivery is `tmux::input`'s job, so the key names — the part agents
+// actually depend on — are pinned here without a mock in sight.
 // =============================================================================
 
-/// Test sending character key to tmux
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_char() {
-    let mut mock_tmux = MockTmuxOperations::new();
-
-    mock_tmux
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("test-window"),
-            mockall::predicate::eq("a"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "test-window",
-        crossterm::event::KeyEvent::new(KeyCode::Char('a'), crossterm::event::KeyModifiers::NONE),
-        &mock_tmux,
-    );
+#[cfg(test)]
+fn translated(code: KeyCode, modifiers: KeyModifiers) -> Option<PaneInput> {
+    popup_key_input("win", crossterm::event::KeyEvent::new(code, modifiers))
 }
 
-/// Test sending Enter key to tmux
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_enter() {
-    let mut mock_tmux = MockTmuxOperations::new();
-
-    mock_tmux
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("test-window"),
-            mockall::predicate::eq("Enter"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "test-window",
-        crossterm::event::KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
-        &mock_tmux,
-    );
+#[cfg(test)]
+fn translated_key(code: KeyCode, modifiers: KeyModifiers) -> String {
+    match translated(code, modifiers) {
+        Some(PaneInput::Key { key, .. }) => key,
+        other => panic!("expected a key name, got {other:?}"),
+    }
 }
 
-/// Test sending special keys to tmux
 #[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_special_keys() {
-    let mut mock_tmux = MockTmuxOperations::new();
-
-    // Test Escape
-    mock_tmux
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("win"),
-            mockall::predicate::eq("Escape"),
-        )
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::NONE),
-        &mock_tmux,
-    );
-
-    // Test Backspace
-    let mut mock_tmux2 = MockTmuxOperations::new();
-    mock_tmux2
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("win"),
-            mockall::predicate::eq("BSpace"),
-        )
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::NONE),
-        &mock_tmux2,
-    );
-}
-
-/// Test sending function key to tmux
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_function_key() {
-    let mut mock_tmux = MockTmuxOperations::new();
-
-    mock_tmux
-        .expect_send_key()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("F5"))
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::F(5), crossterm::event::KeyModifiers::NONE),
-        &mock_tmux,
-    );
-}
-
-/// Test Alt+Left and Alt+Right send M-Left / M-Right (word-boundary navigation)
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_alt_arrow_keys() {
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("win"),
-            mockall::predicate::eq("M-Left"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Left, crossterm::event::KeyModifiers::ALT),
-        &mock_tmux,
-    );
-
-    let mut mock_tmux2 = MockTmuxOperations::new();
-    mock_tmux2
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("win"),
-            mockall::predicate::eq("M-Right"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Right, crossterm::event::KeyModifiers::ALT),
-        &mock_tmux2,
-    );
-}
-
-/// Test Alt+b / Alt+f (macOS Option+Left/Right Emacs-style) send M-b / M-f
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_alt_b_f() {
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_send_key()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-b"))
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Char('b'), crossterm::event::KeyModifiers::ALT),
-        &mock_tmux,
-    );
-
-    let mut mock_tmux2 = MockTmuxOperations::new();
-    mock_tmux2
-        .expect_send_key()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("M-f"))
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(KeyCode::Char('f'), crossterm::event::KeyModifiers::ALT),
-        &mock_tmux2,
-    );
-}
-
-/// Control modifiers must reach the pane so terminal programs can be
-/// interrupted, suspended, or otherwise controlled from the in-app popup.
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_control_char() {
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_send_key()
-        .with(mockall::predicate::eq("win"), mockall::predicate::eq("C-c"))
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(
-            KeyCode::Char('c'),
-            crossterm::event::KeyModifiers::CONTROL,
-        ),
-        &mock_tmux,
+fn a_character_becomes_literal_text_for_the_right_target() {
+    assert_eq!(
+        translated(KeyCode::Char('a'), KeyModifiers::NONE),
+        Some(PaneInput::Text {
+            target: "win".to_string(),
+            text: "a".to_string(),
+        })
     );
 }
 
 #[test]
-#[cfg(feature = "test-mocks")]
-fn test_send_key_to_tmux_control_alt_char() {
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_send_key()
-        .with(
-            mockall::predicate::eq("win"),
-            mockall::predicate::eq("C-M-x"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
+fn enter_and_escape_keep_their_tmux_names() {
+    assert_eq!(translated_key(KeyCode::Enter, KeyModifiers::NONE), "Enter");
+    assert_eq!(translated_key(KeyCode::Esc, KeyModifiers::NONE), "Escape");
+    assert_eq!(
+        translated_key(KeyCode::Backspace, KeyModifiers::NONE),
+        "BSpace"
+    );
+    assert_eq!(translated_key(KeyCode::Delete, KeyModifiers::NONE), "DC");
+    assert_eq!(translated_key(KeyCode::Insert, KeyModifiers::NONE), "IC");
+    assert_eq!(translated_key(KeyCode::F(5), KeyModifiers::NONE), "F5");
+}
 
-    send_key_to_tmux(
-        "win",
-        crossterm::event::KeyEvent::new(
+#[test]
+fn alt_arrows_stay_word_boundary_navigation() {
+    // Option+Left/Right in a composer. Both spellings matter: macOS terminals
+    // send the arrow form, and Emacs-style bindings send M-b / M-f.
+    assert_eq!(translated_key(KeyCode::Left, KeyModifiers::ALT), "M-Left");
+    assert_eq!(translated_key(KeyCode::Right, KeyModifiers::ALT), "M-Right");
+    assert_eq!(translated_key(KeyCode::Char('b'), KeyModifiers::ALT), "M-b");
+    assert_eq!(translated_key(KeyCode::Char('f'), KeyModifiers::ALT), "M-f");
+}
+
+#[test]
+fn control_modifiers_reach_the_pane() {
+    // Interrupting or suspending a program from the in-app popup depends on
+    // these arriving as keys rather than as the letters they are typed with.
+    assert_eq!(
+        translated_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        "C-c"
+    );
+    assert_eq!(
+        translated_key(
             KeyCode::Char('x'),
-            crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT
         ),
-        &mock_tmux,
+        "C-M-x"
     );
 }
 
 #[test]
-fn shell_popup_uses_twenty_fps_poll_interval() {
-    assert_eq!(main_event_poll_timeout(true), std::time::Duration::from_millis(50));
-    assert_eq!(main_event_poll_timeout(false), std::time::Duration::from_millis(100));
+fn an_unreadable_window_listing_never_marks_a_task_exited() {
+    use std::collections::HashSet;
+    let live: HashSet<String> = ["pj:t1".to_string()].into_iter().collect();
+
+    assert!(!window_is_gone(Some("pj:t1"), Some(&live)));
+    assert!(window_is_gone(Some("pj:gone"), Some(&live)));
+
+    // The direction that matters. One listing now answers for every task, so a
+    // failed listing read as "no windows" would mark the whole board `Exited` —
+    // a visible, wrong status change — where the per-task check it replaced
+    // failed safe (`!window_exists(sn).unwrap_or(true)`).
+    assert!(
+        !window_is_gone(Some("pj:t1"), None),
+        "an unreadable listing must mean unknown, not gone"
+    );
+    // An empty-but-readable listing is real information: the windows are gone.
+    assert!(window_is_gone(Some("pj:t1"), Some(&HashSet::new())));
+    // A task with no session was never running in the first place.
+    assert!(!window_is_gone(None, Some(&HashSet::new())));
+}
+
+#[test]
+fn the_pane_watcher_only_wakes_the_loop_when_the_pane_changed() {
+    // The property the whole event-driven loop rests on: an agent painting
+    // nothing produces no wake-ups, so no frame is drawn and no capture is
+    // re-parsed. Asserted on the comparison itself, which is what the watcher
+    // thread decides with.
+    let a = (
+        "task-x".to_string(),
+        b"same".to_vec(),
+        Some(crate::tmux::PaneMetrics {
+            cursor_x: 1,
+            cursor_y: 2,
+            pane_height: 30,
+            history_size: 0,
+        }),
+    );
+    assert!(!pane_capture_changed(&Some(a.clone()), &a.0, &a.1, &a.2));
+
+    // Content, geometry and target each count as a change on their own: a
+    // cursor that moved without the text changing is still a redraw, and a
+    // capture for a different pane is never this pane's content.
+    let mut moved = a.clone();
+    moved.2.as_mut().unwrap().cursor_x = 9;
+    assert!(pane_capture_changed(
+        &Some(a.clone()),
+        &moved.0,
+        &moved.1,
+        &moved.2
+    ));
+    assert!(pane_capture_changed(&Some(a.clone()), &a.0, b"other", &a.2));
+    assert!(pane_capture_changed(&Some(a.clone()), "task-y", &a.1, &a.2));
+    // Nothing seen yet always sends, so a popup that seeded its own content
+    // still gets a first real capture.
+    assert!(pane_capture_changed(&None, &a.0, &a.1, &a.2));
+}
+
+#[test]
+fn the_watcher_backs_off_only_after_the_pane_has_settled() {
+    // Fast while the pane is moving — that is the cadence a keystroke's echo
+    // rides on — and slow once it has not moved for a while, because then
+    // nobody is waiting on a millisecond.
+    assert_eq!(pane_watch_interval(0), SHELL_REFRESH_INTERVAL);
+    assert_eq!(
+        pane_watch_interval(PANE_IDLE_ROUNDS - 1),
+        SHELL_REFRESH_INTERVAL
+    );
+    assert_eq!(pane_watch_interval(PANE_IDLE_ROUNDS), PANE_IDLE_INTERVAL);
+    assert!(PANE_IDLE_INTERVAL > SHELL_REFRESH_INTERVAL);
+    // The back-off must not be reachable between two keystrokes at any human
+    // typing speed, or the first character after a pause would lag.
+    assert!(SHELL_REFRESH_INTERVAL * PANE_IDLE_ROUNDS >= std::time::Duration::from_millis(150));
+}
+
+#[test]
+fn a_poke_puts_the_watcher_back_on_the_fast_cadence() {
+    // The regression this exists for: a poke's own capture runs before the key
+    // it announced has reached the pane, so it sees nothing new. If that left
+    // the count alone, the echo would wait out another idle interval — which is
+    // the back-off charging exactly what it was built not to.
+    let settled = PANE_IDLE_ROUNDS + 10;
+    assert_eq!(pane_watch_interval(settled), PANE_IDLE_INTERVAL);
+    assert_eq!(
+        pane_watch_interval(pane_watch_rounds_after_wait(settled, true)),
+        SHELL_REFRESH_INTERVAL,
+        "a keystroke must return the watcher to the fast cadence"
+    );
+    // A wait that simply expired changes nothing: an idle pane stays idle.
+    assert_eq!(pane_watch_rounds_after_wait(settled, false), settled);
+}
+
+#[test]
+fn a_paint_signal_only_wakes_the_pane_being_watched() {
+    // The output watch mirrors *every* pane in the session, so filtering is what
+    // keeps another task's output from driving captures of this one.
+    let watch = PaneWatch::default();
+    watch.follow(Some("pj:mine"), SHELL_POPUP_TAIL_LINES);
+    watch.set_pane_id(Some("%7".to_string()));
+    let before = watch.signal_count();
+
+    watch.mark_output("%9");
+    assert_eq!(watch.signal_count(), before, "another pane must not signal");
+    watch.mark_output("%7");
+    assert_ne!(watch.signal_count(), before, "the watched pane must signal");
+
+    // With no id resolved, push is not active and nothing may signal — the
+    // watcher is on the timer, and a stray wake would defeat its back-off.
+    watch.set_pane_id(None);
+    let idle = watch.signal_count();
+    watch.mark_output("%7");
+    assert_eq!(watch.signal_count(), idle);
+}
+
+#[test]
+fn following_a_new_pane_drops_the_previous_pane_id() {
+    // Otherwise the old pane's output would keep signalling after the popup
+    // moved, and the new pane's would not.
+    let watch = PaneWatch::default();
+    watch.follow(Some("pj:one"), SHELL_POPUP_TAIL_LINES);
+    watch.set_pane_id(Some("%1".to_string()));
+    watch.follow(Some("pj:two"), SHELL_POPUP_TAIL_LINES);
+    let before = watch.signal_count();
+    watch.mark_output("%1");
+    assert_eq!(
+        watch.signal_count(),
+        before,
+        "the old pane must stop signalling the moment the popup moves"
+    );
+}
+
+#[test]
+fn the_interval_becomes_a_rate_limit_under_push() {
+    use std::time::Duration;
+    let typing = Some(Duration::ZERO);
+    // Push removes the floor: with a signal driving captures, the interval's
+    // only job is to stop a pane painting flat out from driving one capture per
+    // notification.
+    assert_eq!(
+        push_rate_limit_wait(true, Duration::ZERO, typing),
+        Some(SHELL_REFRESH_INTERVAL)
+    );
+    assert_eq!(
+        push_rate_limit_wait(true, SHELL_REFRESH_INTERVAL, typing),
+        None
+    );
+    // Polling paces itself through its own wait, so it must never sleep twice.
+    assert_eq!(push_rate_limit_wait(false, Duration::ZERO, typing), None);
+}
+
+#[test]
+fn output_is_sampled_slower_than_a_keystroke_echo() {
+    use std::time::Duration;
+    // The two reasons to capture deserve different answers. Sharing one made a
+    // pane painting flat out cost more than the polling it replaced: a capture
+    // makes the tmux server format the whole pane, so capturing every frame is
+    // expensive where nobody is watching for one. The polling had been protected
+    // by its own slowness — one `capture-pane` process per capture.
+    assert!(PANE_OUTPUT_MIN_INTERVAL > SHELL_REFRESH_INTERVAL);
+
+    // Nobody is waiting on one frame of an agent's output.
+    let idle_hands = Some(PANE_TYPING_WINDOW * 2);
+    assert_eq!(
+        push_rate_limit_wait(true, Duration::ZERO, idle_hands),
+        Some(PANE_OUTPUT_MIN_INTERVAL)
+    );
+    assert_eq!(
+        push_rate_limit_wait(true, Duration::ZERO, None),
+        Some(PANE_OUTPUT_MIN_INTERVAL)
+    );
+
+    // But a keystroke's echo arrives as a *paint*, indistinguishable from the
+    // agent's own output — so for a window after typing, paints stay fast or
+    // every character would echo up to `PANE_OUTPUT_MIN_INTERVAL` late.
+    assert_eq!(
+        push_rate_limit_wait(true, Duration::ZERO, Some(PANE_TYPING_WINDOW / 2)),
+        Some(SHELL_REFRESH_INTERVAL)
+    );
+    assert!(PANE_TYPING_WINDOW > SHELL_REFRESH_INTERVAL * 4);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_failing_output_watch_is_not_retried_every_iteration() {
+    // The failure path runs inside a loop that ticks every
+    // `SHELL_REFRESH_INTERVAL`, and each attempt is two `tmux` processes. A
+    // popup left open on a window that has since closed would otherwise spawn a
+    // hundred processes a second — the very cost this change removes.
+    let mut mock = MockTmuxOperations::new();
+    // The point of the assertion: asked once, not once per call.
+    mock.expect_pane_id().times(1).returning(|_| None);
+    let watch = Arc::new(PaneWatch::default());
+    let mut retry_at: Option<std::time::Instant> = None;
+
+    for _ in 0..50 {
+        let push = attach_pane_push(None, "pj:t1", &watch, &mock, &mut retry_at);
+        assert!(push.is_none(), "a pane with no id cannot be watched");
+    }
+    assert!(retry_at.is_some(), "a failed attach must schedule a retry");
+}
+
+#[test]
+fn the_output_watch_is_reused_only_within_one_session() {
+    // `%output` never crosses sessions, so the session decides whether an open
+    // watch still covers the pane being followed.
+    assert_eq!(pane_push_session("pj:task-one"), "pj");
+    assert_eq!(
+        pane_push_session("pj:task-one"),
+        pane_push_session("pj:task-two")
+    );
+    assert_ne!(pane_push_session("pj:t"), pane_push_session("other:t"));
+    // A bare target names no session; treating it as one is better than
+    // panicking, and `pane_target` guarantees it does not happen.
+    assert_eq!(pane_push_session("bare"), "bare");
+}
+
+#[test]
+fn the_transition_queue_paces_itself() {
+    // A SQLite query that used to run on every housekeeping tick — ten times a
+    // second, forever, whether or not anything was connected. A transition is a
+    // request to move a task between columns, acted on against a phase status
+    // that is itself only as fresh as its cache, so polling the queue faster
+    // than that cache buys nothing.
+    assert!(TRANSITION_POLL_INTERVAL > HOUSEKEEPING_TICK);
+    assert!(TRANSITION_POLL_INTERVAL >= PHASE_STATUS_CACHE_TTL);
+}
+
+#[test]
+fn nothing_on_the_board_animates() {
+    // The `Working` indicator used to be a spinner, and on an otherwise idle
+    // board it was the *only* thing forcing a redraw — ten a second, forever, to
+    // rotate a glyph. Every indicator is now static, so a board with running
+    // tasks asks for no frame at all between real changes. If a future indicator
+    // animates, `run_housekeeping` has to start reporting a change again, and
+    // the idle cost comes back with it.
+    let src = include_str!("app.rs");
+    assert!(
+        !src.contains("SPINNER_FRAMES"),
+        "an animated indicator is back; idle redraws return with it"
+    );
+}
+
+#[test]
+fn the_capture_depth_follows_the_scroll_position() {
+    // At the bottom only the visible rows are rendered, so a deeper capture is
+    // fetched, formatted by tmux, compared and parsed for nothing. Scrolled up,
+    // the history is the whole point.
+    assert_eq!(popup_capture_depth(0), SHELL_POPUP_TAIL_LINES);
+    assert_eq!(popup_capture_depth(-1), SHELL_POPUP_CAPTURE_LINES);
+    assert_eq!(popup_capture_depth(-40), SHELL_POPUP_CAPTURE_LINES);
+    assert!(SHELL_POPUP_TAIL_LINES < SHELL_POPUP_CAPTURE_LINES);
+    // Not zero: the first `C-u` has to have somewhere to scroll to, and a page
+    // is the pane's height.
+    assert!(
+        SHELL_POPUP_TAIL_LINES >= 60,
+        "the tail must cover a few pages, or the first scroll-up hits the end"
+    );
+}
+
+#[test]
+fn scrolling_repoints_the_watcher_without_changing_target() {
+    // A scroll is not a target change, but it *is* a reason to capture again —
+    // otherwise the user scrolls into a buffer that has nothing above it and
+    // waits for the next paint to fill it in.
+    let watch = PaneWatch::default();
+    watch.follow(Some("pj:t"), SHELL_POPUP_TAIL_LINES);
+    let before = watch.poke_count();
+
+    watch.follow(Some("pj:t"), SHELL_POPUP_TAIL_LINES);
+    assert_eq!(
+        watch.poke_count(),
+        before,
+        "an unchanged depth must not poke"
+    );
+
+    watch.follow(Some("pj:t"), SHELL_POPUP_CAPTURE_LINES);
+    assert_ne!(
+        watch.poke_count(),
+        before,
+        "scrolling up must trigger a deeper capture immediately"
+    );
+}
+
+#[test]
+fn the_popup_renders_the_lines_the_watcher_parsed() {
+    // The parse moved off the UI thread, so the bytes and the styled lines are
+    // now two fields that must be set together: rendering from lines that do
+    // not match the bytes change detection compares would leave a wrong frame
+    // on screen forever, because the next capture would compare equal.
+    let mut popup = ShellPopup::new("t".to_string(), "pj:t".to_string());
+    let content = b"\x1b[31mred\x1b[0m\nplain\n".to_vec();
+    let lines = parse_ansi_to_lines(&content);
+    assert_eq!(lines.len(), 2);
+    popup.set_content(content.clone(), lines);
+    assert_eq!(popup.cached_content, content);
+    assert_eq!(popup.cached_lines.len(), 2);
+    // Scrolling still reads the byte side, so the two must describe one pane.
+    assert_eq!(
+        popup.cached_lines.len(),
+        String::from_utf8_lossy(&popup.cached_content)
+            .lines()
+            .count()
+    );
+}
+
+/// Both waits must release `PaneWatch`'s lock before returning, because the
+/// watcher takes it again straight afterwards and `Mutex` is not reentrant.
+///
+/// This is the invariant that broke: written inline, the arm that did not hand
+/// its guard to `wait_timeout` kept the guard for the rest of the iteration, the
+/// rate limit below re-locked, and the watcher deadlocked *holding the lock the
+/// UI thread calls `follow()` on every iteration* — so the whole TUI froze. The
+/// waits are methods now so the guard cannot escape them; this pins that.
+#[test]
+fn the_waits_release_the_lock_before_returning() {
+    let watch = PaneWatch::default();
+    watch.follow(Some("pj:t1"), SHELL_POPUP_TAIL_LINES);
+
+    // The arm that used to keep its guard: a poke already landed, so the wait is
+    // skipped entirely rather than handed to `wait_timeout`.
+    watch.poke();
+    let outcome = watch
+        .wait_for_change(0, 0, std::time::Duration::from_millis(50))
+        .expect("not stopped");
+    assert!(
+        outcome.skipped,
+        "a poke that already landed must skip the wait"
+    );
+    assert!(outcome.poked);
+    assert!(
+        watch.inner.try_lock().is_ok(),
+        "wait_for_change returned still holding the lock"
+    );
+
+    // And the arm that does wait.
+    let (poke, signal) = {
+        let state = watch.inner.lock().expect("lock");
+        (state.poke, state.signal)
+    };
+    let outcome = watch
+        .wait_for_change(poke, signal, std::time::Duration::from_millis(1))
+        .expect("not stopped");
+    assert!(!outcome.skipped);
+    assert!(
+        watch.inner.try_lock().is_ok(),
+        "wait_for_change returned still holding the lock after waiting"
+    );
+
+    assert!(watch
+        .wait_out_rate_limit(std::time::Duration::from_millis(1))
+        .is_some());
+    assert!(
+        watch.inner.try_lock().is_ok(),
+        "wait_out_rate_limit returned still holding the lock"
+    );
+}
+
+#[test]
+fn a_pane_watch_follows_the_open_popup() {
+    let watch = PaneWatch::default();
+    assert_eq!(watch.target(), None);
+
+    watch.follow(Some("task-one"), SHELL_POPUP_TAIL_LINES);
+    assert_eq!(watch.target().as_deref(), Some("task-one"));
+    let after_first = watch.poke_count();
+
+    // Following the same target again must not poke: this is called every loop
+    // iteration, and a poke means "capture now at the fast cadence".
+    watch.follow(Some("task-one"), SHELL_POPUP_TAIL_LINES);
+    assert_eq!(watch.poke_count(), after_first);
+
+    // A switch and a close both have to reach the watcher, or it would keep
+    // capturing a pane nobody is looking at.
+    watch.follow(Some("task-two"), SHELL_POPUP_TAIL_LINES);
+    assert_eq!(watch.target().as_deref(), Some("task-two"));
+    assert_ne!(watch.poke_count(), after_first);
+    watch.follow(None, SHELL_POPUP_TAIL_LINES);
+    assert_eq!(watch.target(), None);
 }
 
 // =============================================================================
-// Tests for capture_tmux_pane_with_history
+// Tests for capture_tmux_pane_snapshot
 // =============================================================================
 
 /// Test capturing tmux pane content
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_capture_tmux_pane_with_history() {
+fn test_capture_tmux_pane_snapshot() {
     let mut mock_tmux = MockTmuxOperations::new();
 
     mock_tmux
@@ -1023,14 +1269,99 @@ fn test_capture_tmux_pane_with_history() {
         .returning(|_, _| b"Line 1\nLine 2\nLine 3\n".to_vec());
 
     mock_tmux
-        .expect_get_cursor_info()
+        .expect_pane_metrics()
         .with(mockall::predicate::eq("test-window"))
-        .returning(|_| Some((0, 2, 3))); // cursor at column 0, line 2, pane has 3 lines
+        .returning(|_| {
+            Some(crate::tmux::PaneMetrics {
+                cursor_x: 0,
+                cursor_y: 2,
+                pane_height: 3,
+                history_size: 0,
+            })
+        });
 
-    let content = capture_tmux_pane_with_history("test-window", 500, &mock_tmux);
+    let (content, metrics) = capture_tmux_pane_snapshot("test-window", 500, &mock_tmux);
 
     // Content should be trimmed to cursor position
     assert!(!content.is_empty());
+    // The metrics come back with it, so a popup can seed `has_scrollback()`
+    // at open time instead of waiting for the first refresh.
+    assert_eq!(metrics.map(|m| m.history_size), Some(0));
+}
+
+/// A sink that answers captures from a canned snapshot, standing in for a live
+/// control connection.
+#[cfg(feature = "test-mocks")]
+struct CapturingSink(Option<crate::tmux::PaneSnapshot>);
+
+#[cfg(feature = "test-mocks")]
+impl PaneInputSink for CapturingSink {
+    fn send(
+        &self,
+        _input: crate::tmux::PaneInput,
+    ) -> std::result::Result<(), crate::tmux::InputError> {
+        Ok(())
+    }
+    fn capture(
+        &self,
+        _target: &str,
+        _spec: crate::tmux::CaptureSpec,
+    ) -> Option<crate::tmux::PaneSnapshot> {
+        self.0.clone()
+    }
+}
+
+/// The popup's capture goes to the broker's control connection when there is
+/// one: the `tmux` process startup it replaces was most of the delay between
+/// typing into a task pane and seeing the character.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_popup_capture_prefers_the_input_connection() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    // Not `times(0)` on a permissive mock: an unexpected call panics, which is
+    // the assertion. Neither subprocess may run when the sink answers.
+    mock_tmux.expect_capture_pane_with_history().never();
+    mock_tmux.expect_pane_metrics().never();
+
+    let sink = CapturingSink(Some(crate::tmux::PaneSnapshot {
+        content: b"from control\n".to_vec(),
+        metrics: Some(crate::tmux::PaneMetrics {
+            cursor_x: 0,
+            cursor_y: 0,
+            pane_height: 1,
+            history_size: 7,
+        }),
+    }));
+
+    let (content, metrics) = capture_pane_for_popup("test-window", 500, &sink, &mock_tmux);
+    // Trimmed to the cursor, exactly as the subprocess path is.
+    assert_eq!(content, b"from control".to_vec());
+    assert_eq!(metrics.map(|m| m.history_size), Some(7));
+}
+
+/// And falls back untouched when it does not: control mode is off, the
+/// connection is down, or the queue is full. A missed capture costs one frame at
+/// the old speed, never a blank popup.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_popup_capture_falls_back_to_the_subprocess_path() {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux
+        .expect_capture_pane_with_history()
+        .returning(|_, _| b"from subprocess\n".to_vec());
+    mock_tmux.expect_pane_metrics().returning(|_| {
+        Some(crate::tmux::PaneMetrics {
+            cursor_x: 0,
+            cursor_y: 0,
+            pane_height: 1,
+            history_size: 3,
+        })
+    });
+
+    let (content, metrics) =
+        capture_pane_for_popup("test-window", 500, &CapturingSink(None), &mock_tmux);
+    assert_eq!(content, b"from subprocess".to_vec());
+    assert_eq!(metrics.map(|m| m.history_size), Some(3));
 }
 
 // =============================================================================
@@ -1580,7 +1911,7 @@ fn test_footer_text_planning_column() {
 #[test]
 fn test_footer_text_running_column() {
     let text = build_footer_text(InputMode::Normal, false, 2, false, false);
-    assert!(text.contains("[r] move left"));
+    assert!(text.contains("[r] move back"));
     assert!(text.contains("[m] move"));
 }
 
@@ -1609,7 +1940,7 @@ fn test_footer_text_fullscreen_on_enter_hides_ctrl_f() {
 #[test]
 fn test_footer_text_review_column() {
     let text = build_footer_text(InputMode::Normal, false, 3, false, false);
-    assert!(text.contains("[r] move left"));
+    assert!(text.contains("[r] move back"));
     assert!(text.contains("[m] move"));
 }
 
@@ -8499,7 +8830,7 @@ fn test_toggle_orchestrator_spawns_new_session() {
     mock_tmux
         .expect_capture_pane_with_history()
         .returning(|_, _| vec![]);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry.expect_get().returning(|_| {
@@ -8538,7 +8869,7 @@ fn test_toggle_orchestrator_opens_popup_when_already_running() {
     mock_tmux
         .expect_capture_pane_with_history()
         .returning(|_, _| vec![]);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry
@@ -8588,7 +8919,7 @@ fn test_toggle_orchestrator_reattaches_to_live_orchestrator_from_other_instance(
     mock_tmux
         .expect_capture_pane_with_history()
         .returning(|_, _| vec![]);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry
@@ -8643,7 +8974,7 @@ fn test_toggle_orchestrator_clears_stale_session_and_respawns() {
     mock_tmux
         .expect_capture_pane_with_history()
         .returning(|_, _| vec![]);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
 
     let mut mock_registry = MockAgentRegistry::new();
     mock_registry.expect_get().returning(|_| {
@@ -11520,33 +11851,12 @@ fn test_task_has_live_session_returns_false_on_tmux_error() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_handle_paste_into_shell_popup_calls_paste_text() {
-    // When shell popup is open, handle_paste must call paste_text exactly once
-    // with the full pasted string (not send_key character by character).
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux.expect_window_exists().returning(|_| Ok(false));
-    mock_tmux.expect_has_session().returning(|_| false);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
-
-    let received = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let received_c = received.clone();
-    mock_tmux
-        .expect_paste_text()
-        .times(1)
-        .returning(move |_, text| {
-            *received_c.lock().unwrap() = text.to_string();
-            Ok(())
-        });
-
-    let mut app = App::new_for_test(
-        Some(PathBuf::from("/tmp/test-project")),
-        Arc::new(mock_tmux),
-        Arc::new(MockGitOperations::new()),
-        Arc::new(MockGitProviderOperations::new()),
-        Arc::new(MockAgentRegistry::new()),
-    )
-    .unwrap();
-
+fn test_handle_paste_into_shell_popup_enqueues_one_atomic_paste() {
+    // A paste is one request with the whole string, never a character at a time.
+    // It goes to the broker rather than straight to tmux, so the assertion moved
+    // from `paste_text` to what the UI enqueued — the delivery itself is
+    // `tmux::input`'s contract, tested there.
+    let (mut app, sink) = app_with_recording_sink();
     app.state.shell_popup = Some(ShellPopup::new(
         "my task".to_string(),
         "proj:my-task".to_string(),
@@ -11554,23 +11864,28 @@ fn test_handle_paste_into_shell_popup_calls_paste_text() {
 
     app.handle_paste("hello world".to_string()).unwrap();
 
-    assert_eq!(*received.lock().unwrap(), "hello world");
+    assert_eq!(
+        sink.taken(),
+        vec![PaneInput::Paste {
+            target: "proj:my-task".to_string(),
+            text: "hello world".to_string(),
+        }]
+    );
 }
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_handle_paste_into_shell_popup_does_not_call_send_key() {
-    // Verify the old per-character path is not taken for paste events.
+fn test_handle_paste_into_shell_popup_never_touches_tmux_on_the_input_thread() {
+    // The whole point of the broker: nothing on the key path may start or wait
+    // for a tmux process. mockall panics on any unexpected call, so an
+    // expectation of `times(0)` on all three send primitives is the assertion.
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux.expect_window_exists().returning(|_| Ok(false));
     mock_tmux.expect_has_session().returning(|_| false);
-    mock_tmux.expect_get_cursor_info().returning(|_| None);
-    mock_tmux
-        .expect_paste_text()
-        .times(1)
-        .returning(|_, _| Ok(()));
-    // send_key must NOT be called — mockall panics if an unexpected call occurs
+    mock_tmux.expect_pane_metrics().returning(|_| None);
     mock_tmux.expect_send_key().times(0);
+    mock_tmux.expect_send_text().times(0);
+    mock_tmux.expect_paste_text().times(0);
 
     let mut app = App::new_for_test(
         Some(PathBuf::from("/tmp/test-project")),
@@ -11580,6 +11895,7 @@ fn test_handle_paste_into_shell_popup_does_not_call_send_key() {
         Arc::new(MockAgentRegistry::new()),
     )
     .unwrap();
+    app.set_input_sink(Arc::new(crate::tmux::RecordingSink::new()));
 
     app.state.shell_popup = Some(ShellPopup::new(
         "my task".to_string(),
@@ -11587,6 +11903,10 @@ fn test_handle_paste_into_shell_popup_does_not_call_send_key() {
     ));
 
     app.handle_paste("some pasted text".to_string()).unwrap();
+    app.handle_key(key_event(KeyCode::Char('a'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
 }
 
 #[test]
@@ -11852,12 +12172,19 @@ fn test_gemini_hooks_merge_with_existing_settings() {
     )
     .unwrap();
 
-    assert_eq!(v["theme"], serde_json::json!("Dracula"), "user key survived");
+    assert_eq!(
+        v["theme"],
+        serde_json::json!("Dracula"),
+        "user key survived"
+    );
     assert_eq!(v["mcpServers"]["agtx"]["command"].is_string(), true);
     let before_tool = v["hooks"]["BeforeTool"].as_array().unwrap();
     assert_eq!(before_tool.len(), 2, "user hook kept, agtx hook appended");
     assert_eq!(before_tool[0]["hooks"][0]["command"], "mine.sh");
-    assert_eq!(v["hooks"]["AfterAgent"][0]["hooks"][0]["command"].is_string(), true);
+    assert_eq!(
+        v["hooks"]["AfterAgent"][0]["hooks"][0]["command"].is_string(),
+        true
+    );
 }
 
 /// Redeploying must replace agtx's entries rather than accumulate them —
@@ -11920,7 +12247,10 @@ fn test_antigravity_hooks_preserve_a_projects_own_hooks() {
     )
     .unwrap();
 
-    assert_eq!(v["lint-checker"]["PostToolUse"][0]["hooks"][0]["command"], "./lint.sh");
+    assert_eq!(
+        v["lint-checker"]["PostToolUse"][0]["hooks"][0]["command"],
+        "./lint.sh"
+    );
     // Its payload carries no event name, so every handler must name its own.
     assert!(v["agtx"]["Stop"][0]["command"]
         .as_str()
@@ -11944,9 +12274,10 @@ fn test_cursor_hooks_carry_the_version_envelope() {
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().to_string_lossy().to_string();
     write_skills_to_worktree(&wt, dir.path(), &None, &["cursor"], true);
-    let v: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap())
-            .unwrap();
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(".cursor/hooks.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(v["version"], serde_json::json!(1));
     // Flat `{command}`, not the Claude `{hooks:[{type,command}]}` wrapper —
     // cursor loads the wrapped form without complaint and never fires it.
@@ -12013,7 +12344,10 @@ fn test_cursor_hooks_preserve_a_projects_own_hooks() {
     let stop = v["hooks"]["stop"].as_array().unwrap();
     assert_eq!(stop.len(), 2);
     assert_eq!(stop[0]["command"], "./mine.sh");
-    assert!(stop[1]["command"].as_str().unwrap().contains("hook --env cursor"));
+    assert!(stop[1]["command"]
+        .as_str()
+        .unwrap()
+        .contains("hook --env cursor"));
 }
 
 /// Redeploying must replace agtx's own flat `{command}` entries, not stack them.
@@ -13601,4 +13935,474 @@ fn test_no_release_check_runs_in_tests() {
     // a live dependency on GitHub.
     let app = make_test_app();
     assert!(app.state.update_rx.is_none());
+}
+
+// =============================================================================
+// Popup input: what a keystroke becomes, and where it goes
+// =============================================================================
+
+/// Helper: an App whose pane input is recorded instead of sent.
+#[cfg(feature = "test-mocks")]
+fn app_with_recording_sink() -> (App, Arc<crate::tmux::RecordingSink>) {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+    mock_tmux.expect_pane_metrics().returning(|_| None);
+    mock_tmux.expect_resize_window().returning(|_, _, _| Ok(()));
+    // Nothing on the key path may reach tmux directly any more.
+    mock_tmux.expect_send_key().times(0);
+    mock_tmux.expect_send_text().times(0);
+    mock_tmux.expect_paste_text().times(0);
+
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+    let sink = Arc::new(crate::tmux::RecordingSink::new());
+    app.set_input_sink(Arc::clone(&sink) as Arc<dyn crate::tmux::PaneInputSink>);
+    (app, sink)
+}
+
+#[cfg(feature = "test-mocks")]
+fn key_event(code: KeyCode, modifiers: KeyModifiers) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(code, modifiers)
+}
+
+/// Helper: an App with a popup open on `proj:task`, plus its recording sink.
+#[cfg(feature = "test-mocks")]
+fn app_with_open_popup() -> (App, Arc<crate::tmux::RecordingSink>) {
+    let (mut app, sink) = app_with_recording_sink();
+    app.state.shell_popup = Some(ShellPopup::new(
+        "my task".to_string(),
+        "proj:task".to_string(),
+    ));
+    (app, sink)
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_printable_key_is_enqueued_as_literal_text() {
+    let (mut app, sink) = app_with_open_popup();
+    for c in "aZ 9".chars() {
+        app.handle_key(key_event(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(
+        sink.taken(),
+        "aZ 9"
+            .chars()
+            .map(|c| PaneInput::Text {
+                target: "proj:task".to_string(),
+                text: c.to_string(),
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_character_that_tmux_would_read_as_syntax_is_still_text() {
+    // `;` used to be sent through tmux's key-name lookup, where a standalone
+    // semicolon is a command separator — the keystroke never reached the pane.
+    // As text it is just a semicolon.
+    let (mut app, sink) = app_with_open_popup();
+    for c in [';', '$', '#', '"', '\\'] {
+        app.handle_key(key_event(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert!(
+        sink.taken()
+            .iter()
+            .all(|input| matches!(input, PaneInput::Text { .. })),
+        "punctuation must never go through key-name lookup"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn shifted_characters_carry_no_modifier_prefix() {
+    // crossterm reports the shifted character itself, so `M-A`/`S-a` would both
+    // be wrong: the character is the whole story.
+    let (mut app, sink) = app_with_open_popup();
+    app.handle_key(key_event(KeyCode::Char('A'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(
+        sink.taken(),
+        vec![PaneInput::Text {
+            target: "proj:task".to_string(),
+            text: "A".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn named_keys_are_enqueued_as_key_names() {
+    let (mut app, sink) = app_with_open_popup();
+    for code in [
+        KeyCode::Enter,
+        KeyCode::Esc,
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Backspace,
+        KeyCode::Tab,
+        KeyCode::Delete,
+        KeyCode::F(5),
+    ] {
+        app.handle_key(key_event(code, KeyModifiers::NONE)).unwrap();
+    }
+    let keys: Vec<String> = sink
+        .taken()
+        .into_iter()
+        .map(|input| match input {
+            PaneInput::Key { key, .. } => key,
+            other => panic!("expected a key, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["Enter", "Escape", "Up", "Down", "Left", "Right", "BSpace", "Tab", "DC", "F5"]
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn modified_characters_are_key_names_not_text() {
+    // Ctrl+a is a key; sending it as literal text would type an "a".
+    let (mut app, sink) = app_with_open_popup();
+    app.handle_key(key_event(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Char('b'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(
+        sink.taken(),
+        vec![
+            PaneInput::Key {
+                target: "proj:task".to_string(),
+                key: "C-a".to_string(),
+            },
+            PaneInput::Key {
+                target: "proj:task".to_string(),
+                key: "M-b".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_popups_own_shortcuts_are_never_forwarded() {
+    // Ctrl+q closes, Ctrl+f toggles fullscreen, and Ctrl+u/d/g navigate. None of
+    // them belong to the agent, and forwarding one would be invisible damage.
+    let (mut app, sink) = app_with_open_popup();
+    for code in ['u', 'd', 'g', 'f'] {
+        app.handle_key(key_event(KeyCode::Char(code), KeyModifiers::CONTROL))
+            .unwrap();
+    }
+    assert!(
+        sink.taken()
+            .iter()
+            .all(|input| matches!(input, PaneInput::Barrier { .. })),
+        "popup-local shortcuts must enqueue nothing but the fullscreen barrier"
+    );
+    assert!(app.state.shell_popup.is_some());
+
+    app.handle_key(key_event(KeyCode::Char('q'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.state.shell_popup.is_none(), "Ctrl+q closes the popup");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn ctrl_j_and_k_are_not_popup_keymaps() {
+    let (mut app, sink) = app_with_open_popup();
+    for code in ['j', 'k'] {
+        app.handle_key(key_event(KeyCode::Char(code), KeyModifiers::CONTROL))
+            .unwrap();
+    }
+    assert_eq!(
+        sink.taken(),
+        vec![
+            PaneInput::Key {
+                target: "proj:task".to_string(),
+                key: "C-j".to_string(),
+            },
+            PaneInput::Key {
+                target: "proj:task".to_string(),
+                key: "C-k".to_string(),
+            },
+        ],
+        "unmapped chords should pass through without agtx translating them"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn closing_the_popup_waits_for_the_target_it_was_typed_into() {
+    // Batched characters belong to the pane they were typed into, and agtx's own
+    // next write to that pane — a phase advance is one keystroke away on the
+    // board — must not overtake them. An *enqueued* flush returns before
+    // delivery, so this has to be the acknowledged one.
+    let (mut app, sink) = app_with_open_popup();
+    app.handle_key(key_event(KeyCode::Char('h'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Char('q'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(
+        matches!(sink.taken().last(), Some(PaneInput::Barrier { .. })),
+        "closing the popup must wait for the queued prefix, not just enqueue a flush"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn toggling_fullscreen_waits_before_resizing_the_pane() {
+    // The resize is a synchronous tmux subprocess on a different socket. If the
+    // flush were only enqueued it could still be pending when the resize lands,
+    // and the text would reach the pane at the wrong size.
+    let (mut app, sink) = app_with_open_popup();
+    app.handle_key(key_event(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Char('f'), KeyModifiers::CONTROL))
+        .unwrap();
+    let sent = sink.taken();
+    assert!(
+        matches!(sent.last(), Some(PaneInput::Barrier { .. })),
+        "Ctrl+F must wait for the queued prefix before it resizes, got {sent:?}"
+    );
+}
+
+/// Give the popup a pane that reports `history_size` lines of scrollback.
+#[cfg(feature = "test-mocks")]
+fn with_scrollback(app: &mut App, history_size: usize) {
+    if let Some(popup) = app.state.shell_popup.as_mut() {
+        popup.metrics = Some(crate::tmux::PaneMetrics {
+            cursor_x: 0,
+            cursor_y: 1,
+            pane_height: 20,
+            history_size,
+        });
+        popup.cached_content = (0..200)
+            .map(|i| format!("line {i}\n"))
+            .collect::<String>()
+            .into_bytes();
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn scroll_keys_move_the_popup_when_tmux_has_history() {
+    let (mut app, sink) = app_with_open_popup();
+    with_scrollback(&mut app, 500);
+    for code in [KeyCode::Char('p'), KeyCode::Char('u')] {
+        app.handle_key(key_event(code, KeyModifiers::CONTROL))
+            .unwrap();
+    }
+    app.handle_key(key_event(KeyCode::PageUp, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.state.shell_popup.as_ref().unwrap().scroll_offset,
+        -45,
+        "5 + 20 + 20 lines of agtx-side scrolling"
+    );
+    assert!(
+        sink.taken().is_empty(),
+        "with real scrollback the agent must not see the scroll keys"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn hidden_ctrl_arrow_scroll_aliases_are_preserved() {
+    let (mut app, sink) = app_with_open_popup();
+    with_scrollback(&mut app, 500);
+    app.handle_key(key_event(KeyCode::Up, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.shell_popup.as_ref().unwrap().scroll_offset, -5);
+    app.handle_key(key_event(KeyCode::Down, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.shell_popup.as_ref().unwrap().scroll_offset, 0);
+    assert!(sink.taken().is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn scroll_keys_go_to_the_agent_when_tmux_has_no_history() {
+    // A pane in the alternate screen keeps no tmux scrollback, so agtx's buffer
+    // is one screen and scrolling it moves nothing. The agent owns the history,
+    // so it gets the key it scrolls with.
+    let (mut app, sink) = app_with_open_popup();
+    with_scrollback(&mut app, 0);
+    for code in [
+        KeyCode::Char('p'),
+        KeyCode::Char('n'),
+        KeyCode::Char('u'),
+        KeyCode::Char('d'),
+    ] {
+        app.handle_key(key_event(code, KeyModifiers::CONTROL))
+            .unwrap();
+    }
+    app.handle_key(key_event(KeyCode::PageUp, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::PageDown, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key_event(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    let keys: Vec<String> = sink
+        .taken()
+        .into_iter()
+        .map(|input| match input {
+            PaneInput::Key { key, .. } => key,
+            other => panic!("expected a key, got {other:?}"),
+        })
+        .collect();
+    // Ctrl+N/P use the safe translation. `Up`/`Down` would scroll Claude's
+    // transcript view but
+    // recall prompt history in its main view, overwriting the composer — see
+    // `handle_popup_scroll`.
+    assert_eq!(
+        keys,
+        vec!["PageUp", "PageDown", "PageUp", "PageDown", "PageUp", "PageDown", "End"]
+    );
+    assert_eq!(
+        app.state.shell_popup.as_ref().unwrap().scroll_offset,
+        0,
+        "agtx must not also move its own buffer"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_delegated_scroll_only_ever_sends_a_paging_key() {
+    // Passing the chord through instead of translating it would send `C-d` —
+    // an EOF that can end the session — and `C-u`, which kills the line the
+    // user is typing in the agent's composer.
+    let (mut app, sink) = app_with_open_popup();
+    with_scrollback(&mut app, 0);
+    for code in [KeyCode::Char('d'), KeyCode::Char('u'), KeyCode::Char('g')] {
+        app.handle_key(key_event(code, KeyModifiers::CONTROL))
+            .unwrap();
+    }
+    for input in sink.taken() {
+        match input {
+            PaneInput::Key { key, .. } => assert!(
+                matches!(key.as_str(), "PageUp" | "PageDown" | "End"),
+                "only keys that cannot alter the composer may be delegated; got {key}"
+            ),
+            other => panic!("expected a key, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn unknown_pane_metrics_keep_the_popups_own_scrolling() {
+    // A failed `display -p` must not silently reroute keys into the agent.
+    let (mut app, sink) = app_with_open_popup();
+    if let Some(popup) = app.state.shell_popup.as_mut() {
+        popup.metrics = None;
+        popup.cached_content = b"a\nb\nc\n".to_vec();
+    }
+    app.handle_key(key_event(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(sink.taken().is_empty());
+    assert!(app.state.shell_popup.as_ref().unwrap().scroll_offset < 0);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_full_queue_warns_instead_of_sending_out_of_order() {
+    // Sending this key synchronously would put it ahead of everything already
+    // queued. A dropped key the user is told about beats a reordered one.
+    let (mut app, sink) = app_with_open_popup();
+    sink.fail_with(crate::tmux::InputError::QueueFull);
+    app.handle_key(key_event(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    let warning = app
+        .state
+        .warning_message
+        .as_ref()
+        .map(|(text, _)| text.clone())
+        .unwrap_or_default();
+    assert!(
+        warning.contains("dropped"),
+        "the user must be told a keystroke was dropped, got {warning:?}"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn an_escalation_banner_swallows_only_the_first_key() {
+    let (mut app, sink) = app_with_open_popup();
+    if let Some(popup) = app.state.shell_popup.as_mut() {
+        popup.escalation_note = Some("needs a human".to_string());
+    }
+    app.handle_key(key_event(KeyCode::Char('a'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(sink.taken().is_empty(), "the banner ate the keystroke");
+    app.handle_key(key_event(KeyCode::Char('b'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        sink.taken(),
+        vec![PaneInput::Text {
+            target: "proj:task".to_string(),
+            text: "b".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn a_popup_target_always_names_its_session() {
+    // A bare window name is resolved inside whichever session the issuing client
+    // is bound to — the attached one for the control client, the
+    // most-recently-used one for a subprocess. Neither is reliably this
+    // project's after a switch, and `orchestrator` exists in every project's
+    // session, so a bare target could type into another project's agent.
+    assert_eq!(pane_target("proj", "task-abc"), "proj:task-abc");
+    assert_eq!(pane_target("proj", "orchestrator"), "proj:orchestrator");
+    // Idempotent: the orchestrator builds its target qualified already, and
+    // re-qualifying would produce `proj:proj:orchestrator`, which resolves to
+    // nothing at all.
+    assert_eq!(
+        pane_target("proj", "proj:orchestrator"),
+        "proj:orchestrator"
+    );
+}
+
+#[test]
+fn control_mode_is_on_unless_turned_off() {
+    // There is no config field: a connection that fails or dies already falls
+    // back to the subprocess backend by itself. `AGTX_TMUX_CONTROL` stays as a
+    // one-run escape hatch so a bug report can be bisected across the two lanes.
+    assert!(control_mode_from_env(None), "on when nothing is set");
+    for off in ["0", "false", "no"] {
+        assert!(!control_mode_from_env(Some(off)), "{off} turns it off");
+    }
+    for on in ["1", "true", "yes"] {
+        assert!(control_mode_from_env(Some(on)), "{on} leaves it on");
+    }
+    // Anything unrecognised must not read as "off" — a typo in the escape hatch
+    // should leave the default alone rather than silently change lanes.
+    assert!(control_mode_from_env(Some("maybe")));
+    assert!(control_mode_from_env(Some("")));
+}
+
+#[test]
+fn an_unmapped_key_is_dropped_rather_than_guessed() {
+    // A key with no tmux name has no correct encoding; inventing one would type
+    // something the user did not press.
+    assert_eq!(
+        popup_key_input(
+            "t",
+            crossterm::event::KeyEvent::new(KeyCode::CapsLock, KeyModifiers::NONE)
+        ),
+        None
+    );
 }

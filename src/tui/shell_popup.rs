@@ -10,6 +10,12 @@ pub struct ShellPopup {
     pub scroll_offset: i32, // Negative means scroll up (see more history)
     /// Cached pane content - updated periodically, not on every frame
     pub cached_content: Vec<u8>,
+    /// [`cached_content`](Self::cached_content) already parsed into styled lines.
+    ///
+    /// Parsed once, on the watcher thread, rather than on every frame in `draw()`.
+    /// Kept beside the bytes because the bytes are what change detection
+    /// compares, and comparing them is far cheaper than parsing them.
+    pub cached_lines: Vec<Line<'static>>,
     /// Last known pane dimensions for resize detection
     pub last_pane_size: Option<(u16, u16)>,
     /// Escalation note from the orchestrator, shown as a banner
@@ -22,9 +28,7 @@ pub struct ShellPopup {
     /// expensive tmux captures for every character.
     pub last_content_refresh: Instant,
     /// Cursor position inside the visible tmux pane and its pane height.
-    pub cursor_info: Option<(usize, usize, usize)>,
-    /// Forward the next key directly to tmux, even when agtx normally owns it.
-    pub pass_through_next_key: bool,
+    pub metrics: Option<crate::tmux::PaneMetrics>,
 }
 
 impl ShellPopup {
@@ -34,14 +38,24 @@ impl ShellPopup {
             window_name,
             scroll_offset: 0,
             cached_content: Vec::new(),
+            cached_lines: Vec::new(),
             last_pane_size: None,
             escalation_note: None,
             task_id: None,
             fullscreen: false,
             last_content_refresh: Instant::now(),
-            cursor_info: None,
-            pass_through_next_key: false,
+            metrics: None,
         }
+    }
+
+    /// Replace the cached pane, bytes and parsed lines together.
+    ///
+    /// One setter so the two cannot drift: rendering from lines that do not match
+    /// the bytes change detection compares would show a frame that is never
+    /// corrected, because the next capture would compare equal.
+    pub fn set_content(&mut self, content: Vec<u8>, lines: Vec<Line<'static>>) {
+        self.cached_content = content;
+        self.cached_lines = lines;
     }
 
     /// Scroll up into history, clamped to content bounds.
@@ -69,6 +83,19 @@ impl ShellPopup {
         self.scroll_offset >= 0
     }
 
+    /// Does tmux hold any history above this pane's visible screen?
+    ///
+    /// `false` means agtx has nothing to scroll: the agent is drawing in the
+    /// alternate screen and owns the session's scrollback itself. The popup's
+    /// scroll keys are then handed to the agent instead — scrolling agtx's
+    /// one-screen buffer would move nothing while looking like it had.
+    ///
+    /// Unknown metrics count as *has* scrollback, so a failed `display -p`
+    /// leaves the existing behaviour alone rather than silently rerouting keys.
+    pub fn has_scrollback(&self) -> bool {
+        self.metrics.map(|m| m.history_size > 0).unwrap_or(true)
+    }
+
     pub fn content_refresh_due(&self, interval: Duration) -> bool {
         self.last_content_refresh.elapsed() >= interval
     }
@@ -90,8 +117,14 @@ pub struct ShellPopupView<'a> {
 
 /// Compute the visible lines for the shell popup
 /// This is the core testable logic, separated from rendering
+/// Takes a **slice**, not a `Vec`, and clones only the rows it returns.
+///
+/// The caller's lines are cached and reused across frames, so taking them by
+/// value meant cloning every cached row — 100 of them, or 500 once scrolled — to
+/// render the ~30 that fit. Each `Span` owns its text, so those clones are
+/// allocations, on every frame a streaming pane produces.
 pub fn compute_visible_lines<'a>(
-    styled_lines: Vec<Line<'a>>,
+    styled_lines: &[Line<'a>],
     visible_height: usize,
     scroll_offset: i32,
 ) -> (Vec<Line<'a>>, usize, usize) {
@@ -128,10 +161,11 @@ pub fn compute_visible_lines<'a>(
     };
 
     let visible_lines: Vec<Line<'a>> = styled_lines
-        .into_iter()
+        .iter()
         .take(effective_line_count)
         .skip(start_line)
         .take(visible_height)
+        .cloned()
         .collect();
 
     (visible_lines, start_line, total_lines)
@@ -139,23 +173,66 @@ pub fn compute_visible_lines<'a>(
 
 /// Build the footer text for the shell popup
 pub fn build_footer_text(scroll_offset: i32, start_line: usize) -> String {
-    build_footer_text_for_mode(scroll_offset, start_line, false)
+    build_footer_text_for_mode(scroll_offset, start_line, false, true)
 }
 
-fn build_footer_text_for_mode(scroll_offset: i32, start_line: usize, fullscreen: bool) -> String {
+fn build_footer_text_for_mode(
+    scroll_offset: i32,
+    start_line: usize,
+    fullscreen: bool,
+    has_scrollback: bool,
+) -> String {
     let view_action = if fullscreen { "windowed" } else { "fullscreen" };
+    // `C-n/p` and `C-d/u` are both bound and both stay bound; the footer has
+    // room to name one pair, and `C-d/u` is the one advertised. Do not "fix"
+    // the mismatch by unbinding the other — see `handle_shell_popup_key`.
+    //
+    // With no tmux scrollback the scroll keys go to the agent, so advertising a
+    // line number agtx cannot move to is worse than saying nothing: that is
+    // exactly what made an empty buffer look like a broken scrollbar.
+    if !has_scrollback {
+        return format!("[C-d/u] scroll  [C-g] bottom  ·  [C-f] {view_action}  [C-q] close");
+    }
     if scroll_offset < 0 {
         format!(
-            " Line {} | [C-g] bottom [C-f] {} [C-Space] send next [C-q] close [C-j/k] scroll [C-d/u] page ",
+            "Line {}  ·  [C-d/u] scroll  [C-g] bottom  ·  [C-f] {}  [C-q] close",
             start_line + 1,
             view_action
         )
     } else {
         format!(
-            " At bottom | [C-f] {} [C-Space] send next [C-q] close [C-j/k] scroll [C-d/u] page ",
+            "At bottom  ·  [C-d/u] scroll  ·  [C-f] {}  [C-q] close",
             view_action
         )
     }
+}
+
+/// Render popup shortcuts with the same key-first hierarchy as the board
+/// footer: keys carry the accent while labels and separators stay subdued.
+fn styled_footer(text: &str, colors: &ShellPopupColors) -> Line<'static> {
+    let key_style = Style::default().fg(colors.border).bold();
+    let label_style = Style::default().fg(colors.footer_bg);
+    let mut spans = Vec::new();
+    let mut rest = text;
+
+    while let Some(open) = rest.find('[') {
+        if open > 0 {
+            spans.push(Span::styled(rest[..open].to_string(), label_style));
+        }
+        let Some(close) = rest[open..].find(']') else {
+            spans.push(Span::styled(rest[open..].to_string(), label_style));
+            rest = "";
+            break;
+        };
+        let end = open + close + 1;
+        spans.push(Span::styled(rest[open..end].to_string(), key_style));
+        rest = &rest[end..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_string(), label_style));
+    }
+
+    Line::from(spans)
 }
 
 /// Maximum number of trailing empty lines to keep after content
@@ -278,7 +355,7 @@ pub fn render_shell_popup(
     popup: &ShellPopup,
     frame: &mut Frame,
     popup_area: Rect,
-    styled_lines: Vec<Line<'_>>,
+    styled_lines: &[Line<'_>],
     colors: &ShellPopupColors,
 ) {
     frame.render_widget(Clear, popup_area);
@@ -308,8 +385,8 @@ pub fn render_shell_popup(
     // Title bar (pad to fill width)
     let title = format!("  {} ", popup.task_title);
     let padded_title = format!("{:<width$}", title, width = popup_chunks[0].width as usize);
-    let title_bar = Paragraph::new(padded_title)
-        .style(Style::default().fg(colors.header_bg).bold());
+    let title_bar =
+        Paragraph::new(padded_title).style(Style::default().fg(colors.header_bg).bold());
     frame.render_widget(title_bar, popup_chunks[0]);
 
     // Escalation banner (if present)
@@ -347,27 +424,28 @@ pub fn render_shell_popup(
     // A captured pane is text-only; explicitly restore tmux's live cursor when
     // it falls inside the current (non-scrolled) viewport.
     if popup.scroll_offset >= 0 {
-        if let Some((cursor_x, cursor_y, pane_height)) = popup.cursor_info {
+        if let Some((cursor_x, cursor_y, pane_height)) = popup.metrics.map(|m| m.cursor()) {
             let pane_start = total_lines.saturating_sub(pane_height);
             let cursor_line = pane_start.saturating_add(cursor_y);
             if cursor_line >= start_line && cursor_line < start_line + visible_height {
-                let x = popup_chunks[2]
-                    .x
-                    .saturating_add(cursor_x.min(popup_chunks[2].width.saturating_sub(1) as usize) as u16);
-                let y = popup_chunks[2].y.saturating_add((cursor_line - start_line) as u16);
+                let x = popup_chunks[2].x.saturating_add(
+                    cursor_x.min(popup_chunks[2].width.saturating_sub(1) as usize) as u16,
+                );
+                let y = popup_chunks[2]
+                    .y
+                    .saturating_add((cursor_line - start_line) as u16);
                 frame.set_cursor_position((x, y));
             }
         }
     }
 
-    // Footer with scroll indicator (pad to fill width)
-    let footer_text = build_footer_text_for_mode(popup.scroll_offset, start_line, popup.fullscreen);
-    let padded_footer = format!(
-        "{:<width$}",
-        footer_text,
-        width = popup_chunks[3].width as usize
+    // Footer with scroll indicator and grouped, accented shortcuts.
+    let footer_text = build_footer_text_for_mode(
+        popup.scroll_offset,
+        start_line,
+        popup.fullscreen,
+        popup.has_scrollback(),
     );
-    let footer = Paragraph::new(padded_footer)
-        .style(Style::default().fg(colors.footer_bg));
+    let footer = Paragraph::new(styled_footer(&footer_text, colors)).alignment(Alignment::Center);
     frame.render_widget(footer, popup_chunks[3]);
 }

@@ -3,9 +3,9 @@ use agtx::tui::shell_popup::{
     trim_trailing_empty_lines, ShellPopup, ShellPopupColors, MAX_TRAILING_EMPTY_LINES,
 };
 use ratatui::backend::TestBackend;
-use std::time::{Duration, Instant};
 use ratatui::prelude::*;
 use ratatui::Terminal;
+use std::time::{Duration, Instant};
 
 #[test]
 fn test_shell_popup_new() {
@@ -101,7 +101,7 @@ fn test_shell_popup_is_at_bottom() {
 #[test]
 fn test_compute_visible_lines_empty() {
     let lines: Vec<Line> = vec![];
-    let (visible, start, total) = compute_visible_lines(lines, 10, 0);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, 0);
 
     assert!(visible.is_empty());
     assert_eq!(start, 0);
@@ -115,7 +115,7 @@ fn test_compute_visible_lines_fewer_than_height() {
         Line::from("line 2"),
         Line::from("line 3"),
     ];
-    let (visible, start, total) = compute_visible_lines(lines, 10, 0);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, 0);
 
     assert_eq!(visible.len(), 3);
     assert_eq!(start, 0);
@@ -126,7 +126,7 @@ fn test_compute_visible_lines_fewer_than_height() {
 fn test_compute_visible_lines_exact_height() {
     let lines: Vec<Line> = (0..10).map(|i| Line::from(format!("line {}", i))).collect();
 
-    let (visible, start, total) = compute_visible_lines(lines, 10, 0);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, 0);
 
     assert_eq!(visible.len(), 10);
     assert_eq!(start, 0);
@@ -138,7 +138,7 @@ fn test_compute_visible_lines_scrolled_up() {
     let lines: Vec<Line> = (0..20).map(|i| Line::from(format!("line {}", i))).collect();
 
     // Visible height 10, scrolled up by 5 lines
-    let (visible, start, total) = compute_visible_lines(lines, 10, -5);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, -5);
 
     assert_eq!(visible.len(), 10);
     assert_eq!(start, 5); // 20 - 10 - 5 = 5
@@ -149,7 +149,7 @@ fn test_compute_visible_lines_scrolled_up() {
 fn test_compute_visible_lines_at_bottom() {
     let lines: Vec<Line> = (0..20).map(|i| Line::from(format!("line {}", i))).collect();
 
-    let (visible, start, total) = compute_visible_lines(lines, 10, 0);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, 0);
 
     assert_eq!(visible.len(), 10);
     assert_eq!(start, 10); // Shows last 10 lines
@@ -165,7 +165,7 @@ fn test_compute_visible_lines_keeps_trailing_empty_at_bottom() {
     lines.push(Line::from(""));
 
     // At bottom (scroll_offset = 0) - should keep trailing empty lines
-    let (_visible, _start, total) = compute_visible_lines(lines, 20, 0);
+    let (_visible, _start, total) = compute_visible_lines(&lines, 20, 0);
 
     assert_eq!(total, 13); // Keeps all lines including trailing empty
 }
@@ -179,7 +179,7 @@ fn test_compute_visible_lines_strips_trailing_empty_when_scrolled() {
     lines.push(Line::from(""));
 
     // Scrolled up (scroll_offset < 0) - should trim trailing empty for cleaner history
-    let (_visible, _start, total) = compute_visible_lines(lines, 20, -5);
+    let (_visible, _start, total) = compute_visible_lines(&lines, 20, -5);
 
     assert_eq!(total, 10); // Trims trailing empty when scrolled up
 }
@@ -189,7 +189,7 @@ fn test_compute_visible_lines_scrolled_to_top() {
     let lines: Vec<Line> = (0..30).map(|i| Line::from(format!("line {}", i))).collect();
 
     // Scroll up enough to be at top
-    let (visible, start, total) = compute_visible_lines(lines, 10, -20);
+    let (visible, start, total) = compute_visible_lines(&lines, 10, -20);
 
     assert_eq!(visible.len(), 10);
     assert_eq!(start, 0); // At the very top
@@ -201,6 +201,47 @@ fn test_build_footer_text_at_bottom() {
     let footer = build_footer_text(0, 10);
     assert!(footer.contains("At bottom"));
     assert!(!footer.contains("Line"));
+    assert!(footer.contains("[C-d/u] scroll  ·  [C-f] fullscreen"));
+    assert!(!footer.contains("[C-j/k]"));
+    // Both pairs scroll; only one is advertised.
+    assert!(!footer.contains("[C-n/p]"));
+}
+
+#[test]
+fn agent_managed_history_is_described_by_actions_not_implementation() {
+    let popup = ShellPopup {
+        metrics: Some(agtx::tmux::PaneMetrics {
+            cursor_x: 0,
+            cursor_y: 0,
+            pane_height: 24,
+            history_size: 0,
+        }),
+        ..ShellPopup::new("Task".to_string(), "window".to_string())
+    };
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            render_shell_popup(
+                &popup,
+                frame,
+                Rect::new(0, 0, 100, 24),
+                &[],
+                &ShellPopupColors::default(),
+            );
+        })
+        .unwrap();
+    let content: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(content.contains("[C-d/u] scroll"));
+    assert!(!content.contains("[C-j/k]"));
+    assert!(!content.contains("[C-n/p]"));
+    assert!(!content.contains("scrollback"));
 }
 
 #[test]
@@ -208,6 +249,7 @@ fn test_build_footer_text_scrolled_up() {
     let footer = build_footer_text(-5, 10);
     assert!(footer.contains("Line 11")); // start_line + 1
     assert!(footer.contains("bottom")); // Ctrl+g option visible
+    assert!(footer.contains("[C-d/u] scroll  [C-g] bottom"));
 }
 
 #[test]
@@ -230,7 +272,7 @@ fn test_fullscreen_footer_offers_windowed_toggle() {
                 &popup,
                 frame,
                 Rect::new(0, 0, 80, 24),
-                vec![],
+                &[],
                 &ShellPopupColors::default(),
             );
         })
@@ -243,12 +285,6 @@ fn test_fullscreen_footer_offers_windowed_toggle() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(content.contains("[C-f] windowed"));
-}
-
-#[test]
-fn test_footer_documents_reserved_key_passthrough() {
-    let footer = build_footer_text(0, 0);
-    assert!(footer.contains("[C-Space] send next"));
 }
 
 // === Rendering Tests ===
@@ -271,7 +307,7 @@ fn test_render_shell_popup_basic() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -302,7 +338,7 @@ fn test_render_shell_popup_with_content() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -329,7 +365,7 @@ fn test_render_shell_popup_scrolled_up() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -354,7 +390,7 @@ fn test_render_shell_popup_empty_content() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -388,7 +424,7 @@ fn test_render_shell_popup_custom_colors() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -410,7 +446,7 @@ fn test_render_shell_popup_small_area() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 40, 10);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, &lines, &colors);
         })
         .unwrap();
 
@@ -470,7 +506,7 @@ fn test_trim_trailing_empty_lines_whitespace_only() {
 }
 
 #[test]
-fn test_trim_content_to_cursor_no_cursor_info() {
+fn test_trim_content_to_cursor_no_metrics() {
     let content = b"line 1\nline 2\n\n\n\n\n\n\n\n\n".to_vec();
     let result = trim_content_to_cursor(content, None);
     let result_str = String::from_utf8_lossy(&result);
@@ -482,14 +518,14 @@ fn test_trim_content_to_cursor_no_cursor_info() {
 }
 
 #[test]
-fn test_trim_content_to_cursor_with_cursor_info() {
+fn test_trim_content_to_cursor_with_metrics() {
     // Simulate: 10 lines captured, pane_height=5, cursor at line 2 of visible area
     // visible_pane_start = 10 - 5 = 5
     // cursor_in_capture = 5 + 2 = 7
     // Lines below cursor are empty (unused pane buffer) → trimmed at cursor
     let content = b"line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n\n".to_vec();
-    let cursor_info = Some((2, 5)); // cursor_y=2, pane_height=5
-    let result = trim_content_to_cursor(content, cursor_info);
+    let metrics = Some((2, 5)); // cursor_y=2, pane_height=5
+    let result = trim_content_to_cursor(content, metrics);
     let result_str = String::from_utf8_lossy(&result);
     let lines: Vec<&str> = result_str.lines().collect();
 
@@ -504,8 +540,8 @@ fn test_trim_content_to_cursor_tui_cursor_mid_screen() {
     // Should keep all content, not trim at cursor
     let content =
         b"header\nstatus bar\n\ninput field\n\noutput area\nmore output\nbottom bar".to_vec();
-    let cursor_info = Some((3, 8)); // cursor_y=3 (mid-screen), pane_height=8
-    let result = trim_content_to_cursor(content, cursor_info);
+    let metrics = Some((3, 8)); // cursor_y=3 (mid-screen), pane_height=8
+    let result = trim_content_to_cursor(content, metrics);
     let result_str = String::from_utf8_lossy(&result);
     let lines: Vec<&str> = result_str.lines().collect();
 
@@ -519,8 +555,8 @@ fn test_trim_content_to_cursor_cursor_at_bottom_with_empty() {
     // Cursor at bottom of pane, but those lines are empty
     // Should trim the empty lines via second pass
     let content = b"line 0\nline 1\nline 2\n\n\n\n\n".to_vec();
-    let cursor_info = Some((6, 7)); // cursor at line 6 of 7-line pane (bottom)
-    let result = trim_content_to_cursor(content, cursor_info);
+    let metrics = Some((6, 7)); // cursor at line 6 of 7-line pane (bottom)
+    let result = trim_content_to_cursor(content, metrics);
     let result_str = String::from_utf8_lossy(&result);
     // Count newlines + 1 to avoid lines() quirk with trailing newlines
     let line_count = result_str.matches('\n').count() + 1;
