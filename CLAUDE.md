@@ -48,9 +48,17 @@ src/
 │   ├── app.rs        # Main App struct, event loop, rendering (largest file)
 │   ├── app_tests.rs  # Unit tests for app.rs (included via #[path])
 │   ├── board.rs      # BoardState - kanban column/row navigation
+│   ├── config_editor.rs # In-TUI config form: declared fields, two matches
+│   ├── config_editor_tests.rs # Unit tests for config_editor.rs (via #[path])
 │   ├── dep_graph.rs  # Pure dependency-graph model (topological levels, unblocked nodes)
+│   ├── help.rs       # The `?` overlay's binding table (declared, not open-coded)
+│   ├── help_tests.rs # Unit tests for help.rs (included via #[path])
 │   ├── input.rs      # InputMode enum for UI states
-│   └── shell_popup.rs # Shell popup state, rendering, content trimming
+│   ├── shell_popup.rs # Shell popup state, rendering, content trimming
+│   ├── text_input.rs # Shared line editor: buffer + byte caret, motion, deletion
+│   ├── text_input_tests.rs # Unit tests for text_input.rs (included via #[path])
+│   ├── wizard.rs     # Task create/edit wizard state: steps, fields, agent + plugin picks
+│   └── wizard_tests.rs # Unit tests for wizard.rs (included via #[path])
 ├── db/
 │   ├── mod.rs        # Re-exports
 │   ├── schema.rs     # Database struct, SQLite operations
@@ -182,7 +190,7 @@ Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin
 - **supported_agents**: Agent whitelist (empty = all supported)
 - **auto_dismiss**: Rules to auto-dismiss interactive prompts before sending the task prompt
 
-Phase gating is derived from the config: if a phase's command or prompt contains `{task}`, the phase can be entered directly from Backlog. Otherwise, it requires a prior phase artifact. If a phase has no command AND no prompt (e.g. void plugin), it is ungated and can be entered freely. This replaces the old `research_required` flag — all behavior is now inferred from the plugin TOML.
+Phase gating is derived from the config: if a phase's command or prompt contains `{task}`, the phase can be entered directly from Backlog. Otherwise, it requires a prior phase artifact. If a phase has no command AND no prompt (e.g. void plugin), it is ungated and can be entered freely. There is no `research_required` flag: every gating decision is inferred from the plugin TOML.
 
 Plugin resolution: project-local `.agtx/plugins/{name}/` → global `~/.config/agtx/plugins/{name}/` → bundled. `load_task_plugin` falls back to bundled plugins when disk load fails, so tasks always resolve their plugin correctly even if the on-disk copy is missing.
 
@@ -220,7 +228,7 @@ Four writers **merge** instead of overwriting, because their file may already ex
 
 Claude needs an extra side-effect to avoid an interactive dialog on first open: `.claude/settings.local.json` gets `enableAllProjectMcpServers: true` plus `skipDangerousModePermissionPrompt: true`, which is what actually preflights the bypass-permissions warning (see the dialog table).
 
-agtx used to append a `[projects."<worktree>"] trust_level = "trusted"` entry to the user's global `~/.codex/config.toml` here too. **Removed, measured:** codex resolves trust to the *git repository root*, and a worktree under a trusted root both skips the dialog and loads its own `.codex/config.toml` — `/mcp` listed agtx with and without the entry. It bought nothing and accumulated one entry per worktree.
+No `[projects."<worktree>"] trust_level = "trusted"` entry goes into the user's global `~/.codex/config.toml`. **Measured:** codex resolves trust to the *git repository root*, and a worktree under a trusted root both skips the dialog and loads its own `.codex/config.toml` — `/mcp` lists agtx with or without the entry. It buys nothing and accumulates one entry per worktree.
 
 `write_skills_to_worktree` also seeds antigravity's `trustedWorkspaces` for the new worktree, when the project root is already trusted there (`agent::trust`). It is the right call site for both worktree creation *and* an agent switch: with a per-phase agent config, the switched-in agent sees the worktree for the first time at switch time. Home-directory lookups go through `agent_trust_home()`, which honours `AGTX_AGENT_HOME` so the test suite never touches the real user's config.
 
@@ -249,12 +257,12 @@ Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used
 **Mid-session lane — phase advances into an already-running agent.** `send_skill_and_prompt()`, three paths, because agent TUIs disagree about how a slash command plus arguments must arrive:
 
 1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter. Still on the typed path: it is the one flow where the text has to arrive in two pieces by design
-2. **gemini / codex / cursor / antigravity / pi** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so the old poll-until-it-renders step is gone, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone; pi's composer takes a paste as literal text but leaves a combined text+Enter `send_keys` sitting unsent. **How many Enters this takes is not fixed** — see *Submitting is its own delivery problem* below
+2. **gemini / codex / cursor / antigravity / pi** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so nothing has to poll until it renders, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone; pi's composer takes a paste as literal text but leaves a combined text+Enter `send_keys` sitting unsent. **How many Enters this takes is not fixed** — see *Submitting is its own delivery problem* below
 3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
 
 **Submitting is its own delivery problem.** A message with a prompt after the command submits on the first Enter. A **bare skill command** — what a phase whose command carries no `{task}`/`{task_id}` sends, which is `review` — exactly matches a skill name, so the composer's command picker opens *on the paste*. That Enter is then consumed by the picker ("Press enter to insert"), which inserts the command and repaints, leaving it parked. Measured against codex-cli 0.144.5 and cursor-agent 2026.08.25: both open the picker on a pasted bare command, and both submit on the second Enter.
 
-So `submit_message()` counts nothing and watches the composer instead: it presses Enter until the text is **gone from the bottom `COMPOSER_TAIL_LINES` of the pane**, bounded by `SUBMIT_ATTEMPTS`. A repaint is not a submit — that was the old test, and a picker opening satisfies it. The window is 14 lines because the picker draws its suggestions *below* the composer and cursor's footer wraps the worktree path, putting the text eight or more lines off the bottom; sizing it from the tidy pane left behind *after* a failure is how a too-narrow window looks correct. Erring wide costs one inert Enter into a submitted composer; erring narrow parks the command forever.
+So `submit_message()` counts nothing and watches the composer instead: it presses Enter until the text is **gone from the bottom `COMPOSER_TAIL_LINES` of the pane**, bounded by `SUBMIT_ATTEMPTS`. A repaint is not a submit: a picker opening is a repaint. The window is 14 lines because the picker draws its suggestions *below* the composer and cursor's footer wraps the worktree path, putting the text eight or more lines off the bottom; sizing it from the tidy pane left behind *after* a failure is how a too-narrow window looks correct. Erring wide costs one inert Enter into a submitted composer; erring narrow parks the command forever.
 
 **Atomic is not the same as delivered.** An agent TUI that has not attached its stdin reader yet discards what it is sent — bracketed paste included, because the discard happens in the application, not in the pty — and `wait_for_agent_ready` cannot prove otherwise. So paths 1 and 2 go through `deliver_message()`, which resends **while the pane is unchanged** (three attempts, 2s each) and stops the moment it redraws, on the same reasoning `dismiss_launch_dialog` uses: a redraw means it landed, and resending would double the message. Landing is judged by the pane changing rather than by finding the text, because a composer wraps, re-indents and box-draws what it echoes.
 
@@ -301,15 +309,14 @@ ANSI parse is done **once per change on the watcher thread**, not once per frame
 `ShellPopup` carries `cached_lines` beside `cached_content`, set together by `set_content` so the
 bytes change detection compares and the lines the popup renders cannot drift.
 
-**Every key used to be a process.** `send_key` started a `tmux` client and waited for it, on the
-input thread, per keystroke — that is the whole reason this lane exists. Enqueueing is now
-effectively free, and delivery rides a persistent control connection.
+**No key is a process.** Enqueueing is effectively free and delivery rides a persistent control
+connection, which is the whole reason this lane exists: a `tmux` client started and waited for on
+the input thread, per keystroke, is what it avoids.
 
 - **`PaneInput` is typed, not a formatted command**, because the broker must be able to tell literal
   text from a key name: text goes out with `send-keys -l` (no key-name lookup), a key without it.
-  An unmodified character is therefore **`Text`**, where it used to be a key — a fix, not a
-  reclassification: `send-keys -t x ";"` never arrived at all, because a standalone semicolon is how
-  tmux separates commands.
+  An unmodified character is therefore **`Text`**, not a key: `send-keys -t x ";"` never arrives at
+  all, because a standalone semicolon is how tmux separates commands.
 - **Batching never delays a key.** Enter, Escape, arrows, and anything Ctrl/Alt-modified flush the
   buffer first and go immediately. A delayed Enter is a visibly broken editor.
 - **Nor does it delay ordinary typing.** Buffered text is flushed as soon as the queue is empty, and
@@ -361,7 +368,7 @@ effectively free, and delivery rides a persistent control connection.
   - The broker **declines** rather than falling back: with no control connection the caller's own
     `capture-pane` is the same two processes for the same price, and running them on the broker
     thread would park the next keystroke behind that `fork`/`exec`. `capture_pane_for_popup` owns
-    that fallback, and a declined capture costs one frame at the old speed.
+    that fallback, and a declined capture costs one frame at the fallback's speed.
   - A failed capture **keeps** a healthy connection, unlike a failed write. A write error is
     ambiguous and tears the connection down; a read error is not, and demoting every later keystroke
     to the subprocess path over one failed read would trade the fix for the bug.
@@ -499,8 +506,8 @@ agtx tells the user when a newer release exists and replaces its own binary on r
 
 - **The binary must know its own version.** `env!("CARGO_PKG_VERSION")` is the only source, and
   `release.yml`'s *Tag matches Cargo.toml* step fails the build when the pushed tag disagrees with
-  the manifest. Before this existed the tags had reached `v0.2.7` while `Cargo.toml` still said
-  `0.1.0` — a released binary could not answer the question every part of this feature compares
+  the manifest. Without that check the two drift — tags at `v0.2.7` against a manifest still saying
+  `0.1.0` — and a released binary cannot answer the question every part of this feature compares
   against
 - `--version` / `-V` / `version` and `update` are handled in the **early fast path** in `main.rs`,
   beside the `hook` arm, for two reasons: neither wants a daily log appender built for it, and the
@@ -673,7 +680,63 @@ Project config can execute shell commands (`init_script`, `cleanup_script`) and 
 - A project with no `.agtx/config.toml` is trusted by default (nothing to distrust)
 - An untrusted project also forces `flags.no_init_scripts = true`, which additionally suppresses **plugin** `init_script`s
 - Approve via the in-TUI trust confirmation popup (any key) or `agtx trust` in the project directory
+- **agtx's own writes re-record trust.** Any write to `.agtx/config.toml` — picking a plugin with `P`, saving the config editor — changes the hash and so invalidates trust, costing the project its scripts on the next launch. `TrustStore::retrust_after_agtx_write` restores the *prior* decision, gated on the trust state read **before** the write: a project the user never approved must not become trusted because agtx touched its config, or an unvouched-for `init_script` starts running. Every in-TUI config writer goes through it
+- `TrustStore::path()` and `GlobalConfig::config_path()` honour `AGTX_CONFIG_DIR`, like `Database::data_root` honours `AGTX_DATA_DIR`, so the suite exercises these writers without touching the real user's files
 - `--no-init-scripts` suppresses `init_script` and `cleanup_script` execution regardless of trust
+
+### Help Overlay
+`?` opens `tui::help`'s table: every binding, grouped by where it applies, scrollable, and closed with `?`/`Esc`/`q`.
+
+**`HELP` is the complete list of bindings.** `build_footer_text` shows only the column-specific actions plus `[?] help` and `[q] quit`, because the footer is one line and gets truncated on a narrow terminal — `every_footer_fits_a_narrow_terminal` caps every variant at 120 characters. Several keys (`C-n/p` scrolling, `M`, `D`) are advertised nowhere else, and `the_keys_advertised_nowhere_else_are_listed` fails if one drops out of the table.
+
+The overlay swallows the keys it does not use, rather than letting them fall through to the board behind it.
+
+**It scrolls with the same chords as a task pane** — `C-d/u`, `C-n/p`, `PageUp/Down`, `C-g` — read from one `scroll_action_for` table, so `C-d` means the same thing everywhere. `the_scroll_chords_match_between_the_pane_and_the_overlay` fails if the two descriptions drift, and the overlay lists its own keys: a reference that does not say how to read past its first screen is not much of one.
+
+**Two columns where the terminal is wide enough**, which roughly halves the height and lets the whole reference fit a window without scrolling. `help::columns(n)` balances the sections by height but never splits one: a heading in one column with its keys in the next is worse than an uneven pair. A narrow terminal falls back to one column, and the footer drops its scroll hint when everything fits.
+
+**`help_max_scroll` is a `Cell` the renderer writes.** Only the renderer knows how many rows fit, and the handler clamps to that rather than to the table length — against the table length, `C-g` parks the offset past the last screenful and the next `C-u` moves nothing, reading as a dead key.
+
+### First Run
+There is no separate first-run flow. `main.rs` writes the default config and sets `FeatureFlags::first_run`; the TUI opens the **config editor** focused on `Default agent` (`open_first_run_editor`), which is the only question first run has to ask.
+
+`new_for_test_with_flags` calls the same `open_first_run_editor`, so the test exercises the real path rather than a copy of it.
+
+### Config Editor
+`,` on the board opens `~/.config/agtx/config.toml` and the project's `.agtx/config.toml` as a form (`src/tui/config_editor.rs`). Sections across the top (General / Agents / Worktree / Theme, plus Project when one is open), fields below, the selected field's help line at the bottom.
+
+`config_editor_area` sizes the box to its **content** and centres it. It measures across *all* sections, and a choice field by its longest option rather than its current value, so neither tabbing between sections nor picking from a dropdown resizes the box under the cursor. Clamped to the terminal, so a small window still gets something that fits.
+
+| Key | Action |
+|-----|--------|
+| `h/l` or `Tab`/`S-Tab` | Move between sections |
+| `j/k` or arrows | Move between fields |
+| `Enter` / `Space` | Toggle, or open the field for editing |
+| `Enter` / `Esc` in an open field | Accept / abandon that field only |
+| `C-s` | Save |
+| `Esc` | Close (asks first if there are unsaved changes) |
+
+- **The fields are declared, not open-coded.** One `FieldId` per setting and exactly two matches over it — `read` and `write`. The alternative is an arm per field in the renderer, the key handler, the loader and the saver: four places to forget. `every_field_round_trips_through_read_and_write` walks the whole form and fails if a field is wired into one direction only, which is a setting that silently would not stick
+- **It opens on the files, not on `state.config`.** That is a *merged* view; writing it back would bake every global default into the project file as an explicit override
+- **`dirty` tracks what is stored, not what was asked for.** A write can normalise (a blank optional field becomes unset) or decline (a project field in dashboard mode), so `set` compares the stored value before and after. The discard prompt believes this flag
+- **A save re-records project trust.** Trust is a hash of `.agtx/config.toml`, so writing it invalidates trust — see `TrustStore::retrust_after_agtx_write`. Read the state *before* the write, always
+- **A bad colour is refused and the field stays open**, since accepting one makes the board unreadable on the next frame. Theme edits preview live: theme is global-only, so `state.config.theme` is replaced as the user types, and closing without saving reloads from disk to drop the experiment
+- Help lines say when a setting only affects **new** worktrees (`worktree_dir`, `branch_prefix`, `agent_hooks`)
+
+### Config Writes Preserve Comments
+`GlobalConfig::save` and `ProjectConfig::save` go through `write_toml_preserving` (`src/config/mod.rs`), not `toml::to_string_pretty`.
+
+Serialising the struct alone emits a pristine document, dropping every comment and unrecognised key the user wrote — which matters because agtx offers to edit a file people maintain by hand.
+
+The rule: *agtx rewrites the values of keys it knows, never deletes a key it does not recognise, and removes a key it manages when that field becomes unset.*
+
+Four things that are not obvious:
+- **serde renders a nested struct as an inline table** (`worktree = { .. }`). Merged as-is that collapses a `[worktree]` section onto one line and takes its comments with it, and a fresh file does not match the documented format. `expand_inline_tables` normalises first
+- **A comment belongs to the *next* key's decor**, so removing the first key in a file would take the file's header comment with it. `remove_key_keeping_comments` moves it to the following key. Erring toward keeping the user's text leaves a comment that really was about the removed key slightly orphaned, which is visible and fixable where deletion is not
+- **`GLOBAL_MANAGED` / `PROJECT_MANAGED` name the keys a save may delete** — the optional ones, since a required key is always re-emitted. `managed_keys_tests` builds a fully-populated config with an **exhaustive struct literal**, so adding a field fails to compile there until someone has looked at the list. A field missing from it survives being cleared
+- An unparseable file is replaced rather than erroring: preserving is impossible, and refusing the save would leave the user unable to fix it from inside agtx
+
+`GlobalConfig::config_path()` and `TrustStore::path()` both honour `AGTX_CONFIG_DIR`, so the suite exercises the writer without touching the real user's config.
 
 ### Theme Configuration
 Colors configurable via `~/.config/agtx/config.toml`:
@@ -710,6 +773,8 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `p` | Cyclic plugins only: Review → Planning (next phase) |
 | `/` | Search tasks (jumps to and opens task) |
 | `P` | Select workflow plugin |
+| `,` | Open the config editor |
+| `?` | Show every binding (help overlay) |
 | `u` | Update agtx (only bound when a newer release was found) |
 | `O` | Toggle orchestrator agent (experimental) |
 | `e` | Toggle project sidebar (`h`/`Left` from the Backlog column focuses it) |
@@ -763,17 +828,57 @@ When an escalation note is present, the first keypress only dismisses the banner
 | `Esc` | Cancel |
 
 ### Task Creation Wizard
-The wizard flow is: **Title → Plugin → Prompt** (plugin step auto-skipped if ≤1 option or no agents detected).
+The flow is **Title → Agent → Plugin → Prompt**. Both middle steps are optional and drop out when there is nothing to choose — one installed agent, or one compatible plugin — so `steps()` is derived, never a fixed array.
 
 | Key | Action |
 |-----|--------|
-| `j/k` or arrows | Navigate plugin list |
+| `j/k` or arrows | Navigate a list step |
+| `/` | Filter the list |
 | `Tab` | Cycle through options |
 | `Enter` | Advance to next step / save |
-| `Esc` | Cancel wizard |
+| `Esc` | Cancel the wizard, from any step |
+| `S-Tab` / `C-b` | Step back one step |
+| `C-s` | Save from any step |
+| `\` + Enter (or `C-j`, `Alt+Enter`) | Newline in the prompt — see below |
+
+`WizardState` (`src/tui/wizard.rs`) is the whole flow as one value — the step, both text fields, both list picks, and the edited task's id. Holding every field at once is what makes back-navigation work: stepping back has to find the earlier answers still intact.
+
+**The agent step writes `Task::agent`**, the database field every later phase reads. The plugin list is filtered by whatever the agent step settled on, so changing the agent rebuilds it (`reseed_plugins_for_agent`), keeping the pick when that plugin survives the new filter — switching agent is not a decision about the plugin. `try_save_wizard` rebuilds too, so saving straight from the agent step cannot store an incompatible plugin.
+
+**Both lists are seeded when the wizard opens**, not on the first `Enter`, so the breadcrumb shows the real flow from the first frame.
+
+**`ListPick` is one type for both list steps.** `selected` indexes `options`, not the filtered view, so a filter that narrows and widens again leaves the cursor on the same option. `settle()` moves it only when the filter excludes it outright, because an `Enter` on an invisible selection picks something the user cannot see. A filter belongs to the visit, not the step, so stepping away clears it.
+
+Three consequences, all tested:
+- **`Esc` cancels outright, from any step**; stepping back is `Shift+Tab` / `Ctrl+B`. One key that always means "get me out of here" beats one whose effect depends on where you are. Two things own `Esc` first — a dropdown on the prompt step, and an open list filter — because closing either must not take the whole task with it
+- **Each step seeds itself once** (`ListPick::take_seed` / `take_prompt_seed`). Re-entering a list step from the right must not rebuild it, or the user's pick resets to the default they chose against; re-entering the prompt step must not reload from the database over an unsaved edit. Back-navigation is what makes these necessary
+- **The step list is derived, not fixed.** `steps()` drops an optional step when there is nothing to choose, so the breadcrumb never advertises a step this run will not visit, and `step_index` is a position in *this* flow rather than a constant
+
+**`Enter` saves; a newline needs one of three escapes.** `\`+Enter is the documented one and the one the footer names. Two chords do the same, and neither needs anything from the terminal:
+
+- **`Ctrl+J`.** In raw mode crossterm parses `0x0A` as `Ctrl+J` rather than as `Enter` — its `b'\n'` arm is gated on `!is_raw_mode_enabled()` — so nothing has to be negotiated.
+- **`Alt+Enter`**, which arrives as ESC then CR on most terminals, though macOS Terminal and iTerm2 only send it once Option is configured as Meta.
+
+**`Shift+Enter` is deliberately not bound, and agtx does not ask for the Kitty keyboard protocol.** A terminal sends a bare CR for both `Enter` and `Shift+Enter` unless that protocol is negotiated, so the two are indistinguishable and no key handler can separate them. Two measurements argue against requesting it: `supports_keyboard_enhancement()` **blocks for up to two seconds** on any terminal that does not answer the query, which every launch pays; and even under tmux's `extended-keys always`, a real `S-Enter` still arrives as a bare CR — so the binding fires almost never and reads as *save* the rest of the time. Do not add it without re-measuring both.
+
+**`Ctrl+J` overlaps the pickers' down-arrow** (`C-j`/`C-n` in all three dropdowns) — deliberate: while a picker is open it navigates, and it only means newline once nothing has claimed it. It also collides with `vim-tmux-navigator`, which binds `C-h/C-j/C-k/C-l` in tmux's *root* table and would eat the key before agtx ever sees it (same hazard noted under *Typing into a Task Pane*); `\`+Enter is the way out there.
+
+**A chord is not text.** `TextInput::handle_edit_key` and all three dropdowns guard their `Char(c)` arm on `!ctrl && !alt`, so `Ctrl+X` does not type an `x`. Declining is also what lets a caller give a chord its own meaning and still receive the key.
+
+One consequence to remember when adding bindings: under that protocol **`Shift+Tab` arrives as `Tab` with `SHIFT`, not as `BackTab`**. Both spellings are accepted in the wizard and the config editor; a new binding on either has to do the same.
+
+**The wizard pads horizontally** (`WIZARD_PADDING`), and the literals in its render carry no leading spaces of their own: the block's padding is the only indent, so a wrapped line starts in the same column as the row it came from. The cursor anchor adds the same padding — changing one without the other drifts the caret off the text.
+
+`AppState.wizard: Option<WizardState>` **is** the input mode — there is no second flag that could disagree with it. `AppState::wizard_step()` is the one accessor anything outside the wizard uses.
+
+A refusal is never silent. `title_problem()` is the single source for both `Enter` on the title step and `C-s` from anywhere, so they refuse for the same reasons and say the same thing: empty, longer than `MAX_TASK_TITLE_CHARS`, or a duplicate of another task's title. A failure sets `validation`, walks the wizard back to the title step, and renders the reason inside the wizard body — drawn there rather than in the footer because the footer is also the background-warning channel, and an unrelated warning must not replace the message while the user is reading it.
+
+**The renderer is a real `Layout`** (`draw_wizard`): breadcrumb, the steps already behind you, the active step, a validation row. Each step sizes its own body — a title is one line, a prompt and a list want the room — and text fields draw inside their own bordered box, so the caret starts at column 0 of the inner area with no prefix to measure. List steps use ratatui's `List` and `Scrollbar`. The scrollbar track is inset by one row at each end; handed the whole area it draws over the block's corners.
 
 Agent is determined by `config.default_agent` (set via config file), not selected per-task.
 Plugin defaults to the project's active plugin (set via `P` on the board).
+
+The prompt step's `#`/`@`, `/` and `!` dropdowns are each their own handler (`handle_file_search_key`, `handle_skill_search_key`, `handle_task_ref_search_key`), and each **takes its state out** for the duration: every arm needs the dropdown alongside the wizard's prompt field, and several call back into `self` to refresh the match list, which a held borrow would not allow. They return whether the key belonged to them, so the prompt handler keeps a fallback. All three commit and cancel through `splice_search_region` — only the replacement text differs.
 
 ### Task Edit (Description)
 | Key | Action |
@@ -781,18 +886,26 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 | `#` or `@` | Start file search (fuzzy find) |
 | `/` | Start skill search (at start of line or after space) |
 | `!` | Start task reference search (at start of line or after space) |
-| `\` + Enter | Line continuation (multi-line) |
+| `\` + Enter (or `C-j`, `Alt+Enter`) | Newline (multi-line) |
 | Arrow keys | Move cursor |
 | `Alt+Left/Right` or `Alt+b/f` | Word-by-word navigation |
 | `Home/End` | Jump to start/end |
 
 ## Code Patterns
 
+### Comments and Docs
+**Describe the code as it is: keep the reasoning and the measurements, drop the chronology.** Say what a guard prevents, not what once went wrong; name the alternative, not the predecessor. Test names follow the same rule.
+
+`used to`, `no longer`, `previously` and `the old X` usually signal a lapse, but each also has a legitimate present-tense sense — read the line, don't grep the phrase.
+
 ### Ratatui TUI
 - Uses `crossterm` backend
 - State separated from terminal for borrow checker: `App { terminal, state: AppState }`
 - Drawing functions are static: `fn draw_*(state: &AppState, frame: &mut Frame, area: Rect)`
 - Theme colors accessed via `state.config.theme.color_*`
+- **Every text field uses `tui::text_input::TextInput`** — the buffer and its caret as one value, with motion, deletion and word jumps behind `handle_edit_key`. One implementation, so a fix lands in every field at once; a new field must not open-code its own. `handle_edit_key` *reports* whether it consumed the key rather than swallowing it, so a field that gives `/` or `#` its own meaning matches those first and delegates the rest — a `/` mid-word then falls through and arrives as ordinary text. `Enter` and `Esc` are deliberately not handled there: submit, newline, step-back and cancel are the field's decision
+- The caret is a **byte** offset, so every motion goes through the boundary helpers in that module. A caret left mid-codepoint panics the next time anything slices the buffer, which is why `TextInput`'s fields are public but its motion is not open-coded
+- `wrapped_cursor_pos` stays in `app.rs` beside `wrap_spans` on purpose — the two share one wrap rule and the comment there says they must move together
 
 ### Error Handling
 - Use `anyhow::Result` for all fallible functions
@@ -806,8 +919,8 @@ Plugin defaults to the project's active plugin (set via `P` on the board).
 
 ### The Event Loop
 `App::run` **blocks** on one `mpsc` channel that two threads feed, and draws only when something
-changed. It used to poll: `event::poll(interval)` woke it on a timer whether or not anything had
-happened, and every wake-up redrew the whole screen, re-parsed the pane capture, and queried SQLite.
+changed. Polling instead — `event::poll(interval)` waking on a timer whether or not anything
+happened — costs a full redraw, a pane re-parse and a SQLite query per wake-up.
 
 ```text
 agtx-terminal-input ──┐                     blocking `event::read()`
@@ -832,9 +945,9 @@ priced the other two wrongly. They are now separate:
     `PANE_OUTPUT_MIN_INTERVAL` paces the agent's output, `SHELL_REFRESH_INTERVAL` paces the user's
     own echo, and `PANE_TYPING_WINDOW` keeps the fast one in force after a keystroke — because the
     echo arrives as a *paint*, indistinguishable from the agent's output, so pacing paints without
-    the window would delay every character. Sharing one interval made a pane painting flat out cost
-    more than the polling it replaced, which had been protected by its own slowness: one
-    `capture-pane` process per capture is a low ceiling of its own.
+    the window would delay every character. One shared interval makes a pane painting flat out cost
+    more than polling would — polling is protected by its own slowness, since one `capture-pane`
+    process per capture is a low ceiling of its own.
   - **poll** — the timer, when push is unavailable (`AGTX_TMUX_PUSH=0`, control mode off, or a pane
     whose id cannot be read). Not a degraded copy: it is the whole design in that case.
 
@@ -854,11 +967,10 @@ priced the other two wrongly. They are now separate:
   it means *bytes reached the pty*, not that the rendered pane differs, so `PANE_PUSH_BACKSTOP`
   stays as the net for a signal that never came.
 - **Housekeeping** — `maybe_spawn_session_refresh`, expiring warnings, the MCP transition queue —
-  runs on `HOUSEKEEPING_TICK`. It used to run once per loop iteration, so its rate rose and fell
-  with how fast the user typed — and it contains a SQLite query. That query has since moved to its
-  own `TRANSITION_POLL_INTERVAL`: a request to move a task between columns is acted on against a
-  phase status that is itself only as fresh as `PHASE_STATUS_CACHE_TTL`, so reading it faster buys
-  nothing.
+  runs on `HOUSEKEEPING_TICK`, not once per loop iteration — that would tie its rate to how fast the
+  user types, and it contains a SQLite query. That query has its own `TRANSITION_POLL_INTERVAL`: a
+  request to move a task between columns is acted on against a phase status that is itself only as
+  fresh as `PHASE_STATUS_CACHE_TTL`, so reading it faster buys nothing.
 - **Nothing on the board animates.** The `Working` indicator is a static `▶`, not a spinner. On an
   otherwise idle board the spinner was the *only* thing forcing a redraw, and the card already said
   the task was running. A future animated indicator brings that cost back, and
@@ -903,9 +1015,9 @@ Two details worth keeping:
   the middle of a dialog's wording, which is what the matcher and the hash have always been fed. A
   real-tmux test asserts it is byte-identical to `TmuxOperations::capture_pane`
 - `live_window_targets` returns `Option`, and the `None` must not be flattened to an empty set: one
-  listing now answers for the whole board, so "tmux could not be asked" read as "no windows" would
-  mark every running task `Exited` on a transient hiccup. The per-task check it replaced failed safe
-  (`!window_exists(sn).unwrap_or(true)`), and `window_is_gone` keeps that direction
+  listing answers for the whole board, so "tmux could not be asked" read as "no windows" would mark
+  every running task `Exited` on a transient hiccup. `window_is_gone` fails safe, treating an
+  unreadable listing as unknown rather than gone
 - Overlap guard: only one refresh thread runs at a time (`session_refresh_rx.is_some()`)
 - Thread does all expensive work: plugin TOML loading, artifact file checks, `tmux capture-pane`, copy-back side effects
 - `apply_session_refresh()` applies results on main thread (non-blocking `try_recv`)
@@ -1164,7 +1276,8 @@ Half of this is now one table entry; the other half is still per-agent match arm
 ### Adding a keyboard shortcut
 1. Find the appropriate `handle_*_key` function in `src/tui/app.rs`
 2. Add match arm for the new key
-3. Update help/footer text if visible to user
+3. Add it to the `HELP` table in `src/tui/help.rs` — that overlay is the complete list, and a binding missing from it is undiscoverable
+4. Only add it to `build_footer_text` if it belongs to the five things you reach for constantly; the footer is a summary, and `every_footer_fits_a_narrow_terminal` caps it
 
 ### Adding a new popup
 1. Add state struct (e.g., `MyPopup`) in app.rs

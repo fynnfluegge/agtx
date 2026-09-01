@@ -395,7 +395,7 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
             //
             // Contrast antigravity, where trust is per-directory and is *not*
             // inherited (also verified). Do not generalise one agent's rule to
-            // another — this comment previously did, and was wrong.
+            // another: they differ, and the difference is measured.
             AgentDialog {
                 patterns: &["Yes, I trust this folder"],
                 security: true,
@@ -578,8 +578,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // path -> "TRUST_FOLDER" with **lowercased** paths and ancestor
         // semantics (`/users/fynn` covers everything beneath), which is why gemini
         // inherits a trusted project root and why its dialog offers "Trust parent
-        // folder". The variable is left in place because it is untested for the
-        // *other* things it may gate; the comment no longer claims it does this one.
+        // folder". The variable is kept because it is untested for the *other*
+        // things it may gate, but it is not what grants the inheritance.
         env: &[("GEMINI_TRUST_WORKSPACE", "true")],
         base_args: &["--approval-mode", "yolo"],
         prompt_form: PromptForm::Flag("-i"),
@@ -775,8 +775,8 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         // unattended.
         base_args: &["--dangerously-skip-permissions", "--mode", "accept-edits"],
         prompt_form: PromptForm::Flag("-i"),
-        // The ordering question this used to be blocked on is answered. Measured
-        // against agy 1.1.21 in an untrusted repo: `agy … -i '<prompt>'` launched
+        // The ordering question is settled. Measured against agy 1.1.21 in an
+        // untrusted repo: `agy … -i '<prompt>'` launched
         // with the project-trust dialog up, and once the dialog was answered the
         // prompt was submitted and answered normally. An argv prompt is *queued*
         // behind a dialog, not handed to the menu — the dialog delays it, it does

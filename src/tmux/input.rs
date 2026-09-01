@@ -183,7 +183,7 @@ pub trait PaneInputSink: Send + Sync {
     /// `None` means "not available here" — no control connection, a full queue,
     /// a wedged broker — and every caller must have a subprocess capture to fall
     /// back to. It is deliberately not an error type: a missed capture costs one
-    /// frame at the old speed, which is not worth a code path of its own.
+    /// frame at the fallback's speed, which is not worth a code path of its own.
     fn capture(&self, _target: &str, _spec: CaptureSpec) -> Option<PaneSnapshot> {
         None
     }

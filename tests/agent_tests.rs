@@ -209,7 +209,7 @@ fn test_build_orchestrator_command_claude_is_idempotent() {
         "must register under a unique name, not bare `agtx`:\n{cmd}"
     );
 
-    // The JSON is a plainly single-quoted word. It used to be pre-escaped as
+    // The JSON is a plainly single-quoted word. Pre-escaping it as
     // `'\''{json}'\''` because `create_window` interpolated this command raw into
     // `sh -c '…'`; that wrapper now quotes what it is given, so pre-escaping here
     // double-escapes and the pane dies on an unterminated quote before

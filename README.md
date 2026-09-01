@@ -192,6 +192,8 @@ curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh \
 | `x` | Delete task |
 | `/` | Search tasks |
 | `P` | Select spec-driven workflow plugin |
+| `,` | Open the config editor |
+| `?` | Show every keyboard shortcut |
 | `u` | Update agtx (only shown when a new release is available) |
 | `O` | Toggle orchestrator agent (`--experimental`) |
 | `e` | Toggle project sidebar |
