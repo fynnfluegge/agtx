@@ -893,6 +893,11 @@ The prompt step's `#`/`@`, `/` and `!` dropdowns are each their own handler (`ha
 
 ## Code Patterns
 
+### Comments and Docs
+**Describe the code as it is: keep the reasoning and the measurements, drop the chronology.** Say what a guard prevents, not what once went wrong; name the alternative, not the predecessor. Test names follow the same rule.
+
+`used to`, `no longer`, `previously` and `the old X` usually signal a lapse, but each also has a legitimate present-tense sense — read the line, don't grep the phrase.
+
 ### Ratatui TUI
 - Uses `crossterm` backend
 - State separated from terminal for borrow checker: `App { terminal, state: AppState }`
