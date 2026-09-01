@@ -13780,7 +13780,6 @@ fn draw_wizard(
     let text_color = hex_to_color(&state.config.theme.color_text);
     let dimmed = hex_to_color(&state.config.theme.color_dimmed);
     let accent = hex_to_color(&state.config.theme.color_accent);
-    let desc_color = hex_to_color(&state.config.theme.color_description);
 
     let block = Block::default()
         .title(if wizard.is_editing() {
@@ -13814,10 +13813,7 @@ fn draw_wizard(
 
     // A title is one line; a prompt and a list want the room. The trailing
     // slack is what stops a short body stretching to fill the popup.
-    let body_height = match wizard.step() {
-        WizardStep::Title => Constraint::Length(3),
-        _ => Constraint::Min(3),
-    };
+    let title_step = wizard.step() == WizardStep::Title;
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -13825,9 +13821,22 @@ fn draw_wizard(
             Constraint::Length(1),                    // rule
             Constraint::Length(context.len() as u16), // completed steps
             Constraint::Length(if context.is_empty() { 0 } else { 1 }),
-            body_height,           // the active step
-            Constraint::Length(1), // validation
-            Constraint::Min(0),    // slack
+            // A title is one line; a prompt and a list take the rest.
+            if title_step {
+                Constraint::Length(3)
+            } else {
+                Constraint::Min(3)
+            },
+            // The validation row exists only while there is something in it.
+            Constraint::Length(u16::from(wizard.validation.is_some())),
+            // Slack, so a fixed-height body does not stretch to fill. A body
+            // that already fills needs none, and a second `Min` here would take
+            // space from it.
+            if title_step {
+                Constraint::Min(0)
+            } else {
+                Constraint::Length(0)
+            },
         ])
         .split(inner);
 
@@ -13908,14 +13917,6 @@ fn draw_wizard(
             Paragraph::new(Line::from(Span::styled(
                 message.clone(),
                 Style::default().fg(Color::Yellow),
-            ))),
-            rows[5],
-        );
-    } else if wizard.step() == WizardStep::Prompt {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "Leave empty to let the plugin's own prompt stand.".to_string(),
-                Style::default().fg(desc_color),
             ))),
             rows[5],
         );
