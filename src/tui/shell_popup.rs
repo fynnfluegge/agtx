@@ -29,6 +29,16 @@ pub struct ShellPopup {
     pub last_content_refresh: Instant,
     /// Cursor position inside the visible tmux pane and its pane height.
     pub metrics: Option<crate::tmux::PaneMetrics>,
+    /// Index into [`cached_lines`](Self::cached_lines) of the row the tmux
+    /// cursor sits on.
+    ///
+    /// Carried rather than recomputed at draw time, because
+    /// [`trim_content_to_cursor`] drops trailing rows: the last cached line is
+    /// then no longer the pane's last row, and `total_lines - pane_height`
+    /// under-counts by however many were dropped. That error is invisible for a
+    /// pane with no scrollback — the subtraction saturates at 0 — which is why
+    /// it only ever showed up under agents that stay on the normal screen.
+    pub cursor_line: Option<usize>,
 }
 
 impl ShellPopup {
@@ -45,6 +55,7 @@ impl ShellPopup {
             fullscreen: false,
             last_content_refresh: Instant::now(),
             metrics: None,
+            cursor_line: None,
         }
     }
 
@@ -53,9 +64,15 @@ impl ShellPopup {
     /// One setter so the two cannot drift: rendering from lines that do not match
     /// the bytes change detection compares would show a frame that is never
     /// corrected, because the next capture would compare equal.
-    pub fn set_content(&mut self, content: Vec<u8>, lines: Vec<Line<'static>>) {
+    pub fn set_content(
+        &mut self,
+        content: Vec<u8>,
+        lines: Vec<Line<'static>>,
+        cursor_line: Option<usize>,
+    ) {
         self.cached_content = content;
         self.cached_lines = lines;
+        self.cursor_line = cursor_line;
     }
 
     /// Scroll up into history, clamped to content bounds.
@@ -246,37 +263,39 @@ pub const MAX_TRAILING_EMPTY_LINES: usize = 3;
 /// * `cursor_info` - Optional (cursor_y, pane_height) from tmux
 ///
 /// # Returns
-/// Trimmed content with empty buffer space removed
-pub fn trim_content_to_cursor(content: Vec<u8>, cursor_info: Option<(usize, usize)>) -> Vec<u8> {
+/// Trimmed content with empty buffer space removed, and the index of the line
+/// the cursor is on — which the caller must keep, because trimming is what
+/// makes it underivable afterwards.
+pub fn trim_content_to_cursor(
+    content: Vec<u8>,
+    cursor_info: Option<(usize, usize)>,
+) -> (Vec<u8>, Option<usize>) {
     let content_str = String::from_utf8_lossy(&content);
     let lines: Vec<&str> = content_str.lines().collect();
     let total_lines = lines.len();
 
     if total_lines == 0 {
-        return content;
+        return (content, None);
     }
 
-    // First pass: use cursor position if available
-    let end_line_from_cursor = if let Some((cursor_y, pane_height)) = cursor_info {
-        if pane_height > 0 {
-            // The captured content ends at the bottom of the visible pane
-            // visible_pane_start = where the visible pane begins in our capture
-            // cursor position in capture = visible_pane_start + cursor_y
-            let visible_pane_start = total_lines.saturating_sub(pane_height);
-            let cursor_line_in_capture = visible_pane_start + cursor_y;
-            let trim_at = (cursor_line_in_capture + 1).min(total_lines);
+    // Where the cursor is, in the *untrimmed* capture. Trimming only ever drops
+    // lines from the end, so this stays valid for the trimmed content too.
+    let cursor_line = cursor_info.and_then(|(cursor_y, pane_height)| {
+        (pane_height > 0).then(|| total_lines.saturating_sub(pane_height) + cursor_y)
+    });
 
-            // Only trim at cursor if everything below it is blank.
-            // TUI apps (OpenCode, Gemini) place the cursor mid-screen with
-            // real content below — trimming there would cut the UI in half.
-            let has_content_below = lines[trim_at..].iter().any(|l| !l.trim().is_empty());
-            if has_content_below {
-                total_lines
-            } else {
-                trim_at
-            }
-        } else {
+    // First pass: use cursor position if available
+    let end_line_from_cursor = if let Some(cursor_line_in_capture) = cursor_line {
+        let trim_at = (cursor_line_in_capture + 1).min(total_lines);
+
+        // Only trim at cursor if everything below it is blank.
+        // TUI apps (OpenCode, Gemini) place the cursor mid-screen with
+        // real content below — trimming there would cut the UI in half.
+        let has_content_below = lines[trim_at..].iter().any(|l| !l.trim().is_empty());
+        if has_content_below {
             total_lines
+        } else {
+            trim_at
         }
     } else {
         total_lines
@@ -288,7 +307,7 @@ pub fn trim_content_to_cursor(content: Vec<u8>, cursor_info: Option<(usize, usiz
     let end_line = trim_trailing_empty_lines(lines_after_cursor_trim);
 
     let trimmed: String = lines[..end_line].join("\n");
-    trimmed.into_bytes()
+    (trimmed.into_bytes(), cursor_line)
 }
 
 /// Trim excessive trailing empty lines, keeping a small buffer for the prompt area.
@@ -415,7 +434,7 @@ pub fn render_shell_popup(
     let visible_height = popup_chunks[2].height as usize;
 
     // Use the testable helper to compute visible lines
-    let (visible_lines, start_line, total_lines) =
+    let (visible_lines, start_line, _total_lines) =
         compute_visible_lines(styled_lines, visible_height, popup.scroll_offset);
 
     let content = Paragraph::new(visible_lines);
@@ -423,10 +442,14 @@ pub fn render_shell_popup(
 
     // A captured pane is text-only; explicitly restore tmux's live cursor when
     // it falls inside the current (non-scrolled) viewport.
+    //
+    // The row comes from `popup.cursor_line`, fixed when the capture was
+    // trimmed, and *not* from `total_lines - pane_height`: trimming drops
+    // trailing rows, so the last cached line is not the pane's last row.
     if popup.scroll_offset >= 0 {
-        if let Some((cursor_x, cursor_y, pane_height)) = popup.metrics.map(|m| m.cursor()) {
-            let pane_start = total_lines.saturating_sub(pane_height);
-            let cursor_line = pane_start.saturating_add(cursor_y);
+        if let (Some(cursor_line), Some(cursor_x)) =
+            (popup.cursor_line, popup.metrics.map(|m| m.cursor_x))
+        {
             if cursor_line >= start_line && cursor_line < start_line + visible_height {
                 let x = popup_chunks[2].x.saturating_add(
                     cursor_x.min(popup_chunks[2].width.saturating_sub(1) as usize) as u16,

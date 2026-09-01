@@ -191,12 +191,11 @@ pub struct PaneSnapshot {
 }
 
 impl PaneMetrics {
-    /// Where the cursor is, for rendering it in the popup.
-    pub fn cursor(&self) -> (usize, usize, usize) {
-        (self.cursor_x, self.cursor_y, self.pane_height)
-    }
-
     /// What [`trim_content_to_cursor`](crate::tui::shell_popup::trim_content_to_cursor) needs.
+    ///
+    /// It returns the cursor's line index along with the trimmed content: the
+    /// row cannot be recovered from the metrics afterwards, because trimming
+    /// changes how many lines lie between the cursor and the end.
     pub fn trim_bounds(&self) -> (usize, usize) {
         (self.cursor_y, self.pane_height)
     }

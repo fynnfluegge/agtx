@@ -508,7 +508,8 @@ fn test_trim_trailing_empty_lines_whitespace_only() {
 #[test]
 fn test_trim_content_to_cursor_no_metrics() {
     let content = b"line 1\nline 2\n\n\n\n\n\n\n\n\n".to_vec();
-    let result = trim_content_to_cursor(content, None);
+    let (result, cursor_line) = trim_content_to_cursor(content, None);
+    assert_eq!(cursor_line, None);
     let result_str = String::from_utf8_lossy(&result);
     // Count newlines + 1 to avoid lines() quirk with trailing newlines
     let line_count = result_str.matches('\n').count() + 1;
@@ -525,7 +526,7 @@ fn test_trim_content_to_cursor_with_metrics() {
     // Lines below cursor are empty (unused pane buffer) → trimmed at cursor
     let content = b"line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n\n".to_vec();
     let metrics = Some((2, 5)); // cursor_y=2, pane_height=5
-    let result = trim_content_to_cursor(content, metrics);
+    let (result, _) = trim_content_to_cursor(content, metrics);
     let result_str = String::from_utf8_lossy(&result);
     let lines: Vec<&str> = result_str.lines().collect();
 
@@ -541,7 +542,7 @@ fn test_trim_content_to_cursor_tui_cursor_mid_screen() {
     let content =
         b"header\nstatus bar\n\ninput field\n\noutput area\nmore output\nbottom bar".to_vec();
     let metrics = Some((3, 8)); // cursor_y=3 (mid-screen), pane_height=8
-    let result = trim_content_to_cursor(content, metrics);
+    let (result, _) = trim_content_to_cursor(content, metrics);
     let result_str = String::from_utf8_lossy(&result);
     let lines: Vec<&str> = result_str.lines().collect();
 
@@ -556,7 +557,7 @@ fn test_trim_content_to_cursor_cursor_at_bottom_with_empty() {
     // Should trim the empty lines via second pass
     let content = b"line 0\nline 1\nline 2\n\n\n\n\n".to_vec();
     let metrics = Some((6, 7)); // cursor at line 6 of 7-line pane (bottom)
-    let result = trim_content_to_cursor(content, metrics);
+    let (result, _) = trim_content_to_cursor(content, metrics);
     let result_str = String::from_utf8_lossy(&result);
     // Count newlines + 1 to avoid lines() quirk with trailing newlines
     let line_count = result_str.matches('\n').count() + 1;
@@ -569,17 +570,86 @@ fn test_trim_content_to_cursor_cursor_at_bottom_with_empty() {
 #[test]
 fn test_trim_content_to_cursor_empty_content() {
     let content = b"".to_vec();
-    let result = trim_content_to_cursor(content.clone(), Some((0, 10)));
+    let (result, cursor_line) = trim_content_to_cursor(content.clone(), Some((0, 10)));
+    assert_eq!(cursor_line, None);
     assert_eq!(result, content);
 }
 
 #[test]
 fn test_trim_content_to_cursor_zero_pane_height() {
     let content = b"line 1\nline 2\n\n\n\n".to_vec();
-    let result = trim_content_to_cursor(content, Some((0, 0)));
+    let (result, cursor_line) = trim_content_to_cursor(content, Some((0, 0)));
+    assert_eq!(cursor_line, None);
     let result_str = String::from_utf8_lossy(&result);
     // Count newlines + 1 to avoid lines() quirk with trailing newlines
     let line_count = result_str.matches('\n').count() + 1;
     // pane_height=0 should fall through to second pass only
     assert_eq!(line_count, 2 + MAX_TRAILING_EMPTY_LINES);
+}
+
+/// The cursor is drawn on the row it is *on*, even after the capture was
+/// trimmed.
+///
+/// `trim_content_to_cursor` drops trailing rows, so the last cached line is no
+/// longer the pane's last row and `total_lines - pane_height` under-counts by
+/// however many were dropped. A pane with no scrollback hides that — the
+/// subtraction saturates at 0 — which is why the cursor only ever drifted under
+/// agents that stay on the normal screen and accumulate history (codex), and
+/// never under one that lives on the alternate screen (claude).
+#[test]
+fn the_cursor_lands_on_its_own_row_after_the_capture_is_trimmed() {
+    // 5 rows of scrollback + a 10-row pane. The pane's last content row is the
+    // prompt the cursor sits on; the four rows under it are unused buffer, so
+    // trimming drops one of them (it keeps MAX_TRAILING_EMPTY_LINES).
+    let pane_height = 10usize;
+    let mut rows: Vec<String> = (0..5).map(|i| format!("history {i}")).collect();
+    rows.extend((0..5).map(|i| format!("output {i}")));
+    rows.push("> prompt".to_string());
+    rows.extend(std::iter::repeat_n(String::new(), 4));
+    assert_eq!(rows.len(), 5 + pane_height);
+    let capture = format!("{}\n", rows.join("\n")).into_bytes();
+
+    // cursor_y is the row *within the pane*: index 10 of the capture.
+    let (trimmed, cursor_line) = trim_content_to_cursor(capture, Some((5, pane_height)));
+    assert_eq!(cursor_line, Some(10));
+    let lines: Vec<&str> = std::str::from_utf8(&trimmed).unwrap().lines().collect();
+    assert_eq!(lines.len(), 11, "trimming must have dropped trailing rows");
+
+    let popup = ShellPopup {
+        cached_content: trimmed.clone(),
+        cursor_line,
+        metrics: Some(agtx::tmux::PaneMetrics {
+            cursor_x: 2,
+            cursor_y: 5,
+            pane_height,
+            history_size: 5,
+        }),
+        ..ShellPopup::new("Task".to_string(), "window".to_string())
+    };
+
+    // Borders (2) + title (1) + footer (1) around a content area the size of
+    // the pane, as the popup sizes it.
+    let area = Rect::new(0, 0, 40, pane_height as u16 + 4);
+    let styled: Vec<Line<'static>> = lines
+        .iter()
+        .map(|l| Line::from(Span::raw(l.to_string())))
+        .collect();
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal
+        .draw(|frame| {
+            render_shell_popup(&popup, frame, area, &styled, &ShellPopupColors::default());
+        })
+        .unwrap();
+
+    let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+    let row: String = (0..area.width)
+        .map(|x| terminal.backend().buffer()[(x, cursor.y)].symbol())
+        .collect();
+    assert!(
+        row.contains("> prompt"),
+        "cursor drawn on row {} which reads {row:?}, not the prompt it is on",
+        cursor.y
+    );
+    // The content area starts one column in, past the popup border.
+    assert_eq!(cursor.x, 3, "column comes straight from tmux");
 }
