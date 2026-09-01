@@ -287,16 +287,14 @@ pub struct ProjectConfig {
 /// Serialise `value` over the TOML already at `path`, keeping everything agtx
 /// did not put there.
 ///
-/// `toml::to_string_pretty` round-trips through the struct, so it emits a
-/// pristine file and **destroys every comment and every unrecognised key** the
-/// user had written. That was tolerable while the only writer was the first-run
-/// default; it is not, once agtx offers to edit a file people maintain by hand.
+/// The rule: *agtx rewrites the values of keys it knows, never deletes a key it
+/// does not recognise, and removes a key it manages when that field becomes
+/// unset.* `managed` names the keys that may be removed — the optional ones,
+/// since a required key is always re-emitted. Everything else in the file
+/// survives untouched, formatting and comments included.
 ///
-/// The rule this implements: *agtx rewrites the values of keys it knows, never
-/// deletes a key it does not recognise, and removes a key it manages when that
-/// field becomes unset.* `managed` names the keys that may be removed — the
-/// optional ones, since a required key is always re-emitted. Anything else in
-/// the file is left exactly as it was found, formatting included.
+/// Serialising the struct alone would not do: it emits a pristine document and
+/// so drops every comment and unrecognised key the user wrote.
 fn write_toml_preserving(path: &Path, value: &impl Serialize, managed: &ManagedKeys) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -304,14 +302,14 @@ fn write_toml_preserving(path: &Path, value: &impl Serialize, managed: &ManagedK
 
     let mut rendered = toml_edit::ser::to_document(value).context("Failed to serialize config")?;
     // serde renders a nested struct as an *inline* table (`worktree = { .. }`).
-    // Merged as-is that would collapse the user's `[worktree]` section onto one
-    // line and take its comments with it, and a fresh file would not look like
-    // the format the README documents. Normalise to real tables first.
+    // Normalising to real tables keeps the user's `[worktree]` section on its
+    // own lines with its comments, and keeps a fresh file in the documented
+    // format.
     expand_inline_tables(rendered.as_table_mut());
 
-    // A file that does not parse is not something to merge into — silently
-    // rewriting it would discard whatever the user was in the middle of. Start
-    // clean instead, which is what the old writer always did.
+    // A file that does not parse cannot be merged into, so start clean. The
+    // alternative — refusing to save — leaves the user unable to fix it from
+    // inside agtx.
     let mut doc = std::fs::read_to_string(path)
         .ok()
         .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
@@ -324,11 +322,10 @@ fn write_toml_preserving(path: &Path, value: &impl Serialize, managed: &ManagedK
 
 /// Remove `key`, moving any comments above it onto the key that follows.
 ///
-/// A comment belongs to the *next* key's decor, so deleting the first key in a
-/// file deletes the file's header comment with it — which is precisely the
-/// silent loss `write_toml_preserving` exists to prevent. Erring toward keeping
-/// the user's text means a comment that really was about the removed key ends
-/// up slightly orphaned; that is visible and fixable, where deletion is not.
+/// A comment belongs to the *next* key's decor, so removing the first key in a
+/// file would take the file's header comment with it. Erring toward keeping the
+/// user's text leaves a comment that really was about the removed key slightly
+/// orphaned, which is visible and fixable where deletion is not.
 ///
 /// A comment above the *last* key in a table has nothing to move onto and is
 /// dropped.
@@ -526,9 +523,9 @@ impl GlobalConfig {
     /// Get the path to the global config file.
     ///
     /// Always `~/.config/agtx/` on every platform — see the config-path split
-    /// note in CLAUDE.md. Honours `AGTX_CONFIG_DIR` like `TrustStore::path`,
-    /// so a test that exercises the writer cannot overwrite the real user's
-    /// hand-maintained `config.toml`.
+    /// note in CLAUDE.md. Honours `AGTX_CONFIG_DIR` like `TrustStore::path`, so
+    /// a test exercising the writer cannot overwrite the real user's
+    /// `config.toml`.
     pub fn config_path() -> Result<PathBuf> {
         if let Ok(dir) = std::env::var("AGTX_CONFIG_DIR") {
             if !dir.is_empty() {
@@ -960,9 +957,9 @@ impl TrustStore {
     /// Where `trusted_projects.toml` lives.
     ///
     /// Honours `AGTX_CONFIG_DIR` like `Database::data_root` honours
-    /// `AGTX_DATA_DIR`: `App::new` reads this store and `install_plugin` now
-    /// writes it, so without a redirect the test suite reads — and would
-    /// append temp-dir entries to — the real user's file.
+    /// `AGTX_DATA_DIR`: `App::new` reads this store and several paths write it,
+    /// so without a redirect the test suite would append temp-dir entries to
+    /// the real user's file.
     fn path() -> Result<PathBuf> {
         if let Ok(dir) = std::env::var("AGTX_CONFIG_DIR") {
             if !dir.is_empty() {
@@ -1035,11 +1032,11 @@ impl TrustStore {
 mod managed_keys_tests {
     use super::*;
 
-    /// The managed-key lists say what a save may *delete*. A field added to
-    /// either config without being listed would silently survive being cleared
-    /// — the value would go on living in the file after the user removed it.
+    /// The managed-key lists say what a save may *delete*. A field missing from
+    /// them survives being cleared: the value goes on living in the file after
+    /// the user removed it.
     ///
-    /// Both literals below are exhaustive on purpose: adding a field to the
+    /// Both literals below are exhaustive on purpose, so adding a field to the
     /// struct fails to compile here until someone has looked at this list.
     #[test]
     fn project_managed_keys_covers_every_optional_field() {

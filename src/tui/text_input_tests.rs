@@ -205,10 +205,6 @@ fn trigger_characters_insert_when_the_caller_declines_them() {
 }
 
 // --- word boundaries ---
-//
-// These moved here from `app_tests.rs` with the functions themselves, where
-// they had accumulated two overlapping copies. One home for the code, one for
-// its tests.
 
 #[test]
 fn word_boundary_left_from_the_end_of_the_string() {
@@ -314,9 +310,8 @@ fn char_boundaries_never_land_mid_codepoint() {
     }
 }
 
-/// A chord is not text. `Ctrl+X` used to type a literal "x" into every field in
-/// the TUI, and a caller that gives a chord its own meaning could never get the
-/// key back.
+/// A chord is not text, and declining it is also what lets a caller give a
+/// chord its own meaning and still receive the key.
 #[test]
 fn modified_characters_are_declined_rather_than_typed() {
     let mut input = typed("abc");

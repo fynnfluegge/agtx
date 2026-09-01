@@ -5782,9 +5782,8 @@ fn test_wizard_plugin_selection() {
     assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 }
 
-/// The wizard's two text fields share one editor now, so the arms that used to
-/// sit above `Char(c)` in each handler reach it through the fallback instead.
-/// These pin the two places that ordering could have broken.
+/// The wizard's text fields share one editor, reached through each handler's
+/// fallback arm. These pin the two places that ordering matters.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn alt_word_motion_in_the_title_field_moves_rather_than_typing() {
@@ -5951,9 +5950,9 @@ fn a_trailing_backslash_makes_a_newline() {
     assert_eq!(app.state.wizard_step(), Some(WizardStep::Prompt));
 }
 
-/// A terminal already in Kitty mode — from the user's own shell or multiplexer,
-/// since agtx no longer asks for it — reports Shift+Tab as Tab with SHIFT
-/// rather than as BackTab. Both spellings step back.
+/// A terminal in Kitty mode — from the user's own shell or multiplexer, since
+/// agtx does not ask for it — reports Shift+Tab as Tab with SHIFT rather than
+/// as BackTab. Both spellings step back.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn shift_tab_reported_as_a_modified_tab_still_steps_back() {
@@ -6101,9 +6100,8 @@ fn esc_cancels_from_any_step() {
     }
 }
 
-/// Back-navigation is the reason the wizard holds both fields at once: the old
-/// shape had moved the title out of the shared buffer by the time the prompt
-/// step owned it, so there was nothing to go back *to*.
+/// Back-navigation is why the wizard holds every field at once: stepping back
+/// has to find the earlier answers still intact.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn stepping_back_from_the_prompt_preserves_everything_typed() {
@@ -6204,8 +6202,7 @@ fn ctrl_s_saves_from_the_plugin_step() {
     assert_eq!(app.state.board.tasks[0].title, "Saved mid-flow");
 }
 
-/// Enter on an empty title used to do nothing at all, which reads as a broken
-/// key rather than a rejected input.
+/// A silent refusal reads as a broken key rather than a rejected input.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn an_empty_title_is_refused_out_loud() {
@@ -6257,9 +6254,9 @@ fn a_padded_title_is_trimmed_on_save() {
     assert_eq!(app.state.board.tasks[0].title, "Padded");
 }
 
-/// A dropdown owns Esc while it is open. Now that Esc cancels the wizard
-/// outright, getting this wrong would throw away the whole task rather than
-/// costing a step — closing a picker must only close the picker.
+/// A dropdown owns Esc while it is open. Since Esc otherwise cancels the
+/// wizard, getting this wrong throws away the whole task — closing a picker
+/// must only close the picker.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn esc_closes_an_open_dropdown_without_leaving_the_wizard() {
@@ -6281,9 +6278,9 @@ fn esc_closes_an_open_dropdown_without_leaving_the_wizard() {
     assert_eq!(wiz(&app).as_str(), "see ", "the `!` went with it");
 }
 
-/// The file dropdown used to append its pattern to the end of the buffer while
-/// recording a `start_pos` at the caret. With the caret mid-line the two
-/// disagreed and the commit spliced over the wrong range.
+/// The file dropdown records a caret-relative `start_pos`, so its pattern has
+/// to be typed at the caret too — appending to the end of the buffer would make
+/// the commit splice over the wrong range.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn the_file_dropdown_types_at_the_caret_not_the_end() {
@@ -6310,9 +6307,8 @@ fn the_file_dropdown_types_at_the_caret_not_the_end() {
     );
 }
 
-/// First run used to be a hand-rolled raw-mode menu in `main.rs` that shared
-/// neither code nor styling with the rest of the app. It is the config editor
-/// now, opened on the one question that menu asked.
+/// First run is the config editor, opened on the one question it needs to ask,
+/// rather than a menu of its own.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn first_run_opens_the_config_editor_on_the_agent_field() {
@@ -6455,9 +6451,9 @@ fn the_help_overlay_uses_the_same_scroll_chords_as_a_task_pane() {
     assert_eq!(app.state.help_scroll, Some(60), "C-g jumps to the bottom");
 }
 
-/// Jumping to the bottom used to park the offset past the last screenful — the
-/// table has far more rows than fit — so the next `C-u` moved nothing and read
-/// as a dead key. The clamp is to what the renderer could actually show.
+/// The clamp is to what the renderer could actually show. Against the table
+/// length instead, jumping to the bottom parks the offset past the last
+/// screenful and the next `C-u` moves nothing, reading as a dead key.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn paging_back_from_the_bottom_moves_on_the_first_press() {
@@ -6499,8 +6495,8 @@ fn app_awaiting_trust() -> (App, tempfile::TempDir) {
     (app, dir)
 }
 
-/// It used to accept **any** key, `Esc` included, so typing ahead after launch
-/// or reaching for an unrelated shortcut silently granted trust.
+/// Accepting any key would let typing ahead after launch, or reaching for an
+/// unrelated shortcut, silently grant trust.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn an_unrelated_key_neither_trusts_nor_dismisses() {
@@ -6903,6 +6899,74 @@ fn emptying_the_filter_leaves_filter_mode() {
     let before = app.state.wizard.as_ref().unwrap().plugin.selected;
     press_key(&mut app, KeyCode::Char('j'));
     assert_ne!(app.state.wizard.as_ref().unwrap().plugin.selected, before);
+}
+
+/// An open filter owns Esc the way a prompt dropdown does: closing the filter
+/// must not take the whole wizard with it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn esc_closes_an_open_filter_without_leaving_the_wizard() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Keep me");
+    advance_to(&mut app, WizardStep::Plugin);
+
+    press_key(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "gsd");
+    assert!(app.state.wizard.as_ref().unwrap().plugin.is_filtering());
+
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.wizard.is_some(), "the wizard survives");
+    assert_eq!(app.state.wizard_step(), Some(WizardStep::Plugin));
+    let list = &app.state.wizard.as_ref().unwrap().plugin;
+    assert!(!list.is_filtering(), "only the filter closed");
+    assert_eq!(list.matching().len(), list.options.len(), "whole list back");
+
+    // A second Esc, with no filter to close, cancels as it does anywhere else.
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.wizard.is_none());
+}
+
+/// The plugin list is filtered by the agent, so saving straight from the agent
+/// step must not persist a plugin that agent does not support.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn saving_from_the_agent_step_refilters_the_plugin() {
+    let mut app = make_test_app_with_agents();
+    press_key(&mut app, KeyCode::Char('o'));
+    type_str(&mut app, "Agent then save");
+
+    advance_to(&mut app, WizardStep::Agent);
+    press_key(&mut app, KeyCode::Char('j'));
+    let agent = app
+        .state
+        .wizard
+        .as_ref()
+        .unwrap()
+        .agent_name()
+        .unwrap()
+        .to_string();
+
+    app.handle_key(key_event(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    assert_eq!(app.state.board.tasks.len(), 1);
+    let task = &app.state.board.tasks[0];
+    assert_eq!(task.agent, agent);
+    // Whatever plugin was stored has to be one this agent supports.
+    if let Some(name) = task.plugin.as_deref() {
+        let content = skills::BUNDLED_PLUGINS
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .map(|(_, _, c)| *c);
+        if let Some(content) = content {
+            let plugin: crate::config::WorkflowPlugin = toml::from_str(content).unwrap();
+            assert!(
+                plugin.supports_agent(&agent),
+                "saved {name} for {agent}, which does not support it"
+            );
+        }
+    }
 }
 
 /// Enter picks whatever the filter left under the cursor, and the pick survives

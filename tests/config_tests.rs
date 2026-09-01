@@ -576,11 +576,8 @@ fn test_feature_flags_no_init_scripts() {
 // =============================================================================
 // Comment-preserving config writes
 //
-// `toml::to_string_pretty` round-trips through the struct and emits a pristine
-// file, destroying every comment and unrecognised key the user wrote. That was
-// tolerable while the only writer was the first-run default; these pin the
-// behaviour agtx needs now that it offers to edit a file people maintain by
-// hand.
+// agtx offers to edit a file people maintain by hand, so a save has to leave
+// everything it did not put there alone.
 // =============================================================================
 
 fn project_with_config(body: &str) -> tempfile::TempDir {
@@ -640,8 +637,8 @@ fn clearing_a_field_removes_it_from_the_file() {
     assert_eq!(ProjectConfig::load(dir.path()).unwrap().init_script, None);
 }
 
-/// A comment lives in the *following* key's decor, so deleting the first key in
-/// a file would take the file's header comment with it.
+/// A comment lives in the *following* key's decor, so removing the first key in
+/// a file must not take the file's header comment with it.
 #[test]
 fn removing_the_first_key_does_not_take_the_header_comment() {
     let dir = project_with_config(concat!(
@@ -659,8 +656,8 @@ fn removing_the_first_key_does_not_take_the_header_comment() {
     assert!(!text.contains("init_script"), "{text}");
 }
 
-/// serde renders a nested struct as an inline table. Merged as-is that would
-/// collapse the user's `[worktree]` section onto one line, comments and all.
+/// serde renders a nested struct as an inline table; merged as-is that
+/// collapses a `[worktree]` section onto one line, comments and all.
 #[test]
 fn nested_sections_stay_sections() {
     let dir = tempfile::tempdir().unwrap();
@@ -703,9 +700,9 @@ fn clearing_a_nested_field_removes_it() {
     assert!(!text.contains("running"), "{text}");
 }
 
-/// A file that does not parse is not something to merge into — but neither is
-/// it a reason to fail. The old writer always overwrote; that stays true for
-/// the one case where preserving is impossible.
+/// A file that does not parse cannot be merged into, but that is no reason to
+/// refuse the save — it would leave the user unable to fix it from inside
+/// agtx.
 #[test]
 fn an_unparseable_file_is_replaced_rather_than_erroring() {
     let dir = project_with_config("this is not = = toml\n");

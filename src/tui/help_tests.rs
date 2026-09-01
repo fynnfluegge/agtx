@@ -29,9 +29,8 @@ fn section_titles_are_unique() {
     }
 }
 
-/// The overlay exists because the footer could not show everything. These are
-/// the keys that were bound but advertised nowhere; if one is dropped from the
-/// table it goes back to being undiscoverable.
+/// The footer cannot show everything, so these keys are advertised only here.
+/// Dropped from the table, they become undiscoverable.
 #[test]
 fn the_previously_unadvertised_keys_are_listed() {
     let listed: Vec<&str> = HELP

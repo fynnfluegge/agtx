@@ -42,7 +42,7 @@ fn focus(ed: &mut ConfigEditor, id: FieldId) {
 
 // --- the field table ---
 
-/// `read` and `write` are the two halves of one contract. A field wired into
+/// `read` and `write` are the two halves of one contract: a field wired into
 /// one and not the other is a setting that silently will not stick.
 #[test]
 fn every_field_round_trips_through_read_and_write() {

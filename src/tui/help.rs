@@ -1,12 +1,8 @@
 //! The `?` overlay: every binding, grouped by where it applies.
 //!
-//! The footer can only ever show a handful — it had grown to 155 characters and
-//! was being truncated on a 150-column terminal, which meant the *last* few
-//! bindings were the ones nobody could see. Several real keys had never been
-//! advertised at all (`C-n/p` scrolling, `M`, `D`).
-//!
-//! So the footer keeps the column-specific actions and points here for the
-//! rest. This table is the complete list; `build_footer_text` is the summary.
+//! This table is the complete list. `build_footer_text` shows a contextual
+//! handful, because the footer is one line and gets truncated on a narrow
+//! terminal — so a binding that is not here is undiscoverable.
 
 pub struct HelpEntry {
     pub keys: &'static str,
@@ -133,10 +129,9 @@ pub fn rows() -> Vec<Row> {
 
 /// Split the table across `count` columns, balanced by height.
 ///
-/// Sections are never split: a heading in one column with its keys in the next
-/// is worse than an uneven pair of columns. Two columns roughly halve the
-/// height, which is what lets the whole reference fit a normal window instead
-/// of being a tall thin strip that has to be scrolled.
+/// Sections stay whole: a heading in one column with its keys in the next is
+/// worse than an uneven pair. Two columns roughly halve the height, which is
+/// what lets the whole reference fit a normal window without scrolling.
 pub fn columns(count: usize) -> Vec<Vec<Row>> {
     let count = count.max(1);
     let blocks: Vec<Vec<Row>> = HELP.iter().map(section_rows).collect();
@@ -144,6 +139,9 @@ pub fn columns(count: usize) -> Vec<Vec<Row>> {
         return vec![join(&blocks)];
     }
 
+    if blocks.is_empty() {
+        return vec![Vec::new(); count];
+    }
     let total: usize = blocks.iter().map(|b| b.len()).sum::<usize>() + blocks.len() - 1;
     let target = total.div_ceil(count);
 
@@ -154,9 +152,9 @@ pub fn columns(count: usize) -> Vec<Vec<Row>> {
         let remaining_columns = count - column - 1;
         let remaining_blocks = blocks.len() - i;
         let would_be = height + block.len() + usize::from(height > 0);
-        // Break when taking the block would land further from the target height
-        // than leaving it — `abs_diff` on both sides, because `height` can
-        // already be past target and a plain subtraction there underflows.
+        // Break when taking the block lands further from the target height than
+        // leaving it. `abs_diff` on both sides: `height` can already be past
+        // target, where a plain subtraction underflows.
         let overshoots = height > 0 && target.abs_diff(would_be) > target.abs_diff(height);
         if overshoots && remaining_columns > 0 && remaining_blocks > remaining_columns {
             column += 1;

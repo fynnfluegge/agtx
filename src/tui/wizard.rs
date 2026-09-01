@@ -1,24 +1,20 @@
 //! The task creation / edit wizard: one state value for the whole flow.
 //!
-//! This used to be three `InputMode` variants over a single shared buffer plus
-//! a `pending_task_title` on the side. Nothing could go *back*, because the
-//! title had already been moved out of the buffer by the time the prompt step
-//! owned it — so `Esc` could only mean "throw the whole thing away", and a typo
-//! caught on the last step meant starting over.
+//! `WizardState` holds every field at once — both text inputs, both list picks,
+//! the step. That is what makes back-navigation work: stepping back has to find
+//! the earlier answers still intact.
 //!
-//! Holding every field at once is what makes back-navigation possible, and
-//! back-navigation is what makes the "seeded" flags necessary: a step re-entered
-//! from the right must not re-initialise itself and discard what the user did
-//! the first time through.
+//! It is also why the "seeded" flags exist. A step re-entered from the right
+//! must not re-initialise itself over what the user already chose there.
 
 use std::collections::HashSet;
 
 use super::text_input::TextInput;
 
-/// One option offered by a picker, with the blurb shown beneath it.
+/// One option offered by a picker, with the blurb shown beside it.
 ///
-/// Shared by the agent step, the plugin step and the board's `P` popup — they
-/// are the same choice presented in three places.
+/// Shared by the agent step, the plugin step and the board's `P` popup: the
+/// same kind of choice in three places.
 #[derive(Debug, Clone)]
 pub struct PickOption {
     /// What is stored. `""` means "none", which for a plugin is the agtx
@@ -52,15 +48,15 @@ impl PickOption {
 
 /// A pick-one-from-a-list step, with an optional filter.
 ///
-/// `selected` indexes `options`, not the filtered view: a filter that narrows
-/// and then widens again must leave the cursor on the same option, not on
-/// whatever happens to sit at that position now.
+/// `selected` indexes `options`, not the filtered view, so a filter that
+/// narrows and widens again leaves the cursor on the same option rather than on
+/// whatever now sits at that position.
 #[derive(Debug, Clone, Default)]
 pub struct ListPick {
     pub options: Vec<PickOption>,
     pub selected: usize,
-    /// `Some` once the user pressed `/`. Empty-but-present means "filtering,
-    /// nothing typed yet", which still shows the filter row.
+    /// `Some` while `/` filtering is open. Empty-but-present means "filtering,
+    /// nothing typed yet", which still shows the filter in the border.
     pub filter: Option<TextInput>,
     seeded: bool,
 }
@@ -135,8 +131,8 @@ impl ListPick {
         self.filter.is_some()
     }
 
-    /// Keep the cursor on something the filter still admits. Called after every
-    /// change to the filter text.
+    /// Move the cursor onto a visible option, if the filter has excluded it.
+    /// Call after every change to the filter text.
     pub fn settle(&mut self) {
         let visible = self.matching();
         if visible.is_empty() {
@@ -147,12 +143,12 @@ impl ListPick {
         }
     }
 
-    /// True the first time it is asked, so a step seeds itself once per run.
+    /// True the first time only, so a step seeds itself once per run.
     pub fn take_seed(&mut self) -> bool {
         !std::mem::replace(&mut self.seeded, true)
     }
 
-    /// Whether the step is worth showing at all — one option is not a choice.
+    /// Whether the step is worth showing: one option is not a choice.
     pub fn is_a_choice(&self) -> bool {
         self.options.len() > 1
     }
@@ -273,9 +269,9 @@ impl WizardState {
         self.step_index() + 1 == self.steps().len()
     }
 
-    /// Include or drop an optional step. Called once its options are known.
+    /// Include or drop an optional step, once its options are known.
     ///
-    /// Dropping the step the cursor is standing on would leave `step` outside
+    /// Dropping the step the cursor stands on would leave `step` outside
     /// `steps` and every index derived from it wrong, so it retreats to Title.
     pub fn set_optional_step(&mut self, step: WizardStep, enabled: bool) {
         match step {
@@ -333,7 +329,7 @@ impl WizardState {
 
     fn enter(&mut self, step: WizardStep) {
         // A filter belongs to the visit, not to the step: coming back to a list
-        // should show the whole list again, not the last search.
+        // shows the whole list again, not the last search.
         if let Some(list) = self.current_list_mut() {
             list.stop_filter();
         }

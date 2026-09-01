@@ -1,7 +1,5 @@
-//! The in-TUI config editor.
-//!
-//! Everything under `~/.config/agtx/config.toml` and `.agtx/config.toml` used to
-//! be hand-edit-only. This is that file as a form.
+//! The in-TUI config editor: `~/.config/agtx/config.toml` and a project's
+//! `.agtx/config.toml` as a form.
 //!
 //! The fields are **declared**, not open-coded: one `FieldId` per setting, and
 //! exactly two matches over it — `read` and `write`. The alternative is a match
@@ -81,8 +79,8 @@ impl FieldValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldKind {
     Toggle,
-    /// A closed set of options. The list is built at open time because it
-    /// depends on what is installed — see `ConfigEditor::open`.
+    /// A closed set of options, built at open time because the list depends on
+    /// what is installed — see `ConfigEditor::open`.
     Choice(Vec<Choice>),
     Text,
     /// Text, drawn with a swatch of the colour it names.
@@ -109,8 +107,8 @@ impl Choice {
 pub struct Field {
     pub id: FieldId,
     pub label: &'static str,
-    /// One line under the field. This is where a setting that only affects
-    /// *new* worktrees says so, rather than pretending the change is retroactive.
+    /// One line under the field. Where a setting only affects *new* worktrees,
+    /// this is where it says so.
     pub help: &'static str,
     pub kind: FieldKind,
 }
@@ -130,9 +128,10 @@ pub enum EditState {
     Choice { selected: usize },
 }
 
-/// What the caller must do after handling a key. The editor never touches the
-/// filesystem itself — that keeps it pure, and keeps the trust re-record and
-/// the config re-merge in one place in `app.rs`.
+/// What the caller must do after handling a key.
+///
+/// The editor never touches the filesystem: that keeps it pure, and keeps the
+/// trust re-record and the config re-merge in one place in `app.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorAction {
     None,
@@ -149,7 +148,7 @@ pub struct ConfigEditor {
     pub section: usize,
     pub field: usize,
     pub editing: Option<EditState>,
-    /// Set by any change, cleared by a save. Drives the discard prompt.
+    /// Set by any change, cleared by a save. Gates the discard prompt.
     pub dirty: bool,
     /// Asking whether to throw away unsaved changes.
     pub confirming_discard: bool,
@@ -158,10 +157,10 @@ pub struct ConfigEditor {
 }
 
 impl ConfigEditor {
-    /// Build the form for the configs as they are on disk right now.
+    /// Build the form for the configs as they are on disk.
     ///
-    /// `agents` and `plugins` are the installed ones — the choice lists cannot
-    /// be static because they depend on the machine.
+    /// `agents` and `plugins` are the installed ones: the choice lists depend
+    /// on the machine, so they cannot be static.
     pub fn open(
         global: GlobalConfig,
         project: Option<ProjectConfig>,
@@ -390,8 +389,7 @@ impl ConfigEditor {
 
     /// Put the cursor on a named field, wherever it lives.
     ///
-    /// Used by first run, which opens the editor on the one question the old
-    /// standalone menu asked.
+    /// First run uses this to open on `Default agent`.
     pub fn focus(&mut self, id: FieldId) {
         for (section, fields) in self.sections.iter().enumerate() {
             if let Some(field) = fields.fields.iter().position(|f| f.id == id) {
@@ -415,11 +413,10 @@ impl ConfigEditor {
     }
 
     fn set(&mut self, id: FieldId, value: FieldValue) {
-        // Compare what is *stored* before and after rather than trusting the
-        // value handed in. A write can normalise (a blank optional field
-        // becomes unset) or decline (a project field with no project open), and
-        // `dirty` is what the discard prompt believes — it has to be true only
-        // when something really moved.
+        // Compare what is *stored* before and after, not the value handed in:
+        // a write can normalise (a blank optional field becomes unset) or
+        // decline (a project field with no project open). The discard prompt
+        // trusts `dirty`, so it must be true only when something really moved.
         let before = self.value(id);
         write(id, value, &mut self.global, self.project.as_mut());
         if self.value(id) != before {
@@ -518,12 +515,12 @@ impl ConfigEditor {
             };
         }
 
-        // A field open for editing owns its keys, including Esc — closing the
-        // editor must not also close the whole form.
+        // A field open for editing owns its keys, including Esc: closing the
+        // field must not close the whole form.
         //
-        // Read the choice count up front: the cursor lives in `self.editing`
-        // and the list lives in `self.sections`, and holding a borrow of one
-        // while asking the other is what the borrow checker objects to.
+        // The choice count is read up front because the cursor lives in
+        // `self.editing` and the list in `self.sections`, and the borrow checker
+        // will not allow holding one while asking the other.
         let choices = choice_count(self.current_field());
         if let Some(state) = self.editing.as_mut() {
             match (state, key.code) {
@@ -604,8 +601,7 @@ fn opt(value: Option<&String>) -> FieldValue {
     FieldValue::Text(value.cloned().unwrap_or_default())
 }
 
-/// Blank means "unset" for every optional field, so this is the one place that
-/// decides it.
+/// Blank means "unset" for every optional field; decided in one place.
 fn some_unless_blank(value: String) -> Option<String> {
     if value.trim().is_empty() {
         None

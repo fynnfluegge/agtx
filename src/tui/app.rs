@@ -51,10 +51,9 @@ fn build_footer_text(
     has_cyclic_plugin: bool,
     fullscreen_on_enter: bool,
 ) -> String {
-    // Only the column-specific actions plus the two universal ones. Everything
-    // else moved to the `?` overlay: this string had reached 155 characters and
-    // was being truncated on a 150-column terminal, which silently hid whatever
-    // happened to be last.
+    // Only the column-specific actions plus the two universal ones; the `?`
+    // overlay carries the full list. One line has to survive a narrow terminal,
+    // and a truncated footer silently hides whatever comes last.
     match wizard_step {
         None => {
             if sidebar_focused {
@@ -3620,9 +3619,8 @@ impl App {
     /// Answer the trust prompt.
     ///
     /// This decides whether shell commands the user has not read are allowed to
-    /// run, so it takes a deliberate `y`. It used to accept **any** key,
-    /// `Esc` included — which meant typing ahead after launch, or reaching for
-    /// an unrelated shortcut, silently granted it.
+    /// run, so it takes a deliberate `y`. Accepting any key would let typing
+    /// ahead after launch, or reaching for an unrelated shortcut, grant it.
     fn handle_trust_confirm_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {}
@@ -4725,6 +4723,18 @@ impl App {
         // Any keystroke means the user is acting on the complaint, so it goes.
         self.wizard_mut().validation = None;
 
+        // An open filter owns Esc the way a prompt dropdown does: closing the
+        // filter must not take the wizard with it.
+        if key.code == KeyCode::Esc {
+            if let Some(list) = self.wizard_mut().current_list_mut() {
+                if list.is_filtering() {
+                    list.stop_filter();
+                    list.settle();
+                    return Ok(());
+                }
+            }
+        }
+
         match key.code {
             // Save from anywhere, so a correction made on step one does not
             // require walking forward through the rest of the flow again.
@@ -4859,8 +4869,8 @@ impl App {
 
     /// Save if the wizard has what it needs, and say why not if it does not.
     ///
-    /// The refusal used to be silent: `Enter` on an empty title simply did
-    /// nothing, which reads as a broken key rather than a rejected input.
+    /// A silent refusal reads as a broken key rather than a rejected input, so
+    /// every path out of here either saves or explains itself.
     /// What is wrong with the title, if anything.
     ///
     /// One function so `Enter` on the title step and `Ctrl+S` from anywhere
@@ -4893,6 +4903,9 @@ impl App {
     }
 
     fn try_save_wizard(&mut self) -> Result<()> {
+        // The plugin list is filtered by the agent; saving from the agent step
+        // itself would otherwise store a plugin that agent does not support.
+        self.reseed_plugins_for_agent();
         if let Some(problem) = self.title_problem() {
             let wizard = self.wizard_mut();
             // Send the user where the problem is, not where the key was pressed.
@@ -4940,10 +4953,9 @@ impl App {
     /// Keys belonging to the `!` task-reference dropdown. `false` when it is
     /// not open, so the caller falls through to the ordinary prompt handling.
     ///
-    /// The dropdown state is **taken out** for the duration. Every arm needs it
+    /// The dropdown state is **taken out** for the duration: every arm needs it
     /// alongside the wizard's prompt field, and several also call back into
-    /// `self` to refresh the match list; holding a borrow across those is what
-    /// forced the old re-`if let` dance.
+    /// `self` to refresh the match list, which a held borrow would not allow.
     fn handle_task_ref_search_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         let Some(mut search) = self.state.task_ref_search.take() else {
             return false;
@@ -4987,9 +4999,9 @@ impl App {
                     refresh = true;
                 }
             }
-            // A chord the picker did not claim is not text: `Ctrl+X` typed a
-            // literal "x" into the pattern before this guard, and `Ctrl+J`
-            // means newline once the picker is closed.
+            // A chord the picker did not claim is not text: `Ctrl+X` must not
+            // reach the pattern, and `Ctrl+J` means newline once the picker is
+            // closed.
             KeyCode::Char(c) if !ctrl && !alt => {
                 search.pattern.push(c);
                 self.prompt_mut().insert_char(c);
@@ -5423,8 +5435,8 @@ impl App {
             return;
         }
         let default_agent = self.state.config.default_agent.clone();
-        // Editing keeps whatever the task already runs on, which may no longer
-        // be the project default.
+        // Editing opens on whatever the task already runs on, which need not be
+        // the project default.
         let current = self
             .wizard_mut()
             .editing_task_id
@@ -5580,9 +5592,11 @@ impl App {
         }
     }
 
-    /// Close the wizard, discarding it. Any open dropdown goes with it.
+    /// Close the wizard, discarding it. Any open dropdown goes with it, and so
+    /// does the note of which agent its plugin list was filtered by.
     fn cancel_wizard(&mut self) {
         self.state.wizard = None;
+        self.state.plugins_filtered_for = None;
         self.state.task_ref_search = None;
         self.state.skill_search = None;
         self.state.file_search = None;
@@ -13803,9 +13817,8 @@ fn draw_wizard(
         })
         .collect();
 
-    // A title is one line; a prompt and a list want the room. Sizing the body
-    // per step is why the title step no longer draws a full-height box around a
-    // single word, and the trailing slack is what stops it stretching to fill.
+    // A title is one line; a prompt and a list want the room. The trailing
+    // slack is what stops a short body stretching to fill the popup.
     let body_height = match wizard.step() {
         WizardStep::Title => Constraint::Length(3),
         _ => Constraint::Min(3),
@@ -13980,11 +13993,11 @@ fn draw_wizard_text_field(
     }
 }
 
-/// A pick-one list with a scrollbar and, when open, a filter row.
+/// A pick-one list with a scrollbar and, when filtering, the pattern in its
+/// border.
 ///
-/// Ratatui's own `List` does the scrolling, which is what removes the
-/// hand-rolled bottom-anchored offset the old wizard used — it kept the
-/// selection glued to the last row and gave no indication there was more.
+/// Ratatui's own `List` does the scrolling, so the selection stays in view and
+/// the scrollbar shows how much more there is.
 fn draw_wizard_list(
     title: &str,
     list: &super::wizard::ListPick,

@@ -1,8 +1,7 @@
-//! A single-line-buffer editor shared by every text field in the TUI.
+//! The line editor shared by every text field in the TUI.
 //!
-//! The wizard's title and prompt steps had a copy each of the same ~110 lines
-//! of motion and deletion handling, so an editing fix had to be made twice and
-//! the two drifted. This is that logic, once.
+//! Motion, deletion and word jumps live here once, so a fix to any of them
+//! lands in every field at the same time.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -14,9 +13,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// boundary helpers below: `String` indexing panics mid-codepoint, so a cursor
 /// left inside a multi-byte char is a crash waiting for the next keystroke.
 ///
-/// The fields are public on purpose. Those dropdowns do surgery this type has
-/// no business modelling, and hiding the buffer behind accessors would only
-/// have them call `.buffer_mut()` for the same effect with more ceremony.
+/// The fields are public on purpose: those dropdowns do surgery this type has
+/// no business modelling, and accessors would only add ceremony to the same
+/// access.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextInput {
     pub buffer: String,
@@ -102,8 +101,8 @@ impl TextInput {
     ///
     /// Callers match their **own** keys first and delegate the rest here, so a
     /// field that gives `/` a special meaning still gets `/` inserted verbatim
-    /// when its own guard declines. Returning `false` rather than swallowing
-    /// the key is what lets a caller keep a fallback arm.
+    /// when its own guard declines. Reporting rather than swallowing is what
+    /// lets a caller keep a fallback arm.
     ///
     /// `Enter` and `Esc` are deliberately absent: they mean submit, newline,
     /// step-back or cancel depending on the field, and none of those is this
@@ -125,10 +124,9 @@ impl TextInput {
             KeyCode::End => self.end(),
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete_forward(),
-            // A chord is not text. Without this guard `Ctrl+X` typed a literal
-            // "x" into every field in the TUI, and a caller that gives a chord
-            // its own meaning could never get the key back — `handle_edit_key`
-            // would have swallowed it.
+            // A chord is not text: `Ctrl+X` must not type an "x". Declining it
+            // is also what lets a caller give a chord its own meaning and still
+            // receive the key.
             KeyCode::Char(c) if !ctrl && !alt => self.insert_char(c),
             _ => return false,
         }

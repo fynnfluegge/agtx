@@ -681,32 +681,32 @@ Project config can execute shell commands (`init_script`, `cleanup_script`) and 
 - A project with no `.agtx/config.toml` is trusted by default (nothing to distrust)
 - An untrusted project also forces `flags.no_init_scripts = true`, which additionally suppresses **plugin** `init_script`s
 - Approve via the in-TUI trust confirmation popup (any key) or `agtx trust` in the project directory
-- **agtx's own writes re-record trust.** Picking a plugin with `P` writes `workflow_plugin` into `.agtx/config.toml`, which changes the hash — so without this, choosing a plugin silently untrusted the project and cost it its scripts on the next launch. `TrustStore::retrust_after_agtx_write` restores the *prior* decision, gated on the trust state read **before** the write: a project the user never approved must not become trusted because agtx touched its config, or an unvouched-for `init_script` starts running. Every future in-TUI config writer goes through it
-- `TrustStore::path()` honours `AGTX_CONFIG_DIR`, like `Database::data_root` honours `AGTX_DATA_DIR` — `App::new` reads this store and `install_plugin` writes it, so the test suite would otherwise touch the real user's `trusted_projects.toml`
+- **agtx's own writes re-record trust.** Any write to `.agtx/config.toml` — picking a plugin with `P`, saving the config editor — changes the hash and so invalidates trust, costing the project its scripts on the next launch. `TrustStore::retrust_after_agtx_write` restores the *prior* decision, gated on the trust state read **before** the write: a project the user never approved must not become trusted because agtx touched its config, or an unvouched-for `init_script` starts running. Every in-TUI config writer goes through it
+- `TrustStore::path()` and `GlobalConfig::config_path()` honour `AGTX_CONFIG_DIR`, like `Database::data_root` honours `AGTX_DATA_DIR`, so the suite exercises these writers without touching the real user's files
 - `--no-init-scripts` suppresses `init_script` and `cleanup_script` execution regardless of trust
 
 ### Help Overlay
 `?` opens `tui::help`'s table: every binding, grouped by where it applies, scrollable, and closed with `?`/`Esc`/`q`.
 
-It exists because the footer could not carry the load — it had reached 155 characters and was being truncated on a 150-column terminal, so the *last* bindings were the ones nobody could see, and several real keys (`C-n/p` scrolling, `M`, `D`) had never been advertised at all. `build_footer_text` now keeps only the column-specific actions plus `[?] help` and `[q] quit`; the table is the complete list. `every_footer_fits_a_narrow_terminal` caps every variant at 120 characters, and `the_previously_unadvertised_keys_are_listed` fails if one of those keys drops out of the table and goes back to being undiscoverable.
+**`HELP` is the complete list of bindings.** `build_footer_text` shows only the column-specific actions plus `[?] help` and `[q] quit`, because the footer is one line and gets truncated on a narrow terminal — `every_footer_fits_a_narrow_terminal` caps every variant at 120 characters. Several keys (`C-n/p` scrolling, `M`, `D`) are advertised nowhere else, and `the_previously_unadvertised_keys_are_listed` fails if one drops out of the table.
 
 The overlay swallows the keys it does not use, rather than letting them fall through to the board behind it.
 
-**It scrolls with the same chords as a task pane** — `C-d/u`, `C-n/p`, `PageUp/Down`, `C-g` — read from one `scroll_action_for` table, so someone who learns `C-d` once does not find it inert here. `the_scroll_chords_match_between_the_pane_and_the_overlay` fails if the two descriptions drift, and the overlay lists its own keys, since a reference that does not say how to read past its first screen is not much of one.
+**It scrolls with the same chords as a task pane** — `C-d/u`, `C-n/p`, `PageUp/Down`, `C-g` — read from one `scroll_action_for` table, so `C-d` means the same thing everywhere. `the_scroll_chords_match_between_the_pane_and_the_overlay` fails if the two descriptions drift, and the overlay lists its own keys: a reference that does not say how to read past its first screen is not much of one.
 
-**Two columns where the terminal is wide enough**, which roughly halves the height — in one column the whole reference is a tall thin strip that has to be scrolled even in a large window. `help::columns(n)` balances the sections by height but never splits one: a heading in one column with its keys in the next is worse than an uneven pair. A narrow terminal falls back to one column, where two would not fit side by side at all, and the footer drops its scroll hint entirely when everything fits.
+**Two columns where the terminal is wide enough**, which roughly halves the height and lets the whole reference fit a window without scrolling. `help::columns(n)` balances the sections by height but never splits one: a heading in one column with its keys in the next is worse than an uneven pair. A narrow terminal falls back to one column, and the footer drops its scroll hint when everything fits.
 
-**`help_max_scroll` is a `Cell` the renderer writes.** Only the renderer knows how many rows fit, and the handler has to clamp to that rather than to the table length: otherwise `C-g` parks the offset far past the last screenful and the next `C-u` moves nothing, which reads exactly like a broken scroll.
+**`help_max_scroll` is a `Cell` the renderer writes.** Only the renderer knows how many rows fit, and the handler clamps to that rather than to the table length — against the table length, `C-g` parks the offset past the last screenful and the next `C-u` moves nothing, reading as a dead key.
 
 ### First Run
-There is no separate first-run flow any more. `main.rs` writes the default config and sets `FeatureFlags::first_run`; the TUI opens the **config editor** focused on `Default agent` (`open_first_run_editor`), which is the one question the old flow asked.
+There is no separate first-run flow. `main.rs` writes the default config and sets `FeatureFlags::first_run`; the TUI opens the **config editor** focused on `Default agent` (`open_first_run_editor`), which is the only question first run has to ask.
 
-What that replaced was ~110 lines of hand-rolled raw-mode crossterm menu in `main.rs` — its own key loop, its own ASCII banner, its own redraw arithmetic — sharing neither code nor styling with the rest of the app, which is why first run looked like a different program. `new_for_test_with_flags` calls the same `open_first_run_editor`, so the test exercises the real path rather than a copy of it.
+`new_for_test_with_flags` calls the same `open_first_run_editor`, so the test exercises the real path rather than a copy of it.
 
 ### Config Editor
 `,` on the board opens `~/.config/agtx/config.toml` and the project's `.agtx/config.toml` as a form (`src/tui/config_editor.rs`). Sections across the top (General / Agents / Worktree / Theme, plus Project when one is open), fields below, the selected field's help line at the bottom.
 
-`config_editor_area` sizes the box to its **content** and centres it, rather than taking a percentage of the screen — a fixed box left everything huddled in the top-left of a mostly empty dialog. It measures across *all* sections, and a choice field is measured by its longest option rather than its current value, so neither tabbing between sections nor picking from a dropdown resizes the box under the cursor. Clamped to the terminal, so a small window still gets something that fits.
+`config_editor_area` sizes the box to its **content** and centres it. It measures across *all* sections, and a choice field by its longest option rather than its current value, so neither tabbing between sections nor picking from a dropdown resizes the box under the cursor. Clamped to the terminal, so a small window still gets something that fits.
 
 | Key | Action |
 |-----|--------|
@@ -721,21 +721,21 @@ What that replaced was ~110 lines of hand-rolled raw-mode crossterm menu in `mai
 - **It opens on the files, not on `state.config`.** That is a *merged* view; writing it back would bake every global default into the project file as an explicit override
 - **`dirty` tracks what is stored, not what was asked for.** A write can normalise (a blank optional field becomes unset) or decline (a project field in dashboard mode), so `set` compares the stored value before and after. The discard prompt believes this flag
 - **A save re-records project trust.** Trust is a hash of `.agtx/config.toml`, so writing it invalidates trust — see `TrustStore::retrust_after_agtx_write`. Read the state *before* the write, always
-- **A bad colour is refused and the field stays open**, rather than being accepted and making the board unreadable on the next frame. Theme edits preview live: theme is global-only, so `state.config.theme` can simply be replaced as the user types, and closing without saving reloads from disk to drop the experiment
-- Help lines say when a setting only affects **new** worktrees (`worktree_dir`, `branch_prefix`, `agent_hooks`), rather than leaving the user to discover the change looked like it applied and did not
+- **A bad colour is refused and the field stays open**, since accepting one makes the board unreadable on the next frame. Theme edits preview live: theme is global-only, so `state.config.theme` is replaced as the user types, and closing without saving reloads from disk to drop the experiment
+- Help lines say when a setting only affects **new** worktrees (`worktree_dir`, `branch_prefix`, `agent_hooks`)
 
 ### Config Writes Preserve Comments
 `GlobalConfig::save` and `ProjectConfig::save` go through `write_toml_preserving` (`src/config/mod.rs`), not `toml::to_string_pretty`.
 
-The old writer round-tripped through the struct, so it emitted a pristine file and **destroyed every comment and unrecognised key** the user had written. That was tolerable while the only writer was the first-run default; it is not, now that agtx offers to edit a file people maintain by hand.
+Serialising the struct alone emits a pristine document, dropping every comment and unrecognised key the user wrote — which matters because agtx offers to edit a file people maintain by hand.
 
 The rule: *agtx rewrites the values of keys it knows, never deletes a key it does not recognise, and removes a key it manages when that field becomes unset.*
 
-Three things that are not obvious:
-- **serde renders a nested struct as an inline table** (`worktree = { .. }`). Merged as-is that collapses the user's `[worktree]` section onto one line and takes its comments with it — and a fresh file would not look like the documented format. `expand_inline_tables` normalises first
-- **A comment belongs to the *next* key's decor**, so deleting the first key in a file deletes the file's header comment with it. `remove_key_keeping_comments` moves it to the following key instead. Erring toward keeping the user's text means a comment that really was about the removed key ends up slightly orphaned; that is visible and fixable, where deletion is not
-- **`GLOBAL_MANAGED` / `PROJECT_MANAGED` name the keys a save may delete** — the optional ones, since a required key is always re-emitted. `managed_keys_tests` builds a fully-populated config with an **exhaustive struct literal**, so adding a field fails to compile there until someone has looked at the list. A field missing from it would survive being cleared
-- An unparseable file is replaced rather than erroring: preserving is impossible, and the old writer always overwrote
+Four things that are not obvious:
+- **serde renders a nested struct as an inline table** (`worktree = { .. }`). Merged as-is that collapses a `[worktree]` section onto one line and takes its comments with it, and a fresh file does not match the documented format. `expand_inline_tables` normalises first
+- **A comment belongs to the *next* key's decor**, so removing the first key in a file would take the file's header comment with it. `remove_key_keeping_comments` moves it to the following key. Erring toward keeping the user's text leaves a comment that really was about the removed key slightly orphaned, which is visible and fixable where deletion is not
+- **`GLOBAL_MANAGED` / `PROJECT_MANAGED` name the keys a save may delete** — the optional ones, since a required key is always re-emitted. `managed_keys_tests` builds a fully-populated config with an **exhaustive struct literal**, so adding a field fails to compile there until someone has looked at the list. A field missing from it survives being cleared
+- An unparseable file is replaced rather than erroring: preserving is impossible, and refusing the save would leave the user unable to fix it from inside agtx
 
 `GlobalConfig::config_path()` and `TrustStore::path()` both honour `AGTX_CONFIG_DIR`, so the suite exercises the writer without touching the real user's config.
 
@@ -842,44 +842,44 @@ The flow is **Title → Agent → Plugin → Prompt**. Both middle steps are opt
 | `C-s` | Save from any step |
 | `\` + Enter (or `C-j`, `Alt+Enter`) | Newline in the prompt — see below |
 
-`WizardState` (`src/tui/wizard.rs`) is the whole flow as one value — the step, both text fields, the plugin pick, and the edited task's id. It replaced three `InputMode` variants sharing a single buffer with a `pending_task_title` on the side, which is why nothing could go back: by the time the prompt step owned the buffer, the title had already been moved out of it, so `Esc` could only mean "throw it all away".
+`WizardState` (`src/tui/wizard.rs`) is the whole flow as one value — the step, both text fields, both list picks, and the edited task's id. Holding every field at once is what makes back-navigation work: stepping back has to find the earlier answers still intact.
 
-**The agent step writes `Task::agent`.** That is a database field every later phase reads, and before the step existed the only way to run one task on a different agent was to edit the config, start it, and edit back. The plugin list is filtered by whatever the agent step settled on, so changing the agent rebuilds it (`reseed_plugins_for_agent`) — keeping the pick when that plugin survives the new filter, since switching agent is not a decision about the plugin.
+**The agent step writes `Task::agent`**, the database field every later phase reads. The plugin list is filtered by whatever the agent step settled on, so changing the agent rebuilds it (`reseed_plugins_for_agent`), keeping the pick when that plugin survives the new filter — switching agent is not a decision about the plugin. `try_save_wizard` rebuilds too, so saving straight from the agent step cannot store an incompatible plugin.
 
-**Both lists are seeded when the wizard opens**, not on the first `Enter`. Otherwise the breadcrumb reads "Title › Prompt" and then grows two steps once you commit to a title.
+**Both lists are seeded when the wizard opens**, not on the first `Enter`, so the breadcrumb shows the real flow from the first frame.
 
-**`ListPick` is one type for both list steps.** `selected` indexes `options`, not the filtered view — a filter that narrows and widens again must leave the cursor on the same option, not on whatever now sits at that position. `settle()` moves it only when the filter excludes it outright, because an `Enter` on an invisible selection would pick something the user cannot see. A filter belongs to the visit, not the step, so stepping away clears it.
+**`ListPick` is one type for both list steps.** `selected` indexes `options`, not the filtered view, so a filter that narrows and widens again leaves the cursor on the same option. `settle()` moves it only when the filter excludes it outright, because an `Enter` on an invisible selection picks something the user cannot see. A filter belongs to the visit, not the step, so stepping away clears it.
 
-Three things follow from holding every field at once, and all three have tests:
-- **`Esc` cancels outright, from any step**; stepping back is `Shift+Tab` / `Ctrl+B`. One key that always means "get me out of here" beats one whose effect depends on where you are. A dropdown open on the prompt step owns `Esc` first, and the stakes of that are now higher: getting it wrong would throw away the whole task rather than costing a step
-- **Each step seeds itself once** (`ListPick::take_seed` / `take_prompt_seed`). Re-entering a list step from the right must not rebuild it, or the user's pick resets to the default they just chose against; re-entering the prompt step must not reload from the database, or every edit made before stepping back is silently discarded. Back-navigation is what makes these necessary
-- **The step list is derived, not fixed.** `steps()` drops the plugin step when there is nothing to choose, so the breadcrumb never advertises a step this run will not visit, and `step_index` is a position in *this* flow rather than a constant
+Three consequences, all tested:
+- **`Esc` cancels outright, from any step**; stepping back is `Shift+Tab` / `Ctrl+B`. One key that always means "get me out of here" beats one whose effect depends on where you are. Two things own `Esc` first — a dropdown on the prompt step, and an open list filter — because closing either must not take the whole task with it
+- **Each step seeds itself once** (`ListPick::take_seed` / `take_prompt_seed`). Re-entering a list step from the right must not rebuild it, or the user's pick resets to the default they chose against; re-entering the prompt step must not reload from the database over an unsaved edit. Back-navigation is what makes these necessary
+- **The step list is derived, not fixed.** `steps()` drops an optional step when there is nothing to choose, so the breadcrumb never advertises a step this run will not visit, and `step_index` is a position in *this* flow rather than a constant
 
 **`Enter` saves; a newline needs one of three escapes.** `\`+Enter is the documented one and the one the footer names. Two chords do the same, and neither needs anything from the terminal:
 
 - **`Ctrl+J`.** In raw mode crossterm parses `0x0A` as `Ctrl+J` rather than as `Enter` — its `b'\n'` arm is gated on `!is_raw_mode_enabled()` — so nothing has to be negotiated.
 - **`Alt+Enter`**, which arrives as ESC then CR on most terminals, though macOS Terminal and iTerm2 only send it once Option is configured as Meta.
 
-**`Shift+Enter` is deliberately not bound, and agtx does not ask for the Kitty keyboard protocol.** A terminal sends a bare CR for both `Enter` and `Shift+Enter` unless that protocol is negotiated, so the two are indistinguishable and no key handler can separate them. Requesting it was tried and reverted for two reasons: `supports_keyboard_enhancement()` **blocks for up to two seconds** on any terminal that does not answer the query, which every launch would pay; and even with tmux's `extended-keys always`, a real `S-Enter` still arrived as a bare CR — so the binding would have fired almost never and read as *save* the rest of the time. Do not re-add it without measuring both.
+**`Shift+Enter` is deliberately not bound, and agtx does not ask for the Kitty keyboard protocol.** A terminal sends a bare CR for both `Enter` and `Shift+Enter` unless that protocol is negotiated, so the two are indistinguishable and no key handler can separate them. Two measurements argue against requesting it: `supports_keyboard_enhancement()` **blocks for up to two seconds** on any terminal that does not answer the query, which every launch pays; and even under tmux's `extended-keys always`, a real `S-Enter` still arrives as a bare CR — so the binding fires almost never and reads as *save* the rest of the time. Do not add it without re-measuring both.
 
 **`Ctrl+J` overlaps the pickers' down-arrow** (`C-j`/`C-n` in all three dropdowns) — deliberate: while a picker is open it navigates, and it only means newline once nothing has claimed it. It also collides with `vim-tmux-navigator`, which binds `C-h/C-j/C-k/C-l` in tmux's *root* table and would eat the key before agtx ever sees it (same hazard noted under *Typing into a Task Pane*); `\`+Enter is the way out there.
 
-**A chord is not text.** `TextInput::handle_edit_key` and all three dropdowns guard their `Char(c)` arm on `!ctrl && !alt`. Before that, `Ctrl+X` typed a literal `x` into every text field in the TUI, and a caller that gave a chord its own meaning could never get the key back — the editor had already swallowed it.
+**A chord is not text.** `TextInput::handle_edit_key` and all three dropdowns guard their `Char(c)` arm on `!ctrl && !alt`, so `Ctrl+X` does not type an `x`. Declining is also what lets a caller give a chord its own meaning and still receive the key.
 
 One consequence to remember when adding bindings: under that protocol **`Shift+Tab` arrives as `Tab` with `SHIFT`, not as `BackTab`**. Both spellings are accepted in the wizard and the config editor; a new binding on either has to do the same.
 
-**The wizard pads horizontally** (`WIZARD_PADDING`), so the literals in its render carry no leading spaces of their own — the block's padding is the only indent, which is what makes a wrapped prompt line start in the same column as the row it came from instead of hard against the border. The cursor anchor adds the same padding; changing one without the other drifts the caret off the text.
+**The wizard pads horizontally** (`WIZARD_PADDING`), and the literals in its render carry no leading spaces of their own: the block's padding is the only indent, so a wrapped line starts in the same column as the row it came from. The cursor anchor adds the same padding — changing one without the other drifts the caret off the text.
 
 `AppState.wizard: Option<WizardState>` **is** the input mode — there is no second flag that could disagree with it. `AppState::wizard_step()` is the one accessor anything outside the wizard uses.
 
 A refusal is never silent. `title_problem()` is the single source for both `Enter` on the title step and `C-s` from anywhere, so they refuse for the same reasons and say the same thing: empty, longer than `MAX_TASK_TITLE_CHARS`, or a duplicate of another task's title. A failure sets `validation`, walks the wizard back to the title step, and renders the reason inside the wizard body — drawn there rather than in the footer because the footer is also the background-warning channel, and an unrelated warning must not replace the message while the user is reading it.
 
-**The renderer is a real `Layout`** (`draw_wizard`), not one flat `Paragraph` of pre-wrapped lines: breadcrumb, the steps already behind you, the active step, a validation row. Each step sizes its own body — a title is one line, a prompt and a list want the room — and text fields draw inside their own bordered box, so the caret starts at column 0 of the inner area with no prefix to measure. The list steps use ratatui's `List` and `Scrollbar`, which is what replaced the hand-rolled bottom-anchored scroll offset that kept the selection glued to the last row and gave no sign there was more. The scrollbar track is inset by one row at each end; handed the whole area it draws over the block's corners.
+**The renderer is a real `Layout`** (`draw_wizard`): breadcrumb, the steps already behind you, the active step, a validation row. Each step sizes its own body — a title is one line, a prompt and a list want the room — and text fields draw inside their own bordered box, so the caret starts at column 0 of the inner area with no prefix to measure. List steps use ratatui's `List` and `Scrollbar`. The scrollbar track is inset by one row at each end; handed the whole area it draws over the block's corners.
 
 Agent is determined by `config.default_agent` (set via config file), not selected per-task.
 Plugin defaults to the project's active plugin (set via `P` on the board).
 
-The prompt step's `#`/`@`, `/` and `!` dropdowns are each their own handler (`handle_file_search_key`, `handle_skill_search_key`, `handle_task_ref_search_key`), and each **takes its state out** for the duration. Every arm needs the dropdown alongside the wizard's prompt field, and several call back into `self` to refresh the match list; holding a borrow across those is what forced the old re-`if let` dance. They return whether the key belonged to them, so the prompt handler keeps a fallback. All three commit and cancel through `splice_search_region` — only the replacement text differs.
+The prompt step's `#`/`@`, `/` and `!` dropdowns are each their own handler (`handle_file_search_key`, `handle_skill_search_key`, `handle_task_ref_search_key`), and each **takes its state out** for the duration: every arm needs the dropdown alongside the wizard's prompt field, and several call back into `self` to refresh the match list, which a held borrow would not allow. They return whether the key belonged to them, so the prompt handler keeps a fallback. All three commit and cancel through `splice_search_region` — only the replacement text differs.
 
 ### Task Edit (Description)
 | Key | Action |
@@ -899,7 +899,7 @@ The prompt step's `#`/`@`, `/` and `!` dropdowns are each their own handler (`ha
 - State separated from terminal for borrow checker: `App { terminal, state: AppState }`
 - Drawing functions are static: `fn draw_*(state: &AppState, frame: &mut Frame, area: Rect)`
 - Theme colors accessed via `state.config.theme.color_*`
-- **Every text field uses `tui::text_input::TextInput`** — the buffer and its caret as one value, with motion, deletion and word jumps behind `handle_edit_key`. The wizard's title and prompt steps each carried a copy of that ~110 lines and the two had drifted; a new field must not add a third. `handle_edit_key` *reports* whether it consumed the key rather than swallowing it, so a field that gives `/` or `#` its own meaning matches those first and delegates the rest — a `/` mid-word then falls through and arrives as ordinary text. `Enter` and `Esc` are deliberately not handled there: submit, newline, step-back and cancel are the field's decision
+- **Every text field uses `tui::text_input::TextInput`** — the buffer and its caret as one value, with motion, deletion and word jumps behind `handle_edit_key`. One implementation, so a fix lands in every field at once; a new field must not open-code its own. `handle_edit_key` *reports* whether it consumed the key rather than swallowing it, so a field that gives `/` or `#` its own meaning matches those first and delegates the rest — a `/` mid-word then falls through and arrives as ordinary text. `Enter` and `Esc` are deliberately not handled there: submit, newline, step-back and cancel are the field's decision
 - The caret is a **byte** offset, so every motion goes through the boundary helpers in that module. A caret left mid-codepoint panics the next time anything slices the buffer, which is why `TextInput`'s fields are public but its motion is not open-coded
 - `wrapped_cursor_pos` stays in `app.rs` beside `wrap_spans` on purpose — the two share one wrap rule and the comment there says they must move together
 
