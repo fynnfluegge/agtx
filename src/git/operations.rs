@@ -1,6 +1,6 @@
 //! Traits for git operations to enable testing with mocks.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 #[cfg(feature = "test-mocks")]
@@ -98,11 +98,46 @@ impl GitOperations for RealGitOps {
     }
 
     fn remove_worktree(&self, project_path: &Path, worktree_path: &str) -> Result<()> {
-        std::process::Command::new("git")
+        let path = Path::new(worktree_path);
+
+        // Refuse a main working tree before anything else. Under `skip_worktree`
+        // a task's worktree_path *is* the project root, so this is reachable with
+        // the user's own checkout as the argument. Returning Ok matches what git
+        // does today; making it explicit is what keeps the error propagation
+        // below honest, since otherwise every skip_worktree cleanup would report
+        // a failure for an expected no-op.
+        let same_as_project = match (path.canonicalize(), project_path.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if same_as_project || super::is_main_working_tree(path) {
+            return Ok(());
+        }
+
+        let output = std::process::Command::new("git")
             .current_dir(project_path)
             .args(["worktree", "remove", "--force", worktree_path])
-            .output()?;
-        Ok(())
+            .output()
+            .context("Failed to run `git worktree remove`")?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        // The removal failed, so git still has this worktree registered against a
+        // path it may no longer be able to reach. Prune drops registrations whose
+        // directory is gone; without it a single failed removal leaves
+        // `git worktree list` wrong permanently, not just until the next attempt.
+        let _ = std::process::Command::new("git")
+            .current_dir(project_path)
+            .args(["worktree", "prune"])
+            .output();
+
+        anyhow::bail!(
+            "git worktree remove failed for '{}': {}",
+            worktree_path,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
     }
 
     fn worktree_exists(&self, project_path: &Path, task_slug: &str, worktree_dir: &str) -> bool {

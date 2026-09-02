@@ -3949,6 +3949,14 @@ impl App {
                 task.status = TaskStatus::Done;
                 task.updated_at = chrono::Utc::now();
                 db.update_task(&task)?;
+
+                // Same clearing the other transitions do. Without it the card
+                // keeps whatever the last refresh saw — a Done task showing
+                // "Working" — because nothing refreshes Done to correct it.
+                self.state.stuck_task_notified.remove(&task.id);
+                self.state.stuck_task_idle_since.remove(&task.id);
+                self.state.phase_status_cache.remove(&task.id);
+
                 self.refresh_tasks()?;
 
                 // Cleanup in background (archive, kill tmux, remove worktree)
@@ -5622,14 +5630,29 @@ impl App {
                 } else {
                     self.state.config.cleanup_script.clone()
                 };
-                delete_task_resources(
-                    &task,
-                    cleanup_script.as_deref(),
-                    project_path,
-                    self.state.tmux_ops.as_ref(),
-                    self.state.git_ops.as_ref(),
-                );
+                // Drop the task from the board first, then clean up behind it.
+                // The recursive worktree delete is the whole of the freeze this
+                // used to cause, and nothing below needs the card to still exist.
                 db.delete_task(&task.id)?;
+
+                self.state.stuck_task_notified.remove(&task.id);
+                self.state.stuck_task_idle_since.remove(&task.id);
+                self.state.phase_status_cache.remove(&task.id);
+                self.state.pane_content_hashes.remove(&task.id);
+
+                let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                let git_ops = Arc::clone(&self.state.git_ops);
+                let project_path = project_path.clone();
+                std::thread::spawn(move || {
+                    delete_task_resources(
+                        &task,
+                        cleanup_script.as_deref(),
+                        &project_path,
+                        tmux_ops.as_ref(),
+                        git_ops.as_ref(),
+                    );
+                });
+
                 self.refresh_tasks()?;
             }
         }
@@ -7872,13 +7895,7 @@ impl App {
             .board
             .tasks
             .iter()
-            .filter(|t| {
-                matches!(
-                    t.status,
-                    TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review
-                ) || (t.status == TaskStatus::Backlog && t.session_name.is_some())
-            })
-            .filter(|t| t.worktree_path.is_some() || t.session_name.is_some())
+            .filter(|t| has_live_phase_status(t))
             .filter(|t| {
                 self.state
                     .phase_status_cache
@@ -8138,6 +8155,27 @@ impl App {
         let now = Instant::now();
 
         for task_status in result.statuses {
+            // The refresh ran on a thread, so the task may have moved on since
+            // it was selected. A Done task has no window, no worktree and no
+            // agent, so every PhaseStatus is meaningless for it — and nothing
+            // refreshes Done, so a value written here would sit on the card
+            // forever. That is how a task moved to Done kept reading "Working".
+            //
+            // Only a task that is *on the board and no longer live* is dropped.
+            // Absent means deleted or not yet reloaded, which are not the same
+            // thing, and treating them as stale would discard good results
+            // whenever this lands between a DB write and `refresh_tasks`.
+            if self
+                .state
+                .board
+                .tasks
+                .iter()
+                .any(|t| t.id == task_status.task_id && !has_live_phase_status(t))
+            {
+                self.state.phase_status_cache.remove(&task_status.task_id);
+                continue;
+            }
+
             let mut phase = task_status.phase_status;
 
             // A trust prompt outranks every liveness signal below it. The agent is
@@ -8630,6 +8668,21 @@ fn copy_back_to_project(worktree: &Path, project_root: &Path, entries: &[String]
     }
 }
 
+/// Whether a task can have a meaningful phase status right now.
+///
+/// Both halves of the refresh contract read this: `maybe_spawn_session_refresh`
+/// to decide what to poll, and `apply_session_refresh` to decide what to keep.
+/// They must agree — the refresh runs on a thread, so a task can leave a
+/// refreshable status between being selected and its result coming back, and
+/// nothing polls Done to correct a value written after the fact.
+fn has_live_phase_status(task: &Task) -> bool {
+    let refreshable = matches!(
+        task.status,
+        TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review
+    ) || (task.status == TaskStatus::Backlog && task.session_name.is_some());
+    refreshable && (task.worktree_path.is_some() || task.session_name.is_some())
+}
+
 /// Generate a URL-safe slug from task ID and title
 fn generate_task_slug(task_id: &str, title: &str) -> String {
     let title_slug: String = title
@@ -8677,52 +8730,6 @@ fn run_cleanup_script_for_worktree(cleanup_script: Option<&str>, worktree_path: 
             }
         }
     }
-}
-
-/// Cleanup task resources (tmux window, cleanup script, git worktree) and mark as done
-/// Modifies the task in place, ready for database update
-fn cleanup_task_for_done(
-    task: &mut Task,
-    cleanup_script: Option<&str>,
-    project_path: &Path,
-    tmux_ops: &dyn TmuxOperations,
-    git_ops: &dyn GitOperations,
-) {
-    // Archive artifacts before removing worktree
-    if let Some(worktree) = &task.worktree_path {
-        let artifacts_dir = Path::new(worktree).join(".agtx");
-        if artifacts_dir.exists() {
-            let slug = task
-                .branch_name
-                .as_deref()
-                .and_then(|b| b.rsplit_once('/').map(|(_, s)| s))
-                .unwrap_or(&task.id);
-            let archive_dir = project_path.join(".agtx").join("archive").join(slug);
-            if let Ok(()) = std::fs::create_dir_all(&archive_dir) {
-                if let Ok(entries) = std::fs::read_dir(&artifacts_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_file() && path.extension().map_or(false, |ext| ext == "md") {
-                            let _ = std::fs::copy(&path, archive_dir.join(entry.file_name()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(session_name) = &task.session_name {
-        let _ = tmux_ops.kill_window(session_name);
-    }
-    if let Some(worktree) = &task.worktree_path {
-        run_cleanup_script_for_worktree(cleanup_script, Path::new(worktree));
-        let _ = git_ops.remove_worktree(project_path, worktree);
-    }
-    // Keep the branch so task can be reopened later
-    task.session_name = None;
-    task.worktree_path = None;
-    task.status = TaskStatus::Done;
-    task.updated_at = chrono::Utc::now();
 }
 
 /// Background-safe cleanup: archive artifacts, kill tmux window, run cleanup script, remove worktree.
@@ -8777,7 +8784,9 @@ fn cleanup_task_resources(
     }
     if let Some(worktree) = worktree_path {
         run_cleanup_script_for_worktree(cleanup_script, Path::new(worktree));
-        let _ = git_ops.remove_worktree(project_path, worktree);
+        if let Err(e) = git_ops.remove_worktree(project_path, worktree) {
+            tracing::warn!(worktree = %worktree, error = %e, "Failed to remove worktree");
+        }
     }
 }
 
@@ -9024,11 +9033,22 @@ fn delete_task_resources(
         let _ = tmux_ops.kill_window(session_name);
     }
 
-    // Remove worktree and delete branch if exists
+    // Removing the worktree does not depend on there being a branch. Nesting the
+    // two leaked the checkout for every task that had a worktree and no branch —
+    // a setup that failed after `create_worktree`, or a worktree created for a
+    // research session that never reached Planning.
     if let Some(ref worktree) = task.worktree_path {
+        run_cleanup_script_for_worktree(cleanup_script, Path::new(worktree));
+        if let Err(e) = git_ops.remove_worktree(project_path, worktree) {
+            tracing::warn!(worktree = %worktree, error = %e, "Failed to remove worktree");
+        }
+
+        // Deleting the branch stays paired with having had a worktree, and is not
+        // hoisted out with the removal above. A task with a branch but no worktree
+        // is one that reached Done, where the workflow keeps the branch on
+        // purpose — and `delete_branch` is `git branch -D`, so hoisting it would
+        // silently force-delete work the user was told was preserved.
         if let Some(ref branch_name) = task.branch_name {
-            run_cleanup_script_for_worktree(cleanup_script, Path::new(worktree));
-            let _ = git_ops.remove_worktree(project_path, worktree);
             let _ = git_ops.delete_branch(project_path, branch_name);
         }
     }
