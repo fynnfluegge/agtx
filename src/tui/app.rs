@@ -18,6 +18,10 @@ use std::time::Instant;
 use crate::agent::hook_status::{self, HookState};
 use crate::agent::{self, AgentOperations};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig, WorkflowPlugin};
+use crate::core::input::{
+    composer_holds, delivery_needle, pane_shows, submit_message, COMPOSER_TAIL_LINES,
+    SUBMIT_ATTEMPTS, SUBMIT_CONFIRM_POLLS,
+};
 use crate::db::{Database, PhaseStatus, Task, TaskStatus, TransitionRequest};
 use crate::git::{
     self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps,
@@ -1483,6 +1487,15 @@ impl App {
             self.state.last_transition_poll = now;
             if let Err(e) = self.process_transition_requests() {
                 tracing::warn!(error = %e, "failed to process transition requests");
+            }
+            // Beat on the same tick, because it answers a question about
+            // exactly this loop: something out of process can enqueue a
+            // transition whenever, but only a running TUI drains the queue.
+            if let Some(path) = &self.state.project_path {
+                let _ = self
+                    .state
+                    .global_db
+                    .beat_tui_heartbeat(&path.to_string_lossy());
             }
         }
 
@@ -8136,6 +8149,7 @@ impl App {
     /// Apply results from the background session refresh thread.
     fn apply_session_refresh(&mut self, result: SessionRefreshResult) {
         let now = Instant::now();
+        let mut runtime_rows: Vec<crate::db::TaskRuntime> = Vec::new();
 
         for task_status in result.statuses {
             let mut phase = task_status.phase_status;
@@ -8225,6 +8239,26 @@ impl App {
                 .phase_status_cache
                 .insert(task_status.task_id.clone(), (phase, now));
 
+            // Collect the resolved status for readers in other processes, to be
+            // published as one transaction below. This is the only writer:
+            // `phase` is final here, after every override above, and recomputing
+            // it elsewhere would mean duplicating the artifact-check and
+            // pane-hash pipeline against the same panes.
+            let pane = self.state.pane_content_hashes.get(&task_status.task_id);
+            runtime_rows.push(crate::db::TaskRuntime {
+                task_id: task_status.task_id.clone(),
+                phase_status: phase,
+                pane_hash: pane.map(|(h, _)| h.to_string()),
+                // `Instant` has no epoch, so the stored wall-clock time is
+                // derived from how long ago the change was.
+                pane_changed_at: pane.map(|(_, at)| {
+                    chrono::Utc::now()
+                        - chrono::Duration::from_std(now.duration_since(*at))
+                            .unwrap_or_else(|_| chrono::Duration::zero())
+                }),
+                updated_at: chrono::Utc::now(),
+            });
+
             // Notify orchestrator when a phase completes (newly Ready)
             if newly_ready {
                 if self.state.orchestrator_session.is_some() {
@@ -8247,10 +8281,14 @@ impl App {
                         } else {
                             &task_status.task_id
                         };
-                        let notif = crate::db::Notification::new(format!(
-                            "Task \"{}\" ({}) completed phase: {}",
-                            task_title, short_id, phase_name
-                        ));
+                        let notif = crate::db::Notification::for_task(
+                            crate::db::NotificationKind::PhaseCompleted,
+                            &task_status.task_id,
+                            format!(
+                                "Task \"{}\" ({}) completed phase: {}",
+                                task_title, short_id, phase_name
+                            ),
+                        );
                         let _ = db.create_notification(&notif);
                     }
                 }
@@ -8373,7 +8411,7 @@ impl App {
                                 &task_status.task_id
                             };
                             let reason = self.state.blocked_reasons.get(&task_status.task_id);
-                            let notif = crate::db::Notification::new(match (blocked, reason) {
+                            let message = match (blocked, reason) {
                                 (true, Some(r)) => format!(
                                     "Task \"{}\" ({}) is blocked in phase {} waiting for: {}",
                                     task_title,
@@ -8393,7 +8431,12 @@ impl App {
                                     short_id,
                                     task_status.status.as_str()
                                 ),
-                            });
+                            };
+                            let notif = crate::db::Notification::for_task(
+                                crate::db::NotificationKind::TaskStuck,
+                                &task_status.task_id,
+                                message,
+                            );
                             let _ = db.create_notification(&notif);
                         }
                     }
@@ -8403,6 +8446,15 @@ impl App {
                 self.state
                     .stuck_task_idle_since
                     .remove(&task_status.task_id);
+            }
+        }
+
+        // One commit for the whole pass. Pruning rides along inside it — see
+        // `publish_task_runtime`; it is done here rather than at the delete
+        // sites because MCP deletes tasks from another process entirely.
+        if let Some(db) = &self.state.db {
+            if let Err(e) = db.publish_task_runtime(&runtime_rows) {
+                tracing::warn!(error = %e, "failed to publish task runtime");
             }
         }
     }
@@ -10916,36 +10968,12 @@ fn spawn_send_to_agent(
 const DELIVERY_ATTEMPTS: u32 = 3;
 const DELIVERY_CONFIRM_POLLS: u32 = 10; // x 200ms = 2s
 
-/// Attempts and per-attempt budget for [`submit_message`].
-///
-/// Smaller than the delivery budget on purpose: by the time this runs the text is
-/// known to be in the composer, so this is only absorbing a composer that is still
-/// mid-render, not a session that never attached its stdin.
-const SUBMIT_ATTEMPTS: u32 = 3;
-const SUBMIT_CONFIRM_POLLS: u32 = 5; // x 200ms = 1s
 /// Pane-settle budget before each attempt: 1s of quiet, given up on after 10s.
 const SETTLE_STABLE_POLLS: u32 = 5;
 const SETTLE_MAX_POLLS: u32 = 50;
 
-/// Longest prefix of a message used to confirm it landed on a pane that never
-/// went quiet. Short on purpose: a composer wraps and re-indents what it echoes,
-/// so a long needle straddles a line break and reads as absent.
-const DELIVERY_NEEDLE_CHARS: usize = 16;
 
-/// Whitespace-collapsed prefix of `text`, or `None` when there is nothing
-/// distinctive enough to look for.
-fn delivery_needle(text: &str) -> Option<String> {
-    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let needle: String = flat.chars().take(DELIVERY_NEEDLE_CHARS).collect();
-    (needle.chars().count() >= 4).then_some(needle)
-}
 
-/// Whether `needle` is visible in `pane`, comparing both whitespace-collapsed so
-/// a wrap or re-indent in the composer does not hide it.
-fn pane_shows(pane: &str, needle: &str) -> bool {
-    let flat: String = pane.split_whitespace().collect::<Vec<_>>().join(" ");
-    flat.contains(needle)
-}
 
 /// Wait for the pane to stop changing, up to [`SETTLE_MAX_POLLS`].
 ///
@@ -10989,84 +11017,6 @@ fn wait_for_pane_settled(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> bo
 /// Returns whether the message was seen to land. Callers submit either way,
 /// because a false negative (a pane that happened not to redraw) must not
 /// swallow the task.
-/// Lines at the bottom of a pane treated as the composer.
-///
-/// Sized from the worst real layout, not from the composer alone: while the
-/// command picker is open the agent draws its suggestions *below* the composer,
-/// and cursor's footer wraps the worktree path over three more lines. That puts
-/// the text being submitted eight or more lines off the bottom — a snugger
-/// window reads it as already gone and stops pressing Enter after one.
-///
-/// The cost of erring wide is one extra Enter into a composer that already
-/// submitted, which is inert; the cost of erring narrow is a command parked
-/// forever.
-const COMPOSER_TAIL_LINES: usize = 14;
-
-/// Whether the message is still sitting in the composer rather than submitted.
-///
-/// Only the bottom of the pane is examined: after a submit the text moves up into
-/// the scrollback, and finding it *there* is proof it went, not that it stayed.
-fn composer_holds(pane: &str, needle: &str) -> bool {
-    // Trailing blanks first. `capture-pane -p` emits one line per pane *row*, not
-    // per rendered line — verified against tmux 3.5a: a 20-row pane holding one
-    // word comes back as 20 lines, 19 of them empty. Anchoring the window to the
-    // raw end would put it entirely inside that padding whenever the agent's
-    // output has not yet filled the pane, find nothing, and stop pressing Enter
-    // after one — the very park this exists to catch.
-    let mut lines: Vec<&str> = pane.lines().collect();
-    while lines.last().is_some_and(|l| l.trim().is_empty()) {
-        lines.pop();
-    }
-    let start = lines.len().saturating_sub(COMPOSER_TAIL_LINES);
-    pane_shows(&lines[start..].join("\n"), needle)
-}
-
-/// Press Enter until the message actually leaves the composer.
-///
-/// The check is "the text is gone from the composer", not "the pane changed".
-/// A repaint is not a submit: a **bare skill command** — one with no prompt after
-/// it, which is what a phase whose command carries no `{task}`/`{task_id}` sends —
-/// exactly matches a skill name, so the composer's command picker opens *on the
-/// paste*. Enter is then consumed by the picker ("Press enter to insert"), which
-/// inserts the command and repaints. The old change-detector read that repaint as
-/// success and returned, leaving the command parked in the composer forever.
-///
-/// Measured against codex-cli 0.144.5 and cursor-agent 2026.08.25: both open the
-/// picker on a pasted bare command, both need the second Enter, and both run the
-/// skill once it arrives.
-///
-/// Falls back to the change-detector when the text is too short to track, and is
-/// bounded either way — an agent that never submits costs `SUBMIT_ATTEMPTS`
-/// keypresses, not an unbounded stream.
-///
-/// Known cost: agents echo the submitted message into the transcript just above
-/// the composer, so a *successful* submit can leave the needle inside the window
-/// and spend the remaining attempts. Those Enters land in an empty composer,
-/// which is inert — except against a dialog that renders mid-submit, where a bare
-/// Enter picks the highlighted option. `answer_session_dialogs` is what answers
-/// those, and it runs on the refresh loop rather than here.
-fn submit_message(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, text: &str) {
-    let needle = delivery_needle(text);
-    for _ in 0..SUBMIT_ATTEMPTS {
-        let before = tmux_ops.capture_pane(target).unwrap_or_default();
-        let _ = tmux_ops.send_key(target, "Enter");
-        for _ in 0..SUBMIT_CONFIRM_POLLS {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let Ok(now) = tmux_ops.capture_pane(target) else {
-                continue;
-            };
-            match needle.as_deref() {
-                Some(n) if !composer_holds(&now, n) => return,
-                Some(_) => {}
-                // Nothing distinctive enough to look for; the pane moving is all
-                // there is to go on.
-                None if now != before => return,
-                None => {}
-            }
-        }
-    }
-}
-
 fn deliver_message(
     tmux_ops: &Arc<dyn TmuxOperations>,
     target: &str,
@@ -11773,7 +11723,11 @@ fn run_orchestrator_catchup(db: &Database, tasks: &[Task], project_path: Option<
         if existing.contains(&message) {
             continue;
         }
-        let _ = db.create_notification(&crate::db::Notification::new(message));
+        let _ = db.create_notification(&crate::db::Notification::for_task(
+            crate::db::NotificationKind::PhaseCompleted,
+            &task.id,
+            message,
+        ));
     }
 }
 

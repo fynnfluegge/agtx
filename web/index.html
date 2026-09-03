@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover plus the safe-area insets in app.css is what keeps the
+     sticky header and footer clear of the notch and the home indicator. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#11141a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f7f5f2" media="(prefers-color-scheme: light)">
+<meta name="color-scheme" content="dark light">
+<!-- Standalone once added to the Home Screen: no address bar, own icon. On
+     iOS this is also what makes Web Push possible at all — Safari delivers it
+     to installed web apps and never to a tab. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="agtx">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="app.css">
+<title>agtx</title>
+</head>
+<body>
+<div id="app" class="app">
+  <div class="boot">Loading…</div>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

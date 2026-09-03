@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
             };
             return agtx::mcp::serve(project_path).await;
         }
+        Some("serve") => return run_serve(&args[2..]).await,
         Some("trust") => {
             let project_path = std::env::current_dir()?.canonicalize()?;
             let mut store = config::TrustStore::load().unwrap_or_default();
@@ -170,6 +171,87 @@ fn migrate_old_config(new_path: &std::path::Path) -> bool {
 ///
 /// The dedicated command the header notice points at. `--check` only reports,
 /// and exits 1 when an update is available so it can drive a script.
+/// `agtx serve [path] [--port N] [--host ADDR]`.
+///
+/// Lives in the `mode` match rather than the early fast path beside `hook` and
+/// `--version`: it is long-running and wants the log appender those two skip.
+/// The `cfg(not(...))` arm is not decoration — the match below ends with
+/// `Some(path) => AppMode::Project(...)`, and `serve` is not `--`-prefixed, so
+/// without it a default build would open a directory named `serve` as a project.
+#[cfg(feature = "serve")]
+async fn run_serve(args: &[String]) -> Result<()> {
+    let parsed = parse_serve_args(args)?;
+    if parsed.tunnel {
+        anyhow::bail!(
+            "--tunnel is not implemented yet: it needs the per-device tokens that pairing \
+             introduces, and a tunnel without them would publish this machine's agent panes. \
+             Use an SSH tunnel in the meantime."
+        );
+    }
+    agtx::web::serve(parsed.opts).await
+}
+
+#[cfg(not(feature = "serve"))]
+async fn run_serve(_args: &[String]) -> Result<()> {
+    anyhow::bail!(
+        "this agtx was built without the web server. Rebuild with `--features serve` \
+         (the published binaries have it) to use `agtx serve`."
+    )
+}
+
+#[cfg(feature = "serve")]
+struct ParsedServeArgs {
+    opts: agtx::web::ServeOptions,
+    tunnel: bool,
+}
+
+/// Parse `serve`'s own arguments.
+///
+/// Deliberately *not* built on the `positional_args` filter above. That filter
+/// drops `--`-prefixed tokens, which leaves a flag's **value** looking exactly
+/// like a positional: `serve --port 8791` would take `8791` as the project
+/// path and fail with "resolving 8791: no such file or directory". A flag that
+/// takes a value has to consume it.
+#[cfg(feature = "serve")]
+fn parse_serve_args(args: &[String]) -> Result<ParsedServeArgs> {
+    let mut opts = agtx::web::ServeOptions::default();
+    let mut tunnel = false;
+    let mut iter = args.iter().peekable();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--port" => {
+                let v = iter
+                    .next()
+                    .context("--port needs a value, e.g. `--port 8787`")?;
+                opts.port = v
+                    .parse()
+                    .with_context(|| format!("--port expects a number, got {v:?}"))?;
+            }
+            "--host" => {
+                let v = iter
+                    .next()
+                    .context("--host needs a value, e.g. `--host 127.0.0.1`")?;
+                opts.host = v
+                    .parse()
+                    .with_context(|| format!("--host expects an IP address, got {v:?}"))?;
+            }
+            "--tunnel" => tunnel = true,
+            other if other.starts_with("--") => {
+                anyhow::bail!("unknown option for `agtx serve`: {other}")
+            }
+            path => {
+                if opts.project_path.is_some() {
+                    anyhow::bail!("`agtx serve` takes at most one project path, got {path:?}");
+                }
+                opts.project_path = Some(PathBuf::from(path));
+            }
+        }
+    }
+
+    Ok(ParsedServeArgs { opts, tunnel })
+}
+
 fn run_update(args: &[String]) -> Result<()> {
     use agtx::update;
 

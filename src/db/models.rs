@@ -218,6 +218,46 @@ pub struct Notification {
     pub id: String,
     pub message: String,
     pub created_at: DateTime<Utc>,
+    /// The task this is about. `None` only for rows written before the column
+    /// existed — every producer sets it.
+    pub task_id: Option<String>,
+    /// What kind of event this is. Separate from `message` because a consumer
+    /// outside the TUI filters on the event, not on prose: a chat bridge that
+    /// wakes someone for [`TaskStuck`](NotificationKind::TaskStuck) but not for
+    /// [`PhaseCompleted`](NotificationKind::PhaseCompleted) cannot express that
+    /// against a formatted string.
+    pub kind: Option<NotificationKind>,
+}
+
+/// Why a [`Notification`] was raised.
+///
+/// The serde spellings match [`as_str`](Self::as_str) so the stored value and
+/// the wire value cannot drift — a consumer reading the DB directly and one
+/// reading serialised output must agree on the name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationKind {
+    /// A task's phase artifact appeared — it can move forward.
+    PhaseCompleted,
+    /// A task has stopped making progress and may need a human.
+    TaskStuck,
+}
+
+impl NotificationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NotificationKind::PhaseCompleted => "phase_completed",
+            NotificationKind::TaskStuck => "task_stuck",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "phase_completed" => Some(NotificationKind::PhaseCompleted),
+            "task_stuck" => Some(NotificationKind::TaskStuck),
+            _ => None,
+        }
+    }
 }
 
 impl Notification {
@@ -226,11 +266,34 @@ impl Notification {
             id: uuid::Uuid::new_v4().to_string(),
             message: message.into(),
             created_at: Utc::now(),
+            task_id: None,
+            kind: None,
+        }
+    }
+
+    /// The form every producer should use: a notification is always *about* a
+    /// task, and a consumer outside this process needs both halves to route it.
+    pub fn for_task(
+        kind: NotificationKind,
+        task_id: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            task_id: Some(task_id.into()),
+            kind: Some(kind),
+            ..Self::new(message)
         }
     }
 }
 
-/// Phase completion status (runtime-only, not persisted to DB)
+/// Phase completion status.
+///
+/// The TUI computes this on its own thread and reads its in-memory copy; the
+/// `task_runtime` table is a *published* mirror for readers in other processes,
+/// which cannot recompute it without duplicating the artifact-check and
+/// pane-hash pipeline. A reader must treat a row as a snapshot and check
+/// `updated_at`: with no TUI running nothing refreshes it, and a frozen
+/// [`Working`](Self::Working) must not be presented as live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhaseStatus {
     /// Agent is still working, no artifact yet
@@ -249,4 +312,42 @@ pub enum PhaseStatus {
     Ready,
     /// Tmux window gone (process exited)
     Exited,
+}
+
+impl PhaseStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PhaseStatus::Working => "working",
+            PhaseStatus::Blocked => "blocked",
+            PhaseStatus::Idle => "idle",
+            PhaseStatus::Ready => "ready",
+            PhaseStatus::Exited => "exited",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "working" => Some(PhaseStatus::Working),
+            "blocked" => Some(PhaseStatus::Blocked),
+            "idle" => Some(PhaseStatus::Idle),
+            "ready" => Some(PhaseStatus::Ready),
+            "exited" => Some(PhaseStatus::Exited),
+            _ => None,
+        }
+    }
+}
+
+/// A published snapshot of one task's runtime state, for readers outside the
+/// TUI process. Written by the session refresh; never read back by the TUI,
+/// which has the live values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRuntime {
+    pub task_id: String,
+    pub phase_status: PhaseStatus,
+    /// Hash of the last pane capture, and when it last changed. Carried so a
+    /// reader can distinguish "idle because the agent is quiet" from "idle
+    /// because nothing has refreshed this row".
+    pub pane_hash: Option<String>,
+    pub pane_changed_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
 }

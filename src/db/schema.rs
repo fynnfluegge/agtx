@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::Path;
 
-use super::models::{Notification, Project, Task, TaskStatus, TransitionRequest};
+use super::models::{
+    Notification, NotificationKind, PhaseStatus, Project, Task, TaskRuntime, TaskStatus,
+    TransitionRequest,
+};
 
 /// Database wrapper for SQLite operations
 pub struct Database {
@@ -221,6 +224,18 @@ impl Database {
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            -- Published mirror of the TUI's in-memory PhaseStatus, for readers
+            -- in other processes. One row per task, rewritten by each session
+            -- refresh; `updated_at` is what tells a reader whether anything is
+            -- still refreshing it.
+            CREATE TABLE IF NOT EXISTS task_runtime (
+                task_id TEXT PRIMARY KEY,
+                phase_status TEXT NOT NULL,
+                pane_hash TEXT,
+                pane_changed_at TEXT,
+                updated_at TEXT NOT NULL
+            );
             "#,
         )?;
 
@@ -233,6 +248,15 @@ impl Database {
             "ALTER TABLE transition_requests ADD COLUMN claimed_by TEXT",
             [],
         );
+
+        // Migration: notifications gain the two fields an out-of-process reader
+        // needs to route them. Nullable, so rows written before this survive.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE notifications ADD COLUMN task_id TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE notifications ADD COLUMN kind TEXT", []);
 
         Ok(())
     }
@@ -265,6 +289,16 @@ impl Database {
             );
 
             CREATE INDEX IF NOT EXISTS idx_running_project ON running_agents(project_id);
+
+            -- One row per project a TUI is currently open on. Its only job is
+            -- to answer "is anything draining the transition queue?" — a phone
+            -- can enqueue a request whenever, but nothing executes it without a
+            -- running TUI, and a board that accepts taps and silently does
+            -- nothing is worse than one that says so.
+            CREATE TABLE IF NOT EXISTS tui_heartbeat (
+                project_path TEXT PRIMARY KEY,
+                beat_at TEXT NOT NULL
+            );
             "#,
         )?;
         Ok(())
@@ -657,8 +691,15 @@ impl Database {
 
     pub fn create_notification(&self, notif: &Notification) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO notifications (id, message, created_at) VALUES (?1, ?2, ?3)",
-            params![notif.id, notif.message, notif.created_at.to_rfc3339()],
+            "INSERT INTO notifications (id, message, created_at, task_id, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                notif.id,
+                notif.message,
+                notif.created_at.to_rfc3339(),
+                notif.task_id,
+                notif.kind.map(|k| k.as_str()),
+            ],
         )?;
         Ok(())
     }
@@ -679,6 +720,11 @@ impl Database {
                     )
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
+                    task_id: row.get("task_id")?,
+                    kind: row
+                        .get::<_, Option<String>>("kind")?
+                        .as_deref()
+                        .and_then(NotificationKind::from_str),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -689,9 +735,10 @@ impl Database {
 
     /// Atomic fetch-and-delete via `DELETE ... RETURNING`.
     pub fn consume_notifications(&self) -> Result<Vec<Notification>> {
-        let mut stmt = self
-            .conn
-            .prepare("DELETE FROM notifications RETURNING id, message, created_at")?;
+        let mut stmt = self.conn.prepare(
+            "DELETE FROM notifications
+                 RETURNING id, message, created_at, task_id, kind",
+        )?;
 
         let mut notifs: Vec<Notification> = stmt
             .query_map([], |row| {
@@ -703,6 +750,11 @@ impl Database {
                     )
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
+                    task_id: row.get("task_id")?,
+                    kind: row
+                        .get::<_, Option<String>>("kind")?
+                        .as_deref()
+                        .and_then(NotificationKind::from_str),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -711,5 +763,133 @@ impl Database {
         // `RETURNING` doesn't guarantee any particular row order — sort in Rust.
         notifs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         Ok(notifs)
+    }
+
+    // ── TUI heartbeat ───────────────────────────────────────────────────
+
+    /// Record that a TUI is live on `project_path`, as of now.
+    ///
+    /// Called on the transition-poll cadence rather than per event-loop
+    /// iteration: the loop wakes on `HOUSEKEEPING_TICK` (100 ms) and on every
+    /// keystroke, so beating per iteration would be a write ten-plus times a
+    /// second to answer a question whose useful resolution is seconds.
+    pub fn beat_tui_heartbeat(&self, project_path: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO tui_heartbeat (project_path, beat_at) VALUES (?1, ?2)
+             ON CONFLICT(project_path) DO UPDATE SET beat_at = excluded.beat_at",
+            params![project_path, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether a TUI has beaten for `project_path` within `stale_after`.
+    ///
+    /// Absent and stale are the same answer — nothing is draining the queue —
+    /// so a missing row is not an error.
+    pub fn tui_is_live(&self, project_path: &str, stale_after: chrono::Duration) -> Result<bool> {
+        let beat: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT beat_at FROM tui_heartbeat WHERE project_path = ?1",
+                params![project_path],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(beat
+            .and_then(|b| chrono::DateTime::parse_from_rfc3339(&b).ok())
+            .is_some_and(|t| chrono::Utc::now() - t.with_timezone(&chrono::Utc) < stale_after))
+    }
+
+    // ── Task runtime (published phase status) ───────────────────────────
+
+    /// Publish one refresh pass as a whole: upsert every live task's row and
+    /// drop rows for tasks that no longer exist, in one transaction.
+    ///
+    /// The refresh writes every live task on every pass — that is what makes
+    /// `updated_at` mean "last observed" rather than "last changed", which is
+    /// the distinction a reader needs to tell a steadily-working task from a
+    /// board nothing has refreshed since the TUI died. Batching is what keeps
+    /// that affordable: one commit per pass instead of one per task.
+    ///
+    /// Pruning removes rows for tasks that no longer *exist*, not rows absent
+    /// from this pass: the refresh tracks only active phases, so a task that
+    /// reaches Done stops being published and keeps its last row. That row is
+    /// stale rather than wrong, and `updated_at` is what a reader checks — the
+    /// same contract that covers a board nothing is refreshing at all. Pruning
+    /// to the published set instead would empty the table on any pass that
+    /// transiently reported nothing.
+    ///
+    /// Uses an unchecked transaction because the caller holds `&Database`.
+    pub fn publish_task_runtime(&self, rows: &[TaskRuntime]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for rt in rows {
+            tx.execute(
+                "INSERT INTO task_runtime
+                     (task_id, phase_status, pane_hash, pane_changed_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(task_id) DO UPDATE SET
+                     phase_status    = excluded.phase_status,
+                     pane_hash       = excluded.pane_hash,
+                     pane_changed_at = excluded.pane_changed_at,
+                     updated_at      = excluded.updated_at",
+                params![
+                    rt.task_id,
+                    rt.phase_status.as_str(),
+                    rt.pane_hash,
+                    rt.pane_changed_at.map(|t| t.to_rfc3339()),
+                    rt.updated_at.to_rfc3339(),
+                ],
+            )?;
+        }
+        // A deleted task's last status would otherwise be served to readers
+        // forever as current. In the same transaction so a reader never sees a
+        // pass applied without its prune.
+        tx.execute(
+            "DELETE FROM task_runtime WHERE task_id NOT IN (SELECT id FROM tasks)",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_task_runtime(&self, task_id: &str) -> Result<Option<TaskRuntime>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM task_runtime WHERE task_id = ?1")?;
+        let mut rows = stmt.query_map(params![task_id], Self::task_runtime_from_row)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn list_task_runtime(&self) -> Result<Vec<TaskRuntime>> {
+        let mut stmt = self.conn.prepare("SELECT * FROM task_runtime")?;
+        let rows = stmt
+            .query_map([], Self::task_runtime_from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    fn task_runtime_from_row(row: &rusqlite::Row) -> rusqlite::Result<TaskRuntime> {
+        let parse = |s: String| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
+        };
+        Ok(TaskRuntime {
+            task_id: row.get("task_id")?,
+            // An unparseable status means a writer from a newer version wrote a
+            // variant this build has no arm for. Treating that as `Working` is
+            // the honest fallback: it is the state that claims the least.
+            phase_status: PhaseStatus::from_str(&row.get::<_, String>("phase_status")?)
+                .unwrap_or(PhaseStatus::Working),
+            pane_hash: row.get("pane_hash")?,
+            pane_changed_at: row
+                .get::<_, Option<String>>("pane_changed_at")?
+                .and_then(parse),
+            updated_at: row
+                .get::<_, Option<String>>("updated_at")?
+                .and_then(parse)
+                .unwrap_or_else(chrono::Utc::now),
+        })
     }
 }
