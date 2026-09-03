@@ -1467,76 +1467,6 @@ fn test_tmux_safe_session_name_replaces_dots() {
 }
 
 // =============================================================================
-// Tests for cleanup_task_for_done
-// =============================================================================
-
-/// Test cleanup_task_for_done cleans up resources
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_cleanup_task_for_done_with_resources() {
-    use crate::db::Task;
-
-    let mut mock_tmux = MockTmuxOperations::new();
-    let mut mock_git = MockGitOperations::new();
-
-    mock_tmux
-        .expect_kill_window()
-        .with(mockall::predicate::eq("project:task-window"))
-        .times(1)
-        .returning(|_| Ok(()));
-
-    mock_git
-        .expect_remove_worktree()
-        .with(
-            mockall::predicate::eq(Path::new("/project")),
-            mockall::predicate::eq("/tmp/worktree"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    let mut task = Task::new("Test task", "claude", "project-1");
-    task.session_name = Some("project:task-window".to_string());
-    task.worktree_path = Some("/tmp/worktree".to_string());
-    task.status = TaskStatus::Review;
-
-    cleanup_task_for_done(
-        &mut task,
-        None,
-        Path::new("/project"),
-        &mock_tmux,
-        &mock_git,
-    );
-
-    assert!(task.session_name.is_none());
-    assert!(task.worktree_path.is_none());
-    assert_eq!(task.status, TaskStatus::Done);
-}
-
-/// Test cleanup_task_for_done handles missing resources gracefully
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_cleanup_task_for_done_no_resources() {
-    use crate::db::Task;
-
-    let mock_tmux = MockTmuxOperations::new();
-    let mock_git = MockGitOperations::new();
-    // No expectations - functions should not be called
-
-    let mut task = Task::new("Test task", "claude", "project-1");
-    // No session_name or worktree_path set
-
-    cleanup_task_for_done(
-        &mut task,
-        None,
-        Path::new("/project"),
-        &mock_tmux,
-        &mock_git,
-    );
-
-    assert_eq!(task.status, TaskStatus::Done);
-}
-
-// =============================================================================
 // Tests for delete_task_resources
 // =============================================================================
 
@@ -8397,6 +8327,73 @@ fn test_apply_session_refresh_ready_inserts_cache() {
     assert!(!app.state.pane_content_hashes.contains_key("t1"));
 }
 
+/// A refresh spawned while the task was in Review can land after it reached
+/// Done. Nothing refreshes Done, so whatever was written then stays on the card
+/// — which is how a finished task went on showing "● Working" in its footer.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_apply_session_refresh_drops_results_for_a_task_that_reached_done() {
+    let mut app = make_test_app();
+
+    let db = app.state.db.as_ref().unwrap();
+    let mut task = Task::new("Finished feature", "claude", "test-project");
+    task.id = "t1".to_string();
+    // Done: cleanup has cleared both, which is exactly why no phase status can
+    // be meaningful any more.
+    task.status = TaskStatus::Done;
+    task.worktree_path = None;
+    task.session_name = None;
+    db.create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
+
+    // A result from the refresh that was already in flight when it moved.
+    let result = SessionRefreshResult {
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Review,
+            PhaseStatus::Working,
+            false,
+        )],
+    };
+    app.apply_session_refresh(result);
+
+    assert!(
+        !app.state.phase_status_cache.contains_key("t1"),
+        "a Done task must not keep a phase status; the card renders it as a label"
+    );
+}
+
+/// The same guard must not throw away a live task's result.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_apply_session_refresh_keeps_results_for_a_live_task() {
+    let mut app = make_test_app();
+
+    let db = app.state.db.as_ref().unwrap();
+    let mut task = Task::new("In progress", "claude", "test-project");
+    task.id = "t1".to_string();
+    task.status = TaskStatus::Running;
+    task.worktree_path = Some("/tmp/wt".to_string());
+    db.create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
+
+    let result = SessionRefreshResult {
+        statuses: vec![make_session_task_status(
+            "t1",
+            TaskStatus::Running,
+            PhaseStatus::Working,
+            false,
+        )],
+    };
+    app.apply_session_refresh(result);
+
+    assert_eq!(
+        app.state.phase_status_cache["t1"].0,
+        PhaseStatus::Working,
+        "a Running task with a worktree still gets its status"
+    );
+}
+
 // ── hook-reported status ─────────────────────────────────────────────────────
 
 #[cfg(feature = "test-mocks")]
@@ -8638,6 +8635,10 @@ fn test_apply_session_refresh_newly_ready_notifies_orchestrator() {
     let mut task = Task::new("My feature", "claude", "test-project");
     task.id = "t1".to_string();
     task.status = TaskStatus::Planning;
+    // A Planning task always has a worktree; without one the refresh would
+    // never have selected it, and `apply_session_refresh` drops results for
+    // tasks that cannot have a live phase status.
+    task.worktree_path = Some("/tmp/test-project/.agtx/worktrees/t1".to_string());
     db.create_task(&task).unwrap();
     app.refresh_tasks().unwrap();
 
@@ -8914,6 +8915,10 @@ fn test_handle_review_confirm_y_starts_pr_generation() {
     let mut task = Task::new("My feature", "claude", "test-project");
     task.id = "t1".to_string();
     task.status = TaskStatus::Running;
+    // A Running task always has a worktree; the refresh only selects tasks that
+    // do, and `apply_session_refresh` drops results for ones that cannot have a
+    // live phase status.
+    task.worktree_path = Some("/tmp/test-project/.agtx/worktrees/t1".to_string());
     db.create_task(&task).unwrap();
     app.refresh_tasks().unwrap();
 
@@ -8951,6 +8956,10 @@ fn test_handle_review_confirm_n_moves_without_pr() {
     let mut task = Task::new("My feature", "claude", "test-project");
     task.id = "t1".to_string();
     task.status = TaskStatus::Running;
+    // A Running task always has a worktree; the refresh only selects tasks that
+    // do, and `apply_session_refresh` drops results for ones that cannot have a
+    // live phase status.
+    task.worktree_path = Some("/tmp/test-project/.agtx/worktrees/t1".to_string());
     db.create_task(&task).unwrap();
     app.refresh_tasks().unwrap();
 
@@ -10607,6 +10616,10 @@ fn test_stuck_task_notification_fires_after_1_min_idle() {
     let mut task = Task::new("stuck task", "claude", "test-project");
     task.id = "t1".to_string();
     task.status = TaskStatus::Running;
+    // A Running task always has a worktree; the refresh only selects tasks that
+    // do, and `apply_session_refresh` drops results for ones that cannot have a
+    // live phase status.
+    task.worktree_path = Some("/tmp/test-project/.agtx/worktrees/t1".to_string());
     db.create_task(&task).unwrap();
     app.refresh_tasks().unwrap();
 
@@ -10656,6 +10669,10 @@ fn test_stuck_task_notification_does_not_fire_before_1_min() {
     let mut task = Task::new("pending task", "claude", "test-project");
     task.id = "t1".to_string();
     task.status = TaskStatus::Running;
+    // A Running task always has a worktree; the refresh only selects tasks that
+    // do, and `apply_session_refresh` drops results for ones that cannot have a
+    // live phase status.
+    task.worktree_path = Some("/tmp/test-project/.agtx/worktrees/t1".to_string());
     db.create_task(&task).unwrap();
     app.refresh_tasks().unwrap();
 
@@ -10701,6 +10718,10 @@ fn test_stuck_task_notification_fires_once_per_phase() {
     let mut task = Task::new("my task", "claude", "test-project");
     task.id = "t1".to_string();
     task.status = TaskStatus::Running;
+    // A Running task always has a worktree; the refresh only selects tasks that
+    // do, and `apply_session_refresh` drops results for ones that cannot have a
+    // live phase status.
+    task.worktree_path = Some("/tmp/test-project/.agtx/worktrees/t1".to_string());
     db.create_task(&task).unwrap();
     app.refresh_tasks().unwrap();
 
@@ -10746,6 +10767,10 @@ fn test_stuck_task_notification_not_fired_without_orchestrator() {
     let mut task = Task::new("my task", "claude", "test-project");
     task.id = "t1".to_string();
     task.status = TaskStatus::Running;
+    // A Running task always has a worktree; the refresh only selects tasks that
+    // do, and `apply_session_refresh` drops results for ones that cannot have a
+    // live phase status.
+    task.worktree_path = Some("/tmp/test-project/.agtx/worktrees/t1".to_string());
     db.create_task(&task).unwrap();
     app.refresh_tasks().unwrap();
 
@@ -10789,6 +10814,10 @@ fn test_stuck_task_idle_since_cleared_when_not_idle() {
     let mut task = Task::new("my task", "claude", "test-project");
     task.id = "t1".to_string();
     task.status = TaskStatus::Running;
+    // A Running task always has a worktree; the refresh only selects tasks that
+    // do, and `apply_session_refresh` drops results for ones that cannot have a
+    // live phase status.
+    task.worktree_path = Some("/tmp/test-project/.agtx/worktrees/t1".to_string());
     db.create_task(&task).unwrap();
     app.refresh_tasks().unwrap();
 
@@ -11013,7 +11042,7 @@ fn test_transform_skill_for_opencode_uses_description_from_frontmatter() {
 
 // =============================================================================
 // Tests for mock-dependent functions: is_pane_at_shell, is_agent_active,
-// collect_task_diff, cleanup_task_for_done, cleanup_task_resources,
+// collect_task_diff, cleanup_task_resources,
 // delete_task_resources, save_task
 // =============================================================================
 
@@ -11173,63 +11202,6 @@ fn test_collect_task_diff_untracked_excluded_by_prefix() {
     );
 }
 
-// --- cleanup_task_for_done ---
-
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_cleanup_task_for_done_clears_session_and_worktree() {
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_kill_window()
-        .withf(|name: &str| name == "proj:task-1")
-        .times(1)
-        .returning(|_| Ok(()));
-
-    let mut mock_git = MockGitOperations::new();
-    mock_git
-        .expect_remove_worktree()
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    let mut task = make_test_task("t1", "My task", TaskStatus::Review);
-    task.session_name = Some("proj:task-1".to_string());
-    task.worktree_path = Some("/tmp/nonexistent-wt".to_string());
-
-    cleanup_task_for_done(
-        &mut task,
-        None,
-        Path::new("/tmp/proj"),
-        &mock_tmux,
-        &mock_git,
-    );
-
-    assert_eq!(task.status, TaskStatus::Done);
-    assert!(task.session_name.is_none());
-    assert!(task.worktree_path.is_none());
-}
-
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_cleanup_task_for_done_no_ops_when_no_session_or_worktree() {
-    // No session or worktree → kill_window and remove_worktree must NOT be called
-    let mock_tmux = MockTmuxOperations::new();
-    let mock_git = MockGitOperations::new();
-
-    let mut task = make_test_task("t2", "My task", TaskStatus::Review);
-    task.session_name = None;
-    task.worktree_path = None;
-
-    cleanup_task_for_done(
-        &mut task,
-        None,
-        Path::new("/tmp/proj"),
-        &mock_tmux,
-        &mock_git,
-    );
-
-    assert_eq!(task.status, TaskStatus::Done);
-}
-
 /// `.agtx/status/` is runtime scratch written by agent hooks, not a phase
 /// artifact. The archive step only copies top-level `.md` files, so it is
 /// excluded today — this pins that, since a future recursive archive would
@@ -11256,7 +11228,17 @@ fn test_cleanup_does_not_archive_hook_status_files() {
     task.worktree_path = Some(wt.path().to_string_lossy().to_string());
     task.branch_name = Some("task/my-slug".to_string());
 
-    cleanup_task_for_done(&mut task, None, project_dir.path(), &mock_tmux, &mock_git);
+    cleanup_task_resources(
+        &task.id,
+        &task.agent,
+        &task.branch_name,
+        &task.session_name,
+        &task.worktree_path,
+        None,
+        project_dir.path(),
+        &mock_tmux,
+        &mock_git,
+    );
 
     let archived = project_dir
         .path()
@@ -11271,7 +11253,7 @@ fn test_cleanup_does_not_archive_hook_status_files() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_cleanup_task_for_done_archives_md_files() {
+fn test_cleanup_task_resources_archives_md_files() {
     use std::io::Write;
 
     let mock_tmux = MockTmuxOperations::new();
@@ -11292,7 +11274,17 @@ fn test_cleanup_task_for_done_archives_md_files() {
     task.worktree_path = Some(wt.path().to_string_lossy().to_string());
     task.branch_name = Some("task/my-slug".to_string());
 
-    cleanup_task_for_done(&mut task, None, project_dir.path(), &mock_tmux, &mock_git);
+    cleanup_task_resources(
+        &task.id,
+        &task.agent,
+        &task.branch_name,
+        &task.session_name,
+        &task.worktree_path,
+        None,
+        project_dir.path(),
+        &mock_tmux,
+        &mock_git,
+    );
 
     // Archived file should exist under .agtx/archive/my-slug/plan.md
     let archive = project_dir
@@ -11312,12 +11304,17 @@ fn test_cleanup_task_resources_kills_window_and_removes_worktree() {
     let mut mock_tmux = MockTmuxOperations::new();
     mock_tmux
         .expect_kill_window()
+        .with(mockall::predicate::eq("proj:task-win"))
         .times(1)
         .returning(|_| Ok(()));
 
     let mut mock_git = MockGitOperations::new();
     mock_git
         .expect_remove_worktree()
+        .with(
+            mockall::predicate::eq(Path::new("/tmp/proj")),
+            mockall::predicate::eq("/tmp/wt"),
+        )
         .times(1)
         .returning(|_, _| Ok(()));
 
@@ -11355,6 +11352,53 @@ fn test_cleanup_task_resources_noop_when_no_session_or_worktree() {
 }
 
 // --- delete_task_resources ---
+
+/// A task can have a worktree and no branch: setup that failed after
+/// `create_worktree`, or a research session that never reached Planning.
+/// Removal used to be nested inside the branch check, so those checkouts were
+/// left on disk forever.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_delete_task_resources_removes_worktree_without_a_branch() {
+    let mock_tmux = MockTmuxOperations::new();
+    let mut mock_git = MockGitOperations::new();
+    mock_git
+        .expect_remove_worktree()
+        .with(
+            mockall::predicate::eq(Path::new("/tmp/proj")),
+            mockall::predicate::eq("/tmp/wt"),
+        )
+        .times(1)
+        .returning(|_, _| Ok(()));
+    // No branch, so nothing to delete.
+    mock_git.expect_delete_branch().times(0);
+
+    let mut task = make_test_task("t-nobranch", "Half-set-up task", TaskStatus::Planning);
+    task.session_name = None;
+    task.worktree_path = Some("/tmp/wt".to_string());
+    task.branch_name = None;
+
+    delete_task_resources(&task, None, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
+}
+
+/// The converse is deliberately *not* symmetric. A task with a branch and no
+/// worktree is one that reached Done, where the workflow keeps the branch on
+/// purpose — and `delete_branch` is `git branch -D`.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_delete_task_resources_keeps_branch_of_a_done_task() {
+    let mock_tmux = MockTmuxOperations::new();
+    let mut mock_git = MockGitOperations::new();
+    mock_git.expect_remove_worktree().times(0);
+    mock_git.expect_delete_branch().times(0);
+
+    let mut task = make_test_task("t-done", "Finished task", TaskStatus::Done);
+    task.session_name = None;
+    task.worktree_path = None;
+    task.branch_name = Some("task/finished".to_string());
+
+    delete_task_resources(&task, None, Path::new("/tmp/proj"), &mock_tmux, &mock_git);
+}
 
 #[test]
 #[cfg(feature = "test-mocks")]

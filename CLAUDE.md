@@ -74,7 +74,7 @@ src/
 ├── git/
 │   ├── mod.rs        # is_git_repo, repo_root, current_branch, diff_stat/diff_full,
 │                     # merge_branch, check_merge_conflicts, delete_branch
-│   ├── worktree.rs   # Git worktree create/remove/list
+│   ├── worktree.rs   # Git worktree create/list, is_main_working_tree
 │   ├── operations.rs # GitOperations trait (mockable for testing)
 │   └── provider.rs   # GitProviderOperations trait (GitHub PR ops)
 ├── agent/
@@ -174,6 +174,36 @@ Backlog → Planning → Running → Review → Done
 - **Done**: Cleanup worktree + tmux window (branch kept locally). Runs the project `cleanup_script` before removal
 
 Backlog tasks can also skip straight to Running (`M`), and Running can be sent back to Planning (`r`).
+
+#### Removing a worktree
+
+`RealGitOps::remove_worktree` (`git/operations.rs`) is the only implementation any production path
+uses; all three cleanup paths — Review → Done, force-move to Done, and task delete (`x`) — go through
+it, and all three run on a background thread.
+
+Three properties, none of them incidental:
+
+- **A main working tree is refused, and the refusal is a no-op returning `Ok`.** Under
+  `skip_worktree` a task's `worktree_path` *is* the project root, so this is genuinely reachable with
+  the user's own checkout as the argument. git refuses it too, but that protection is inherited
+  rather than intended, and `fs::rename` — what a background trash directory would use instead — has
+  no concept of a main working tree at all.
+- **`is_main_working_tree` checks the toplevel, not just the git dir.** `--git-dir` ==
+  `--git-common-dir` alone is not enough: the default `worktree_dir` is `.agtx/worktrees`, *inside*
+  the project, so a worktree there that has lost its `.git` link makes git walk up and answer for the
+  main repository. Without the `--show-toplevel` half, exactly the half-deleted worktrees that most
+  need removing would be refused as if they were the user's checkout.
+- **A failed removal prunes and returns `Err`.** Measured against git 2.49: a *deleted* worktree
+  directory is handled by `git worktree remove` itself (exit 0), but a worktree whose `.git` link is
+  missing, or whose directory has been replaced by a file, fails with exit 128 and stays in
+  `git worktree list` — and `git worktree prune` is what clears it. A locked worktree fails and prune
+  does **not** clear it, which is why the error is propagated rather than only pruned away. Callers
+  log it; swallowing the exit status is what let a stale registration sit unnoticed.
+
+`delete_task_resources` removes the worktree independently of whether a branch exists — a task can
+have a worktree and no branch. Branch deletion stays paired with having had a worktree on purpose: a
+task with a branch and no worktree is one that reached Done, whose branch the workflow keeps, and
+`delete_branch` is `git branch -D`.
 
 ### Workflow Plugins
 Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin.toml`) that defines:

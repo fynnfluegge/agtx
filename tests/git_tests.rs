@@ -1,7 +1,27 @@
 use agtx::git;
+use agtx::git::{GitOperations, RealGitOps};
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
+
+fn list_worktrees(project: &std::path::Path) -> String {
+    let out = Command::new("git")
+        .current_dir(project)
+        .args(["worktree", "list"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// Remove a task's worktree through the implementation production actually uses.
+///
+/// `RealGitOps::remove_worktree` takes the worktree path; these tests were
+/// written against a `git::remove_worktree(project, task_id, worktree_dir)` free
+/// function that no production code ever called.
+fn remove_task_worktree(project: &std::path::Path, task_id: &str) -> anyhow::Result<()> {
+    let wt = git::worktree_path(project, task_id, git::DEFAULT_WORKTREE_DIR);
+    RealGitOps.remove_worktree(project, &wt.to_string_lossy())
+}
 
 // =============================================================================
 // Pure function tests (no git repo needed)
@@ -147,7 +167,7 @@ fn test_create_and_remove_worktree() {
     assert!(git::worktree_exists(temp_dir.path(), "test-task"));
 
     // Remove worktree
-    git::remove_worktree(temp_dir.path(), "test-task", git::DEFAULT_WORKTREE_DIR).unwrap();
+    remove_task_worktree(temp_dir.path(), "test-task").unwrap();
 
     // Verify it's gone
     assert!(!worktree_path.exists());
@@ -240,13 +260,14 @@ fn test_create_worktree_on_non_git_directory() {
 fn test_remove_worktree_nonexistent() {
     let temp_dir = setup_git_repo();
 
-    // Removing a non-existent worktree should not panic
-    // (it may return Ok or Err depending on git version, but shouldn't crash)
-    let result = git::remove_worktree(temp_dir.path(), "does-not-exist", git::DEFAULT_WORKTREE_DIR);
-
-    // The function should complete without panicking
-    // We don't assert success/failure since behavior may vary
-    let _ = result;
+    // A failed removal is reported rather than swallowed. It used to return
+    // Ok(()) whatever git did, which is what let a stale registration sit in
+    // `git worktree list` unnoticed.
+    let result = remove_task_worktree(temp_dir.path(), "does-not-exist");
+    assert!(
+        result.is_err(),
+        "a removal that git rejects must not report success"
+    );
 }
 
 #[test]
@@ -287,9 +308,9 @@ fn test_create_multiple_worktrees() {
     assert_ne!(path1, path3);
 
     // Clean up
-    git::remove_worktree(temp_dir.path(), "task-1", git::DEFAULT_WORKTREE_DIR).unwrap();
-    git::remove_worktree(temp_dir.path(), "task-2", git::DEFAULT_WORKTREE_DIR).unwrap();
-    git::remove_worktree(temp_dir.path(), "task-3", git::DEFAULT_WORKTREE_DIR).unwrap();
+    remove_task_worktree(temp_dir.path(), "task-1").unwrap();
+    remove_task_worktree(temp_dir.path(), "task-2").unwrap();
+    remove_task_worktree(temp_dir.path(), "task-3").unwrap();
 
     assert!(!path1.exists());
     assert!(!path2.exists());
@@ -307,8 +328,161 @@ fn test_worktree_with_uncommitted_changes() {
     std::fs::write(worktree_path.join("dirty-file.txt"), "uncommitted content").unwrap();
 
     // Remove should still work (with --force)
-    let result = git::remove_worktree(temp_dir.path(), "dirty-task", git::DEFAULT_WORKTREE_DIR);
+    let result = remove_task_worktree(temp_dir.path(), "dirty-task");
     assert!(result.is_ok());
+}
+
+/// A removal that fails must still drop the registration it left dangling.
+/// Without the prune, one failed removal leaves `git worktree list` wrong
+/// permanently — not just until the next attempt.
+///
+/// Measured against git 2.49 to pick a failure this actually fixes:
+///
+/// | worktree state          | `remove --force` | still listed | prune fixes |
+/// |-------------------------|------------------|--------------|-------------|
+/// | directory deleted       | exit 0           | no           | n/a — git handles it |
+/// | `.git` link missing     | exit 128         | yes          | **yes**     |
+/// | directory now a file    | exit 128         | yes          | **yes**     |
+/// | locked                  | exit 128         | yes          | no — prune respects locks |
+///
+/// So the case worth pinning is a half-deleted tree, which is the state a
+/// crashed cleanup leaves behind — and the one `create_worktree` then has to
+/// decide about on the next task with that slug.
+#[test]
+fn test_remove_worktree_prunes_after_a_failed_removal() {
+    let temp_dir = setup_git_repo();
+    let worktree_path = git::create_worktree(temp_dir.path(), "half-deleted").unwrap();
+
+    // Break the worktree the way an interrupted delete does: the directory is
+    // still there, its link back to the repository is not.
+    std::fs::remove_file(worktree_path.join(".git")).unwrap();
+    assert!(
+        list_worktrees(temp_dir.path()).contains("half-deleted"),
+        "precondition: git should still list the worktree"
+    );
+
+    let result = remove_task_worktree(temp_dir.path(), "half-deleted");
+    assert!(
+        result.is_err(),
+        "a removal git rejects must be reported, not swallowed"
+    );
+    assert!(
+        !list_worktrees(temp_dir.path()).contains("half-deleted"),
+        "the dangling registration must be pruned, got:\n{}",
+        list_worktrees(temp_dir.path())
+    );
+}
+
+/// Removal must unlink a symlink, never follow it into the directory it points
+/// at. This is the precondition for sharing a `node_modules` across worktrees:
+/// if cleanup followed the link, finishing one task would destroy the install
+/// every other worktree depends on — and the project's own.
+///
+/// The test that must never be deleted. Assert on the *shared content*, not on
+/// the worktree being gone: a version that deleted the target would still
+/// remove the worktree and still return Ok.
+#[test]
+fn test_remove_worktree_does_not_follow_symlinks_out_of_the_worktree() {
+    let temp_dir = setup_git_repo();
+    let project = temp_dir.path();
+
+    // A populated directory outside the worktree, standing in for the project's
+    // own node_modules.
+    let shared = project.join("node_modules");
+    std::fs::create_dir_all(shared.join("left-pad")).unwrap();
+    std::fs::write(shared.join("left-pad/index.js"), "module.exports = 1;").unwrap();
+
+    let worktree_path = git::create_worktree(project, "linker").unwrap();
+    std::os::unix::fs::symlink(&shared, worktree_path.join("node_modules")).unwrap();
+    assert!(worktree_path
+        .join("node_modules/left-pad/index.js")
+        .exists());
+
+    remove_task_worktree(project, "linker").unwrap();
+
+    assert!(
+        !worktree_path.exists(),
+        "the worktree itself should be gone"
+    );
+    assert!(
+        shared.join("left-pad/index.js").exists(),
+        "the shared directory the symlink pointed at must survive"
+    );
+}
+
+/// The same property for the plain recursive delete, which is what a background
+/// trash sweep would use if tranche 2 is ever built.
+#[test]
+fn test_remove_dir_all_does_not_follow_symlinks() {
+    let temp_dir = TempDir::new().unwrap();
+    let shared = temp_dir.path().join("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("pkg.txt"), "content").unwrap();
+
+    let wt = temp_dir.path().join("wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    std::os::unix::fs::symlink(&shared, wt.join("node_modules")).unwrap();
+
+    std::fs::remove_dir_all(&wt).unwrap();
+
+    assert!(!wt.exists());
+    assert!(
+        shared.join("pkg.txt").exists(),
+        "remove_dir_all must unlink the symlink, not recurse through it"
+    );
+}
+
+/// Under `skip_worktree` a task's `worktree_path` *is* the project root, so
+/// every cleanup path asks for the user's own checkout to be removed. That must
+/// be a no-op — and it must be asserted on the directory, not the return value:
+/// a version that moved the repository aside and reported success would pass a
+/// return-value check.
+#[test]
+fn test_remove_worktree_refuses_the_main_working_tree() {
+    let temp_dir = setup_git_repo();
+    let project = temp_dir.path();
+    std::fs::write(project.join("uncommitted.txt"), "work in progress").unwrap();
+
+    let result = RealGitOps.remove_worktree(project, &project.to_string_lossy());
+
+    assert!(result.is_ok(), "refusal is a no-op, not an error");
+    assert!(project.exists(), "the project directory must survive");
+    assert!(project.join(".git").exists(), "the repository must survive");
+    assert!(
+        project.join("uncommitted.txt").exists(),
+        "uncommitted work must survive"
+    );
+}
+
+/// The guard is not just a project-root string comparison: a path that reaches
+/// the same repository by another route is still a main working tree.
+#[test]
+fn test_is_main_working_tree_distinguishes_worktrees() {
+    let temp_dir = setup_git_repo();
+    let worktree_path = git::create_worktree(temp_dir.path(), "linked").unwrap();
+
+    assert!(
+        git::is_main_working_tree(temp_dir.path()),
+        "the project root is a main working tree"
+    );
+    assert!(
+        !git::is_main_working_tree(&worktree_path),
+        "a linked worktree is not"
+    );
+    assert!(
+        !git::is_main_working_tree(&temp_dir.path().join("does-not-exist")),
+        "a missing path is not, so it does not block its own removal"
+    );
+
+    // The default worktree_dir is inside the project, so a worktree that has
+    // lost its `.git` link makes git walk up and answer for the *main*
+    // repository. Checking only `--git-dir == --git-common-dir` reports true
+    // here and refuses to remove exactly the trees that most need it.
+    std::fs::remove_file(worktree_path.join(".git")).unwrap();
+    assert!(
+        !git::is_main_working_tree(&worktree_path),
+        "a half-deleted worktree inside the project is not the main working tree"
+    );
 }
 
 // =============================================================================
