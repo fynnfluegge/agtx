@@ -191,6 +191,29 @@ impl ServeSession {
     }
 
     pub fn stop(&mut self) {
+        // `Child::kill` sends SIGKILL, which cannot be caught — and the child
+        // has cleanup that matters: a tunnel configures the Tailscale daemon,
+        // so the exposure outlives the process unless it is torn down. Ask
+        // politely first, and only insist if it does not go.
+        //
+        // Shelling out to `kill` rather than adding a libc dependency for one
+        // signal, which is the same trade agtx already makes for tmux and git.
+        let _ = Command::new("kill")
+            .args(["-TERM", &self.child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        // Up to two seconds, polled: a tunnel teardown is a round trip to the
+        // local daemon, not an instant thing.
+        for _ in 0..20 {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

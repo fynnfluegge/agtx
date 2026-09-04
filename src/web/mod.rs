@@ -103,11 +103,14 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
     // Start the tunnel before the listener so a provider that is missing or
     // refuses fails here, rather than after printing a QR for a URL that will
     // never resolve.
+    let mut public_base: Option<String> = None;
     let _tunnel = match opts.tunnel {
         Some(scope) => {
             let plan = tunnel::plan(scope, opts.port, &tunnel::installed)?;
+            let started = tunnel::Tunnel::start(&plan)?;
             println!("tunnel: {} — reachable from {}", plan.program, plan.reach);
-            Some(tunnel::Tunnel::start(&plan)?)
+            public_base = plan.public_url.clone();
+            Some(started)
         }
         None => None,
     };
@@ -138,13 +141,60 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
     // The bound address rather than the requested one: port 0 is how a test or
     // a second instance asks the OS to pick, and the answer is only known here.
     let bound = listener.local_addr().unwrap_or(addr);
-    print_banner(&bound, pairing_code.as_deref(), opts.is_loopback());
+    print_banner(
+        &bound,
+        public_base.as_deref(),
+        pairing_code.as_deref(),
+        opts.is_loopback(),
+    );
     tracing::info!(addr = %bound, loopback = opts.is_loopback(), "web server started");
 
+    // Graceful shutdown is not a nicety here — it is what makes the tunnel
+    // teardown run at all. `tailscale serve` configures the *daemon*, so the
+    // exposure outlives this process, and `Tunnel`'s `Drop` is the only thing
+    // that removes it. Rust does not run destructors on a signal, so without
+    // this a Ctrl-C or a `kill` leaves the board published on the tailnet with
+    // nothing serving it.
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .context("web server stopped")?;
     Ok(())
+}
+
+/// Resolve on Ctrl-C or `SIGTERM`.
+///
+/// Both, because they arrive from different places and mean the same thing: a
+/// person pressing Ctrl-C in the terminal, and the TUI stopping the child it
+/// spawned for the `W` overlay.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            // Nothing to do but wait for Ctrl-C instead; a server that refuses
+            // to start because it could not install a handler is worse.
+            Err(e) => {
+                tracing::warn!(error = %e, "could not listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    println!("shutting down");
 }
 
 /// What to print so the URL can be typed into a phone.
@@ -153,7 +203,12 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
 /// reads it, stores it, and strips it from the address bar. Putting it in the
 /// path or the query would write the credential into every access log between
 /// here and the browser.
-fn print_banner(bound: &SocketAddr, pairing_code: Option<&str>, loopback: bool) {
+fn print_banner(
+    bound: &SocketAddr,
+    public_base: Option<&str>,
+    pairing_code: Option<&str>,
+    loopback: bool,
+) {
     let host = if bound.ip().is_unspecified() {
         // `0.0.0.0` is not an address anything can open. Name a real one, or
         // the user is left to work out their own LAN address.
@@ -162,7 +217,13 @@ fn print_banner(bound: &SocketAddr, pairing_code: Option<&str>, loopback: bool) 
         bound.ip().to_string()
     };
 
-    let base = format!("http://{host}:{}", bound.port());
+    // A tunnel's hostname, when there is one. Without this the banner prints
+    // the *bound* address — which for a tunnel is loopback, so the QR would
+    // carry `http://127.0.0.1:…` and be useless to the phone it was drawn for.
+    let base = match public_base {
+        Some(b) => b.to_string(),
+        None => format!("http://{host}:{}", bound.port()),
+    };
     let url = match pairing_code {
         Some(code) => format!("{base}/#pair={code}"),
         None => format!("{base}/"),

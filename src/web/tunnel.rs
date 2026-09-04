@@ -56,6 +56,18 @@ pub struct TunnelPlan {
     pub scope: TunnelScope,
     /// What to tell the user about where this is reachable from.
     pub reach: &'static str,
+    /// Whether the command configures a daemon and exits, rather than *being*
+    /// the tunnel.
+    ///
+    /// This decides how success is judged, and getting it wrong is silent:
+    /// `tailscale serve --bg` returns immediately, so a spawned handle proves
+    /// nothing — the exit status is the only signal, and a failure there means
+    /// no tunnel at all. `cloudflared` is the opposite: it runs for as long as
+    /// the tunnel lives, so waiting on it would block forever.
+    pub backgrounds: bool,
+    /// The URL the board is reached at, once this is running. `None` when only
+    /// the provider knows it — `cloudflared` invents a hostname and prints it.
+    pub public_url: Option<String>,
 }
 
 /// Choose a provider for `scope`, given which binaries exist.
@@ -82,6 +94,10 @@ pub fn plan(scope: TunnelScope, port: u16, available: &dyn Fn(&str) -> bool) -> 
                 args: vec![
                     "serve".to_string(),
                     "--bg".to_string(),
+                    // Without this it prompts, and the child is spawned with
+                    // null stdin — so it would block on a question nobody can
+                    // see, or fail with nothing on screen explaining why.
+                    "--yes".to_string(),
                     "--https=443".to_string(),
                     target,
                 ],
@@ -93,6 +109,10 @@ pub fn plan(scope: TunnelScope, port: u16, available: &dyn Fn(&str) -> bool) -> 
                 ]),
                 scope,
                 reach: "your tailnet — anywhere, but only devices signed into it",
+                backgrounds: true,
+                // Served on 443, so no port — and https, because that is what
+                // `--https=443` publishes.
+                public_url: tailnet_hostname().map(|h| format!("https://{h}")),
             })
         }
         TunnelScope::Public => {
@@ -109,6 +129,9 @@ pub fn plan(scope: TunnelScope, port: u16, available: &dyn Fn(&str) -> bool) -> 
                     teardown: None,
                     scope,
                     reach: "the open internet — anyone with the URL",
+                    // The child *is* the tunnel and prints its own hostname.
+                    backgrounds: false,
+                    public_url: None,
                 });
             }
             if available("tailscale") {
@@ -117,6 +140,7 @@ pub fn plan(scope: TunnelScope, port: u16, available: &dyn Fn(&str) -> bool) -> 
                     args: vec![
                         "funnel".to_string(),
                         "--bg".to_string(),
+                        "--yes".to_string(),
                         "--https=443".to_string(),
                         target,
                     ],
@@ -128,6 +152,8 @@ pub fn plan(scope: TunnelScope, port: u16, available: &dyn Fn(&str) -> bool) -> 
                     ]),
                     scope,
                     reach: "the open internet — anyone with the URL",
+                    backgrounds: true,
+                    public_url: tailnet_hostname().map(|h| format!("https://{h}")),
                 });
             }
             bail!(
@@ -147,6 +173,38 @@ pub struct Tunnel {
 
 impl Tunnel {
     pub fn start(plan: &TunnelPlan) -> Result<Self> {
+        if plan.backgrounds {
+            // Run to completion and judge it by the exit status. Spawning and
+            // holding the handle looks like it works and proves nothing: the
+            // process is *expected* to exit, so a failed tunnel and a healthy
+            // one are indistinguishable that way — which is how a board ends up
+            // served at a URL that resolves nowhere.
+            let out = Command::new(&plan.program)
+                .args(&plan.args)
+                .stdin(Stdio::null())
+                .output()
+                .with_context(|| format!("running {}", plan.program))?;
+
+            if !out.status.success() {
+                // Relay the provider's own words. It knows things agtx does not
+                // — that Serve is disabled for this tailnet, and the one-time
+                // URL that enables it.
+                let detail = String::from_utf8_lossy(&out.stderr);
+                let detail = detail.trim();
+                let detail = if detail.is_empty() {
+                    String::from_utf8_lossy(&out.stdout).trim().to_string()
+                } else {
+                    detail.to_string()
+                };
+                bail!("{} could not start the tunnel:\n{detail}", plan.program);
+            }
+
+            return Ok(Self {
+                child: None,
+                teardown: plan.teardown.clone(),
+            });
+        }
+
         let child = Command::new(&plan.program)
             .args(&plan.args)
             .stdin(Stdio::null())
@@ -159,9 +217,6 @@ impl Tunnel {
             .with_context(|| format!("starting {}", plan.program))?;
 
         Ok(Self {
-            // `tailscale serve --bg` returns immediately, having configured the
-            // daemon; there is no long-lived child to hold. Keeping the handle
-            // either way costs nothing and keeps the drop path uniform.
             child: Some(child),
             teardown: plan.teardown.clone(),
         })
