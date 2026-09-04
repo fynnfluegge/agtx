@@ -377,3 +377,48 @@ main { flex: 1; padding: 0.7rem 0.9rem calc(var(--safe-bottom) + 2rem); }
   border: 1px solid var(--accent); border-radius: var(--radius);
   background: none; color: var(--accent); padding: 0 0.9rem;
 }
+
+/* ── diff triage ─────────────────────────────────────────────────────── */
+
+.chip.conflict {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface-2));
+}
+.chip.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+
+.file { border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 0.45rem; overflow: hidden; }
+.file-row {
+  display: flex; align-items: baseline; gap: 0.5rem; width: 100%;
+  appearance: none; border: 0; cursor: pointer; text-align: left;
+  background: var(--surface); color: var(--text);
+  padding: 0.6rem 0.7rem; min-height: 44px;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.file-row:active { background: var(--surface-2); }
+.file-row .caret { color: var(--dim); width: 1em; flex: 0 0 auto; }
+.file-row .path { flex: 1; overflow-wrap: anywhere; }
+.file-row .n { color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The hunks sit inside the file's own box, so the border reads as one unit. */
+.file .mono { border: 0; border-top: 1px solid var(--border); border-radius: 0; max-height: 60dvh; }
+
+/* ── refresh ─────────────────────────────────────────────────────────── */
+
+.refresh {
+  appearance: none; border: 0; background: none; cursor: pointer;
+  color: var(--dim); font: inherit; font-size: 1.1rem; line-height: 1;
+  /* 44px of touch target, without 44px of visible chrome. */
+  padding: 0.6rem; margin: -0.6rem -0.4rem -0.6rem 0;
+}
+.refresh:active { color: var(--accent); }
+.refresh.spinning { animation: spin 0.7s linear infinite; color: var(--accent); }
+@keyframes spin { to { transform: rotate(360deg); } }
+/* A reduced-motion preference means the spin is a colour change instead. */
+@media (prefers-reduced-motion: reduce) { .refresh.spinning { animation: none; } }
+
+.pull {
+  height: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--dim); font-size: 0.75rem;
+  transition: height 0.15s ease-out;
+}

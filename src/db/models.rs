@@ -351,3 +351,33 @@ pub struct TaskRuntime {
     pub pane_changed_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
 }
+
+/// A phone (or anything else) paired with `agtx serve`.
+///
+/// One row per device rather than one shared secret, so a lost phone can be
+/// revoked without re-pairing everything else — which is the whole reason this
+/// exists rather than the single token it replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobileDevice {
+    pub id: String,
+    /// What the user calls it. Free text from the pairing request, so it is
+    /// shown but never trusted or matched on.
+    pub label: String,
+    /// SHA-256 of the token, hex. The token itself is shown once, at pairing,
+    /// and never stored.
+    pub token_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
+impl MobileDevice {
+    pub fn new(label: impl Into<String>, token_hash: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            label: label.into(),
+            token_hash: token_hash.into(),
+            created_at: Utc::now(),
+            last_seen: None,
+        }
+    }
+}

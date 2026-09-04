@@ -16,6 +16,7 @@ const SHELL = [
   "app.css",
   "app.js",
   "api.js",
+  "ansi.js",
   "manifest.webmanifest",
   "icon-192.png",
   "icon-512.png",

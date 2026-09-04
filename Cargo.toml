@@ -52,11 +52,15 @@ rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
 # agents running with `--dangerously-skip-permissions`, and an opt-in compile is
 # one more step in front of that.
 axum = { version = "0.8", features = ["ws"], optional = true }
+# The pairing QR. `default-features = false` drops `image` and `svg`, which pull
+# in an image codec stack for output this never produces — the only renderer
+# here writes half-blocks to a terminal.
+qrcode = { version = "0.14", default-features = false, optional = true }
 
 [features]
 default = []
 test-mocks = ["dep:mockall"]
-serve = ["dep:axum"]
+serve = ["dep:axum", "dep:qrcode"]
 
 # Dev tooling for the smoke tests, not part of the shipped binary. Declared with
 # an explicit path so it can live next to its only consumer in tests/smoke/

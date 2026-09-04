@@ -10,6 +10,8 @@
 
 import {
   api,
+  captureCredential,
+  wsProtocols,
   ACTION_LABELS,
   COLUMNS,
   INPUTTABLE,
@@ -23,13 +25,22 @@ import { paintPane } from "./ansi.js";
 
 const app = document.getElementById("app");
 
-/// Poll cadence while a screen is visible. Matches the TUI's own transition
-/// tick: the data behind these views is republished on that cadence, so asking
-/// faster returns the same bytes.
-const POLL_MS = 2000;
+/// The board does not poll.
+///
+/// A timer refetching every couple of seconds spends battery and cellular data
+/// to answer a question nobody asked — a kanban board changes on the scale of
+/// minutes, and the person holding the phone knows when they care. So the board
+/// is fetched when something *happened*: opened, pulled down, returned to, or
+/// changed by an action taken here.
+///
+/// The live pane is the exception and stays on its socket: that is push, not
+/// polling, and watching an agent work is exactly the case where waiting for a
+/// human to ask would be wrong.
 
-let timer = null;
+/// The current screen's fetch, re-run on refresh.
 let currentRender = null;
+/// When it last completed, so staleness is legible rather than implied.
+let lastLoaded = null;
 
 // ── tiny DOM helpers ────────────────────────────────────────────────────
 
@@ -51,9 +62,29 @@ function el(tag, attrs = {}, ...children) {
 
 function mount(...nodes) {
   app.replaceChildren(...nodes.filter(Boolean));
+  lastLoaded = Date.now();
+  const main = app.querySelector("main");
+  if (main) attachPullToRefresh(main);
 }
 
 function header(title, sub, onBack) {
+  // A visible control as well as the pull gesture. A gesture is the fast path
+  // for a thumb, but it is invisible on a desktop browser and undiscoverable
+  // on a phone until someone happens to try it.
+  const button = el(
+    "button",
+    {
+      class: "refresh",
+      "aria-label": "Refresh",
+      onclick: async () => {
+        button.classList.add("spinning");
+        await refresh();
+        button.classList.remove("spinning");
+      },
+    },
+    "↻",
+  );
+
   return el(
     "header",
     { class: "hdr" },
@@ -62,6 +93,7 @@ function header(title, sub, onBack) {
       { class: "hdr-row" },
       onBack && el("button", { class: "back", "aria-label": "Back", onclick: onBack }, "‹"),
       el("h1", {}, title, sub ? el("span", { class: "sub", text: sub }) : null),
+      button,
     ),
   );
 }
@@ -342,23 +374,98 @@ function go(hash) {
   location.hash = hash;
 }
 
-/// Run `fn` now, then on a timer until the route changes.
-///
-/// Polling stops while the tab is hidden: a phone in a pocket refreshing a
-/// board it is not showing is pure battery, and the first thing on return is a
-/// fresh fetch anyway.
-function poll(fn) {
-  if (timer) clearInterval(timer);
+/// Show `fn`'s screen, and remember it as what a refresh re-runs.
+function show(fn) {
   currentRender = fn;
-  fn();
-  timer = setInterval(() => {
-    if (document.visibilityState === "visible") fn();
-  }, POLL_MS);
+  return fn();
 }
 
+/// Re-run the current screen's fetch.
+async function refresh() {
+  if (!currentRender) return;
+  await currentRender();
+  lastLoaded = Date.now();
+}
+
+/// Coming back to the app refreshes it.
+///
+/// Not polling — it fires once, on a deliberate act. Returning to a board that
+/// is quietly minutes old is the one case where "the user will pull down" is
+/// the wrong answer, because they have no way to know they need to.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && currentRender) currentRender();
+  if (document.visibilityState === "visible") refresh();
 });
+
+/// How stale the screen is, in words.
+function staleness() {
+  if (!lastLoaded) return null;
+  const secs = Math.round((Date.now() - lastLoaded) / 1000);
+  if (secs < 45) return "just now";
+  if (secs < 90) return "a minute ago";
+  if (secs < 3600) return `${Math.round(secs / 60)} minutes ago`;
+  return "over an hour ago";
+}
+
+/// Pull down at the top of the page to refresh.
+///
+/// Two things it must not do, both found by asking what else is scrolling:
+///
+/// - **Arm mid-scroll.** `main` is a flex child that does not scroll — the
+///   *document* does — so checking `node.scrollTop` would read 0 everywhere and
+///   turn any downward drag on a long board into a refresh. The check is
+///   against the scrolling element.
+/// - **Steal the terminal's own scrolling.** A `.term` or `.mono` pane scrolls
+///   inside itself, and a drag there is someone reading output, not asking for
+///   fresh data. Those are excluded outright rather than by position, because
+///   being at the top of a pane is not a request to leave it.
+function attachPullToRefresh(node) {
+  const THRESHOLD = 64;
+  let startY = null;
+  let pulled = 0;
+
+  const indicator = el("div", { class: "pull" }, "↓ pull to refresh");
+  node.prepend(indicator);
+
+  const atTop = () => (document.scrollingElement?.scrollTop ?? 0) <= 0;
+
+  node.addEventListener(
+    "touchstart",
+    (e) => {
+      const inPane = e.target instanceof Element && e.target.closest(".term, .mono");
+      startY = !inPane && atTop() ? e.touches[0].clientY : null;
+      pulled = 0;
+    },
+    { passive: true },
+  );
+
+  node.addEventListener(
+    "touchmove",
+    (e) => {
+      if (startY === null) return;
+      pulled = Math.max(0, e.touches[0].clientY - startY);
+      // Damped, so the indicator trails the finger rather than tracking it —
+      // the standard feel, and it makes the threshold reachable without a
+      // gesture that runs off the screen.
+      indicator.style.height = `${Math.min(pulled / 2, 48)}px`;
+      indicator.textContent = pulled >= THRESHOLD ? "↻ release to refresh" : "↓ pull to refresh";
+    },
+    { passive: true },
+  );
+
+  const release = async () => {
+    const fired = startY !== null && pulled >= THRESHOLD;
+    startY = null;
+    pulled = 0;
+    indicator.style.height = "";
+    if (fired) {
+      indicator.textContent = "↻ refreshing…";
+      indicator.style.height = "24px";
+      await refresh();
+    }
+  };
+  node.addEventListener("touchend", release);
+  node.addEventListener("touchcancel", release);
+}
 
 // ── screens ─────────────────────────────────────────────────────────────
 
@@ -473,6 +580,9 @@ async function screenBoard(pid, column) {
       shown.length
         ? shown.map((t) => swipeable(pid, t))
         : el("div", { class: "empty" }, `Nothing in ${active}.`),
+      // Said plainly, because nothing refreshes on its own: a board with no
+      // clock on it invites being read as live when it is an hour old.
+      el("div", { class: "foot", text: `Updated ${staleness() ?? "just now"} · pull to refresh` }),
     ),
     el(
       "button",
@@ -605,6 +715,11 @@ function taskCard(pid, t) {
       t.pr_number ? el("span", { class: "chip", text: `#${t.pr_number}` }) : null,
       t.deps_satisfied === false
         ? el("span", { class: "chip deps", text: "blocked on deps" })
+        : null,
+      // `null` is "not checked yet", which must not read as clean — that is
+      // the answer someone might merge on. Only a definite `true` shows.
+      t.conflicted === true
+        ? el("span", { class: "chip conflict", text: "conflicts" })
         : null,
     ),
   );
@@ -752,29 +867,105 @@ async function diffBody(pid, tid) {
     return el("div", { class: "empty" }, `No changes against ${diff.base}.`);
   }
 
-  // File list first, hunks below: mobile review is triage. Parsing `--stat`
-  // rather than the patch keeps this honest about what git counted.
-  const files = diff.stat
-    .trim()
-    .split("\n")
-    .filter((l) => l.includes("|"))
-    .map((l) => {
-      const [path, rest] = l.split("|");
-      return el(
-        "li",
-        {},
-        el("span", { class: "path", text: path.trim() }),
-        el("span", { class: "n", text: (rest || "").trim() }),
-      );
-    });
+  // One collapsible section per file, closed by default. A phone screen holds
+  // maybe forty lines; a flat patch of a dozen files means scrolling past all
+  // of them to find the one worth reading. Triage is picking the file, then
+  // reading it — so the file list *is* the interface and the hunks are what
+  // opens underneath.
+  const byFile = splitPatchByFile(diff.patch);
+  const stats = statLines(diff.stat);
+
+  const sections = byFile.map(({ path, body }) => {
+    const hunks = el("div", { class: "mono", hidden: true }, ...colourDiff(body));
+    const stat = stats.get(path);
+    const head = el(
+      "button",
+      {
+        class: "file-row",
+        "aria-expanded": "false",
+        onclick: () => {
+          const open = hunks.hidden;
+          hunks.hidden = !open;
+          head.setAttribute("aria-expanded", String(open));
+          head.querySelector(".caret").textContent = open ? "▾" : "▸";
+        },
+      },
+      el("span", { class: "caret", text: "▸" }),
+      el("span", { class: "path", text: path }),
+      stat ? el("span", { class: "n", text: stat }) : null,
+    );
+    return el("div", { class: "file" }, head, hunks);
+  });
 
   return el(
     "div",
     {},
-    el("div", { class: "chip", text: `vs ${diff.base}` }),
-    files.length ? el("ul", { class: "files" }, files) : null,
-    el("div", { class: "mono" }, ...colourDiff(diff.patch)),
+    el(
+      "div",
+      { class: "term-bar" },
+      el("span", { class: "chip", text: `vs ${diff.base}` }),
+      conflictChip(diff),
+      el("span", { class: "chip", text: `${byFile.length} files` }),
+    ),
+    conflictDetail(diff),
+    sections.length
+      ? sections
+      : el("div", { class: "mono" }, ...colourDiff(diff.patch)),
   );
+}
+
+function conflictChip(diff) {
+  if (diff.conflicted === true) {
+    return el("span", { class: "chip conflict", text: "conflicts with base" });
+  }
+  if (diff.conflicted === false) {
+    return el("span", { class: "chip ok", text: "merges cleanly" });
+  }
+  return null; // not checked — say nothing rather than imply either answer
+}
+
+function conflictDetail(diff) {
+  if (diff.conflicted !== true || !diff.conflicting_files?.length) return null;
+  return el(
+    "div",
+    { class: "note" },
+    el("h3", { text: "Conflicting files" }),
+    el("div", { class: "desc", text: diff.conflicting_files.join("\n") }),
+  );
+}
+
+/// Split a unified diff into one entry per file.
+///
+/// Anchored on `diff --git`, which git emits once per file regardless of
+/// rename, mode change or binary content — unlike `+++ b/...`, which is absent
+/// for a deleted file and misleading for a rename.
+function splitPatchByFile(patch) {
+  const out = [];
+  let current = null;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      if (current) out.push(current);
+      // `diff --git a/x b/x` — take the b-side, which is the path after any
+      // rename, falling back to the whole line if it is shaped unexpectedly.
+      const m = line.match(/ b\/(.*)$/);
+      current = { path: m ? m[1] : line.slice("diff --git ".length), body: line + "\n" };
+    } else if (current) {
+      current.body += line + "\n";
+    }
+  }
+  if (current) out.push(current);
+  return out;
+}
+
+/// `path => "12 +++---"` from `git diff --stat`, for the counts beside each row.
+function statLines(stat) {
+  const map = new Map();
+  for (const line of (stat || "").trim().split("\n")) {
+    const bar = line.indexOf("|");
+    if (bar === -1) continue;
+    map.set(line.slice(0, bar).trim(), line.slice(bar + 1).trim());
+  }
+  return map;
 }
 
 /// Colour a unified diff without a syntax highlighter: +/- and hunk headers
@@ -933,7 +1124,7 @@ function openSocket(pid, tid, pane, live) {
   term.live = live;
 
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
-  const ws = new WebSocket(url);
+  const ws = new WebSocket(url, wsProtocols());
   socket = ws;
   socketTask = tid;
 
@@ -984,13 +1175,22 @@ function render() {
     closeSocket();
     mountedTask = null;
   }
-  if (r.screen === "projects") poll(() => screenProjects());
-  else if (r.screen === "board") poll(() => screenBoard(r.pid, r.column));
-  else poll(() => screenTask(r.pid, r.tid));
+  if (r.screen === "projects") show(() => screenProjects());
+  else if (r.screen === "board") show(() => screenBoard(r.pid, r.column));
+  else show(() => screenTask(r.pid, r.tid));
 }
 
+// Before the first route is read: a `#pair=…` or `#token=…` hand-off occupies
+// the same fragment the router uses, so it has to be consumed first. Pairing is
+// a round trip, so the first render waits for it — otherwise the board's own
+// requests race the token into storage and the screen opens on an auth error.
+captureCredential().then((result) => {
+  if (result?.paired) toast(`Paired as “${result.paired}”.`);
+  else if (result?.error) toast(result.error, { bad: true, ms: 9000 });
+  render();
+});
+
 addEventListener("hashchange", render);
-render();
 
 if ("serviceWorker" in navigator) {
   // Failure here is not worth surfacing: it costs the offline shell and

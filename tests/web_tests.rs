@@ -547,6 +547,59 @@ async fn every_asset_is_served() {
     }
 }
 
+/// Every file in `web/` is in the asset table.
+///
+/// `include_bytes!` guarantees the other direction — a *listed* file must exist
+/// or the build fails — but nothing makes every file on disk listed. A new
+/// module left out 404s to the SPA shell, so an `import` receives HTML, the
+/// module graph fails to parse, and the whole app renders a blank page with the
+/// error only in a console nobody is looking at. That is not hypothetical: it
+/// is exactly what `ansi.js` did when it was added.
+#[test]
+fn the_asset_table_covers_the_web_directory() {
+    let listed: std::collections::HashSet<&str> =
+        agtx::web::assets::ASSETS.iter().map(|a| a.path).collect();
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web");
+    let mut missing = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("web/ exists") {
+        let entry = entry.unwrap();
+        if !entry.file_type().unwrap().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if !listed.contains(name.as_str()) {
+            missing.push(name);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these files are in web/ but not in ASSETS, so they 404 to the shell: {missing:?}"
+    );
+}
+
+/// The service worker precaches the shell by name, so its list has the same
+/// drift risk as the asset table — a module missing from it simply is not
+/// available offline.
+#[tokio::test]
+async fn the_service_worker_precaches_every_script() {
+    let f = fixture();
+    let (_, _, body) = raw(state_for(&f, ServeMode::Global), "/sw.js").await;
+    let js = String::from_utf8_lossy(&body);
+    for asset in agtx::web::assets::ASSETS {
+        if asset.path.ends_with(".js") && asset.path != "sw.js" {
+            assert!(
+                js.contains(asset.path),
+                "{} is served but not precached by the service worker",
+                asset.path
+            );
+        }
+    }
+}
+
 /// A module script whose MIME is not a JavaScript type is refused outright by
 /// the browser, which fails the entire app with a blank page.
 #[tokio::test]
@@ -940,4 +993,835 @@ async fn writes_are_rate_limited() {
     // see the board it just changed.
     let (status, _) = get(state, &format!("/api/projects/{}/tasks", f.project_id)).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+// ── live pane socket ────────────────────────────────────────────────────
+
+use agtx::web::ws::{ClientMessage, ServerMessage, Subscription};
+
+/// The browser writes these by hand, so a rename that nothing pins breaks the
+/// live view silently: the socket connects, the subscribe is rejected as a bad
+/// message, and the pane just stays empty.
+#[test]
+fn the_socket_wire_format_is_what_the_client_writes() {
+    let sub: ClientMessage =
+        serde_json::from_str(r#"{"type":"subscribe","project_id":"p","task_id":"t"}"#).unwrap();
+    assert!(matches!(
+        sub,
+        ClientMessage::Subscribe { project_id, task_id } if project_id == "p" && task_id == "t"
+    ));
+
+    let un: ClientMessage = serde_json::from_str(r#"{"type":"unsubscribe"}"#).unwrap();
+    assert!(matches!(un, ClientMessage::Unsubscribe));
+
+    // And the three the client switches on.
+    let frame = serde_json::to_string(&ServerMessage::Frame {
+        task_id: "t",
+        content: "hi",
+    })
+    .unwrap();
+    assert_eq!(frame, r#"{"type":"frame","task_id":"t","content":"hi"}"#);
+    assert_eq!(
+        serde_json::to_string(&ServerMessage::Gone { task_id: "t" }).unwrap(),
+        r#"{"type":"gone","task_id":"t"}"#
+    );
+    assert!(serde_json::to_string(&ServerMessage::Error {
+        message: "nope".into()
+    })
+    .unwrap()
+    .starts_with(r#"{"type":"error""#));
+}
+
+/// `Subscription` holds a `dyn TmuxOperations`, which has no business
+/// implementing `Debug` just so a test can call `unwrap_err`.
+fn subscribe_err(state: &ServerState, pid: &str, tid: &str) -> String {
+    Subscription::open(state, pid, tid)
+        .err()
+        .expect("expected a refusal")
+}
+
+/// Subscribing is where every "why is my terminal blank" question gets its
+/// answer, so each refusal has to name its own cause rather than share one.
+#[tokio::test]
+async fn subscribing_refuses_with_a_specific_reason() {
+    let f = fixture();
+    let state = state_for(&f, ServeMode::Global);
+
+    let err = subscribe_err(&state, "no-such-project", "t");
+    assert!(err.contains("no-such-project"), "got {err}");
+
+    let err = subscribe_err(&state, &f.project_id, "no-such-task");
+    assert!(err.contains("no-such-task"), "got {err}");
+
+    // A task with no tmux session has no pane to stream — the common case for
+    // anything in Backlog.
+    let idle = add_task(&f, "Never started", TaskStatus::Backlog);
+    let err = subscribe_err(&state, &f.project_id, &idle.id);
+    assert!(err.contains("no active session"), "got {err}");
+}
+
+/// `/ws` must be a real route rather than falling through to the SPA shell —
+/// a plain GET without upgrade headers is a 400 from axum, not a 404 or HTML.
+#[tokio::test]
+async fn the_socket_route_exists() {
+    let f = fixture();
+    let app = agtx::web::routes::router(state_for(&f, ServeMode::Global));
+    let res = app
+        .oneshot(Request::builder().uri("/ws").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::NOT_FOUND);
+    let mime = res
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(!mime.contains("text/html"), "/ws fell through to the shell");
+}
+
+// ── /input ──────────────────────────────────────────────────────────────
+
+fn running_task(f: &Fixture) -> Task {
+    let db = Database::open_project(&f.project_path).unwrap();
+    let mut t = Task::new("Running", "claude", &f.project_id);
+    t.status = TaskStatus::Running;
+    t.session_name = Some("agtx-test-nonexistent:pane".to_string());
+    db.create_task(&t).unwrap();
+    t
+}
+
+/// Text and keys are different requests, and the server must not have to guess
+/// which was meant: `send-keys` without `-l` resolves anything matching a key
+/// name *as that key*, so a message of "Space" would arrive as `0x20`.
+#[tokio::test]
+async fn input_needs_exactly_one_of_text_or_key() {
+    let f = fixture();
+    let t = running_task(&f);
+    let uri = format!("/api/projects/{}/tasks/{}/input", f.project_id, t.id);
+
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({ "text": "hi", "key": "Enter" }),
+    ] {
+        let (status, _) = send(state_for(&f, ServeMode::Global), "POST", &uri, Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+/// A closed key set is deliberate: forwarding arbitrary tmux key names would
+/// let a request send `C-d`, an EOF that ends the agent's session, or `C-u`,
+/// which kills the composer line.
+#[tokio::test]
+async fn only_known_keys_are_forwarded() {
+    let f = fixture();
+    let t = running_task(&f);
+    let uri = format!("/api/projects/{}/tasks/{}/input", f.project_id, t.id);
+
+    for key in ["C-d", "C-u", "M-x", "F13", "PageUp", ""] {
+        let (status, body) = send(
+            state_for(&f, ServeMode::Global),
+            "POST",
+            &uri,
+            Some(serde_json::json!({ "key": key })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{key:?} was accepted");
+        assert!(body["error"].as_str().unwrap().contains("unsupported key"));
+    }
+
+    // What the chips actually send is all accepted by the parser.
+    for key in [
+        "y", "n", "1", "2", "3", "Enter", "Escape", "Up", "Down", "C-c",
+    ] {
+        assert!(
+            agtx::core::input::PaneKey::parse(key).is_some(),
+            "the UI offers {key:?} but the server rejects it"
+        );
+    }
+}
+
+/// A task with no composer has nothing to type into. Same rule as
+/// `send_to_task`, so MCP and HTTP refuse the same requests.
+#[tokio::test]
+async fn input_only_reaches_an_active_phase() {
+    let f = fixture();
+    for status in [TaskStatus::Backlog, TaskStatus::Review, TaskStatus::Done] {
+        let t = add_task(&f, &format!("Task {}", status.as_str()), status);
+        let (code, body) = send(
+            state_for(&f, ServeMode::Global),
+            "POST",
+            &format!("/api/projects/{}/tasks/{}/input", f.project_id, t.id),
+            Some(serde_json::json!({ "text": "hello" })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CONFLICT, "{status:?} accepted input");
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Planning or Running"));
+    }
+}
+
+/// The same 4096-byte cap and null-byte rule `send_to_task` enforces, so the
+/// two callers refuse the same messages.
+#[tokio::test]
+async fn oversized_and_null_bearing_messages_are_refused() {
+    let f = fixture();
+    let t = running_task(&f);
+    let uri = format!("/api/projects/{}/tasks/{}/input", f.project_id, t.id);
+
+    let (status, body) = send(
+        state_for(&f, ServeMode::Global),
+        "POST",
+        &uri,
+        Some(serde_json::json!({ "text": "x".repeat(4097) })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("4096"));
+
+    let (status, body) = send(
+        state_for(&f, ServeMode::Global),
+        "POST",
+        &uri,
+        Some(serde_json::json!({ "text": format!("before{}after", char::from(0u8)) })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("null"));
+}
+
+/// The one-shot `/pane` answers JSON, so it must not carry the SGR escapes the
+/// live socket deliberately keeps.
+#[test]
+fn the_one_shot_capture_is_plain_text() {
+    let coloured = "\u{1b}[1;31mRED\u{1b}[0m plain \u{1b}[32mgreen\u{1b}[0m";
+    assert_eq!(agtx::web::routes::strip_sgr(coloured), "RED plain green");
+    // Text with no escapes is untouched, including the box-drawing an agent TUI
+    // is full of.
+    let plain = "│ ✓ done │\n└────────┘";
+    assert_eq!(agtx::web::routes::strip_sgr(plain), plain);
+}
+
+// ── access token ────────────────────────────────────────────────────────
+
+/// A state that requires pairing, so the auth layer is actually exercised —
+/// the other tests run unauthenticated, as a loopback bind does.
+fn guarded(f: &Fixture) -> std::sync::Arc<ServerState> {
+    let _ = f;
+    ServerState::with_auth(ServeMode::Global, true)
+}
+
+/// Pair a device directly and return its token.
+fn paired_token(label: &str) -> String {
+    agtx::web::auth::pair_device(label).expect("pairing")
+}
+
+async fn with_auth(
+    state: std::sync::Arc<ServerState>,
+    uri: &str,
+    bearer: Option<&str>,
+) -> StatusCode {
+    let app = agtx::web::routes::router(state);
+    let mut req = Request::builder().uri(uri);
+    if let Some(b) = bearer {
+        req = req.header("authorization", format!("Bearer {b}"));
+    }
+    app.oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn the_api_requires_the_token() {
+    let f = fixture();
+    assert_eq!(
+        with_auth(guarded(&f), "/api/health", None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        with_auth(guarded(&f), "/api/health", Some("wrong")).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        with_auth(guarded(&f), "/api/health", Some(&paired_token("test"))).await,
+        StatusCode::OK
+    );
+}
+
+/// Writes are behind the same gate as reads. Worth its own assertion because
+/// the middleware is layered once and a route registered outside that layer
+/// would be open with nothing to notice it.
+#[tokio::test]
+async fn every_api_route_is_behind_the_token() {
+    let f = fixture();
+    let t = add_task(&f, "Task", TaskStatus::Backlog);
+    let pid = &f.project_id;
+
+    for (method, uri) in [
+        ("GET", format!("/api/projects")),
+        ("GET", format!("/api/projects/{pid}/tasks")),
+        ("GET", format!("/api/projects/{pid}/tasks/{}", t.id)),
+        ("GET", format!("/api/projects/{pid}/tasks/{}/diff", t.id)),
+        ("GET", format!("/api/projects/{pid}/tasks/{}/pane", t.id)),
+        ("POST", format!("/api/projects/{pid}/tasks/{}/action", t.id)),
+        ("POST", format!("/api/projects/{pid}/tasks/{}/input", t.id)),
+        ("POST", format!("/api/projects/{pid}/tasks")),
+        ("PATCH", format!("/api/projects/{pid}/tasks/{}", t.id)),
+        ("DELETE", format!("/api/projects/{pid}/tasks/{}", t.id)),
+    ] {
+        let app = agtx::web::routes::router(guarded(&f));
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} answered without a token"
+        );
+    }
+}
+
+/// The shell must stay open. A browser cannot put a header on the initial
+/// navigation, so gating the assets would mean carrying the token in the URL of
+/// every page load — and they are this app's own JS and CSS, not board data.
+#[tokio::test]
+async fn the_shell_loads_without_a_token() {
+    let f = fixture();
+    for path in [
+        "/",
+        "/index.html",
+        "/app.js",
+        "/api.js",
+        "/ansi.js",
+        "/app.css",
+    ] {
+        assert_eq!(
+            with_auth(guarded(&f), path, None).await,
+            StatusCode::OK,
+            "{path} required a token"
+        );
+    }
+}
+
+/// A real handshake, minus the token.
+///
+/// The `/ws` route is exempt from the header middleware — a browser cannot put
+/// `Authorization` on an upgrade — so this is the assertion that the exemption
+/// did not simply leave the socket open. It has to be a *genuine* handshake:
+/// `WebSocketUpgrade` is an extractor, so a plain GET is rejected 400 before
+/// the handler's token check ever runs, and testing that proves nothing.
+fn ws_handshake(uri: &str, protocol: Option<&str>) -> Request<Body> {
+    let mut req = Request::builder()
+        .uri(uri)
+        .header("connection", "Upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+    if let Some(p) = protocol {
+        req = req.header("sec-websocket-protocol", p);
+    }
+    req.body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn the_socket_requires_the_token_by_subprotocol() {
+    let f = fixture();
+
+    // No subprotocol at all.
+    let res = agtx::web::routes::router(guarded(&f))
+        .oneshot(ws_handshake("/ws", None))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // A subprotocol carrying the wrong token.
+    let res = agtx::web::routes::router(guarded(&f))
+        .oneshot(ws_handshake("/ws", Some("agtx.token.wrong")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // The accepting case is deliberately not asserted here. `WebSocketUpgrade`
+    // needs a real hyper `OnUpgrade` extension, which `oneshot` cannot supply —
+    // a correct token gets 426 Upgrade Required from the extractor rather than
+    // 101, so an assertion here would be testing the harness. What matters is
+    // that the *refusals* happen before the upgrade, which is what the two
+    // above pin. The accept path and the subprotocol echo were verified against
+    // a browser.
+}
+
+/// Comparison is constant-time, so it must still be *correct* — the obvious way
+/// to write that loop is to get the length check wrong.
+#[test]
+fn token_comparison_accepts_only_an_exact_match() {
+    use agtx::web::auth::token_matches;
+    assert!(token_matches("abc123", "abc123"));
+    assert!(!token_matches("abc123", "abc124"));
+    assert!(!token_matches("abc123", "abc12"));
+    assert!(!token_matches("abc123", "abc1234"));
+    assert!(!token_matches("abc123", ""));
+    assert!(!token_matches("", "abc123"));
+}
+
+// ── pairing QR ──────────────────────────────────────────────────────────
+
+/// Decode the rendered half-blocks back into a module grid.
+///
+/// Each cell is `ESC[<fg>m ESC[<bg>m ▀`, where the foreground paints the upper
+/// module and the background the lower one.
+fn qr_grid(rendered: &str) -> Vec<Vec<bool>> {
+    let mut grid: Vec<Vec<bool>> = Vec::new();
+    for line in rendered.lines() {
+        let (mut upper, mut lower) = (Vec::new(), Vec::new());
+        // Split on the block character; each chunk before one holds its colours.
+        for cell in line.split('▀').filter(|c| !c.is_empty()) {
+            if cell.contains("[0m") {
+                continue; // the row reset
+            }
+            upper.push(cell.contains("[30m"));
+            lower.push(cell.contains("[40m"));
+        }
+        if !upper.is_empty() {
+            grid.push(upper);
+            grid.push(lower);
+        }
+    }
+    grid
+}
+
+/// The two ways a QR that *looks* fine fails to scan: no quiet zone, and
+/// finder patterns that are wrong or in the wrong corners. Neither is visible
+/// by eye in a terminal, and both make a phone simply do nothing.
+#[test]
+fn the_pairing_qr_is_scannable() {
+    let url = "http://192.168.178.26:8787/#token=be29ea5a70c64030a63526d89f24ba070866a9e273664767";
+    let rendered = agtx::web::qr::render(url).expect("a URL always fits a QR");
+    let grid = qr_grid(&rendered);
+
+    let w = grid[0].len();
+    let h = grid.len();
+    assert!(
+        w >= 21 + 8,
+        "grid is {w} wide, smaller than the smallest QR plus its quiet zone"
+    );
+    assert!(grid.iter().all(|r| r.len() == w), "ragged grid");
+
+    // Quiet zone: four light modules on every side. Without it a decoder cannot
+    // find the code's edges and gives up silently.
+    for y in 0..4 {
+        assert!(
+            !grid[y].iter().any(|m| *m),
+            "row {y} of the quiet zone has a dark module"
+        );
+        assert!(
+            !grid[h - 1 - y].iter().any(|m| *m),
+            "bottom quiet zone is not clear"
+        );
+    }
+    for (y, row) in grid.iter().enumerate() {
+        assert!(
+            !row[..4].iter().any(|m| *m),
+            "left quiet zone dirty at row {y}"
+        );
+        assert!(
+            !row[w - 4..].iter().any(|m| *m),
+            "right quiet zone dirty at row {y}"
+        );
+    }
+
+    // Finder patterns in three corners. Checking all three is what catches a
+    // transposed x/y, which is otherwise a perfectly plausible-looking square.
+    const FINDER: [&str; 7] = [
+        "#######", "#.....#", "#.###.#", "#.###.#", "#.###.#", "#.....#", "#######",
+    ];
+    let finder_at = |ox: usize, oy: usize| -> bool {
+        FINDER.iter().enumerate().all(|(dy, row)| {
+            row.chars()
+                .enumerate()
+                .all(|(dx, ch)| grid[oy + dy][ox + dx] == (ch == '#'))
+        })
+    };
+    let size = w - 8;
+    assert!(finder_at(4, 4), "no finder pattern top-left");
+    assert!(finder_at(4 + size - 7, 4), "no finder pattern top-right");
+    assert!(finder_at(4, 4 + size - 7), "no finder pattern bottom-left");
+}
+
+/// The QR is for a phone, and a phone cannot reach `127.0.0.1` on another
+/// machine. Printing one there would scan perfectly and go nowhere.
+#[test]
+fn a_long_url_still_encodes() {
+    // Longer than any realistic pairing URL, to prove the renderer picks a
+    // bigger version rather than failing.
+    let long = format!("http://192.168.178.26:8787/#token={}", "a".repeat(200));
+    assert!(agtx::web::qr::render(&long).is_some());
+}
+
+// ── merge-conflict triage ───────────────────────────────────────────────
+
+/// Give the fixture repo a branch that conflicts with `main`, and one that
+/// does not, so both answers are exercised against real git.
+fn seed_conflict(dir: &Path) {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git");
+    };
+    // `task/demo` already edited a.txt; move main underneath it so the two
+    // disagree on the same line.
+    git(&["checkout", "-q", "main"]);
+    std::fs::write(dir.join("a.txt"), "hello\nfrom-main\n").unwrap();
+    git(&["commit", "-qam", "main moves"]);
+
+    // And a branch that only adds a file, which merges cleanly.
+    git(&["checkout", "-qb", "task/clean", "main"]);
+    std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "clean"]);
+    git(&["checkout", "-q", "task/demo"]);
+}
+
+fn review_task(f: &Fixture, title: &str, branch: &str) -> Task {
+    let db = Database::open_project(&f.project_path).unwrap();
+    let mut t = Task::new(title, "claude", &f.project_id);
+    t.status = TaskStatus::Review;
+    t.worktree_path = Some(f.project_path.to_string_lossy().to_string());
+    t.branch_name = Some(branch.to_string());
+    t.base_branch = Some("main".to_string());
+    db.create_task(&t).unwrap();
+    t
+}
+
+/// "Merges cleanly" and "not checked yet" must not look alike — one of them is
+/// an answer someone merges on.
+#[tokio::test]
+async fn the_diff_reports_conflicts_against_the_base() {
+    let f = fixture();
+    seed_conflict(&f.project_path);
+
+    let conflicting = review_task(&f, "Conflicting", "task/demo");
+    let (status, body) = get(
+        state_for(&f, ServeMode::Global),
+        &format!(
+            "/api/projects/{}/tasks/{}/diff",
+            f.project_id, conflicting.id
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["conflicted"], true);
+    let files: Vec<&str> = body["conflicting_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(files, vec!["a.txt"], "only the genuinely conflicting file");
+
+    let clean = review_task(&f, "Clean", "task/clean");
+    let (_, body) = get(
+        state_for(&f, ServeMode::Global),
+        &format!("/api/projects/{}/tasks/{}/diff", f.project_id, clean.id),
+    )
+    .await;
+    assert_eq!(body["conflicted"], false);
+    assert!(body["conflicting_files"].as_array().unwrap().is_empty());
+}
+
+/// A task that is not in Review is not asked about: the question is only
+/// meaningful once work is up for merging, and a branch still being written to
+/// would answer differently many times before anyone cared.
+#[tokio::test]
+async fn only_review_tasks_are_checked_for_conflicts() {
+    let f = fixture();
+    seed_conflict(&f.project_path);
+
+    let db = Database::open_project(&f.project_path).unwrap();
+    let mut running = Task::new("Still running", "claude", &f.project_id);
+    running.status = TaskStatus::Running;
+    running.worktree_path = Some(f.project_path.to_string_lossy().to_string());
+    running.branch_name = Some("task/demo".to_string());
+    db.create_task(&running).unwrap();
+
+    let (_, body) = get(
+        state_for(&f, ServeMode::Global),
+        &format!("/api/projects/{}/tasks", f.project_id),
+    )
+    .await;
+    let card = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == running.id)
+        .unwrap();
+    assert!(
+        card["conflicted"].is_null(),
+        "a Running task should not carry a conflict verdict"
+    );
+}
+
+/// The board must not block on git. The first ask reports `null` and a
+/// background pass fills the cache — checking N branches inside a request that
+/// is polled every two seconds is the cost decision 3 refuses for phase status.
+#[tokio::test]
+async fn the_board_never_waits_on_the_conflict_check() {
+    let f = fixture();
+    seed_conflict(&f.project_path);
+    let task = review_task(&f, "Conflicting", "task/demo");
+    let state = state_for(&f, ServeMode::Global);
+
+    let started = std::time::Instant::now();
+    let (status, body) = get(
+        state.clone(),
+        &format!("/api/projects/{}/tasks", f.project_id),
+    )
+    .await;
+    let first_ask = started.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        first_ask < std::time::Duration::from_millis(500),
+        "the board waited {first_ask:?} — it should answer from cache and refresh behind"
+    );
+
+    let card = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == task.id)
+        .unwrap();
+    assert!(card["conflicted"].is_null(), "first ask should be unknown");
+
+    // The background pass lands within a poll or two.
+    let mut seen = None;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (_, body) = get(
+            state.clone(),
+            &format!("/api/projects/{}/tasks", f.project_id),
+        )
+        .await;
+        let card = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == task.id)
+            .cloned()
+            .unwrap();
+        if !card["conflicted"].is_null() {
+            seen = Some(card);
+            break;
+        }
+    }
+    let card = seen.expect("the background pass never filled the conflict cache");
+    assert_eq!(card["conflicted"], true);
+}
+
+// ── pairing ─────────────────────────────────────────────────────────────
+
+#[test]
+fn a_pairing_code_is_single_use() {
+    let codes = agtx::web::auth::PairingCodes::default();
+    let code = codes.issue();
+
+    assert!(codes.redeem(&code).is_ok());
+    // Spent. A code that could be replayed is a credential anyone who saw the
+    // screen keeps.
+    assert_eq!(
+        codes.redeem(&code),
+        Err(agtx::web::auth::PairError::Unknown)
+    );
+}
+
+/// Wrong codes are counted, and enough of them shut pairing until the next
+/// launch. `/api/pair` is the one unauthenticated route, so it is the one that
+/// must not be hammerable.
+#[test]
+fn repeated_bad_codes_lock_pairing_out() {
+    let codes = agtx::web::auth::PairingCodes::default();
+    let real = codes.issue();
+
+    for _ in 0..agtx::web::auth::PAIRING_MAX_FAILURES {
+        assert_eq!(
+            codes.redeem("not-a-code"),
+            Err(agtx::web::auth::PairError::Unknown)
+        );
+    }
+
+    // Even the genuine code is refused now: the lockout is about the endpoint,
+    // not about the code being wrong.
+    assert_eq!(
+        codes.redeem(&real),
+        Err(agtx::web::auth::PairError::LockedOut)
+    );
+}
+
+/// A device token is minted once and only its hash is kept, so the database
+/// cannot hand the credential back to anyone who reads it.
+#[tokio::test]
+async fn a_paired_device_stores_only_a_hash() {
+    let _f = fixture();
+    let token = paired_token("Test phone");
+
+    let db = Database::open_global().unwrap();
+    let devices = db.list_mobile_devices().unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].label, "Test phone");
+    assert_ne!(devices[0].token_hash, token, "the token itself was stored");
+    assert_eq!(devices[0].token_hash, agtx::web::auth::sha(&token));
+}
+
+/// Revoking one device must not disturb the others — the whole reason this
+/// replaced a single shared secret.
+#[tokio::test]
+async fn revoking_one_device_leaves_the_rest() {
+    let f = fixture();
+    let keep = paired_token("Keeper");
+    let lose = paired_token("Lost phone");
+
+    let db = Database::open_global().unwrap();
+    let lost_id = db
+        .list_mobile_devices()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.label == "Lost phone")
+        .unwrap()
+        .id;
+    assert!(db.revoke_mobile_device(&lost_id).unwrap());
+    // A second revoke reports false rather than succeeding twice.
+    assert!(!db.revoke_mobile_device(&lost_id).unwrap());
+
+    assert_eq!(
+        with_auth(guarded(&f), "/api/health", Some(&lose)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        with_auth(guarded(&f), "/api/health", Some(&keep)).await,
+        StatusCode::OK
+    );
+}
+
+/// An existing `serve-token` becomes a paired device rather than silently
+/// ceasing to work — the phone that was already set up keeps connecting.
+#[tokio::test]
+async fn the_legacy_token_is_adopted_once() {
+    let f = fixture();
+    let cfg = tempfile::TempDir::new().unwrap();
+    std::env::set_var("AGTX_CONFIG_DIR", cfg.path());
+
+    let legacy = "legacy-token-value";
+    std::fs::write(agtx::web::auth::token_path().unwrap(), legacy).unwrap();
+
+    let migrated = agtx::web::auth::migrate_legacy_token().unwrap();
+    assert_eq!(migrated.as_deref(), Some(legacy));
+    assert_eq!(
+        with_auth(guarded(&f), "/api/health", Some(legacy)).await,
+        StatusCode::OK,
+        "the previously paired device stopped working"
+    );
+
+    // The file is gone, so there is exactly one credential path, and a second
+    // run is a no-op rather than a duplicate row.
+    assert!(!agtx::web::auth::token_path().unwrap().exists());
+    assert!(agtx::web::auth::migrate_legacy_token().unwrap().is_none());
+    assert_eq!(
+        Database::open_global()
+            .unwrap()
+            .list_mobile_devices()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    std::env::remove_var("AGTX_CONFIG_DIR");
+}
+
+// ── tunnel planning ─────────────────────────────────────────────────────
+
+use agtx::web::tunnel::{plan, TunnelScope};
+
+/// `private` is `tailscale serve`; `public` is `funnel` or `cloudflared`. They
+/// are a tailnet and the open internet, and Tailscale's own naming invites
+/// confusing them.
+#[test]
+fn private_never_reaches_for_funnel() {
+    let only_tailscale = |p: &str| p == "tailscale";
+    let p = plan(TunnelScope::Private, 8787, &only_tailscale).unwrap();
+    assert_eq!(p.program, "tailscale");
+    assert!(p.args.contains(&"serve".to_string()));
+    assert!(
+        !p.args.contains(&"funnel".to_string()),
+        "private must never use funnel — that is the public one"
+    );
+    assert!(p.args.iter().any(|a| a.contains("127.0.0.1:8787")));
+
+    // And it undoes itself: `tailscale serve` configures the daemon, so it
+    // outlives this process unless explicitly turned off.
+    let teardown = p.teardown.expect("tailscale serve must be torn down");
+    assert!(teardown.contains(&"off".to_string()));
+}
+
+#[test]
+fn public_prefers_cloudflared_and_says_where_it_reaches() {
+    let both = |_: &str| true;
+    let p = plan(TunnelScope::Public, 9000, &both).unwrap();
+    assert_eq!(p.program, "cloudflared");
+    // The child *is* the tunnel, so dying is the teardown.
+    assert!(p.teardown.is_none());
+    assert!(p.reach.contains("internet"));
+
+    let only_tailscale = |x: &str| x == "tailscale";
+    let p = plan(TunnelScope::Public, 9000, &only_tailscale).unwrap();
+    assert!(p.args.contains(&"funnel".to_string()));
+    assert!(p.reach.contains("internet"));
+}
+
+#[test]
+fn a_missing_provider_explains_the_alternative() {
+    let none = |_: &str| false;
+    let err = plan(TunnelScope::Private, 8787, &none)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Tailscale"), "got {err}");
+
+    let err = plan(TunnelScope::Public, 8787, &none)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("--tunnel private"),
+        "public should point at the safer option: {err}"
+    );
+}
+
+#[test]
+fn tunnel_scope_is_never_guessed() {
+    assert_eq!(TunnelScope::parse("private"), Some(TunnelScope::Private));
+    assert_eq!(TunnelScope::parse("public"), Some(TunnelScope::Public));
+    for bad in ["", "yes", "PUBLIC", "prviate", "funnel"] {
+        assert_eq!(TunnelScope::parse(bad), None, "{bad:?} was accepted");
+    }
+}
+
+/// A tunnel is exposure even though the listener stays on loopback, so pairing
+/// must be required. Reading only the bind address is how a tunnelled server
+/// ends up open.
+#[test]
+fn a_tunnel_counts_as_off_loopback() {
+    let mut opts = agtx::web::ServeOptions::default();
+    assert!(opts.is_loopback(), "a plain serve is loopback");
+    opts.tunnel = Some(TunnelScope::Private);
+    assert!(
+        !opts.is_loopback(),
+        "a tunnelled server must require pairing even though it binds 127.0.0.1"
+    );
 }

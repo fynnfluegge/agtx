@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::actions::{validate_action, ActionRefusal, CallerKind, MAX_TASK_TITLE_CHARS};
 use crate::core::input::{agent_needs_paste, send_user_key, send_user_text, PaneKey};
 use crate::db::{Database, Task, TaskStatus, TransitionRequest};
+use crate::web::auth::PairError;
 
 use super::state::{ApiError, ApiResult, ServerState};
 
@@ -431,4 +432,64 @@ pub async fn task_input(
 
     tracing::info!(task = %tid, delivered, "input from web");
     Ok(Json(InputResponse { delivered }))
+}
+
+// ── POST /api/pair ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct PairRequest {
+    pub code: String,
+    /// What to call this device in the list. Free text, shown and never matched
+    /// on, so it needs no validation beyond not being able to flood a display.
+    pub label: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PairResponse {
+    token: String,
+    label: String,
+}
+
+/// Exchange a pairing code for a device token.
+///
+/// The one unauthenticated route, so everything that guards it lives here: the
+/// code is single-use and short-lived, failures are counted toward a lockout,
+/// and the write budget applies. The token is returned exactly once — only its
+/// hash is stored — so a device that loses it pairs again rather than asking
+/// for it back.
+pub async fn pair(
+    State(state): State<Arc<ServerState>>,
+    Json(body): Json<PairRequest>,
+) -> ApiResult<Json<PairResponse>> {
+    state.check_write_budget()?;
+
+    // Nothing to pair *with* on a loopback bind: there is no auth to hold a
+    // token against, so issuing one would imply a protection that is not there.
+    if !state.require_auth {
+        return Err(ApiError::Conflict(
+            "this server is not requiring authentication, so there is nothing to pair".to_string(),
+        ));
+    }
+
+    state
+        .pairing
+        .redeem(body.code.trim())
+        .map_err(|e| match e {
+            PairError::LockedOut => ApiError::TooManyRequests(e.message().to_string()),
+            other => ApiError::BadRequest(other.message().to_string()),
+        })?;
+
+    let label = body.label.unwrap_or_default();
+    let token = crate::web::auth::pair_device(&label)
+        .map_err(|e| ApiError::Internal(format!("pairing: {e}")))?;
+
+    let stored = crate::web::auth::device_for_token(&token)
+        .map(|d| d.label)
+        .unwrap_or_else(|| "phone".to_string());
+    tracing::info!(label = %stored, "device paired");
+
+    Ok(Json(PairResponse {
+        token,
+        label: stored,
+    }))
 }

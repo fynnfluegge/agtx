@@ -42,33 +42,67 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(250);
 /// a history browser.
 const FRAME_LINES: i32 = 200;
 
-#[derive(Deserialize)]
+/// What a client may say. Public because it *is* the wire contract: the
+/// browser has a hand-written encoder for it, and a rename here that nothing
+/// pins would break the live view silently — the socket would connect, the
+/// subscribe would be rejected as a bad message, and the pane would sit empty.
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ClientMessage {
+pub enum ClientMessage {
     /// Start streaming a task's pane. Replaces any previous subscription: a
     /// socket watches one pane, because a phone shows one screen.
-    Subscribe { project_id: String, task_id: String },
+    Subscribe {
+        project_id: String,
+        task_id: String,
+    },
     Unsubscribe,
 }
 
-#[derive(Serialize)]
+/// What the server sends back. Public for the same reason as [`ClientMessage`].
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ServerMessage<'a> {
+pub enum ServerMessage<'a> {
     Frame {
         task_id: &'a str,
         content: &'a str,
     },
     /// The pane went away — the agent exited, or the window was killed. Sent
     /// once rather than every tick, so a client can say so and stop waiting.
-    Gone { task_id: &'a str },
-    Error { message: String },
+    Gone {
+        task_id: &'a str,
+    },
+    Error {
+        message: String,
+    },
 }
 
-pub async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<ServerState>>) -> Response {
-    // Auth belongs here, and there is none yet: nothing is issued to check
-    // against until pairing (Step 6). The server binds loopback only, which is
-    // what currently stands in for it — see `web::serve`.
-    ws.on_upgrade(move |socket| run(socket, state))
+pub async fn handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<ServerState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    // Authentication already happened in the router's auth layer, which reads
+    // the same subprotocol — it has to run *before* `WebSocketUpgrade` accepts
+    // the upgrade, and an extractor cannot.
+    //
+    // What is left here is echoing the subprotocol back: a browser that offered
+    // one and receives nothing fails the handshake itself, which surfaces as a
+    // network error rather than as anything to do with tokens.
+    let offered = headers
+        .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.split(',')
+                .map(str::trim)
+                .find(|p| p.starts_with(super::auth::WS_TOKEN_PREFIX))
+                .map(str::to_string)
+        });
+
+    let upgrade = match offered {
+        Some(proto) => ws.protocols([proto]),
+        None => ws,
+    };
+    upgrade.on_upgrade(move |socket| run(socket, state))
 }
 
 async fn run(mut socket: WebSocket, state: Arc<ServerState>) {
@@ -154,7 +188,7 @@ async fn send(socket: &mut WebSocket, msg: &ServerMessage<'_>) -> Result<(), axu
 /// rather than per frame — the task's session name does not change while it is
 /// being watched, and looking it up four times a second would put a SQLite read
 /// on the frame path.
-struct Subscription {
+pub struct Subscription {
     task_id: String,
     session_name: String,
     /// Captures go through `TmuxOperations` rather than a hand-rolled `tmux`
@@ -167,7 +201,7 @@ struct Subscription {
 }
 
 impl Subscription {
-    fn open(state: &ServerState, project_id: &str, task_id: &str) -> Result<Self, String> {
+    pub fn open(state: &ServerState, project_id: &str, task_id: &str) -> Result<Self, String> {
         let db = state
             .project_db(project_id)
             .map_err(|_| format!("no project {project_id}"))?;

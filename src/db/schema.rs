@@ -3,8 +3,8 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 use super::models::{
-    Notification, NotificationKind, PhaseStatus, Project, Task, TaskRuntime, TaskStatus,
-    TransitionRequest,
+    MobileDevice, Notification, NotificationKind, PhaseStatus, Project, Task, TaskRuntime,
+    TaskStatus, TransitionRequest,
 };
 
 /// Database wrapper for SQLite operations
@@ -299,6 +299,23 @@ impl Database {
                 project_path TEXT PRIMARY KEY,
                 beat_at TEXT NOT NULL
             );
+
+            -- Devices paired with `agtx serve`. One row per phone, so a lost
+            -- one can be revoked without re-pairing the rest.
+            --
+            -- The token is stored **hashed**. This file is 0600, but a
+            -- credential that grants shell-equivalent access to the machine
+            -- should not be readable from a backup, a stray copy, or anything
+            -- that later gets a wider mode by accident.
+            CREATE TABLE IF NOT EXISTS mobile_devices (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                last_seen TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_devices_hash ON mobile_devices(token_hash);
             "#,
         )?;
         Ok(())
@@ -763,6 +780,89 @@ impl Database {
         // `RETURNING` doesn't guarantee any particular row order — sort in Rust.
         notifs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         Ok(notifs)
+    }
+
+    // ── Paired devices ──────────────────────────────────────────────────
+
+    pub fn add_mobile_device(&self, device: &MobileDevice) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO mobile_devices (id, label, token_hash, created_at, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                device.id,
+                device.label,
+                device.token_hash,
+                device.created_at.to_rfc3339(),
+                device.last_seen.map(|t| t.to_rfc3339()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The device holding this token hash, if any.
+    ///
+    /// Looked up by hash rather than compared in Rust so the secret itself
+    /// never has to be read out of the database to check a request.
+    pub fn mobile_device_by_hash(&self, token_hash: &str) -> Result<Option<MobileDevice>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM mobile_devices WHERE token_hash = ?1")?;
+        let mut rows = stmt.query_map(params![token_hash], Self::mobile_device_from_row)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn list_mobile_devices(&self) -> Result<Vec<MobileDevice>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM mobile_devices ORDER BY created_at ASC")?;
+        let rows = stmt
+            .query_map([], Self::mobile_device_from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Record that a device was used. Callers should throttle: this is a write,
+    /// and a phone polling the board would otherwise cause one every two
+    /// seconds to store a timestamp nobody reads that often.
+    pub fn touch_mobile_device(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE mobile_devices SET last_seen = ?1 WHERE id = ?2",
+            params![chrono::Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns whether a row was removed, so a caller can tell "revoked" from
+    /// "no such device" rather than reporting success either way.
+    pub fn revoke_mobile_device(&self, id: &str) -> Result<bool> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM mobile_devices WHERE id = ?1", params![id])?;
+        Ok(rows > 0)
+    }
+
+    /// Returns how many were removed.
+    pub fn revoke_all_mobile_devices(&self) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM mobile_devices", [])?)
+    }
+
+    fn mobile_device_from_row(row: &rusqlite::Row) -> rusqlite::Result<MobileDevice> {
+        let parse = |s: String| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
+        };
+        Ok(MobileDevice {
+            id: row.get("id")?,
+            label: row.get("label")?,
+            token_hash: row.get("token_hash")?,
+            created_at: row
+                .get::<_, Option<String>>("created_at")?
+                .and_then(parse)
+                .unwrap_or_else(chrono::Utc::now),
+            last_seen: row.get::<_, Option<String>>("last_seen")?.and_then(parse),
+        })
     }
 
     // ── TUI heartbeat ───────────────────────────────────────────────────

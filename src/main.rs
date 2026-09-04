@@ -181,13 +181,20 @@ fn migrate_old_config(new_path: &std::path::Path) -> bool {
 #[cfg(feature = "serve")]
 async fn run_serve(args: &[String]) -> Result<()> {
     let parsed = parse_serve_args(args)?;
-    if parsed.tunnel {
-        anyhow::bail!(
-            "--tunnel is not implemented yet: it needs the per-device tokens that pairing \
-             introduces, and a tunnel without them would publish this machine's agent panes. \
-             Use an SSH tunnel in the meantime."
-        );
+
+    // Device management runs and exits — it is about the paired devices, not
+    // about serving, and doing it without starting a listener means it works
+    // while a server is already running.
+    if parsed.devices {
+        return list_devices();
     }
+    if parsed.revoke_all {
+        return revoke_all_devices();
+    }
+    if let Some(id) = parsed.revoke {
+        return revoke_device(&id);
+    }
+
     agtx::web::serve(parsed.opts).await
 }
 
@@ -202,7 +209,55 @@ async fn run_serve(_args: &[String]) -> Result<()> {
 #[cfg(feature = "serve")]
 struct ParsedServeArgs {
     opts: agtx::web::ServeOptions,
-    tunnel: bool,
+    devices: bool,
+    revoke_all: bool,
+    revoke: Option<String>,
+}
+
+/// `agtx serve --devices`
+#[cfg(feature = "serve")]
+fn list_devices() -> Result<()> {
+    let devices = agtx::db::Database::open_global()?.list_mobile_devices()?;
+    if devices.is_empty() {
+        println!("No paired devices. Run `agtx serve --host 0.0.0.0` and scan the QR code.");
+        return Ok(());
+    }
+    println!("{:<38}  {:<24}  {}", "ID", "LABEL", "LAST SEEN");
+    for d in devices {
+        let seen = d
+            .last_seen
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "never".to_string());
+        println!("{:<38}  {:<24}  {}", d.id, d.label, seen);
+    }
+    println!("\nRevoke one with `agtx serve --revoke <ID>`, or all with `--revoke-all`.");
+    Ok(())
+}
+
+/// `agtx serve --revoke <id>`
+#[cfg(feature = "serve")]
+fn revoke_device(id: &str) -> Result<()> {
+    let db = agtx::db::Database::open_global()?;
+    if db.revoke_mobile_device(id)? {
+        println!("Revoked {id}. That device must scan a new QR code to return.");
+    } else {
+        // Distinguished from success so a typo does not read as a revocation
+        // that never happened.
+        anyhow::bail!("no paired device with id {id}; `agtx serve --devices` lists them");
+    }
+    Ok(())
+}
+
+/// `agtx serve --revoke-all`
+#[cfg(feature = "serve")]
+fn revoke_all_devices() -> Result<()> {
+    let removed = agtx::db::Database::open_global()?.revoke_all_mobile_devices()?;
+    match removed {
+        0 => println!("No paired devices to revoke."),
+        1 => println!("Revoked 1 device."),
+        n => println!("Revoked {n} devices."),
+    }
+    Ok(())
 }
 
 /// Parse `serve`'s own arguments.
@@ -215,7 +270,9 @@ struct ParsedServeArgs {
 #[cfg(feature = "serve")]
 fn parse_serve_args(args: &[String]) -> Result<ParsedServeArgs> {
     let mut opts = agtx::web::ServeOptions::default();
-    let mut tunnel = false;
+    let mut devices = false;
+    let mut revoke_all = false;
+    let mut revoke = None;
     let mut iter = args.iter().peekable();
 
     while let Some(arg) = iter.next() {
@@ -236,7 +293,33 @@ fn parse_serve_args(args: &[String]) -> Result<ParsedServeArgs> {
                     .parse()
                     .with_context(|| format!("--host expects an IP address, got {v:?}"))?;
             }
-            "--tunnel" => tunnel = true,
+            "--tunnel" => {
+                // A bare `--tunnel` means private. `public` is never inferred:
+                // the difference is a tailnet versus the open internet, and it
+                // has to be a thing someone typed.
+                let scope = match iter.peek() {
+                    Some(next) if !next.starts_with("--") => {
+                        let v = iter.next().unwrap();
+                        agtx::web::tunnel::TunnelScope::parse(v).with_context(|| {
+                            format!("--tunnel takes `private` or `public`, got {v:?}")
+                        })?
+                    }
+                    _ => agtx::web::tunnel::TunnelScope::Private,
+                };
+                opts.tunnel = Some(scope);
+            }
+            "--pair-code" => {
+                opts.pair_code = Some(iter.next().context("--pair-code needs a value")?.clone())
+            }
+            "--devices" => devices = true,
+            "--revoke-all" => revoke_all = true,
+            "--revoke" => {
+                revoke = Some(
+                    iter.next()
+                        .context("--revoke needs a device id; see `agtx serve --devices`")?
+                        .clone(),
+                )
+            }
             other if other.starts_with("--") => {
                 anyhow::bail!("unknown option for `agtx serve`: {other}")
             }
@@ -249,7 +332,12 @@ fn parse_serve_args(args: &[String]) -> Result<ParsedServeArgs> {
         }
     }
 
-    Ok(ParsedServeArgs { opts, tunnel })
+    Ok(ParsedServeArgs {
+        opts,
+        devices,
+        revoke_all,
+        revoke,
+    })
 }
 
 fn run_update(args: &[String]) -> Result<()> {

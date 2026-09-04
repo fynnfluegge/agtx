@@ -7,7 +7,11 @@
 //!   dependency, which every browser that can install a PWA loads natively.
 //! - **A missing file is a compile error.** A path table checked at build time
 //!   cannot drift from what is on disk; a directory glob resolved at runtime
-//!   404s instead, and only for whoever hits that asset.
+//!   404s instead, and only for whoever hits that asset. Note the guarantee runs
+//!   one way — a *listed* file must exist, but nothing here makes every file on
+//!   disk listed. A new module left out of this table 404s to the SPA shell, and
+//!   an ES import that receives HTML fails the whole app with a blank page.
+//!   `the_asset_table_covers_the_web_directory` is what closes that direction.
 //! - **No build artifact means nothing can be stale.** The alternative —
 //!   committing `web/dist/` and adding a CI job to catch a stale copy — exists
 //!   only to police a build step that this does not have.
@@ -48,6 +52,11 @@ pub const ASSETS: &[Asset] = &[
         path: "app.js",
         mime: "text/javascript; charset=utf-8",
         body: include_bytes!("../../web/app.js"),
+    },
+    Asset {
+        path: "ansi.js",
+        mime: "text/javascript; charset=utf-8",
+        body: include_bytes!("../../web/ansi.js"),
     },
     Asset {
         path: "api.js",

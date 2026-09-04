@@ -7,8 +7,9 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
-    http::{header, Uri},
+    extract::{Path, Query, Request, State},
+    http::{header, StatusCode, Uri},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
     Json, Router,
@@ -18,7 +19,54 @@ use serde::{Deserialize, Serialize};
 use crate::core::actions::{allowed_actions, CallerKind};
 use crate::db::{Database, PhaseStatus, Task};
 
-use super::state::{ApiError, ApiResult, ServeMode, ServerState};
+use super::state::{ApiError, ApiResult, ConflictState, ServeMode, ServerState};
+
+/// Reject an unauthenticated `/api/*` or `/ws` request.
+///
+/// Layered over the API routes only. The static assets stay open because a
+/// browser cannot put a header on the initial page load, and gating them would
+/// mean carrying the token in the URL of every navigation — see
+/// [`super::auth`]. They are this app's own JS and CSS and expose no board.
+async fn require_token(
+    State(state): State<Arc<ServerState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    // Two places a token can be, because a browser cannot put `Authorization`
+    // on a WebSocket handshake — the subprotocol is the one field it *can* set
+    // there. Both are checked here rather than one here and one in the socket
+    // handler: `WebSocketUpgrade` is an extractor, so a handler-side check runs
+    // only after the upgrade has been accepted, and an exemption in this layer
+    // to let that happen is an open socket for as long as anyone forgets why.
+    let headers = req.headers();
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| {
+            headers
+                .get(header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .find_map(|p| p.strip_prefix(super::auth::WS_TOKEN_PREFIX))
+                })
+        });
+
+    if state.token_ok(presented) {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "missing or wrong token. Open the URL agtx printed at startup, \
+                          which carries it in the fragment."
+            })),
+        )
+            .into_response()
+    }
+}
 
 pub fn router(state: Arc<ServerState>) -> Router {
     Router::new()
@@ -48,15 +96,23 @@ pub fn router(state: Arc<ServerState>) -> Router {
         )
         // Live pane frames. Not under `/api` because it is not a JSON endpoint
         // and the fallback's `/api/` guard would have to special-case it.
+        // Inside the auth layer, unlike the static assets: the token check has
+        // to happen before the upgrade is accepted.
         .route("/ws", get(super::ws::handler))
         .route(
             "/api/projects/{pid}/tasks/{tid}",
             patch(super::writes::update_task).delete(super::writes::delete_task),
         )
+        // Pairing is the one unauthenticated route — it is how a device gets a
+        // credential in the first place — so it is registered *outside* the
+        // auth layer, alongside the static shell.
+        .layer(middleware::from_fn_with_state(state.clone(), require_token))
+        .route("/api/pair", post(super::writes::pair))
         .with_state(state)
         // The PWA, last: `/api/*` is matched first, so an asset can never
-        // shadow a route, and an unknown `/api/...` path still 404s as JSON
-        // rather than being answered with the HTML shell.
+        // shadow a route, and an unknown `/api/...` path still 404s as HTML —
+        // and the fallback sits *outside* the auth layer, so the shell loads
+        // before the page has a token to present.
         .fallback(asset)
 }
 
@@ -215,11 +271,24 @@ struct TaskCard {
     /// it.
     phase_status: Option<String>,
     phase_age_secs: Option<i64>,
+    /// Whether this branch still merges cleanly into its base. `None` means
+    /// "not checked yet" — a Review task's first appearance, before the
+    /// background pass has run — and a client must render that as unknown
+    /// rather than as clean, which is the answer someone might merge on.
+    conflicted: Option<bool>,
+    conflicting_files: Vec<String>,
 }
 
-fn card(db: &Database, t: Task, runtime: Option<&crate::db::TaskRuntime>) -> TaskCard {
+fn card(
+    db: &Database,
+    t: Task,
+    runtime: Option<&crate::db::TaskRuntime>,
+    conflict: Option<ConflictState>,
+) -> TaskCard {
     let deps_ok = db.deps_satisfied(&t);
     TaskCard {
+        conflicted: conflict.as_ref().map(|c| c.conflicted),
+        conflicting_files: conflict.map(|c| c.files).unwrap_or_default(),
         allowed_actions: allowed_actions(&t, deps_ok, CallerKind::Human),
         deps_satisfied: deps_ok,
         phase_status: runtime.map(|r| r.phase_status.as_str().to_string()),
@@ -250,14 +319,91 @@ async fn tasks(
     // request a phone makes most, and it is the one that grows with the project.
     let runtime = db.list_task_runtime().unwrap_or_default();
 
+    // Kick off a conflict pass for anything in Review whose answer is missing
+    // or stale. It runs *after* this response: the board never waits on git.
+    spawn_conflict_refresh(state.clone(), &pid, &all);
+
     Ok(Json(
         all.into_iter()
             .map(|t| {
                 let rt = runtime.iter().find(|r| r.task_id == t.id);
-                card(&db, t, rt)
+                let conflict = state.conflicts.get(&t.id);
+                card(&db, t, rt, conflict)
             })
             .collect(),
     ))
+}
+
+/// Recompute merge-conflict state for Review tasks, off the request path.
+///
+/// Only Review tasks: a branch that is still being written to will conflict or
+/// not many times before anyone cares, and the question is only meaningful once
+/// the work is up for merging.
+fn spawn_conflict_refresh(state: Arc<ServerState>, pid: &str, tasks: &[Task]) {
+    let stale: Vec<Task> = tasks
+        .iter()
+        .filter(|t| t.status == crate::db::TaskStatus::Review)
+        .filter(|t| t.worktree_path.is_some() && state.conflicts.is_stale(&t.id))
+        .cloned()
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+
+    let Ok(project) = state.project_path(pid) else {
+        return;
+    };
+
+    tokio::task::spawn_blocking(move || {
+        // One pass at a time. A poll every two seconds would otherwise stack
+        // passes over the same tasks faster than git can answer.
+        let Some(_guard) = state.conflicts.try_claim() else {
+            return;
+        };
+        for task in stale {
+            if let Some(found) = conflict_for(&project, &task) {
+                state.conflicts.put(task.id.clone(), found);
+            }
+        }
+    });
+}
+
+/// The base branch to compare against, verified to exist.
+///
+/// The recorded base has to be *checked*, not trusted: `git diff` and
+/// `git merge-tree` only fail when git cannot be **spawned**, so a base that no
+/// longer resolves comes back as an empty diff and no conflicts — which reads
+/// as "nothing to do" for a task whose work is entirely intact. Falling back to
+/// detection and reporting which base was used keeps the answer honest.
+fn resolve_base(
+    project: &std::path::Path,
+    worktree: &std::path::Path,
+    recorded: Option<&str>,
+) -> Option<String> {
+    recorded
+        .filter(|b| !b.is_empty() && crate::git::ref_exists(worktree, b))
+        .map(str::to_string)
+        .or_else(|| {
+            crate::git::detect_main_branch(project)
+                .ok()
+                .filter(|b| crate::git::ref_exists(worktree, b))
+        })
+}
+
+/// `None` when the question cannot be asked — no worktree, no branch, or a base
+/// that does not resolve. Distinct from "no conflicts", which is an answer.
+fn conflict_for(project: &std::path::Path, task: &Task) -> Option<ConflictState> {
+    let worktree = std::path::PathBuf::from(task.worktree_path.as_ref()?);
+    if !worktree.exists() {
+        return None;
+    }
+    let branch = task.branch_name.clone()?;
+    let base = resolve_base(project, &worktree, task.base_branch.as_deref())?;
+
+    match crate::git::check_merge_conflicts(&worktree, &base, &branch) {
+        Ok((conflicted, files)) => Some(ConflictState { conflicted, files }),
+        Err(_) => None,
+    }
 }
 
 // ── /api/projects/:pid/tasks/:tid ───────────────────────────────────────
@@ -288,6 +434,29 @@ async fn task_detail(
     let t = load_task(&db, &tid)?;
     let runtime = db.get_task_runtime(&tid).ok().flatten();
 
+    // On the detail screen the answer is worth waiting for: one task, and this
+    // is the screen someone is on when deciding whether to merge. The board
+    // takes the cached value instead, because it asks about every card at once.
+    let conflict = if t.status == crate::db::TaskStatus::Review {
+        match state.conflicts.get(&tid) {
+            Some(cached) if !state.conflicts.is_stale(&tid) => Some(cached),
+            _ => {
+                let project = state.project_path(&pid)?;
+                let task = t.clone();
+                let found = tokio::task::spawn_blocking(move || conflict_for(&project, &task))
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(ref c) = found {
+                    state.conflicts.put(tid.clone(), c.clone());
+                }
+                found
+            }
+        }
+    } else {
+        None
+    };
+
     let hook = t.worktree_path.as_ref().and_then(|wt| {
         crate::agent::hook_status::read_status(
             std::path::Path::new(wt),
@@ -305,7 +474,7 @@ async fn task_detail(
     let created_at = t.created_at.to_rfc3339();
 
     Ok(Json(TaskDetail {
-        card: card(&db, t, runtime.as_ref()),
+        card: card(&db, t, runtime.as_ref(), conflict),
         description,
         worktree_path,
         session_name,
@@ -333,6 +502,10 @@ struct DiffResponse {
     base: String,
     stat: String,
     patch: String,
+    /// `None` when the check could not be made. The diff screen is where
+    /// someone decides to merge, so "unknown" and "clean" must not look alike.
+    conflicted: Option<bool>,
+    conflicting_files: Vec<String>,
 }
 
 async fn task_diff(
@@ -353,31 +526,14 @@ async fn task_diff(
         )));
     }
 
-    // The task's own base branch when it has one — a task cut from a release
-    // branch diffed against `main` shows every unrelated commit as its work.
-    //
-    // But the recorded base has to be *checked*, not trusted. `diff_stat` only
-    // fails when git cannot be spawned, so a base that no longer resolves comes
-    // back as an empty diff, and the UI renders "no changes" for a task whose
-    // work is entirely intact. Falling back to detection and reporting which
-    // base was actually used keeps the answer honest — the client reads `base`.
-    let base = t
-        .base_branch
-        .clone()
-        .filter(|b| !b.is_empty() && crate::git::ref_exists(&worktree, b))
-        .or_else(|| {
-            crate::git::detect_main_branch(&project)
-                .ok()
-                .filter(|b| crate::git::ref_exists(&worktree, b))
-        })
-        .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "no base branch to diff against: task {tid} records {:?}, and neither it nor a \
+    let base = resolve_base(&project, &worktree, t.base_branch.as_deref()).ok_or_else(|| {
+        ApiError::NotFound(format!(
+            "no base branch to diff against: task {tid} records {:?}, and neither it nor a \
                  detected default resolves in {}",
-                t.base_branch.as_deref().unwrap_or("none"),
-                worktree.display()
-            ))
-        })?;
+            t.base_branch.as_deref().unwrap_or("none"),
+            worktree.display()
+        ))
+    })?;
 
     // `HEAD` rather than the branch name: the branch is what the worktree has
     // checked out, and naming it would miss nothing but costs a lookup.
@@ -386,7 +542,27 @@ async fn task_diff(
     let patch = crate::git::diff_full(&worktree, &base, "HEAD")
         .map_err(|e| ApiError::Internal(format!("git diff: {e}")))?;
 
-    Ok(Json(DiffResponse { base, stat, patch }))
+    // Computed here rather than read from the cache: this is the screen the
+    // decision gets made on, and one git call is worth an honest answer.
+    let conflict = {
+        let project = project.clone();
+        let task = t.clone();
+        tokio::task::spawn_blocking(move || conflict_for(&project, &task))
+            .await
+            .ok()
+            .flatten()
+    };
+    if let Some(ref c) = conflict {
+        state.conflicts.put(tid.clone(), c.clone());
+    }
+
+    Ok(Json(DiffResponse {
+        base,
+        stat,
+        patch,
+        conflicted: conflict.as_ref().map(|c| c.conflicted),
+        conflicting_files: conflict.map(|c| c.files).unwrap_or_default(),
+    }))
 }
 
 // ── /api/projects/:pid/tasks/:tid/pane ──────────────────────────────────
@@ -446,7 +622,7 @@ fn capture_pane(session_name: &str, lines: i32) -> Option<String> {
 }
 
 /// Remove SGR sequences, leaving the text a JSON caller expects.
-fn strip_sgr(text: &str) -> String {
+pub fn strip_sgr(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
