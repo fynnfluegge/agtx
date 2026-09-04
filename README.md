@@ -132,6 +132,9 @@ agtx -g
 
 # Orchestrator mode — let an AI manage the board for you
 agtx --experimental
+
+# Drive the board from your phone — press W in the TUI, or:
+agtx serve --tunnel
 ```
 
 > [!NOTE]
@@ -195,6 +198,7 @@ curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh \
 | `,` | Open the config editor |
 | `?` | Show every keyboard shortcut |
 | `u` | Update agtx (only shown when a new release is available) |
+| `W` | Serve the board to a phone (QR pairing, device list) |
 | `O` | Toggle orchestrator agent (`--experimental`) |
 | `e` | Toggle project sidebar |
 | `q` | Quit |
@@ -238,6 +242,47 @@ Each task runs in its own tmux window with a dedicated coding agent. The session
 - **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch using a non-destructive virtual merge (`git merge-tree`). If conflicts are detected, the agent is automatically sent the `/agtx:merge-conflicts` skill to resolve them and re-commit
 
 </details>
+
+## Mobile
+
+[//]: <> (screenshot: the board on a phone — take it on a real device, then drag it into a GitHub comment and paste the attachment URL here, as with the TUI shot above)
+
+Press `W` on the board to serve it to your phone. agtx prints a QR code; scanning
+it pairs the device and opens an installable web app with the board, task
+details, git diffs, and the agent's live terminal — including a keyboard, so you
+can answer a permission prompt from wherever you are.
+
+```bash
+# Or start it yourself, without the TUI
+agtx serve                       # this machine only
+agtx serve --tunnel              # your tailnet — anywhere, your devices only
+agtx serve --devices             # list paired devices
+agtx serve --revoke <id>         # revoke one; --revoke-all for the lot
+```
+
+Two keys in the overlay, each a whole action: `s` serves to the local network,
+`t` serves via your tailnet. The local network is unroutable from mobile data, so
+`t` is the one that works on the train — it needs
+[Tailscale](https://tailscale.com/download) installed on both machines and Serve
+enabled for the tailnet.
+
+Add it to your home screen and it behaves like an app: its own icon, no address
+bar, and the pairing is remembered.
+
+> [!IMPORTANT]
+> Anything that can reach this server can read every task, every diff and every
+> agent's screen, and can type into a running agent — which is arbitrary code
+> execution on your machine. So: loopback needs no credential because reaching it
+> already means being on the machine, and **everything wider requires a paired
+> device**. Tokens are per-device and stored hashed, so a lost phone is revoked
+> without disturbing the rest. `--tunnel public` publishes to the open internet
+> and is deliberately not offered behind a keypress.
+
+**Actions queue; they do not execute on their own.** Moving a task writes a
+request that only a running `agtx` picks up, so with no TUI open your taps are
+accepted and then wait — the board says so rather than pretending. Creating,
+editing and deleting Backlog tasks take effect immediately, since they need no
+agent. Starting the server with `W` keeps the two together by construction.
 
 ## Brainstorm & Sweep Skills
 

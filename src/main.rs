@@ -178,8 +178,61 @@ fn migrate_old_config(new_path: &std::path::Path) -> bool {
 /// The `cfg(not(...))` arm is not decoration — the match below ends with
 /// `Some(path) => AppMode::Project(...)`, and `serve` is not `--`-prefixed, so
 /// without it a default build would open a directory named `serve` as a project.
+/// What `agtx serve --help` prints.
+///
+/// Hand-written because agtx parses its own arguments; the cost of that is
+/// that `--help` has to be remembered, and forgetting it means the first thing
+/// anyone types at a new subcommand is an error.
+#[cfg(feature = "serve")]
+const SERVE_HELP: &str = "\
+agtx serve — open the board to a phone
+
+USAGE
+  agtx serve [path] [options]
+
+  With no path, every project in the global index is served and the phone picks
+  one. With a path, only that project.
+
+OPTIONS
+  --host <addr>       Bind address. Defaults to 127.0.0.1, which nothing else
+                      can reach; anything wider requires a paired device.
+  --port <n>          Default 8787.
+  --tunnel [private|public]
+                      Reach the board from outside this network. `private`
+                      (the default, and what a bare --tunnel means) is
+                      `tailscale serve`: anywhere, but only devices signed into
+                      your tailnet. `public` is cloudflared or `tailscale
+                      funnel` — the open internet, to anyone with the URL.
+  --devices           List paired devices.
+  --revoke <id>       Revoke one device.
+  --revoke-all        Revoke every device.
+
+PAIRING
+  Off loopback, agtx prints a QR encoding a single-use pairing code. Scanning it
+  exchanges the code for that device's own token, so a lost phone can be revoked
+  without disturbing the rest. Already-paired devices need nothing.
+
+WHAT WORKS WITHOUT A TUI
+  Reading does: the board, task details, diffs and the live agent pane are all
+  served from the databases and tmux directly.
+
+  Acting does not, yet. Moving a task writes a request to a queue that only a
+  running `agtx` drains, so with no TUI open your taps are accepted and then
+  wait. The board says so rather than pretending. Anything that does not need
+  an agent — creating, editing or deleting a Backlog task — takes effect
+  immediately.
+
+  From the TUI, `W` starts this server and shows the QR, so the two are running
+  together by construction.
+";
+
 #[cfg(feature = "serve")]
 async fn run_serve(args: &[String]) -> Result<()> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{SERVE_HELP}");
+        return Ok(());
+    }
+
     let parsed = parse_serve_args(args)?;
 
     // Device management runs and exits — it is about the paired devices, not
@@ -321,7 +374,7 @@ fn parse_serve_args(args: &[String]) -> Result<ParsedServeArgs> {
                 )
             }
             other if other.starts_with("--") => {
-                anyhow::bail!("unknown option for `agtx serve`: {other}")
+                anyhow::bail!("unknown option for `agtx serve`: {other}. Try `agtx serve --help`.")
             }
             path => {
                 if opts.project_path.is_some() {
