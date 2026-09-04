@@ -103,6 +103,7 @@ pub const HELP: &[HelpSection] = &[
         title: "Mobile (W)",
         entries: &[
             e("s", "Start or stop serving"),
+            e("t", "Reach: local network, or your tailnet from anywhere"),
             e("j k  ↓↑", "Select a paired device"),
             e("x", "Revoke the selected device"),
             e("r", "Reload the device list"),

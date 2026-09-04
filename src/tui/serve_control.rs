@@ -24,29 +24,106 @@ use anyhow::{Context, Result};
 /// overlay keeps working against a hand-started server and the other way round.
 pub const DEFAULT_PORT: u16 = 8787;
 
+/// How far the served board should reach.
+///
+/// Only these two. `--tunnel public` exists on the CLI and is deliberately not
+/// offered behind a keypress: it publishes an endpoint that can type into a
+/// running agent, and that should cost more than tapping `t` twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// Bound to every interface. Works on this wifi; a private address is
+    /// unroutable from mobile data.
+    Lan,
+    /// `tailscale serve` into a loopback listener. Anywhere, but only devices
+    /// signed into the same tailnet.
+    Tailnet,
+}
+
+impl Reach {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Reach::Lan => "local network",
+            Reach::Tailnet => "tailnet",
+        }
+    }
+
+    pub fn toggled(&self) -> Self {
+        match self {
+            Reach::Lan => Reach::Tailnet,
+            Reach::Tailnet => Reach::Lan,
+        }
+    }
+
+    /// Why this option cannot be used right now, if it cannot.
+    ///
+    /// Checked before starting rather than after: a child that exits because
+    /// Tailscale is missing surfaces as "the server stopped on its own", which
+    /// says nothing about what to install.
+    #[cfg(feature = "serve")]
+    pub fn unavailable(&self) -> Option<&'static str> {
+        match self {
+            Reach::Lan => None,
+            Reach::Tailnet if !crate::web::tunnel::installed("tailscale") => {
+                Some("install Tailscale and sign this machine in")
+            }
+            Reach::Tailnet if crate::web::tunnel::tailnet_hostname().is_none() => {
+                Some("Tailscale is installed but not signed in")
+            }
+            Reach::Tailnet => None,
+        }
+    }
+
+    #[cfg(not(feature = "serve"))]
+    pub fn unavailable(&self) -> Option<&'static str> {
+        Some("this build has no web server")
+    }
+}
+
 /// A running child server, plus what a person needs to reach it.
 pub struct ServeSession {
     child: Child,
     pub url: String,
     pub port: u16,
+    pub reach: Reach,
 }
 
 impl ServeSession {
-    /// Start `agtx serve` bound to every interface, seeded with `code`.
+    /// Start `agtx serve` for `reach`, seeded with a fresh pairing code.
     ///
-    /// Off-loopback on purpose: a server the phone cannot reach is the one
-    /// thing this overlay exists to avoid. That also means the child requires
-    /// pairing, which the code is for.
-    pub fn start(port: u16) -> Result<Self> {
+    /// The two modes differ in more than a flag. LAN binds every interface and
+    /// the URL is this machine's private address. A tunnel leaves the listener
+    /// on loopback — Tailscale proxies into it — and the URL is the **tailnet
+    /// hostname**, which agtx does not choose and therefore has to ask for.
+    /// Both require pairing: `ServeOptions::is_loopback` counts a tunnel as
+    /// exposure even though the bind address says otherwise.
+    pub fn start(port: u16, reach: Reach) -> Result<Self> {
         let exe = std::env::current_exe().context("locating the agtx binary")?;
         let code = uuid::Uuid::new_v4().simple().to_string();
-        let host = local_ipv4().unwrap_or_else(|| "127.0.0.1".to_string());
-        let url = format!("http://{host}:{port}/#pair={code}");
+
+        let mut args: Vec<String> = vec!["serve".into(), "--port".into(), port.to_string()];
+        let url = match reach {
+            Reach::Lan => {
+                args.push("--host".into());
+                args.push("0.0.0.0".into());
+                let host = local_ipv4().unwrap_or_else(|| "127.0.0.1".to_string());
+                format!("http://{host}:{port}/#pair={code}")
+            }
+            Reach::Tailnet => {
+                args.push("--tunnel".into());
+                args.push("private".into());
+                let host = tailnet_host().context(
+                    "could not read this machine's tailnet name from `tailscale status`",
+                )?;
+                // https, because that is what `tailscale serve --https=443`
+                // publishes — and the port is the tunnel's, not the listener's.
+                format!("https://{host}/#pair={code}")
+            }
+        };
+        args.push("--pair-code".into());
+        args.push(code);
 
         let child = Command::new(exe)
-            .args(["serve", "--host", "0.0.0.0", "--port"])
-            .arg(port.to_string())
-            .args(["--pair-code", &code])
+            .args(&args)
             // The TUI owns the screen; anything the child prints would land on
             // top of the board. Its errors are surfaced by `check` instead.
             .stdin(Stdio::null())
@@ -55,7 +132,12 @@ impl ServeSession {
             .spawn()
             .context("starting agtx serve")?;
 
-        Ok(Self { child, url, port })
+        Ok(Self {
+            child,
+            url,
+            port,
+            reach,
+        })
     }
 
     /// Whether the child is still running.
@@ -63,6 +145,32 @@ impl ServeSession {
     /// `Some(status)` means it exited — most often because the port was already
     /// taken, or this build has no `serve` feature. Either way the overlay has
     /// to stop claiming to be serving.
+    /// Whether this URL only resolves inside the local network.
+    ///
+    /// True for the private ranges — 10/8, 172.16/12, 192.168/16 and the
+    /// link-local 169.254/16 — plus loopback. A phone on mobile data has no
+    /// route to any of them, so a QR carrying one is a code that scans
+    /// perfectly and then times out.
+    pub fn is_lan_only(&self) -> bool {
+        Self::lan_only_url(&self.url)
+    }
+
+    /// Split out so it can be tested against the addresses that matter without
+    /// starting a server for each one.
+    pub fn lan_only_url(url: &str) -> bool {
+        let host = url
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .split(['/', ':'])
+            .next()
+            .unwrap_or_default();
+        match host.parse::<std::net::Ipv4Addr>() {
+            Ok(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+            // A hostname rather than an address means a tunnel put it there.
+            Err(_) => false,
+        }
+    }
+
     pub fn check(&mut self) -> Option<std::process::ExitStatus> {
         self.child.try_wait().ok().flatten()
     }
@@ -94,10 +202,22 @@ pub fn local_ipv4() -> Option<String> {
     }
 }
 
+#[cfg(feature = "serve")]
+fn tailnet_host() -> Option<String> {
+    crate::web::tunnel::tailnet_hostname()
+}
+
+#[cfg(not(feature = "serve"))]
+fn tailnet_host() -> Option<String> {
+    None
+}
+
 /// The `W` overlay's state.
 pub struct MobilePopup {
     /// `None` when nothing is being served.
     pub session: Option<ServeSession>,
+    /// What `s` will start. Toggled with `t` while stopped.
+    pub reach: Reach,
     /// Devices as of the last refresh, so the list does not hit the database
     /// on every frame.
     pub devices: Vec<crate::db::MobileDevice>,
@@ -110,6 +230,7 @@ impl MobilePopup {
     pub fn new() -> Self {
         let mut popup = Self {
             session: None,
+            reach: Reach::Lan,
             devices: Vec::new(),
             selected: 0,
             message: None,
@@ -126,19 +247,46 @@ impl MobilePopup {
     }
 
     /// Start serving, or stop if already running.
+    /// Start serving, or stop if already running.
+    ///
+    /// The session is passed in rather than owned: it belongs to `AppState`, so
+    /// that closing this overlay cannot stop the server.
     pub fn toggle(&mut self, port: u16) {
         if self.session.is_some() {
             self.session = None; // dropping stops the child
             self.message = Some("Stopped serving.".to_string());
             return;
         }
-        match ServeSession::start(port) {
-            Ok(session) => {
-                self.session = Some(session);
+        if let Some(why) = self.reach.unavailable() {
+            self.message = Some(format!(
+                "Cannot serve to the {}: {why}.",
+                self.reach.label()
+            ));
+            return;
+        }
+        match ServeSession::start(port, self.reach) {
+            Ok(started) => {
+                self.session = Some(started);
                 self.message = None;
             }
             Err(e) => self.message = Some(format!("Could not start: {e}")),
         }
+    }
+
+    /// Switch what `s` will start.
+    ///
+    /// Refused while serving: changing the mode under a running child would
+    /// leave the overlay describing a reach the server does not have.
+    pub fn toggle_reach(&mut self) {
+        if self.session.is_some() {
+            self.message = Some("Stop serving first to change where it is reachable.".to_string());
+            return;
+        }
+        self.reach = self.reach.toggled();
+        self.message = match self.reach.unavailable() {
+            Some(why) => Some(format!("{} — {why}", self.reach.label())),
+            None => None,
+        };
     }
 
     /// Notice a child that exited on its own — a taken port, or a build without
@@ -184,16 +332,6 @@ impl MobilePopup {
             d => (self.selected + d as usize).min(last),
         };
     }
-
-    /// The QR module grid for the current pairing URL, if one is being served.
-    ///
-    /// The **grid**, not the ANSI rendering: ratatui does not interpret escape
-    /// sequences, so `qr::render`'s output would be drawn as literal garbage.
-    /// The overlay turns these modules into styled spans instead.
-    ///
-    /// Only available in a build with the `serve` feature — which is also the
-    /// only build whose child could have started, so the overlay never has a
-    /// URL it cannot draw.
     #[cfg(feature = "serve")]
     pub fn qr_grid(&self) -> Option<(usize, Vec<bool>)> {
         crate::web::qr::grid(&self.session.as_ref()?.url)

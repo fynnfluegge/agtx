@@ -199,3 +199,41 @@ pub fn installed(program: &str) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+// ── tailnet identity ────────────────────────────────────────────────────
+
+/// This machine's tailnet DNS name, for building a URL before the tunnel runs.
+///
+/// `tailscale serve` proxies `https://<this>/` into a loopback listener, so the
+/// hostname is not something agtx chooses — it has to be asked for, or the QR
+/// would carry an address that does not exist.
+pub fn tailnet_hostname() -> Option<String> {
+    let out = Command::new("tailscale")
+        .args(["status", "--json"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_tailnet_hostname(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pull `Self.DNSName` out of `tailscale status --json`.
+///
+/// Split from the command so the parsing is testable without Tailscale
+/// installed — which matters here, because it is not installed on the machine
+/// this was written on.
+pub fn parse_tailnet_hostname(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let name = value.get("Self")?.get("DNSName")?.as_str()?;
+    // Tailscale reports a fully-qualified name with the root dot. Leaving it on
+    // produces a URL that most clients accept and some reject, which is the
+    // worst of both.
+    let trimmed = name.trim_end_matches('.');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}

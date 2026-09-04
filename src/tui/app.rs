@@ -6546,6 +6546,7 @@ impl App {
             KeyCode::Char('s') => {
                 popup.toggle(crate::tui::serve_control::DEFAULT_PORT);
             }
+            KeyCode::Char('t') => popup.toggle_reach(),
             KeyCode::Char('x') => popup.revoke_selected(),
             KeyCode::Char('j') | KeyCode::Down => popup.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => popup.move_selection(-1),
@@ -6581,8 +6582,13 @@ impl App {
         let qr_width = qr.as_ref().map_or(0, |(w, _)| *w);
         let qr_height = qr_width.div_ceil(2);
 
+        // Sized from the longest line, not from a guess. `Paragraph` is left
+        // unwrapped on purpose — wrapping would break the QR's rows into
+        // nonsense — so anything wider than the box is silently truncated, and
+        // a sentence losing its last word reads as a typo rather than a layout
+        // bug.
         let width = (qr_width as u16 + 6)
-            .max(58)
+            .max(MOBILE_POPUP_MIN_WIDTH)
             .min(area.width.saturating_sub(2));
         let body_height = qr_height as u16 + popup.devices.len().max(1) as u16 + 10;
         let height = body_height.min(area.height.saturating_sub(2));
@@ -6627,6 +6633,19 @@ impl App {
                     "Scan it. The code is single-use; paired devices need nothing.",
                     Style::default().fg(dim),
                 )));
+                // Say the reach out loud. A QR invites the assumption that it
+                // works from anywhere, and a private address does not — the
+                // failure is a phone on mobile data timing out against an
+                // unroutable host, which looks like a broken pairing rather
+                // than a network that was never going to carry it.
+                lines.push(Line::from(Span::styled(
+                    if session.is_lan_only() {
+                        "Works on this wifi only — a private address is unroutable from mobile data."
+                    } else {
+                        "Reachable from outside this network."
+                    },
+                    Style::default().fg(selected),
+                )));
             }
             (Some(session), None) => {
                 lines.push(Line::from(Span::styled(
@@ -6635,16 +6654,40 @@ impl App {
                 )));
             }
             (None, _) => {
+                // The reach is stated *before* starting, not discovered after:
+                // a QR carrying a private address scans perfectly and then
+                // times out on mobile data, which reads as broken pairing.
+                let unavailable = popup.reach.unavailable();
+                lines.push(Line::from(vec![
+                    Span::styled("Reach: ", Style::default().fg(dim)),
+                    Span::styled(
+                        popup.reach.label(),
+                        Style::default()
+                            .fg(if unavailable.is_some() { dim } else { selected })
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("   t to switch", Style::default().fg(dim)),
+                ]));
                 lines.push(Line::from(Span::styled(
-                    "Not serving. Press s to start.",
+                    match popup.reach {
+                        crate::tui::serve_control::Reach::Lan => {
+                            "This wifi only — unroutable from mobile data."
+                        }
+                        crate::tui::serve_control::Reach::Tailnet => {
+                            "Anywhere, but only devices signed into your tailnet."
+                        }
+                    },
                     Style::default().fg(dim),
                 )));
+                if let Some(why) = unavailable {
+                    lines.push(Line::from(Span::styled(
+                        format!("Unavailable: {why}."),
+                        Style::default().fg(hex_to_color(&theme.color_description)),
+                    )));
+                }
+                lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "Anything on this network will be able to reach the board,",
-                    Style::default().fg(dim),
-                )));
-                lines.push(Line::from(Span::styled(
-                    "including typing into your agents. Devices must pair first.",
+                    "Press s to start. A paired device can type into agents.",
                     Style::default().fg(dim),
                 )));
             }
@@ -6688,10 +6731,13 @@ impl App {
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
+            // Trimmed to fit the box, like the board's own footer: `r` still
+            // reloads, it just lives in HELP rather than here. A footer that
+            // runs off the edge advertises a key by half its name.
             if serving {
-                "[s] stop  [x] revoke  [j/k] select  [r] reload  [Esc] close (keeps serving)"
+                "[s] stop  [x] revoke  [j/k] move  [Esc] close, keeps serving"
             } else {
-                "[s] start serving  [x] revoke  [j/k] select  [r] reload  [Esc] close"
+                "[s] start  [t] reach  [x] revoke  [j/k] move  [Esc] close"
             },
             Style::default().fg(dim),
         )));
@@ -14268,3 +14314,10 @@ fn qr_lines(total: usize, dark: &[bool]) -> Vec<Line<'static>> {
         })
         .collect()
 }
+
+/// Narrowest the `W` overlay may be.
+///
+/// Wide enough for its longest sentence: the body is drawn unwrapped, because
+/// wrapping would break the QR's rows, so a narrower box truncates text rather
+/// than reflowing it.
+const MOBILE_POPUP_MIN_WIDTH: u16 = 64;

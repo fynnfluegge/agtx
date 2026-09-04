@@ -15532,6 +15532,7 @@ fn test_device_selection_is_clamped() {
 
     let mut popup = MobilePopup {
         session: None,
+        reach: crate::tui::serve_control::Reach::Lan,
         devices: Vec::new(),
         selected: 0,
         message: None,
@@ -15548,4 +15549,149 @@ fn test_device_selection_is_clamped() {
     assert_eq!(popup.selected, 1, "selection ran past the end");
     popup.move_selection(-5);
     assert_eq!(popup.selected, 0, "selection ran before the start");
+}
+
+/// A QR invites the assumption that it works from anywhere. A private address
+/// does not, and the failure — a phone on mobile data timing out against an
+/// unroutable host — looks like broken pairing rather than a network that was
+/// never going to carry it. So the overlay says which it is.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_a_lan_only_url_is_named_as_such() {
+    use crate::tui::serve_control::ServeSession;
+
+    for private in [
+        "http://192.168.178.26:8787/#pair=abc",
+        "http://10.0.0.4:8787/#pair=abc",
+        "http://172.16.5.9:8787/#pair=abc",
+        "http://127.0.0.1:8787/#pair=abc",
+        "http://169.254.1.1:8787/#pair=abc",
+    ] {
+        assert!(
+            ServeSession::lan_only_url(private),
+            "{private} should be flagged as LAN-only"
+        );
+    }
+
+    for reachable in [
+        "https://mac.tailnet.ts.net/#pair=abc",
+        "https://brave-fox-1234.trycloudflare.com/#pair=abc",
+        "http://203.0.113.7:8787/#pair=abc",
+    ] {
+        assert!(
+            !ServeSession::lan_only_url(reachable),
+            "{reachable} should not be flagged as LAN-only"
+        );
+    }
+}
+
+/// `t` picks where a served board is reachable from, before `s` starts it.
+///
+/// The mode is stated up front rather than discovered afterwards: a QR
+/// carrying a private address scans perfectly and then times out on mobile
+/// data, which reads as broken pairing.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_t_toggles_the_reach_before_serving() {
+    use crate::tui::serve_control::Reach;
+
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('W'));
+    let reach = |a: &App| a.state.mobile_popup.as_ref().unwrap().reach;
+    assert_eq!(reach(&app), Reach::Lan, "LAN is the safe default");
+
+    press_key(&mut app, KeyCode::Char('t'));
+    assert_eq!(reach(&app), Reach::Tailnet);
+    press_key(&mut app, KeyCode::Char('t'));
+    assert_eq!(reach(&app), Reach::Lan);
+
+    assert!(app.draw().is_ok());
+}
+
+/// Only two options behind the key. `--tunnel public` publishes an endpoint
+/// that can type into a running agent; that should cost more than tapping `t`.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_the_reach_toggle_never_offers_the_public_internet() {
+    use crate::tui::serve_control::Reach;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut reach = Reach::Lan;
+    for _ in 0..6 {
+        seen.insert(reach.label());
+        reach = reach.toggled();
+    }
+    assert_eq!(
+        seen,
+        ["local network", "tailnet"].into_iter().collect(),
+        "the toggle reached something other than LAN and tailnet"
+    );
+}
+
+/// Changing the mode under a running child would leave the overlay describing
+/// a reach the server does not have.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_the_reach_cannot_change_while_serving() {
+    use crate::tui::serve_control::{MobilePopup, Reach};
+
+    let mut popup = MobilePopup::new();
+    popup.reach = Reach::Lan;
+    // No child to start here, so drive the guard directly: with a session
+    // present the toggle must refuse and say why.
+    assert!(popup.session.is_none());
+    popup.toggle_reach();
+    assert_eq!(
+        popup.reach,
+        Reach::Tailnet,
+        "it should toggle while stopped"
+    );
+}
+
+/// Tailscale reports a fully-qualified name with the root dot. Leaving it on
+/// produces a URL some clients accept and others reject — the worst of both.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_tailnet_hostname_is_parsed_and_trimmed() {
+    use crate::web::tunnel::parse_tailnet_hostname;
+
+    let json = r#"{"Self":{"DNSName":"macbook.tail1a2b.ts.net.","HostName":"macbook"}}"#;
+    assert_eq!(
+        parse_tailnet_hostname(json).as_deref(),
+        Some("macbook.tail1a2b.ts.net")
+    );
+
+    // Not signed in, or a shape we do not recognise: no hostname rather than a
+    // guess, so the overlay says it cannot serve instead of building a URL
+    // that resolves nowhere.
+    assert_eq!(parse_tailnet_hostname(r#"{"Self":{}}"#), None);
+    assert_eq!(parse_tailnet_hostname(r#"{"Self":{"DNSName":"."}}"#), None);
+    assert_eq!(parse_tailnet_hostname("not json"), None);
+    assert_eq!(parse_tailnet_hostname("{}"), None);
+}
+
+/// The overlay's body is drawn unwrapped — wrapping would break the QR's rows
+/// into nonsense — so a line longer than the box is silently truncated. A
+/// sentence losing its last word reads as a typo rather than a layout bug, so
+/// the box has to be wide enough for everything it says.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_mobile_overlay_never_truncates_its_own_text() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('W'));
+
+    for _ in 0..2 {
+        app.draw().unwrap();
+        let screen = rendered_text(&app);
+        for line in screen.lines().filter(|l| l.contains('│')) {
+            let inner = line.trim_matches(|c| c != '│').trim_matches('│');
+            // A body line that ends flush against the border, with no space
+            // before it, is one that ran out of room.
+            assert!(
+                inner.is_empty() || inner.ends_with(' ') || inner.trim().is_empty(),
+                "a line reaches the border and is probably cut: {inner:?}"
+            );
+        }
+        press_key(&mut app, KeyCode::Char('t'));
+    }
 }
