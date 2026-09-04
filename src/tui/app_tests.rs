@@ -15567,7 +15567,6 @@ fn test_device_selection_is_clamped() {
     use crate::tui::serve_control::MobilePopup;
 
     let mut popup = MobilePopup {
-        reach: crate::tui::serve_control::Reach::Lan,
         devices: Vec::new(),
         selected: 0,
         message: None,
@@ -15620,68 +15619,6 @@ fn test_a_lan_only_url_is_named_as_such() {
     }
 }
 
-/// `t` picks where a served board is reachable from, before `s` starts it.
-///
-/// The mode is stated up front rather than discovered afterwards: a QR
-/// carrying a private address scans perfectly and then times out on mobile
-/// data, which reads as broken pairing.
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_t_toggles_the_reach_before_serving() {
-    use crate::tui::serve_control::Reach;
-
-    let mut app = make_test_app();
-    press_key(&mut app, KeyCode::Char('W'));
-    let reach = |a: &App| a.state.mobile_popup.as_ref().unwrap().reach;
-    assert_eq!(reach(&app), Reach::Lan, "LAN is the safe default");
-
-    press_key(&mut app, KeyCode::Char('t'));
-    assert_eq!(reach(&app), Reach::Tailnet);
-    press_key(&mut app, KeyCode::Char('t'));
-    assert_eq!(reach(&app), Reach::Lan);
-
-    assert!(app.draw().is_ok());
-}
-
-/// Only two options behind the key. `--tunnel public` publishes an endpoint
-/// that can type into a running agent; that should cost more than tapping `t`.
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_the_reach_toggle_never_offers_the_public_internet() {
-    use crate::tui::serve_control::Reach;
-
-    let mut seen = std::collections::HashSet::new();
-    let mut reach = Reach::Lan;
-    for _ in 0..6 {
-        seen.insert(reach.label());
-        reach = reach.toggled();
-    }
-    assert_eq!(
-        seen,
-        ["local network", "tailnet"].into_iter().collect(),
-        "the toggle reached something other than LAN and tailnet"
-    );
-}
-
-/// Changing the mode under a running child would leave the overlay describing
-/// a reach the server does not have.
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_the_reach_cannot_change_while_serving() {
-    use crate::tui::serve_control::{MobilePopup, Reach};
-
-    let mut popup = MobilePopup::new();
-    popup.reach = Reach::Lan;
-    // No child to start here, so drive the guard directly: with a session
-    // present the toggle must refuse and say why.
-    popup.toggle_reach(false);
-    assert_eq!(
-        popup.reach,
-        Reach::Tailnet,
-        "it should toggle while stopped"
-    );
-}
-
 /// Tailscale reports a fully-qualified name with the root dot. Leaving it on
 /// produces a URL some clients accept and others reject — the worst of both.
 #[test]
@@ -15714,18 +15651,54 @@ fn test_the_mobile_overlay_never_truncates_its_own_text() {
     let mut app = make_test_app();
     press_key(&mut app, KeyCode::Char('W'));
 
-    for _ in 0..2 {
-        app.draw().unwrap();
-        let screen = rendered_text(&app);
-        for line in screen.lines().filter(|l| l.contains('│')) {
-            let inner = line.trim_matches(|c| c != '│').trim_matches('│');
-            // A body line that ends flush against the border, with no space
-            // before it, is one that ran out of room.
-            assert!(
-                inner.is_empty() || inner.ends_with(' ') || inner.trim().is_empty(),
-                "a line reaches the border and is probably cut: {inner:?}"
-            );
-        }
-        press_key(&mut app, KeyCode::Char('t'));
+    app.draw().unwrap();
+    let screen = rendered_text(&app);
+    for line in screen.lines().filter(|l| l.contains('│')) {
+        let inner = line.trim_matches(|c| c != '│').trim_matches('│');
+        // A body line that ends flush against the border, with no space before
+        // it, is one that ran out of room.
+        assert!(
+            inner.is_empty() || inner.ends_with(' ') || inner.trim().is_empty(),
+            "a line reaches the border and is probably cut: {inner:?}"
+        );
     }
+}
+
+/// `s` and `t` are each a whole action — serve to this wifi, serve via the
+/// tailnet — rather than one key setting a mode another key acts on. A hidden
+/// mode means neither label can say what pressing it will do, which is the
+/// confusion this design replaced.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_overlay_offers_both_reaches_directly() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('W'));
+    app.draw().unwrap();
+    let screen = rendered_text(&app);
+
+    assert!(screen.contains("local network"), "{screen}");
+    assert!(screen.contains("tailnet"), "{screen}");
+    assert!(
+        screen.contains("this wifi only"),
+        "the wifi option must say it is unroutable off the network: {screen}"
+    );
+    assert!(
+        !screen.contains("t to switch"),
+        "nothing should still advertise the removed mode toggle"
+    );
+}
+
+/// Only those two behind a key. `--tunnel public` publishes an endpoint that
+/// can type into a running agent; that should cost more than one keystroke.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_overlay_never_offers_the_public_internet() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('W'));
+    app.draw().unwrap();
+    let screen = rendered_text(&app).to_lowercase();
+    assert!(
+        !screen.contains("public") && !screen.contains("funnel"),
+        "the overlay offers public exposure: {screen}"
+    );
 }

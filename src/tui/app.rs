@@ -6558,16 +6558,17 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('W') => {
                 self.state.mobile_popup = None;
             }
-            KeyCode::Char('s') => {
-                popup.toggle(
-                    &mut self.state.serve_session,
-                    crate::tui::serve_control::DEFAULT_PORT,
-                );
-            }
-            KeyCode::Char('t') => {
-                let serving = self.state.serve_session.is_some();
-                popup.toggle_reach(serving);
-            }
+            // Each key is a whole action, not a mode plus a trigger.
+            KeyCode::Char('s') => popup.serve(
+                &mut self.state.serve_session,
+                crate::tui::serve_control::DEFAULT_PORT,
+                crate::tui::serve_control::Reach::Lan,
+            ),
+            KeyCode::Char('t') => popup.serve(
+                &mut self.state.serve_session,
+                crate::tui::serve_control::DEFAULT_PORT,
+                crate::tui::serve_control::Reach::Tailnet,
+            ),
             KeyCode::Char('x') => popup.revoke_selected(),
             KeyCode::Char('j') | KeyCode::Down => popup.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => popup.move_selection(-1),
@@ -6676,40 +6677,42 @@ impl App {
                 )));
             }
             (None, _) => {
-                // The reach is stated *before* starting, not discovered after:
-                // a QR carrying a private address scans perfectly and then
-                // times out on mobile data, which reads as broken pairing.
-                let unavailable = popup.reach.unavailable();
-                lines.push(Line::from(vec![
-                    Span::styled("Reach: ", Style::default().fg(dim)),
-                    Span::styled(
-                        popup.reach.label(),
-                        Style::default()
-                            .fg(if unavailable.is_some() { dim } else { selected })
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("   t to switch", Style::default().fg(dim)),
-                ]));
+                // Both options, each stating what it gives. The alternative —
+                // one key setting a mode another key acts on — means neither
+                // label can say what pressing it will do.
                 lines.push(Line::from(Span::styled(
-                    match popup.reach {
-                        crate::tui::serve_control::Reach::Lan => {
-                            "This wifi only — unroutable from mobile data."
-                        }
-                        crate::tui::serve_control::Reach::Tailnet => {
-                            "Anywhere, but only devices signed into your tailnet."
-                        }
-                    },
+                    "Not serving.",
                     Style::default().fg(dim),
                 )));
-                if let Some(why) = unavailable {
-                    lines.push(Line::from(Span::styled(
-                        format!("Unavailable: {why}."),
-                        Style::default().fg(hex_to_color(&theme.color_description)),
-                    )));
+                lines.push(Line::from(""));
+                for (key, reach) in [
+                    ("s", crate::tui::serve_control::Reach::Lan),
+                    ("t", crate::tui::serve_control::Reach::Tailnet),
+                ] {
+                    let blocked = reach.unavailable();
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {key}  "),
+                            Style::default()
+                                .fg(if blocked.is_some() { dim } else { selected })
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{:<15}", reach.label()),
+                            Style::default().fg(if blocked.is_some() { dim } else { text }),
+                        ),
+                        Span::styled(reach.describe(), Style::default().fg(dim)),
+                    ]));
+                    if let Some(why) = blocked {
+                        lines.push(Line::from(Span::styled(
+                            format!("     unavailable: {why}"),
+                            Style::default().fg(hex_to_color(&theme.color_description)),
+                        )));
+                    }
                 }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "Press s to start. A paired device can type into agents.",
+                    "A paired device can type into your agents.",
                     Style::default().fg(dim),
                 )));
             }
@@ -6759,7 +6762,7 @@ impl App {
             if serving {
                 "[s] stop  [x] revoke  [j/k] move  [Esc] close, keeps serving"
             } else {
-                "[s] start  [t] reach  [x] revoke  [j/k] move  [Esc] close"
+                "[s] wifi  [t] tailnet  [x] revoke  [j/k] move  [Esc] close"
             },
             Style::default().fg(dim),
         )));

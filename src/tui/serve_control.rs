@@ -47,10 +47,15 @@ impl Reach {
         }
     }
 
-    pub fn toggled(&self) -> Self {
+    /// What a person gets, in the words the overlay offers it in.
+    ///
+    /// Kept short enough to fit beside the key and the label without the box
+    /// having to grow: the overlay draws unwrapped, so a long phrase here is
+    /// silently cut rather than reflowed.
+    pub fn describe(&self) -> &'static str {
         match self {
-            Reach::Lan => Reach::Tailnet,
-            Reach::Tailnet => Reach::Lan,
+            Reach::Lan => "this wifi only, not mobile data",
+            Reach::Tailnet => "anywhere, your devices only",
         }
     }
 
@@ -252,8 +257,6 @@ fn tailnet_host() -> Option<String> {
 
 /// The `W` overlay's state.
 pub struct MobilePopup {
-    /// What `s` will start. Toggled with `t` while stopped.
-    pub reach: Reach,
     /// Devices as of the last refresh, so the list does not hit the database
     /// on every frame.
     pub devices: Vec<crate::db::MobileDevice>,
@@ -265,7 +268,6 @@ pub struct MobilePopup {
 impl MobilePopup {
     pub fn new() -> Self {
         let mut popup = Self {
-            reach: Reach::Lan,
             devices: Vec::new(),
             selected: 0,
             message: None,
@@ -281,47 +283,30 @@ impl MobilePopup {
         self.selected = self.selected.min(self.devices.len().saturating_sub(1));
     }
 
-    /// Start serving, or stop if already running.
-    /// Start serving, or stop if already running.
+    /// Stop serving if running; otherwise start with the given reach.
     ///
-    /// The session is passed in rather than owned: it belongs to `AppState`, so
-    /// that closing this overlay cannot stop the server.
-    pub fn toggle(&mut self, session: &mut Option<ServeSession>, port: u16) {
+    /// Each key does a whole thing — `s` serves to this wifi, `t` serves via
+    /// the tailnet — rather than one key setting a mode another key acts on.
+    /// A hidden mode means neither label can say what pressing it will
+    /// actually do, and the answer to "why can my phone not see this" was one
+    /// keypress of invisible state away.
+    pub fn serve(&mut self, session: &mut Option<ServeSession>, port: u16, reach: Reach) {
         if session.is_some() {
             *session = None; // dropping stops the child
             self.message = Some("Stopped serving.".to_string());
             return;
         }
-        if let Some(why) = self.reach.unavailable() {
-            self.message = Some(format!(
-                "Cannot serve to the {}: {why}.",
-                self.reach.label()
-            ));
+        if let Some(why) = reach.unavailable() {
+            self.message = Some(format!("Cannot serve to the {}: {why}.", reach.label()));
             return;
         }
-        match ServeSession::start(port, self.reach) {
+        match ServeSession::start(port, reach) {
             Ok(started) => {
                 *session = Some(started);
                 self.message = None;
             }
             Err(e) => self.message = Some(format!("Could not start: {e}")),
         }
-    }
-
-    /// Switch what `s` will start.
-    ///
-    /// Refused while serving: changing the mode under a running child would
-    /// leave the overlay describing a reach the server does not have.
-    pub fn toggle_reach(&mut self, serving: bool) {
-        if serving {
-            self.message = Some("Stop serving first to change where it is reachable.".to_string());
-            return;
-        }
-        self.reach = self.reach.toggled();
-        self.message = match self.reach.unavailable() {
-            Some(why) => Some(format!("{} — {why}", self.reach.label())),
-            None => None,
-        };
     }
 
     /// Notice a child that exited on its own — a taken port, or a build without
