@@ -261,13 +261,69 @@ agtx serve --revoke <id>         # revoke one; --revoke-all for the lot
 ```
 
 Two keys in the overlay, each a whole action: `s` serves to the local network,
-`t` serves via your tailnet. The local network is unroutable from mobile data, so
-`t` is the one that works on the train — it needs
-[Tailscale](https://tailscale.com/download) installed on both machines and Serve
-enabled for the tailnet.
+`t` serves via your tailnet.
 
-Add it to your home screen and it behaves like an app: its own icon, no address
-bar, and the pairing is remembered.
+<details>
+<summary><strong>Setup — on your wifi</strong></summary>
+
+Works in about thirty seconds, and needs nothing installed.
+
+1. Run `agtx` in a project and press `W`
+2. Press `s`
+3. Point your phone's camera at the QR code — the phone must be on the same wifi
+4. In Safari or Chrome: **Share → Add to Home Screen**
+
+That last step is what turns it into an app: its own icon, no address bar, and
+the pairing remembered so you never scan again.
+
+The URL here is a private address like `192.168.1.20`, which exists only on your
+network. **It will not work on mobile data** — if you leave the house, the app
+will sit there timing out. That is what the tailnet option below is for.
+
+</details>
+
+<details>
+<summary><strong>Setup — from anywhere, via Tailscale</strong></summary>
+
+A few minutes once, then it is the same two taps forever. Your board becomes
+reachable from your phone on any network, while staying invisible to everyone
+else.
+
+**One-time, on your Mac and your phone:**
+
+1. Install [Tailscale](https://tailscale.com/download) on both
+2. Sign both into the **same** account — they need to be on one tailnet
+3. Enable Serve for your tailnet. It is off by default and is a separate switch
+   from installing Tailscale — the step most people miss. The simplest way is to
+   just press `t` in agtx once: Tailscale refuses with a one-time link that
+   enables it for this machine, and agtx prints that link rather than swallowing
+   it. Follow it, then press `t` again.
+
+**Then, every time:**
+
+1. Run `agtx`, press `W`, press `t`
+2. Scan the QR, and **Share → Add to Home Screen**
+
+Now the icon on your home screen works on 5G, on hotel wifi, anywhere — the
+address is an HTTPS name on your tailnet, and only devices signed into it can
+resolve or reach it.
+
+</details>
+
+<details>
+<summary><strong>When it does not work</strong></summary>
+
+| What you see | What it means |
+|---|---|
+| `Unavailable: install Tailscale and sign this machine in` | `t` needs Tailscale on *this* machine. Install it, or use `s` for wifi. |
+| `Unavailable: Tailscale is installed but not signed in` | Run `tailscale up`. |
+| `could not start the tunnel: … Serve is not enabled on your tailnet` | The one-time switch above. agtx relays Tailscale's own message, which carries the URL that enables it. |
+| Scanned fine, then the app times out | You pressed `s` (wifi) and the phone is on mobile data. Press `s` again to stop, then `t`. |
+| The tailnet URL loads on the Mac but not the phone | The phone is not on the tailnet. Open the Tailscale app there and connect. |
+| `This device is not authorised` | The pairing code expired — it lasts two minutes and is single-use. Press `s` or `t` again for a fresh QR. |
+| `No agtx running` on the board | Expected with no TUI open. Reading works; actions queue until one is. |
+
+</details>
 
 > [!IMPORTANT]
 > Anything that can reach this server can read every task, every diff and every

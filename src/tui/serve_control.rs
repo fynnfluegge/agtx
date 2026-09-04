@@ -129,11 +129,18 @@ impl ServeSession {
 
         let child = Command::new(exe)
             .args(&args)
-            // The TUI owns the screen; anything the child prints would land on
-            // top of the board. Its errors are surfaced by `check` instead.
+            // The TUI owns the screen, so the child's own output must not land
+            // on top of the board — but its *errors* are the only place some
+            // things are explained. A failed tunnel prints the one-time link
+            // that enables Tailscale Serve, and discarding that leaves the
+            // overlay able to say only "it stopped", which helps nobody.
+            //
+            // Safe to pipe without a reader because the banner and QR go to
+            // stdout: stderr carries a line or two at most, far below the pipe
+            // buffer that would block the child.
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .context("starting agtx serve")?;
 
@@ -193,6 +200,20 @@ impl ServeSession {
 
     pub fn check(&mut self) -> Option<std::process::ExitStatus> {
         self.child.try_wait().ok().flatten()
+    }
+
+    /// Whatever the child wrote to stderr before dying.
+    ///
+    /// Only meaningful once it has exited — reading earlier would block on a
+    /// pipe nobody is finished writing to.
+    pub fn take_stderr(&mut self) -> String {
+        use std::io::Read;
+        let Some(mut err) = self.child.stderr.take() else {
+            return String::new();
+        };
+        let mut buf = String::new();
+        let _ = err.read_to_string(&mut buf);
+        buf.trim().to_string()
     }
 
     pub fn stop(&mut self) {
@@ -313,15 +334,29 @@ impl MobilePopup {
     /// the `serve` feature. Returns whether anything changed.
     pub fn poll_session(&mut self, session: &mut Option<ServeSession>) -> bool {
         let exited = session.as_mut().and_then(|s| s.check()).is_some();
-        if exited {
-            *session = None;
-            self.message = Some(
-                "The server stopped on its own. The port may be in use, or this build lacks \
-                 the `serve` feature."
-                    .to_string(),
-            );
+        if !exited {
+            return false;
         }
-        exited
+
+        // Relay what the child said. It knows things the TUI does not — that
+        // the port is taken, or that Tailscale Serve is disabled for this
+        // tailnet and the one-time link that enables it.
+        let detail = session
+            .as_mut()
+            .map(|s| s.take_stderr())
+            .unwrap_or_default();
+        *session = None;
+
+        self.message = Some(if detail.is_empty() {
+            "The server stopped. The port may be in use, or this build lacks the `serve` feature."
+                .to_string()
+        } else {
+            // Last line first: anyhow prints `Error: <context>` then the cause,
+            // and the cause is the part that says what to do.
+            let line = detail.lines().filter(|l| !l.trim().is_empty()).next_back();
+            format!("Server stopped: {}", line.unwrap_or(&detail))
+        });
+        true
     }
 
     pub fn revoke_selected(&mut self) {

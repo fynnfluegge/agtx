@@ -1501,6 +1501,29 @@ impl App {
             if let Err(e) = self.process_transition_requests() {
                 tracing::warn!(error = %e, "failed to process transition requests");
             }
+            // Notice a served board whose child has died — a taken port, or a
+            // tunnel the provider refused. Without this the overlay keeps
+            // showing a QR for a server that is gone, which is the worst of
+            // both: it looks fine and nothing works.
+            if self.state.serve_session.is_some() {
+                if let Some(popup) = self.state.mobile_popup.as_mut() {
+                    if popup.poll_session(&mut self.state.serve_session) {
+                        changed = true;
+                    }
+                } else if self
+                    .state
+                    .serve_session
+                    .as_mut()
+                    .and_then(|s| s.check())
+                    .is_some()
+                {
+                    // Overlay closed, so there is nowhere to show a message —
+                    // but the dead session must still be dropped, or `s` would
+                    // report "stopped serving" for something already gone.
+                    self.state.serve_session = None;
+                }
+            }
+
             // Beat on the same tick, because it answers a question about
             // exactly this loop: something out of process can enqueue a
             // transition whenever, but only a running TUI drains the queue.

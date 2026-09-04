@@ -15702,3 +15702,58 @@ fn test_the_overlay_never_offers_the_public_internet() {
         "the overlay offers public exposure: {screen}"
     );
 }
+
+/// A served board whose child has died must say *why*.
+///
+/// The child knows things the TUI does not — that the port is taken, or that
+/// Tailscale Serve is disabled for this tailnet and the one-time link that
+/// enables it. Discarding its stderr leaves the overlay able to say only "it
+/// stopped", which helps nobody; and until this was wired up, `poll_session`
+/// was dead code, so a dead child was never noticed at all and the overlay
+/// went on showing a QR for a server that was gone.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_a_dead_server_reports_what_the_child_said() {
+    use crate::tui::serve_control::{MobilePopup, ServeSession};
+
+    let child = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "echo 'Error: binding 127.0.0.1:8787' >&2; \
+                      echo '' >&2; \
+                      echo 'Address already in use (os error 48)' >&2; \
+                      exit 1",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+
+    let mut session = Some(ServeSession::for_test(
+        child,
+        "http://10.0.0.2:8787/#pair=x",
+    ));
+    let mut popup = MobilePopup::new();
+
+    // Give it a moment to exit, then poll as housekeeping does.
+    for _ in 0..30 {
+        if popup.poll_session(&mut session) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    assert!(session.is_none(), "a dead session must be dropped");
+    let message = popup.message.expect("a dead server must explain itself");
+    assert!(
+        message.contains("Address already in use"),
+        "the child's own words were dropped: {message}"
+    );
+    // The *last* line, because anyhow prints the context first and the cause —
+    // the part that says what to do — last.
+    assert!(
+        !message.contains("binding 127.0.0.1"),
+        "reported the context rather than the cause: {message}"
+    );
+}
