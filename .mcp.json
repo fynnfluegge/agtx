@@ -3,7 +3,17 @@
     "agtx": {
       "type": "stdio",
       "command": "agtx",
-      "args": ["mcp-serve"]
+      "args": [
+        "mcp-serve"
+      ]
+    },
+    "knos": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "-m",
+        "knos.mcp"
+      ]
     }
   }
 }
