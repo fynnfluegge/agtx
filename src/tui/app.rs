@@ -438,6 +438,13 @@ struct AppState {
     dep_graph_popup: Option<DepGraphPopup>,
     /// The `W` overlay: serve the board to a phone, and manage paired devices.
     mobile_popup: Option<crate::tui::serve_control::MobilePopup>,
+    /// The child `agtx serve`, if one is running.
+    ///
+    /// Held here and **not on the popup**, because the popup is a view that is
+    /// dropped whenever the overlay closes — and dropping a `ServeSession`
+    /// kills the child. Someone opens `W`, scans, closes it, and carries on
+    /// using the board; the server has to survive that.
+    serve_session: Option<crate::tui::serve_control::ServeSession>,
     // Queue of task IDs awaiting serialized worktree setup (batch-move from the
     // dependency view). Worktree setup runs one-at-a-time via `setup_rx`; this
     // queue is drained as each setup completes.
@@ -935,6 +942,7 @@ impl App {
                 deps_satisfied_cache: HashMap::new(),
                 dep_graph_popup: None,
                 mobile_popup: None,
+                serve_session: None,
                 setup_queue: VecDeque::new(),
                 instance_id: uuid::Uuid::new_v4().to_string(),
             },
@@ -1185,6 +1193,7 @@ impl App {
                 deps_satisfied_cache: HashMap::new(),
                 dep_graph_popup: None,
                 mobile_popup: None,
+                serve_session: None,
                 setup_queue: VecDeque::new(),
                 instance_id: uuid::Uuid::new_v4().to_string(),
             },
@@ -2747,7 +2756,13 @@ impl App {
 
         // Mobile overlay
         if let Some(ref popup) = state.mobile_popup {
-            Self::draw_mobile_popup(popup, frame, area, &state.config.theme);
+            Self::draw_mobile_popup(
+                popup,
+                state.serve_session.as_ref(),
+                frame,
+                area,
+                &state.config.theme,
+            );
         }
     }
 
@@ -6544,9 +6559,15 @@ impl App {
                 self.state.mobile_popup = None;
             }
             KeyCode::Char('s') => {
-                popup.toggle(crate::tui::serve_control::DEFAULT_PORT);
+                popup.toggle(
+                    &mut self.state.serve_session,
+                    crate::tui::serve_control::DEFAULT_PORT,
+                );
             }
-            KeyCode::Char('t') => popup.toggle_reach(),
+            KeyCode::Char('t') => {
+                let serving = self.state.serve_session.is_some();
+                popup.toggle_reach(serving);
+            }
             KeyCode::Char('x') => popup.revoke_selected(),
             KeyCode::Char('j') | KeyCode::Down => popup.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => popup.move_selection(-1),
@@ -6564,6 +6585,7 @@ impl App {
     /// The `W` overlay: a QR to scan, and the devices already paired.
     fn draw_mobile_popup(
         popup: &crate::tui::serve_control::MobilePopup,
+        session: Option<&crate::tui::serve_control::ServeSession>,
         frame: &mut Frame,
         area: Rect,
         theme: &crate::config::ThemeConfig,
@@ -6575,7 +6597,7 @@ impl App {
         let text = hex_to_color(&theme.color_text);
         let selected = hex_to_color(&theme.color_selected);
 
-        let qr = popup.qr_grid();
+        let qr = session.and_then(|s| crate::tui::serve_control::qr_grid(&s.url));
         // The QR is the widest thing here and it must not wrap — a wrapped QR
         // is unscannable and reads as corruption rather than as a layout bug.
         // Two module rows per text row, so the height is half the width.
@@ -6602,7 +6624,7 @@ impl App {
 
         frame.render_widget(Clear, rect);
 
-        let serving = popup.session.is_some();
+        let serving = session.is_some();
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(hex_to_color(&theme.color_popup_border)))
@@ -6621,7 +6643,7 @@ impl App {
 
         let mut lines: Vec<Line> = Vec::new();
 
-        match (&popup.session, &qr) {
+        match (session, &qr) {
             (Some(session), Some((total, dark))) => {
                 lines.extend(qr_lines(*total, dark));
                 lines.push(Line::from(""));
@@ -8764,8 +8786,9 @@ impl Drop for App {
     fn drop(&mut self) {
         // Stop a server started from the overlay. tmux windows deliberately
         // outlive agtx; a child server must not, or it holds its port with
-        // nothing on screen owning it.
-        self.state.mobile_popup = None;
+        // nothing on screen owning it. Quitting is the only thing that stops
+        // it — closing the overlay does not.
+        self.state.serve_session = None;
 
         // Deliver what is still queued and stop the broker before the process
         // goes away — the last characters typed into a pane were typed on

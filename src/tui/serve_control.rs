@@ -171,6 +171,21 @@ impl ServeSession {
         }
     }
 
+    /// A session wrapping an arbitrary long-lived child, for tests.
+    ///
+    /// The ownership rule this exists to pin — that closing the overlay must
+    /// not stop the server — is only observable with a session present, and the
+    /// test that claimed to check it had none. It could never have failed.
+    #[cfg(feature = "test-mocks")]
+    pub fn for_test(child: Child, url: &str) -> Self {
+        Self {
+            child,
+            url: url.to_string(),
+            port: DEFAULT_PORT,
+            reach: Reach::Lan,
+        }
+    }
+
     pub fn check(&mut self) -> Option<std::process::ExitStatus> {
         self.child.try_wait().ok().flatten()
     }
@@ -214,8 +229,6 @@ fn tailnet_host() -> Option<String> {
 
 /// The `W` overlay's state.
 pub struct MobilePopup {
-    /// `None` when nothing is being served.
-    pub session: Option<ServeSession>,
     /// What `s` will start. Toggled with `t` while stopped.
     pub reach: Reach,
     /// Devices as of the last refresh, so the list does not hit the database
@@ -229,7 +242,6 @@ pub struct MobilePopup {
 impl MobilePopup {
     pub fn new() -> Self {
         let mut popup = Self {
-            session: None,
             reach: Reach::Lan,
             devices: Vec::new(),
             selected: 0,
@@ -251,9 +263,9 @@ impl MobilePopup {
     ///
     /// The session is passed in rather than owned: it belongs to `AppState`, so
     /// that closing this overlay cannot stop the server.
-    pub fn toggle(&mut self, port: u16) {
-        if self.session.is_some() {
-            self.session = None; // dropping stops the child
+    pub fn toggle(&mut self, session: &mut Option<ServeSession>, port: u16) {
+        if session.is_some() {
+            *session = None; // dropping stops the child
             self.message = Some("Stopped serving.".to_string());
             return;
         }
@@ -266,7 +278,7 @@ impl MobilePopup {
         }
         match ServeSession::start(port, self.reach) {
             Ok(started) => {
-                self.session = Some(started);
+                *session = Some(started);
                 self.message = None;
             }
             Err(e) => self.message = Some(format!("Could not start: {e}")),
@@ -277,8 +289,8 @@ impl MobilePopup {
     ///
     /// Refused while serving: changing the mode under a running child would
     /// leave the overlay describing a reach the server does not have.
-    pub fn toggle_reach(&mut self) {
-        if self.session.is_some() {
+    pub fn toggle_reach(&mut self, serving: bool) {
+        if serving {
             self.message = Some("Stop serving first to change where it is reachable.".to_string());
             return;
         }
@@ -291,10 +303,10 @@ impl MobilePopup {
 
     /// Notice a child that exited on its own — a taken port, or a build without
     /// the `serve` feature. Returns whether anything changed.
-    pub fn poll_session(&mut self) -> bool {
-        let exited = self.session.as_mut().and_then(|s| s.check()).is_some();
+    pub fn poll_session(&mut self, session: &mut Option<ServeSession>) -> bool {
+        let exited = session.as_mut().and_then(|s| s.check()).is_some();
         if exited {
-            self.session = None;
+            *session = None;
             self.message = Some(
                 "The server stopped on its own. The port may be in use, or this build lacks \
                  the `serve` feature."
@@ -332,15 +344,21 @@ impl MobilePopup {
             d => (self.selected + d as usize).min(last),
         };
     }
-    #[cfg(feature = "serve")]
-    pub fn qr_grid(&self) -> Option<(usize, Vec<bool>)> {
-        crate::web::qr::grid(&self.session.as_ref()?.url)
-    }
+}
 
-    #[cfg(not(feature = "serve"))]
-    pub fn qr_grid(&self) -> Option<(usize, Vec<bool>)> {
-        None
-    }
+/// The QR module grid for a pairing URL.
+///
+/// The **grid**, not the ANSI rendering: ratatui does not interpret escape
+/// sequences, so `qr::render`'s output would be drawn as literal garbage. The
+/// overlay turns these modules into styled spans instead.
+#[cfg(feature = "serve")]
+pub fn qr_grid(url: &str) -> Option<(usize, Vec<bool>)> {
+    crate::web::qr::grid(url)
+}
+
+#[cfg(not(feature = "serve"))]
+pub fn qr_grid(_url: &str) -> Option<(usize, Vec<bool>)> {
+    None
 }
 
 impl Default for MobilePopup {

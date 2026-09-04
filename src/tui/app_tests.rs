@@ -15507,20 +15507,56 @@ fn test_the_overlay_never_draws_raw_ansi() {
     );
 }
 
-/// Closing the overlay must not stop the server: the point is to scan and then
-/// carry on using the board.
+/// Closing the overlay must not stop the server: the point is to scan, close,
+/// and carry on using the board.
+///
+/// This needs a live session to mean anything. An earlier version of this test
+/// had none and asserted only that the overlay opened and closed — so it passed
+/// while `Esc` was killing the child, because `MobilePopup` owned the
+/// `ServeSession` and dropping the view dropped the server. The session now
+/// lives on `AppState`; this is what holds that.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_closing_the_overlay_does_not_stop_serving() {
-    use crate::tui::serve_control::MobilePopup;
+    use crate::tui::serve_control::{MobilePopup, ServeSession};
 
     let mut app = make_test_app();
+    // A stand-in child that stays alive long enough to observe.
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn a stand-in child");
+    app.state.serve_session = Some(ServeSession::for_test(
+        child,
+        "http://10.0.0.2:8787/#pair=x",
+    ));
     app.state.mobile_popup = Some(MobilePopup::new());
-    // Reopening must not restart or disturb anything either.
+
     press_key(&mut app, KeyCode::Esc);
-    assert!(app.state.mobile_popup.is_none());
+    assert!(
+        app.state.mobile_popup.is_none(),
+        "Esc should close the overlay"
+    );
+    assert!(
+        app.state.serve_session.is_some(),
+        "closing the overlay stopped the server"
+    );
+    // And the child is genuinely still running, not merely still referenced.
+    assert!(
+        app.state.serve_session.as_mut().unwrap().check().is_none(),
+        "the child exited when the overlay closed"
+    );
+
+    // Reopening finds it still serving.
     press_key(&mut app, KeyCode::Char('W'));
     assert!(app.state.mobile_popup.is_some());
+    assert!(app.state.serve_session.is_some());
+
+    // Quitting is what stops it.
+    app.state.serve_session = None;
 }
 
 /// `move_selection` is the only thing standing between an empty device list and
@@ -15531,7 +15567,6 @@ fn test_device_selection_is_clamped() {
     use crate::tui::serve_control::MobilePopup;
 
     let mut popup = MobilePopup {
-        session: None,
         reach: crate::tui::serve_control::Reach::Lan,
         devices: Vec::new(),
         selected: 0,
@@ -15639,8 +15674,7 @@ fn test_the_reach_cannot_change_while_serving() {
     popup.reach = Reach::Lan;
     // No child to start here, so drive the guard directly: with a session
     // present the toggle must refuse and say why.
-    assert!(popup.session.is_none());
-    popup.toggle_reach();
+    popup.toggle_reach(false);
     assert_eq!(
         popup.reach,
         Reach::Tailnet,
