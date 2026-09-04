@@ -26,6 +26,11 @@ cargo build --release
 # Run the MCP server (global mode, or project-scoped with a path)
 ./target/release/agtx mcp-serve [path]
 
+# Serve the board to a phone (feature = "serve"; loopback needs no pairing)
+./target/release/agtx serve [path] [--host 0.0.0.0] [--port 8787] [--tunnel private|public]
+./target/release/agtx serve --devices          # paired devices
+./target/release/agtx serve --revoke <id>      # or --revoke-all
+
 # Record an agent lifecycle event (invoked by agent hooks, not by hand)
 ./target/release/agtx hook --env <agent> [--event <Name>] < payload.json
 
@@ -54,6 +59,7 @@ src/
 │   ├── help.rs       # The `?` overlay's binding table (declared, not open-coded)
 │   ├── help_tests.rs # Unit tests for help.rs (included via #[path])
 │   ├── input.rs      # InputMode enum for UI states
+│   ├── serve_control.rs # The `W` overlay: run `agtx serve` as a child, manage devices
 │   ├── shell_popup.rs # Shell popup state, rendering, content trimming
 │   ├── text_input.rs # Shared line editor: buffer + byte caret, motion, deletion
 │   ├── text_input_tests.rs # Unit tests for text_input.rs (included via #[path])
@@ -85,9 +91,22 @@ src/
 │   ├── trust.rs      # Reads each agent's own workspace-trust store; seeds antigravity's
 │   ├── trust_tests.rs # Unit tests for trust.rs (included via #[path])
 │   └── operations.rs # AgentOperations/CodingAgent traits (mockable)
+├── core/             # Domain logic with no terminal, HTTP or agent transport attached
+│   ├── actions.rs    # allowed_actions + CallerKind — what a task permits, and to whom
+│   └── input.rs      # Getting text and keys into a pane: submit_message, composer parking
 ├── mcp/
 │   ├── mod.rs        # Re-exports
 │   └── server.rs     # MCP server (JSON-RPC over stdio) — global and project-scoped modes
+├── web/              # `agtx serve` — the board over HTTP (feature = "serve")
+│   ├── mod.rs        # ServeOptions, startup, the banner and its QR
+│   ├── routes.rs     # Router, read endpoints, the auth layer, the embedded-asset fallback
+│   ├── writes.rs     # Actions (queued, never executed), task CRUD, /input, /api/pair
+│   ├── ws.rs         # Live pane frames — snapshot frames, not a PTY
+│   ├── state.rs      # ServeMode, ApiError, rate limit, conflict cache
+│   ├── auth.rs       # Pairing codes and per-device tokens
+│   ├── assets.rs     # The PWA, embedded with include_bytes! (no bundler)
+│   ├── qr.rs         # Pairing QR: half-blocks for a terminal, grid for ratatui
+│   └── tunnel.rs     # tailscale serve / funnel / cloudflared — plan is pure, spawn is not
 ├── update/
 │   ├── mod.rs        # check_for_update() — the whole background check
 │   ├── version.rs    # Semver-lite parse/compare + the prerelease policy (pure)
@@ -98,6 +117,15 @@ src/
 └── config/
     └── mod.rs        # GlobalConfig, ProjectConfig, MergedConfig, PhaseAgentsConfig,
                       # WorktreeConfig, ThemeConfig, WorkflowPlugin, TrustStore
+
+web/                   # The mobile PWA — plain ES modules, no build step
+├── index.html         # Shell; app.js is the only entry point
+├── app.js             # Router, screens, action sheet, swipe, live terminal
+├── api.js             # API client, credential capture, key-chip vocabulary
+├── ansi.js            # SGR-to-HTML — capture-pane emits only `ESC[…m`, so no emulator
+├── app.css            # Theme tokens tracking the TUI's palette
+├── sw.js              # Offline shell, network-first (never caches /api)
+└── manifest.webmanifest, icon-{192,512}.png
 
 skills/                # Plugin skill files — auto-discovered as /agtx:* (Claude) or @agtx:* (Codex)
 ├── sweep/SKILL.md     # Sweep skill — push any conversation to the board (/agtx:sweep)
@@ -556,6 +584,46 @@ agtx tells the user when a newer release exists and replaces its own binary on r
   verified them since it was written, but none were ever published, so its verification had never
   once run
 
+### Serving the Board to a Phone
+`agtx serve` (feature = `serve`) is **the MCP server re-exposed over HTTP with a PWA on top** — it talks
+to SQLite, tmux and git, never to `App`. `W` in the TUI runs it as a child and shows the pairing QR.
+
+**Actions queue; they do not execute.** A tap writes to `transition_requests`, and only a running TUI
+drains it — the same contract the orchestrator lives under. So every action response says `queued`,
+carries `tui_connected` from the `tui_heartbeat` table, and the phone shows a banner when nothing is
+draining. `docs/planning/headless-engine.md` is the plan that removes this.
+
+**Loopback needs no credential; anything wider does.** Reaching `127.0.0.1` already means being on this
+machine, where the tmux socket and the databases are readable anyway. Off-loopback — including a tunnel,
+whose provider proxies into a loopback listener — requires a paired device. Reading only the bind address
+is how a tunnelled server ends up open, so `ServeOptions::is_loopback` reads the tunnel too.
+
+**Per-device tokens, hashed at rest** in `mobile_devices`, so one lost phone is revoked without cutting
+off the rest. Validation is a hash lookup per request, which makes `--revoke` immediate and
+cross-process. Secrets reach the phone in the **URL fragment**, which browsers never transmit, so they
+stay out of every access log; `/ws` uses `Sec-WebSocket-Protocol` instead, the one field a browser can
+set on an upgrade. Auth lives in the router's middleware and not the socket handler: `WebSocketUpgrade`
+is an extractor, so a handler-side check runs only *after* the upgrade is accepted.
+
+**Two things about the PWA that look like shortcuts and are not.** There is **no bundler** — the app is
+plain ES modules embedded with `include_bytes!`, so a missing file is a compile error rather than a
+runtime 404, and nothing can be stale. And there is **no xterm.js**: measured against tmux 3.5a,
+`capture-pane -p -e` emits only `ESC[…m`, no cursor motion, because it is a snapshot of an
+already-rendered grid — a terminal emulator would have nothing to emulate. `web/ansi.js` builds a DOM
+fragment rather than an HTML string, so agent output containing `<script>` is text.
+
+Two traps worth knowing before touching either half:
+
+- **`include_bytes!` guarantees a *listed* file exists, not that every file is listed.** A module left
+  out of `assets.rs` 404s to the SPA shell, the ES import receives HTML, and the whole app renders
+  blank. `the_asset_table_covers_the_web_directory` closes that direction.
+- **ratatui does not interpret ANSI.** `qr::render` is for the CLI banner; the `W` overlay must use
+  `qr::grid` and build styled spans, or it draws literal escape bytes as an unscannable QR.
+
+**The board does not poll.** It is fetched when something happened — opened, pulled down, returned to,
+or changed by an action. The live pane is the exception and keeps its socket, which runs only while a
+subscriber is attached and sends only changed frames.
+
 ### Database Storage
 All databases stored centrally (not in project directories), in the platform data dir (`GlobalConfig::data_dir`, via the `directories` crate):
 - macOS: `~/Library/Application Support/agtx/`
@@ -784,6 +852,7 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `,` | Open the config editor |
 | `?` | Show every binding (help overlay) |
 | `u` | Update agtx (only bound when a newer release was found) |
+| `W` | Serve the board to a phone: QR, pairing, and paired devices |
 | `O` | Toggle orchestrator agent (experimental) |
 | `e` | Toggle project sidebar (`h`/`Left` from the Backlog column focuses it) |
 | `q` | Quit |
