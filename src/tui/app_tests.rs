@@ -15417,3 +15417,135 @@ fn an_unmapped_key_is_dropped_rather_than_guessed() {
         None
     );
 }
+
+// =============================================================================
+// The `W` overlay — serving the board to a phone
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_w_opens_the_mobile_overlay_and_esc_closes_it() {
+    let mut app = make_test_app();
+    assert!(app.state.mobile_popup.is_none());
+
+    press_key(&mut app, KeyCode::Char('W'));
+    assert!(
+        app.state.mobile_popup.is_some(),
+        "W did not open the overlay"
+    );
+    assert!(app.draw().is_ok());
+
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.mobile_popup.is_none());
+}
+
+/// The overlay swallows keys rather than letting them reach the board behind
+/// it — otherwise `x` would delete the selected *task* while someone is aiming
+/// at a device row.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_the_mobile_overlay_swallows_board_keys() {
+    let mut app = make_test_app();
+    let before = app.state.board.tasks.len();
+
+    press_key(&mut app, KeyCode::Char('W'));
+    for key in ['x', 'o', 'd', 'm', 'p'] {
+        press_key(&mut app, KeyCode::Char(key));
+    }
+
+    assert!(app.state.mobile_popup.is_some(), "a key closed the overlay");
+    assert_eq!(
+        app.state.board.tasks.len(),
+        before,
+        "a key reached the board behind the overlay"
+    );
+    assert!(
+        app.state.wizard.is_none(),
+        "`o` opened the wizard underneath"
+    );
+}
+
+/// Everything currently on the test terminal, as one string.
+///
+/// Reads the cells rather than any of the app's own state, so it sees what a
+/// person would see — which is the point when the bug under test is bytes
+/// reaching the screen that should never have been drawn.
+#[cfg(feature = "test-mocks")]
+fn rendered_text(app: &App) -> String {
+    match app.terminal.backend() {
+        AppBackend::Test(backend) => {
+            let buffer = backend.buffer();
+            let area = buffer.area();
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        _ => String::new(),
+    }
+}
+
+/// A QR drawn through ratatui must be **styled spans**, never the ANSI string
+/// the CLI banner prints: ratatui does not interpret escape sequences, so those
+/// bytes would be drawn as literal garbage — a QR that cannot scan and looks
+/// like corruption.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_overlay_never_draws_raw_ansi() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('W'));
+    assert!(app.draw().is_ok());
+
+    let rendered = rendered_text(&app);
+    assert!(
+        !rendered.contains('\u{1b}') && !rendered.contains("[97m") && !rendered.contains("[107m"),
+        "an escape sequence reached the screen: {rendered:?}"
+    );
+}
+
+/// Closing the overlay must not stop the server: the point is to scan and then
+/// carry on using the board.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_closing_the_overlay_does_not_stop_serving() {
+    use crate::tui::serve_control::MobilePopup;
+
+    let mut app = make_test_app();
+    app.state.mobile_popup = Some(MobilePopup::new());
+    // Reopening must not restart or disturb anything either.
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.mobile_popup.is_none());
+    press_key(&mut app, KeyCode::Char('W'));
+    assert!(app.state.mobile_popup.is_some());
+}
+
+/// `move_selection` is the only thing standing between an empty device list and
+/// an index panic on the next draw.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_device_selection_is_clamped() {
+    use crate::tui::serve_control::MobilePopup;
+
+    let mut popup = MobilePopup {
+        session: None,
+        devices: Vec::new(),
+        selected: 0,
+        message: None,
+    };
+    popup.move_selection(1);
+    popup.move_selection(-1);
+    assert_eq!(popup.selected, 0, "an empty list must not move the cursor");
+
+    popup.devices = vec![
+        crate::db::MobileDevice::new("a", "h1"),
+        crate::db::MobileDevice::new("b", "h2"),
+    ];
+    popup.move_selection(5);
+    assert_eq!(popup.selected, 1, "selection ran past the end");
+    popup.move_selection(-5);
+    assert_eq!(popup.selected, 0, "selection ran before the start");
+}

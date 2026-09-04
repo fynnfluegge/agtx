@@ -436,6 +436,8 @@ struct AppState {
     deps_satisfied_cache: HashMap<String, bool>,
     // Full-screen dependency-graph overlay (Shift+D)
     dep_graph_popup: Option<DepGraphPopup>,
+    /// The `W` overlay: serve the board to a phone, and manage paired devices.
+    mobile_popup: Option<crate::tui::serve_control::MobilePopup>,
     // Queue of task IDs awaiting serialized worktree setup (batch-move from the
     // dependency view). Worktree setup runs one-at-a-time via `setup_rx`; this
     // queue is drained as each setup completes.
@@ -932,6 +934,7 @@ impl App {
                 update_install_rx: None,
                 deps_satisfied_cache: HashMap::new(),
                 dep_graph_popup: None,
+                mobile_popup: None,
                 setup_queue: VecDeque::new(),
                 instance_id: uuid::Uuid::new_v4().to_string(),
             },
@@ -1181,6 +1184,7 @@ impl App {
                 update_install_rx: None,
                 deps_satisfied_cache: HashMap::new(),
                 dep_graph_popup: None,
+                mobile_popup: None,
                 setup_queue: VecDeque::new(),
                 instance_id: uuid::Uuid::new_v4().to_string(),
             },
@@ -2740,6 +2744,11 @@ impl App {
         if let Some(ref popup) = state.dep_graph_popup {
             Self::draw_dependency_graph(popup, frame, area, &state.config.theme);
         }
+
+        // Mobile overlay
+        if let Some(ref popup) = state.mobile_popup {
+            Self::draw_mobile_popup(popup, frame, area, &state.config.theme);
+        }
     }
 
     /// Render the dependency-graph overlay: topological columns of task cards,
@@ -3447,6 +3456,11 @@ impl App {
         // Handle dependency-graph overlay if open
         if self.state.dep_graph_popup.is_some() {
             return self.handle_dep_graph_key(key);
+        }
+
+        // Handle the mobile overlay if open
+        if self.state.mobile_popup.is_some() {
+            return self.handle_mobile_key(key);
         }
 
         // Handle PR confirmation popup if open
@@ -4645,6 +4659,10 @@ impl App {
             KeyCode::Char('x') => self.delete_selected_task()?,
             KeyCode::Char('d') => self.show_task_diff()?,
             KeyCode::Char('D') => self.show_dependency_graph()?,
+            KeyCode::Char('W') => {
+                // `W` and not `R`/`r`: those are start-research and resume.
+                self.state.mobile_popup = Some(crate::tui::serve_control::MobilePopup::new());
+            }
             KeyCode::Char('m') => self.move_task_right()?,
             KeyCode::Char('M') => self.move_backlog_to_running()?,
             KeyCode::Char('R') => {
@@ -6512,6 +6530,175 @@ impl App {
     }
 
     /// Key handling for the dependency-graph overlay.
+    /// Keys for the `W` overlay.
+    ///
+    /// Closing it does **not** stop the server: someone opens this, scans, and
+    /// closes it while carrying on with the board. Only `s` and quitting stop
+    /// serving.
+    fn handle_mobile_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let Some(popup) = self.state.mobile_popup.as_mut() else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('W') => {
+                self.state.mobile_popup = None;
+            }
+            KeyCode::Char('s') => {
+                popup.toggle(crate::tui::serve_control::DEFAULT_PORT);
+            }
+            KeyCode::Char('x') => popup.revoke_selected(),
+            KeyCode::Char('j') | KeyCode::Down => popup.move_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => popup.move_selection(-1),
+            KeyCode::Char('r') => {
+                popup.reload_devices();
+                popup.message = Some("Reloaded.".to_string());
+            }
+            // Swallow everything else rather than letting it reach the board
+            // behind the overlay.
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The `W` overlay: a QR to scan, and the devices already paired.
+    fn draw_mobile_popup(
+        popup: &crate::tui::serve_control::MobilePopup,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &crate::config::ThemeConfig,
+    ) {
+        use ratatui::widgets::Clear;
+
+        let accent = hex_to_color(&theme.color_accent);
+        let dim = hex_to_color(&theme.color_dimmed);
+        let text = hex_to_color(&theme.color_text);
+        let selected = hex_to_color(&theme.color_selected);
+
+        let qr = popup.qr_grid();
+        // The QR is the widest thing here and it must not wrap — a wrapped QR
+        // is unscannable and reads as corruption rather than as a layout bug.
+        // Two module rows per text row, so the height is half the width.
+        let qr_width = qr.as_ref().map_or(0, |(w, _)| *w);
+        let qr_height = qr_width.div_ceil(2);
+
+        let width = (qr_width as u16 + 6)
+            .max(58)
+            .min(area.width.saturating_sub(2));
+        let body_height = qr_height as u16 + popup.devices.len().max(1) as u16 + 10;
+        let height = body_height.min(area.height.saturating_sub(2));
+        let rect = centered_rect_fixed_width(width, 100, area);
+        let rect = Rect {
+            x: rect.x,
+            y: area.y + (area.height.saturating_sub(height)) / 2,
+            width: rect.width.min(width),
+            height,
+        };
+
+        frame.render_widget(Clear, rect);
+
+        let serving = popup.session.is_some();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(hex_to_color(&theme.color_popup_border)))
+            .title(Span::styled(
+                if serving {
+                    " Mobile — serving "
+                } else {
+                    " Mobile "
+                },
+                Style::default()
+                    .fg(hex_to_color(&theme.color_popup_header))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        match (&popup.session, &qr) {
+            (Some(session), Some((total, dark))) => {
+                lines.extend(qr_lines(*total, dark));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    session.url.clone(),
+                    Style::default().fg(accent),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Scan it. The code is single-use; paired devices need nothing.",
+                    Style::default().fg(dim),
+                )));
+            }
+            (Some(session), None) => {
+                lines.push(Line::from(Span::styled(
+                    session.url.clone(),
+                    Style::default().fg(accent),
+                )));
+            }
+            (None, _) => {
+                lines.push(Line::from(Span::styled(
+                    "Not serving. Press s to start.",
+                    Style::default().fg(dim),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Anything on this network will be able to reach the board,",
+                    Style::default().fg(dim),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "including typing into your agents. Devices must pair first.",
+                    Style::default().fg(dim),
+                )));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Paired devices ({})", popup.devices.len()),
+            Style::default().fg(text).add_modifier(Modifier::BOLD),
+        )));
+
+        if popup.devices.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  none yet",
+                Style::default().fg(dim),
+            )));
+        } else {
+            for (i, device) in popup.devices.iter().enumerate() {
+                let marker = if i == popup.selected { "▸ " } else { "  " };
+                let seen = device
+                    .last_seen
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "never".to_string());
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{marker}{}", device.label),
+                        Style::default().fg(if i == popup.selected { selected } else { text }),
+                    ),
+                    Span::styled(format!("  last seen {seen}"), Style::default().fg(dim)),
+                ]));
+            }
+        }
+
+        if let Some(ref message) = popup.message {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                message.clone(),
+                Style::default().fg(selected),
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            if serving {
+                "[s] stop  [x] revoke  [j/k] select  [r] reload  [Esc] close (keeps serving)"
+            } else {
+                "[s] start serving  [x] revoke  [j/k] select  [r] reload  [Esc] close"
+            },
+            Style::default().fg(dim),
+        )));
+
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
     fn handle_dep_graph_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         let Some(popup) = self.state.dep_graph_popup.as_mut() else {
             return Ok(());
@@ -8529,6 +8716,11 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        // Stop a server started from the overlay. tmux windows deliberately
+        // outlive agtx; a child server must not, or it holds its port with
+        // nothing on screen owning it.
+        self.state.mobile_popup = None;
+
         // Deliver what is still queued and stop the broker before the process
         // goes away — the last characters typed into a pane were typed on
         // purpose. Bounded by the queue depth, so quitting stays instant.
@@ -10971,9 +11163,6 @@ const DELIVERY_CONFIRM_POLLS: u32 = 10; // x 200ms = 2s
 /// Pane-settle budget before each attempt: 1s of quiet, given up on after 10s.
 const SETTLE_STABLE_POLLS: u32 = 5;
 const SETTLE_MAX_POLLS: u32 = 50;
-
-
-
 
 /// Wait for the pane to stop changing, up to [`SETTLE_MAX_POLLS`].
 ///
@@ -14047,4 +14236,35 @@ fn draw_wizard_list(
             &mut scrollbar_state,
         );
     }
+}
+
+/// A QR module grid as ratatui lines.
+///
+/// `▀` splits each cell into an upper and a lower module, coloured
+/// independently, so the code is square in a terminal whose cells are about
+/// twice as tall as they are wide — and half as tall as one module per cell.
+///
+/// The colours are set explicitly, not left to the theme: a QR must be
+/// dark-on-light to scan, and most terminals running agtx are the other way
+/// round.
+fn qr_lines(total: usize, dark: &[bool]) -> Vec<Line<'static>> {
+    let at = |x: usize, y: usize| -> bool { y < total && dark[y * total + x] };
+    (0..total)
+        .step_by(2)
+        .map(|row| {
+            let spans: Vec<Span> = (0..total)
+                .map(|x| {
+                    let upper = at(x, row);
+                    let lower = at(x, row + 1);
+                    Span::styled(
+                        "▀",
+                        Style::default()
+                            .fg(if upper { Color::Black } else { Color::White })
+                            .bg(if lower { Color::Black } else { Color::White }),
+                    )
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
 }

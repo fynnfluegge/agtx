@@ -3,6 +3,7 @@ pub mod board;
 pub mod config_editor;
 pub mod dep_graph;
 pub mod help;
+pub mod serve_control;
 pub mod shell_popup;
 pub mod text_input;
 mod theme;
