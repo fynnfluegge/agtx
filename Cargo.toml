@@ -46,6 +46,10 @@ tracing-appender = "0.2"
 # MCP server
 rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
 
+# Web server
+axum = "0.8"
+pulldown-cmark = "0.12"
+
 [features]
 default = []
 test-mocks = ["dep:mockall"]
@@ -63,6 +67,7 @@ path = "tests/smoke/agent_matrix.rs"
 [dev-dependencies]
 tempfile = "3"
 mockall = "0.13"
+tower = { version = "0.5", features = ["util"] }
 
 [dependencies.mockall]
 version = "0.13"

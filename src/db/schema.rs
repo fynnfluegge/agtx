@@ -18,20 +18,20 @@ impl Database {
     /// keyed by a temp path that no longer exists. Same reasoning as
     /// `AGTX_AGENT_HOME`.
     pub fn data_root() -> Result<std::path::PathBuf> {
-        if let Ok(dir) = std::env::var("AGTX_DATA_DIR") {
-            if !dir.is_empty() {
-                return Ok(std::path::PathBuf::from(dir));
-            }
-        }
-        let dirs = directories::ProjectDirs::from("", "", "agtx")
-            .context("Could not determine config directory")?;
-        Ok(dirs.config_dir().to_path_buf())
+        crate::config::GlobalConfig::config_dir()
     }
 
-    /// Open or create a project database (stored centrally in config dir)
+    /// Open or create a project database (stored centrally in the platform
+    /// config dir).
     pub fn open_project(project_path: &Path) -> Result<Self> {
         let config_dir = Self::data_root()?;
+        Self::open_project_in(&config_dir, project_path)
+    }
 
+    /// Open or create a project database under an explicit config directory.
+    /// The default location is resolved by [`Database::open_project`]; this
+    /// variant lets callers (e.g. the web server, tests) inject the root.
+    pub fn open_project_in(config_dir: &Path, project_path: &Path) -> Result<Self> {
         // Create a stable ID from the project path using a hash
         let path_str = project_path.to_string_lossy();
         let path_hash = Self::hash_path(&path_str);
@@ -95,9 +95,17 @@ impl Database {
         format!("{:016x}", hasher.finish())
     }
 
-    /// Open or create the global index database
+    /// Open or create the global index database (in the platform config dir).
     pub fn open_global() -> Result<Self> {
-        let db_path = Self::data_root()?.join("index.db");
+        let config_dir = Self::data_root()?;
+        Self::open_global_in(&config_dir)
+    }
+
+    /// Open or create the global index database under an explicit config
+    /// directory. The default location is resolved by [`Database::open_global`];
+    /// this variant lets callers (e.g. the web server, tests) inject the root.
+    pub fn open_global_in(config_dir: &Path) -> Result<Self> {
+        let db_path = config_dir.join("index.db");
 
         // Ensure config directory exists
         if let Some(parent) = db_path.parent() {

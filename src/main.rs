@@ -64,6 +64,11 @@ async fn main() -> Result<()> {
         .collect();
 
     let mode = match positional_args.first().copied() {
+        Some("web-serve") => {
+            let env_port = std::env::var("PORT").ok();
+            let port = agtx::web::server::parse_web_port(&args, env_port.as_deref());
+            return agtx::web::serve(port).await;
+        }
         Some("mcp-serve") => {
             let project_path = positional_args.get(1).map(PathBuf::from);
             let project_path = match project_path {

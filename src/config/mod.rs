@@ -554,6 +554,24 @@ impl GlobalConfig {
             .context("Could not determine data directory")?;
         Ok(dirs.data_dir().to_path_buf())
     }
+
+    /// Get the path to the global config directory (where `index.db` and
+    /// per-project databases live).
+    ///
+    /// Honours `AGTX_DATA_DIR`, so a test or smoke run that redirects the
+    /// databases redirects every reader of them — the TUI, the web server and
+    /// `Database::open_global` alike — rather than leaving one of them
+    /// pointed at the user's own store.
+    pub fn config_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("AGTX_DATA_DIR") {
+            if !dir.is_empty() {
+                return Ok(PathBuf::from(dir));
+            }
+        }
+        let dirs = directories::ProjectDirs::from("", "", "agtx")
+            .context("Could not determine config directory")?;
+        Ok(dirs.config_dir().to_path_buf())
+    }
 }
 
 impl ProjectConfig {
