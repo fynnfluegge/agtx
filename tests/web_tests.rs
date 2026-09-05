@@ -1855,3 +1855,80 @@ fn a_tunnel_counts_as_off_loopback() {
         "a tunnelled server must require pairing even though it binds 127.0.0.1"
     );
 }
+
+// ── the publish gate ────────────────────────────────────────────────────
+
+/// `task_runtime` exists for a reader outside the TUI process. With no such
+/// reader the write is pure cost — a transaction every couple of seconds for
+/// the life of every session, on the chance a phone might one day connect. So
+/// a board request is what turns publishing on.
+#[tokio::test]
+async fn asking_for_a_board_marks_it_as_watched() {
+    let f = fixture();
+    let db = Database::open_global().unwrap();
+    let path = f.project_path.to_string_lossy().to_string();
+    let window = chrono::Duration::seconds(600);
+
+    assert!(
+        !db.board_watched_recently(&path, window).unwrap(),
+        "nothing has asked for this board yet"
+    );
+
+    let (status, _) = get(
+        state_for(&f, ServeMode::Global),
+        &format!("/api/projects/{}/tasks", f.project_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert!(
+        db.board_watched_recently(&path, window).unwrap(),
+        "a board request should mark the project as watched"
+    );
+}
+
+/// The marker ages out, so publishing stops again once nobody is reading.
+#[tokio::test]
+async fn a_stale_watch_does_not_keep_publishing_alive() {
+    let f = fixture();
+    let db = Database::open_global().unwrap();
+    let path = f.project_path.to_string_lossy().to_string();
+
+    db.note_board_watched(&path).unwrap();
+    assert!(db
+        .board_watched_recently(&path, chrono::Duration::seconds(600))
+        .unwrap());
+    // Zero window: every marker is already expired.
+    assert!(!db
+        .board_watched_recently(&path, chrono::Duration::zero())
+        .unwrap());
+    // And a project nobody ever asked about is never watched.
+    assert!(!db
+        .board_watched_recently("/not/a/project", chrono::Duration::seconds(600))
+        .unwrap());
+}
+
+/// Reads other than the board must not switch publishing on. Opening one task
+/// detail is not a reason to start mirroring the whole project's phase status.
+#[tokio::test]
+async fn only_a_board_request_counts_as_watching() {
+    let f = fixture();
+    let task = add_task(&f, "A task", TaskStatus::Backlog);
+    let db = Database::open_global().unwrap();
+    let path = f.project_path.to_string_lossy().to_string();
+    let window = chrono::Duration::seconds(600);
+
+    for uri in [
+        "/api/health".to_string(),
+        "/api/projects".to_string(),
+        format!("/api/projects/{}/tasks/{}", f.project_id, task.id),
+    ] {
+        let (status, _) = get(state_for(&f, ServeMode::Global), &uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+    }
+
+    assert!(
+        !db.board_watched_recently(&path, window).unwrap(),
+        "a non-board read switched publishing on"
+    );
+}

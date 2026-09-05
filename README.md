@@ -141,8 +141,9 @@ agtx serve --tunnel
 > Add `.agtx/` to your project's `.gitignore` to avoid committing worktrees and local task data.
 
 ```bash
-# Install from source
-cargo build --release
+# Install from source — `serve` adds the mobile board (`W`), and the
+# published binaries are built with it
+cargo build --release --features serve
 cp target/release/agtx ~/.local/bin/
 ```
 
@@ -262,6 +263,11 @@ agtx serve --revoke <id>         # revoke one; --revoke-all for the lot
 
 Two keys in the overlay, each a whole action: `s` serves to the local network,
 `t` serves via your tailnet.
+
+> [!NOTE]
+> This needs a binary built with `--features serve`. The released ones are; a
+> local `cargo build --release` without it reports "this build has no web
+> server" under both options.
 
 <details>
 <summary><strong>Setup — on your wifi</strong></summary>

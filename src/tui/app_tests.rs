@@ -15757,3 +15757,67 @@ fn test_a_dead_server_reports_what_the_child_said() {
         "reported the context rather than the cause: {message}"
     );
 }
+
+/// An idle TUI must not write `task_runtime` at all.
+///
+/// The table mirrors phase status for a reader in another process. With no
+/// reader the write is pure cost — one transaction every couple of seconds for
+/// the life of every session — so publishing is gated on someone actually
+/// asking for a board, and compiled out entirely in a build with no server.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_an_unwatched_board_publishes_no_runtime() {
+    let app = make_test_app();
+    assert!(
+        !app.should_publish_runtime(),
+        "a board nobody has asked for should not be mirrored to the database"
+    );
+}
+
+/// Starting the server from the overlay is an explicit request for mobile, so
+/// it counts without waiting for the phone's first request.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_serving_from_the_overlay_turns_publishing_on() {
+    use crate::tui::serve_control::ServeSession;
+
+    let mut app = make_test_app();
+    assert!(!app.should_publish_runtime());
+
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn a stand-in child");
+    app.state.serve_session = Some(ServeSession::for_test(
+        child,
+        "http://10.0.0.2:8787/#pair=x",
+    ));
+
+    assert!(
+        app.should_publish_runtime(),
+        "serving should start the mirror without waiting for a request"
+    );
+    app.state.serve_session = None;
+}
+
+/// A build without the `serve` feature still has the `W` binding, so both
+/// options are permanently unavailable — and must say what to do about it. The
+/// published binaries carry the feature; a plain `cargo build --release` does
+/// not, and "this build has no web server" left the reader guessing whether
+/// that was a bug, a missing dependency, or something they could fix.
+#[test]
+#[cfg(all(feature = "test-mocks", not(feature = "serve")))]
+fn test_a_build_without_the_server_says_how_to_get_one() {
+    use crate::tui::serve_control::Reach;
+
+    for reach in [Reach::Lan, Reach::Tailnet] {
+        let why = reach.unavailable().expect("must be unavailable");
+        assert!(
+            why.contains("--features serve"),
+            "the reason must name the fix: {why}"
+        );
+    }
+}

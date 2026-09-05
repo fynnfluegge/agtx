@@ -300,6 +300,17 @@ impl Database {
                 beat_at TEXT NOT NULL
             );
 
+            -- When a phone last asked for a project's board.
+            --
+            -- The TUI publishes `task_runtime` only while this is fresh, so a
+            -- board nobody is looking at costs no writes at all. Without it the
+            -- refresh wrote a transaction every couple of seconds forever, to
+            -- keep a mirror current for a reader that might never exist.
+            CREATE TABLE IF NOT EXISTS board_watch (
+                project_path TEXT PRIMARY KEY,
+                beat_at TEXT NOT NULL
+            );
+
             -- Devices paired with `agtx serve`. One row per phone, so a lost
             -- one can be revoked without re-pairing the rest.
             --
@@ -880,6 +891,42 @@ impl Database {
             params![project_path, chrono::Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+
+    /// Record that something asked for this project's board.
+    ///
+    /// Written by the web server on a board request. Callers should throttle:
+    /// this is a write, and it answers a question whose useful resolution is
+    /// minutes.
+    pub fn note_board_watched(&self, project_path: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO board_watch (project_path, beat_at) VALUES (?1, ?2)
+             ON CONFLICT(project_path) DO UPDATE SET beat_at = excluded.beat_at",
+            params![project_path, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether a board was asked for within `stale_after`.
+    ///
+    /// The gate on publishing `task_runtime`. Absent and stale are the same
+    /// answer — nobody is reading — so a missing row is not an error.
+    pub fn board_watched_recently(
+        &self,
+        project_path: &str,
+        stale_after: chrono::Duration,
+    ) -> Result<bool> {
+        let beat: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT beat_at FROM board_watch WHERE project_path = ?1",
+                params![project_path],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(beat
+            .and_then(|b| chrono::DateTime::parse_from_rfc3339(&b).ok())
+            .is_some_and(|t| chrono::Utc::now() - t.with_timezone(&chrono::Utc) < stale_after))
     }
 
     /// Whether a TUI has beaten for `project_path` within `stale_after`.

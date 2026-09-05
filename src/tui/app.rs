@@ -8427,6 +8427,48 @@ impl App {
         });
     }
 
+    /// Whether `task_runtime` is worth writing right now.
+    ///
+    /// The table exists so a *reader outside this process* can see phase status
+    /// it cannot recompute. With no such reader the write is pure cost — and it
+    /// is not a small one in aggregate: a transaction every couple of seconds,
+    /// for the life of every agtx session, forever, on the chance a phone might
+    /// one day connect.
+    ///
+    /// So it is gated twice. Without the `serve` feature there is no server in
+    /// this binary and nothing could ever read the table, so the call is
+    /// compiled out entirely. With it, publishing starts when someone actually
+    /// asks for a board and stops when they stop — the web server marks
+    /// `board_watch` on a board request, and the overlay's own child counts too,
+    /// since starting it is an explicit request for mobile.
+    ///
+    /// The window is generous because the board no longer polls: someone can
+    /// read it for minutes without issuing a request, and going quiet mid-read
+    /// would freeze their phase icons rather than save anything worth having.
+    #[cfg(feature = "serve")]
+    fn should_publish_runtime(&self) -> bool {
+        const WATCH_WINDOW: i64 = 10 * 60;
+
+        if self.state.serve_session.is_some() {
+            return true;
+        }
+        let Some(path) = &self.state.project_path else {
+            return false;
+        };
+        self.state
+            .global_db
+            .board_watched_recently(
+                &path.to_string_lossy(),
+                chrono::Duration::seconds(WATCH_WINDOW),
+            )
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(feature = "serve"))]
+    fn should_publish_runtime(&self) -> bool {
+        false
+    }
+
     /// Apply results from the background session refresh thread.
     fn apply_session_refresh(&mut self, result: SessionRefreshResult) {
         let now = Instant::now();
@@ -8730,12 +8772,15 @@ impl App {
             }
         }
 
-        // One commit for the whole pass. Pruning rides along inside it — see
-        // `publish_task_runtime`; it is done here rather than at the delete
-        // sites because MCP deletes tasks from another process entirely.
-        if let Some(db) = &self.state.db {
-            if let Err(e) = db.publish_task_runtime(&runtime_rows) {
-                tracing::warn!(error = %e, "failed to publish task runtime");
+        // One commit for the whole pass, and only when something is reading.
+        // Pruning rides along inside it — see `publish_task_runtime`; it is done
+        // there rather than at the delete sites because MCP deletes tasks from
+        // another process entirely.
+        if self.should_publish_runtime() {
+            if let Some(db) = &self.state.db {
+                if let Err(e) = db.publish_task_runtime(&runtime_rows) {
+                    tracing::warn!(error = %e, "failed to publish task runtime");
+                }
             }
         }
     }

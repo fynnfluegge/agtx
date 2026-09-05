@@ -194,6 +194,9 @@ pub struct ServerState {
     pub pairing: super::auth::PairingCodes,
     /// Device ids seen recently, so `last_seen` is not written on every poll.
     seen: Mutex<HashMap<String, Instant>>,
+    /// Projects whose board was recently asked for, so the watch marker is not
+    /// rewritten on every request.
+    watched: Mutex<HashMap<String, Instant>>,
     /// How long a TUI heartbeat stays trusted. Three beats of
     /// `TRANSITION_POLL_INTERVAL`, so one missed tick is not a disconnect.
     pub heartbeat_ttl: chrono::Duration,
@@ -213,6 +216,7 @@ impl ServerState {
             require_auth,
             pairing: super::auth::PairingCodes::default(),
             seen: Mutex::new(HashMap::new()),
+            watched: Mutex::new(HashMap::new()),
             heartbeat_ttl: chrono::Duration::seconds(6),
             // Generous for a person tapping, ruinous only for a loop.
             writes: RateLimiter::new(120, Duration::from_secs(60)),
@@ -259,6 +263,27 @@ impl ServerState {
         seen.insert(device_id.to_string(), Instant::now());
         if let Ok(db) = Database::open_global() {
             let _ = db.touch_mobile_device(device_id);
+        }
+    }
+
+    /// Mark this project's board as being looked at.
+    ///
+    /// This is what lets the TUI publish `task_runtime` only while someone is
+    /// actually reading it — a board nobody has opened costs no writes at all.
+    /// Throttled, because it answers a question whose useful resolution is
+    /// minutes and it is on the path of the request a phone makes most.
+    pub fn note_board_watched(&self, project_path: &str) {
+        const NOTE_INTERVAL: Duration = Duration::from_secs(30);
+        let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
+        let fresh = watched
+            .get(project_path)
+            .is_some_and(|at| at.elapsed() < NOTE_INTERVAL);
+        if fresh {
+            return;
+        }
+        watched.insert(project_path.to_string(), Instant::now());
+        if let Ok(db) = Database::open_global() {
+            let _ = db.note_board_watched(project_path);
         }
     }
 

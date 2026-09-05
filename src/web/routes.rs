@@ -311,6 +311,11 @@ async fn tasks(
     Path(pid): Path<String>,
 ) -> ApiResult<Json<Vec<TaskCard>>> {
     let db = state.project_db(&pid)?;
+    // Tell the TUI someone is reading, so it starts publishing phase status.
+    // Without a reader it publishes nothing, which is the point.
+    if let Ok(path) = state.project_path(&pid) {
+        state.note_board_watched(&path.to_string_lossy());
+    }
     let all = db
         .get_all_tasks()
         .map_err(|e| ApiError::Internal(format!("listing tasks: {e}")))?;

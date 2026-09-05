@@ -78,9 +78,13 @@ impl Reach {
         }
     }
 
+    /// A build without the feature can never serve, so both options say so —
+    /// and say what to do about it. "This build has no web server" is true and
+    /// useless: the reader is left to guess whether that is a bug, a missing
+    /// dependency, or something they can fix.
     #[cfg(not(feature = "serve"))]
     pub fn unavailable(&self) -> Option<&'static str> {
-        Some("this build has no web server")
+        Some("rebuild with `cargo build --release --features serve`")
     }
 }
 
