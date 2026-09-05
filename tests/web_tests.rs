@@ -1244,7 +1244,7 @@ fn guarded(f: &Fixture) -> std::sync::Arc<ServerState> {
 
 /// Pair a device directly and return its token.
 fn paired_token(label: &str) -> String {
-    agtx::web::auth::pair_device(label).expect("pairing")
+    agtx::web::auth::pair_device(label, None).expect("pairing")
 }
 
 async fn with_auth(
@@ -1741,6 +1741,87 @@ async fn revoking_one_device_leaves_the_rest() {
     );
 }
 
+/// A pairing outlives the server that issued it. The device row is in the
+/// global database and the token is in the phone's storage, so a home-screen
+/// app reconnects to a later `agtx serve` without a new scan.
+///
+/// Locked down because the opposite — dropping devices on shutdown — is a
+/// reasonable-looking change that would silently make every phone re-scan.
+#[tokio::test]
+async fn a_pairing_survives_the_server_that_issued_it() {
+    let f = fixture();
+    let token = agtx::web::auth::pair_device("Phone", Some("session-a")).expect("pairing");
+
+    // A fresh state and router: the same thing a restarted `agtx serve` builds.
+    assert_eq!(
+        with_auth(guarded(&f), "/api/health", Some(&token)).await,
+        StatusCode::OK,
+        "the device had to pair again after a restart"
+    );
+    assert_eq!(Database::open_global().unwrap().list_mobile_devices().unwrap().len(), 1);
+}
+
+/// `revoke_session_devices` is scoped to one session, which is what would let a
+/// future expiry or forget-on-exit policy be safe: `mobile_devices` is global,
+/// so a second agtx serving another project must keep its devices.
+#[tokio::test]
+async fn revoking_a_session_leaves_another_sessions_devices() {
+    let f = fixture();
+    let mine = agtx::web::auth::pair_device("Mine", Some("session-a")).expect("pairing");
+    let theirs = agtx::web::auth::pair_device("Theirs", Some("session-b")).expect("pairing");
+
+    let db = Database::open_global().unwrap();
+    assert_eq!(db.revoke_session_devices("session-a").unwrap(), 1);
+    // Idempotent, and it never reaches beyond its own session.
+    assert_eq!(db.revoke_session_devices("session-a").unwrap(), 0);
+
+    assert_eq!(
+        with_auth(guarded(&f), "/api/health", Some(&mine)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        with_auth(guarded(&f), "/api/health", Some(&theirs)).await,
+        StatusCode::OK,
+        "another agtx instance lost its device"
+    );
+}
+
+/// A device paired through the API records the server's session. Pairing and
+/// the scoped revoke live in different files, so a missing stamp would leave
+/// the provenance blank with nothing failing.
+#[tokio::test]
+async fn pairing_over_the_api_records_the_serving_session() {
+    let _f = fixture();
+    let state = agtx::web::state::ServerState::with_session(
+        ServeMode::Global,
+        true,
+        Some("session-a".to_string()),
+    );
+    let code = state.pairing.issue();
+    let app = agtx::web::routes::router(state);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/pair")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"code":"{code}","label":"Phone"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let db = Database::open_global().unwrap();
+    assert_eq!(
+        db.list_mobile_devices().unwrap()[0].session_id.as_deref(),
+        Some("session-a")
+    );
+}
+
 /// An existing `serve-token` becomes a paired device rather than silently
 /// ceasing to work — the phone that was already set up keeps connecting.
 #[tokio::test]
@@ -1752,7 +1833,7 @@ async fn the_legacy_token_is_adopted_once() {
     let legacy = "legacy-token-value";
     std::fs::write(agtx::web::auth::token_path().unwrap(), legacy).unwrap();
 
-    let migrated = agtx::web::auth::migrate_legacy_token().unwrap();
+    let migrated = agtx::web::auth::migrate_legacy_token(None).unwrap();
     assert_eq!(migrated.as_deref(), Some(legacy));
     assert_eq!(
         with_auth(guarded(&f), "/api/health", Some(legacy)).await,
@@ -1763,7 +1844,7 @@ async fn the_legacy_token_is_adopted_once() {
     // The file is gone, so there is exactly one credential path, and a second
     // run is a no-op rather than a duplicate row.
     assert!(!agtx::web::auth::token_path().unwrap().exists());
-    assert!(agtx::web::auth::migrate_legacy_token().unwrap().is_none());
+    assert!(agtx::web::auth::migrate_legacy_token(None).unwrap().is_none());
     assert_eq!(
         Database::open_global()
             .unwrap()

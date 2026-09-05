@@ -34,6 +34,15 @@ pub struct ServeOptions {
     /// Set when the TUI launches the server: it needs the URL — and the QR —
     /// before the child exists.
     pub pair_code: Option<String>,
+    /// Identifies this serve session in `mobile_devices`.
+    ///
+    /// Stamped on every device paired here, so a device can be traced back to
+    /// the server that issued it. Minted on startup when the caller supplies
+    /// none. Pairings themselves persist until revoked.
+    ///
+    /// Deliberately **not** the pairing code: that is a credential, and a
+    /// credential does not belong in a column that outlives its use.
+    pub session_id: Option<String>,
 }
 
 impl Default for ServeOptions {
@@ -47,6 +56,7 @@ impl Default for ServeOptions {
             port: 8787,
             tunnel: None,
             pair_code: None,
+            session_id: None,
         }
     }
 }
@@ -76,11 +86,21 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
     // makes the bind answerable at all.
     let require_auth = !opts.is_loopback();
 
+    // Recorded on every device this server pairs. Provenance rather than a
+    // lifetime: pairings persist until revoked. It is what a forget-on-exit or
+    // expiry policy would delete by, and scoping such a delete is not optional
+    // — `mobile_devices` is global, so a second agtx serving another project
+    // must keep its own devices.
+    let session_id = opts
+        .session_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
     // An already-paired phone must survive the move from the single shared
     // token to per-device ones. Without this it would simply stop connecting,
     // with nothing on screen to say why.
     if require_auth {
-        match auth::migrate_legacy_token() {
+        match auth::migrate_legacy_token(Some(&session_id)) {
             Ok(Some(_)) => println!("  adopted the previous access token as a paired device"),
             Ok(None) => {}
             Err(e) => tracing::warn!(error = %e, "could not migrate the legacy access token"),
@@ -123,7 +143,7 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
         None => None,
     };
 
-    let state = ServerState::with_auth(mode, require_auth);
+    let state = ServerState::with_session(mode, require_auth, Some(session_id.clone()));
 
     // A code exists only while someone is looking at the terminal it was
     // printed in, so it is minted here rather than on demand.

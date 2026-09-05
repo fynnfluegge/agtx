@@ -108,6 +108,10 @@ impl ServeSession {
     pub fn start(port: u16, reach: Reach) -> Result<Self> {
         let exe = std::env::current_exe().context("locating the agtx binary")?;
         let code = uuid::Uuid::new_v4().simple().to_string();
+        // Recorded against every device the child pairs, so a device can be
+        // traced back to the session that issued it. Not a lifetime: pairings
+        // persist until revoked.
+        let session_id = uuid::Uuid::new_v4().to_string();
 
         let mut args: Vec<String> = vec!["serve".into(), "--port".into(), port.to_string()];
         let url = match reach {
@@ -130,6 +134,8 @@ impl ServeSession {
         };
         args.push("--pair-code".into());
         args.push(code);
+        args.push("--session-id".into());
+        args.push(session_id);
 
         let child = Command::new(exe)
             .args(&args)

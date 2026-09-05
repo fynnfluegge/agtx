@@ -600,7 +600,21 @@ is how a tunnelled server ends up open, so `ServeOptions::is_loopback` reads the
 
 **Per-device tokens, hashed at rest** in `mobile_devices`, so one lost phone is revoked without cutting
 off the rest. Validation is a hash lookup per request, which makes `--revoke` immediate and
-cross-process. Secrets reach the phone in the **URL fragment**, which browsers never transmit, so they
+cross-process.
+
+**Serving is per-session; the pairing is not.** `W` runs `agtx serve` as a *child* of the TUI, so it
+stops when agtx does and nothing ever opens a port on its own — while the paired device survives. The
+two lifetimes differing is the thing users trip on: the phone reconnects silently when the board is
+served again, and times out identically whether it was unpaired or simply nobody is serving. The
+README says so under **Mobile**; keep it said.
+
+**A pairing outlives the server that issued it**, by design: the device row is in the global
+`index.db` and the token is in the phone's `localStorage`, so a home-screen app reconnects without a
+new scan. Revocation is manual (`--revoke`, `--revoke-all`). Each device records the `session_id` of
+the serve session that paired it — provenance only, and the hook for a future expiry or
+forget-on-exit policy (`Database::revoke_session_devices` scopes a delete to one session, which is
+what makes such a policy safe: `mobile_devices` is **global**, so a second agtx serving another
+project must keep its own devices). Secrets reach the phone in the **URL fragment**, which browsers never transmit, so they
 stay out of every access log; `/ws` uses `Sec-WebSocket-Protocol` instead, the one field a browser can
 set on an upgrade. Auth lives in the router's middleware and not the socket handler: `WebSocketUpgrade`
 is an extractor, so a handler-side check runs only *after* the upgrade is accepted.

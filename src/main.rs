@@ -364,6 +364,12 @@ fn parse_serve_args(args: &[String]) -> Result<ParsedServeArgs> {
             "--pair-code" => {
                 opts.pair_code = Some(iter.next().context("--pair-code needs a value")?.clone())
             }
+            // Set by the `W` overlay so the TUI can drop this session's
+            // pairings if the child is killed before it cleans up after
+            // itself. Not for humans; a standalone serve mints its own.
+            "--session-id" => {
+                opts.session_id = Some(iter.next().context("--session-id needs a value")?.clone())
+            }
             "--devices" => devices = true,
             "--revoke-all" => revoke_all = true,
             "--revoke" => {

@@ -203,6 +203,9 @@ pub struct ServerState {
     /// Ceiling on writes — actions and task CRUD together.
     pub writes: RateLimiter,
     pub conflicts: ConflictCache,
+    /// Stamped on every device this server pairs, and the key it deletes them
+    /// by on shutdown. `None` in tests and wherever pairings are not owned.
+    pub session_id: Option<String>,
 }
 
 impl ServerState {
@@ -211,6 +214,15 @@ impl ServerState {
     }
 
     pub fn with_auth(mode: ServeMode, require_auth: bool) -> Arc<Self> {
+        Self::with_session(mode, require_auth, None)
+    }
+
+    /// As [`Self::with_auth`], naming the serve session that owns its pairings.
+    pub fn with_session(
+        mode: ServeMode,
+        require_auth: bool,
+        session_id: Option<String>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             mode,
             require_auth,
@@ -221,6 +233,7 @@ impl ServerState {
             // Generous for a person tapping, ruinous only for a loop.
             writes: RateLimiter::new(120, Duration::from_secs(60)),
             conflicts: ConflictCache::default(),
+            session_id,
         })
     }
 

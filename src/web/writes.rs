@@ -480,7 +480,7 @@ pub async fn pair(
         })?;
 
     let label = body.label.unwrap_or_default();
-    let token = crate::web::auth::pair_device(&label)
+    let token = crate::web::auth::pair_device(&label, state.session_id.as_deref())
         .map_err(|e| ApiError::Internal(format!("pairing: {e}")))?;
 
     let stored = crate::web::auth::device_for_token(&token)

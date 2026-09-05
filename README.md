@@ -264,6 +264,13 @@ agtx serve --revoke <id>         # revoke one; --revoke-all for the lot
 Two keys in the overlay, each a whole action: `s` serves to the local network,
 `t` serves via your tailnet.
 
+> [!IMPORTANT]
+> **agtx never opens a port on its own.** Serving lasts for as long as that agtx
+> runs: quit it and the server stops, so the next time you want the board on
+> your phone you press `W` then `s`/`t` again. Pairing does not change this — it
+> is a credential, not a trigger, and a paired phone whose Mac is not serving
+> just times out.
+
 > [!NOTE]
 > This needs a binary built with `--features serve`. The released ones are; a
 > local `cargo build --release` without it reports "this build has no web
@@ -280,7 +287,8 @@ Works in about thirty seconds, and needs nothing installed.
 4. In Safari or Chrome: **Share → Add to Home Screen**
 
 That last step is what turns it into an app: its own icon, no address bar, and
-the pairing remembered so you never scan again.
+the pairing remembered so you never scan again — but you still press `W` then
+`s` to start serving each time you run agtx.
 
 The URL here is a private address like `192.168.1.20`, which exists only on your
 network. **It will not work on mobile data** — if you leave the house, the app
@@ -305,10 +313,14 @@ else.
    enables it for this machine, and agtx prints that link rather than swallowing
    it. Follow it, then press `t` again.
 
-**Then, every time:**
+**Once more, to install the app:**
 
 1. Run `agtx`, press `W`, press `t`
 2. Scan the QR, and **Share → Add to Home Screen**
+
+**Then, every time you want the board on your phone:** run `agtx`, press `W`,
+press `t`. That is all — the pairing is remembered, so there is no QR to scan;
+what you are starting is the server.
 
 Now the icon on your home screen works on 5G, on hotel wifi, anywhere — the
 address is an HTTPS name on your tailnet, and only devices signed into it can
@@ -327,6 +339,7 @@ resolve or reach it.
 | Scanned fine, then the app times out | You pressed `s` (wifi) and the phone is on mobile data. Press `s` again to stop, then `t`. |
 | The tailnet URL loads on the Mac but not the phone | The phone is not on the tailnet. Open the Tailscale app there and connect. |
 | `This device is not authorised` | The pairing code expired — it lasts two minutes and is single-use. Press `s` or `t` again for a fresh QR. |
+| The app worked yesterday, today it just times out | Nothing is serving. agtx does not start the server on its own — run it, press `W`, then `s`/`t`. The pairing is still good; the port is not open. |
 | `No agtx running` on the board | Expected with no TUI open. Reading works; actions queue until one is. |
 
 </details>

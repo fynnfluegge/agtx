@@ -323,12 +323,20 @@ impl Database {
                 label TEXT NOT NULL,
                 token_hash TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL,
-                last_seen TEXT
+                last_seen TEXT,
+                session_id TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_devices_hash ON mobile_devices(token_hash);
             "#,
         )?;
+
+        // Migration: a device records the serve session that paired it.
+        // Nullable, so a row written before this column existed survives.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE mobile_devices ADD COLUMN session_id TEXT", []);
+
         Ok(())
     }
 
@@ -797,14 +805,15 @@ impl Database {
 
     pub fn add_mobile_device(&self, device: &MobileDevice) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO mobile_devices (id, label, token_hash, created_at, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO mobile_devices (id, label, token_hash, created_at, last_seen, session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 device.id,
                 device.label,
                 device.token_hash,
                 device.created_at.to_rfc3339(),
                 device.last_seen.map(|t| t.to_rfc3339()),
+                device.session_id,
             ],
         )?;
         Ok(())
@@ -853,6 +862,22 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// Drop every device paired by one serve session.
+    ///
+    /// Nothing calls this on shutdown — pairings persist until revoked. It is
+    /// the scoped primitive an expiry or forget-on-exit policy needs, and the
+    /// scoping is the point: `mobile_devices` is global, so a blanket delete
+    /// would cut off a second agtx serving another project.
+    ///
+    /// A `NULL` session_id is never matched, so a row written before the
+    /// column existed is left for the user to revoke by hand.
+    pub fn revoke_session_devices(&self, session_id: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM mobile_devices WHERE session_id = ?1",
+            params![session_id],
+        )?)
+    }
+
     /// Returns how many were removed.
     pub fn revoke_all_mobile_devices(&self) -> Result<usize> {
         Ok(self.conn.execute("DELETE FROM mobile_devices", [])?)
@@ -873,6 +898,7 @@ impl Database {
                 .and_then(parse)
                 .unwrap_or_else(chrono::Utc::now),
             last_seen: row.get::<_, Option<String>>("last_seen")?.and_then(parse),
+            session_id: row.get("session_id")?,
         })
     }
 

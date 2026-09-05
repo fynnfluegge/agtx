@@ -368,6 +368,15 @@ pub struct MobileDevice {
     pub token_hash: String,
     pub created_at: DateTime<Utc>,
     pub last_seen: Option<DateTime<Utc>>,
+    /// The serve session that paired it.
+    ///
+    /// Provenance, not a lifetime — a pairing persists until revoked. It is
+    /// what a future expiry or forget-on-exit policy would delete by, and the
+    /// reason such a policy can be safe: `mobile_devices` is global, so a
+    /// second agtx serving another project must keep its own devices.
+    ///
+    /// `None` for a row written before this column existed, and in tests.
+    pub session_id: Option<String>,
 }
 
 impl MobileDevice {
@@ -378,6 +387,13 @@ impl MobileDevice {
             token_hash: token_hash.into(),
             created_at: Utc::now(),
             last_seen: None,
+            session_id: None,
         }
+    }
+
+    /// Bind this device to the serve session that paired it.
+    pub fn in_session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
 }

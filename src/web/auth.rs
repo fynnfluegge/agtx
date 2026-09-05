@@ -198,9 +198,13 @@ impl PairingCodes {
 ///
 /// The token is returned exactly once and never stored — only its hash — so a
 /// device that loses it has to pair again rather than ask for it back.
-pub fn pair_device(label: &str) -> Result<String> {
+///
+/// `session_id` records which serve session paired it. The pairing itself
+/// persists until revoked.
+pub fn pair_device(label: &str, session_id: Option<&str>) -> Result<String> {
     let token = generate();
-    let device = MobileDevice::new(sanitise_label(label), sha(&token));
+    let mut device = MobileDevice::new(sanitise_label(label), sha(&token));
+    device.session_id = session_id.map(str::to_string);
     Database::open_global()
         .context("opening the global database")?
         .add_mobile_device(&device)
@@ -243,7 +247,9 @@ fn sanitise_label(label: &str) -> String {
 /// Without this the move to per-device tokens would silently stop an
 /// already-paired phone from connecting, with nothing on screen to explain why.
 /// The file is removed afterwards so there is exactly one credential path.
-pub fn migrate_legacy_token() -> Result<Option<String>> {
+///
+/// The adopted device records `session_id` like any other.
+pub fn migrate_legacy_token(session_id: Option<&str>) -> Result<Option<String>> {
     let path = token_path()?;
     let Ok(existing) = std::fs::read_to_string(&path) else {
         return Ok(None);
@@ -256,7 +262,9 @@ pub fn migrate_legacy_token() -> Result<Option<String>> {
 
     let db = Database::open_global().context("opening the global database")?;
     if db.mobile_device_by_hash(&sha(&token))?.is_none() {
-        db.add_mobile_device(&MobileDevice::new("previously paired device", sha(&token)))?;
+        let mut device = MobileDevice::new("previously paired device", sha(&token));
+        device.session_id = session_id.map(str::to_string);
+        db.add_mobile_device(&device)?;
     }
     let _ = std::fs::remove_file(&path);
     Ok(Some(token))
