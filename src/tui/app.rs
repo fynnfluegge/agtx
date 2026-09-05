@@ -6628,42 +6628,7 @@ impl App {
         let qr_width = qr.as_ref().map_or(0, |(w, _)| *w);
         let qr_height = qr_width.div_ceil(2);
 
-        // Sized from the longest line, not from a guess. `Paragraph` is left
-        // unwrapped on purpose — wrapping would break the QR's rows into
-        // nonsense — so anything wider than the box is silently truncated, and
-        // a sentence losing its last word reads as a typo rather than a layout
-        // bug.
-        let width = (qr_width as u16 + 6)
-            .max(MOBILE_POPUP_MIN_WIDTH)
-            .min(area.width.saturating_sub(2));
-        let body_height = qr_height as u16 + popup.devices.len().max(1) as u16 + 10;
-        let height = body_height.min(area.height.saturating_sub(2));
-        let rect = centered_rect_fixed_width(width, 100, area);
-        let rect = Rect {
-            x: rect.x,
-            y: area.y + (area.height.saturating_sub(height)) / 2,
-            width: rect.width.min(width),
-            height,
-        };
-
-        frame.render_widget(Clear, rect);
-
         let serving = session.is_some();
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(hex_to_color(&theme.color_popup_border)))
-            .title(Span::styled(
-                if serving {
-                    " Mobile — serving "
-                } else {
-                    " Mobile "
-                },
-                Style::default()
-                    .fg(hex_to_color(&theme.color_popup_header))
-                    .add_modifier(Modifier::BOLD),
-            ));
-        let inner = block.inner(rect);
-        frame.render_widget(block, rect);
 
         let mut lines: Vec<Line> = Vec::new();
 
@@ -6789,6 +6754,49 @@ impl App {
             },
             Style::default().fg(dim),
         )));
+
+        // Sized from the longest line it will actually draw. `Paragraph` is
+        // left unwrapped on purpose — wrapping would break the QR's rows into
+        // nonsense — so anything wider than the box is silently truncated.
+        //
+        // Measuring the QR alone is not enough, and the shortfall is not
+        // cosmetic: the pairing URL is longer than the QR is wide, and a code
+        // missing its last characters is not a shorter code but an invalid
+        // one. Clicking that link fails to pair and then reports "This device
+        // is not authorised", which reads as a pairing bug rather than a
+        // layout one.
+        let content_width = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+        let width = (qr_width as u16 + 6)
+            .max(content_width + 4)
+            .max(MOBILE_POPUP_MIN_WIDTH)
+            .min(area.width.saturating_sub(2));
+        let body_height = qr_height as u16 + popup.devices.len().max(1) as u16 + 10;
+        let height = body_height.min(area.height.saturating_sub(2));
+        let rect = centered_rect_fixed_width(width, 100, area);
+        let rect = Rect {
+            x: rect.x,
+            y: area.y + (area.height.saturating_sub(height)) / 2,
+            width: rect.width.min(width),
+            height,
+        };
+
+        frame.render_widget(Clear, rect);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(hex_to_color(&theme.color_popup_border)))
+            .title(Span::styled(
+                if serving {
+                    " Mobile — serving "
+                } else {
+                    " Mobile "
+                },
+                Style::default()
+                    .fg(hex_to_color(&theme.color_popup_header))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
 
         frame.render_widget(Paragraph::new(lines), inner);
     }

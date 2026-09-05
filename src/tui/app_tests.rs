@@ -15664,6 +15664,91 @@ fn test_the_mobile_overlay_never_truncates_its_own_text() {
     }
 }
 
+/// Draw the `W` overlay on its own, at a size a real terminal has.
+///
+/// The shared `TestBackend` is 80x24 and a QR is 21 rows, so through `App::draw`
+/// everything below the QR — the URL, the hint, the footer — is clipped
+/// vertically and no assertion about it can mean anything.
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn render_mobile_overlay(url: &str, w: u16, h: u16) -> String {
+    use crate::tui::serve_control::{MobilePopup, ServeSession};
+
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn a stand-in child");
+    let session = ServeSession::for_test(child, url);
+    let popup = MobilePopup::new();
+    let theme = crate::config::ThemeConfig::default();
+
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            App::draw_mobile_popup(&popup, Some(&session), frame, area, &theme);
+        })
+        .expect("draw");
+
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(w as usize)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A realistic pairing URL: a LAN address and a full 32-character code. The
+/// length is the whole point, so a short stand-in would pass against a box that
+/// truncates.
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn sample_pairing_url() -> String {
+    format!("http://192.168.178.26:8787/#pair={}", "be29ea5a".repeat(4))
+}
+
+/// The URL under the QR must appear **in full**.
+///
+/// It is a link people click — for a demo on the machine itself, or to paste
+/// somewhere — and a pairing code missing its last characters is not a shorter
+/// code, it is an invalid one. The failure is silent and misdirects: pairing
+/// fails, the app falls back to an unauthenticated request, and the browser
+/// reports "This device is not authorised", which reads as a pairing problem
+/// rather than a layout one.
+///
+/// The box was sized from the QR alone, and the URL is longer than the QR is
+/// wide.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_overlay_shows_the_whole_pairing_url() {
+    let url = sample_pairing_url();
+    let screen = render_mobile_overlay(&url, 120, 44);
+    assert!(
+        screen.contains(&url),
+        "the pairing URL is cut off, so clicking it pairs with an invalid code.\n\
+         wanted: {url}\nscreen:\n{screen}"
+    );
+}
+
+/// Every line drawn while serving has to fit, for the same reason: the body is
+/// unwrapped, so anything too wide is silently cut.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_serving_overlay_never_truncates_its_own_text() {
+    let screen = render_mobile_overlay(&sample_pairing_url(), 120, 44);
+    for line in screen.lines().filter(|l| l.contains('│')) {
+        let inner = line.trim_matches(|c| c != '│').trim_matches('│');
+        assert!(
+            inner.is_empty() || inner.ends_with(' ') || inner.trim().is_empty(),
+            "a line reaches the border and is probably cut: {inner:?}"
+        );
+    }
+}
+
 /// `s` and `t` are each a whole action — serve to this wifi, serve via the
 /// tailnet — rather than one key setting a mode another key acts on. A hidden
 /// mode means neither label can say what pressing it will do, which is the
@@ -15821,3 +15906,4 @@ fn test_a_build_without_the_server_says_how_to_get_one() {
         );
     }
 }
+
