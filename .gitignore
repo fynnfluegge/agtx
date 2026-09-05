@@ -19,3 +19,11 @@ Thumbs.db
 
 # Logs
 *.log
+
+# In-flight design notes — untracked by convention (see CLAUDE.md)
+/docs/planning/
+
+# SWE-bench harness run output
+/benchmark/swebench_output/
+
+*__pycache__

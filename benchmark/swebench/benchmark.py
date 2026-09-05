@@ -21,6 +21,7 @@ Usage:
     python benchmark.py --config my_config.toml --instances 1
     python benchmark.py --config my_config.toml --concurrency 2 --instances 10
     python benchmark.py --config my_config.toml --instance-ids sympy__sympy-20590
+    python benchmark.py --config my_config.toml --instance-ids astropy__astropy-12907 --sandbox --verbose --agtx ../../target/release/agtx
 
 Example config.toml:
     default_agent = "claude"
@@ -32,9 +33,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -112,11 +116,21 @@ class McpError(Exception):
 class McpClient:
     """Raw JSON-RPC 2.0 MCP client over subprocess stdin/stdout."""
 
-    def __init__(self, agtx_bin: str, repo_path: str):
+    def __init__(self, agtx_bin: str, repo_path: str, container_id: str | None = None):
         self._seq = 0
         self._lock = threading.Lock()
+        if container_id:
+            cmd = [
+                "docker", "exec", "-i", container_id,
+                "/bin/bash", "-c",
+                "export HOME=/home/bench"
+                " && source /opt/miniconda3/bin/activate && conda activate testbed"
+                " && agtx mcp-serve /testbed",
+            ]
+        else:
+            cmd = [agtx_bin, "mcp-serve", repo_path]
         self._proc = subprocess.Popen(
-            [agtx_bin, "mcp-serve", repo_path],
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -135,7 +149,22 @@ class McpClient:
         self._proc.stdin.write(line)
         self._proc.stdin.flush()
 
+    # A reply should take milliseconds. This is not a latency budget, it is a
+    # deadlock guard: `readline()` on a live-but-silent server blocks forever, and
+    # no --phase-timeout can rescue it because the block is inside the MCP call
+    # rather than inside the artifact poll that the timeout governs.
+    RECV_TIMEOUT_SECONDS = 120
+
     def _recv(self) -> dict:
+        import selectors
+
+        with selectors.DefaultSelector() as sel:
+            sel.register(self._proc.stdout, selectors.EVENT_READ)
+            if not sel.select(timeout=self.RECV_TIMEOUT_SECONDS):
+                raise McpError(
+                    f"MCP server did not respond within {self.RECV_TIMEOUT_SECONDS}s "
+                    "(agent may be parked on an interactive prompt or a usage limit)"
+                )
         line = self._proc.stdout.readline()
         if not line:
             raise McpError("MCP server closed connection")
@@ -241,19 +270,32 @@ def setup_repo(instance: dict, workdir: str, config_path: Path, verbose: bool = 
         head_ok = head_result.returncode == 0 and head_result.stdout.strip() == base_commit
         no_task_branches = branch_result.returncode != 0 or not branch_result.stdout.strip()
 
-        if head_ok and no_task_branches:
-            if verbose:
-                print(f"  [setup] Using cached repo at {repo_path}", file=sys.stderr)
-            _write_agtx_config(repo_path, config_path, base_commit)
-            return repo_path
-        else:
+        if not head_ok:
+            # Wrong commit — need a clean clone
             if verbose:
                 print(
-                    f"  [setup] Contaminated clone (head_ok={head_ok}, "
-                    f"task_branches={not no_task_branches}), removing {repo_path}",
+                    f"  [setup] Stale clone (wrong commit), removing {repo_path}",
                     file=sys.stderr,
                 )
             subprocess.run(["rm", "-rf", str(repo_path)], check=True)
+        else:
+            if not no_task_branches:
+                # Just delete leftover task branches, no need to re-clone
+                for branch in branch_result.stdout.strip().splitlines():
+                    branch = branch.strip()
+                    if branch:
+                        subprocess.run(
+                            ["git", "branch", "-D", branch],
+                            cwd=repo_path,
+                            capture_output=True,
+                        )
+                if verbose:
+                    print(f"  [setup] Cleaned stale task branches, reusing {repo_path}", file=sys.stderr)
+            else:
+                if verbose:
+                    print(f"  [setup] Using cached repo at {repo_path}", file=sys.stderr)
+            _write_agtx_config(repo_path, config_path, base_commit)
+            return repo_path
 
     if verbose:
         print(f"  [setup] Cloning {repo_url} → {repo_path}", file=sys.stderr)
@@ -388,6 +430,562 @@ def kill_tmux_session(slug: str, repo_path: Path | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Docker helpers
+# ---------------------------------------------------------------------------
+
+def docker_image_name(instance_id: str) -> str:
+    """Convert an instance_id to its SWE-bench Docker image name.
+
+    e.g. astropy__astropy-12907 → swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest
+    """
+    image_slug = instance_id.replace("__", "_1776_")
+    return f"swebench/sweb.eval.x86_64.{image_slug}:latest"
+
+
+TOOLS_IMAGE = "agtx/swebench-tools:latest"
+TOOLS_CONTAINER = "agtx-swebench-tools"
+TOOLS_VOLUME = "agtx-swebench-tools"
+
+
+def _tools_image_exists() -> bool:
+    """Return True if the shared tools image has been built by prebake_images.py."""
+    result = subprocess.run(
+        ["docker", "image", "inspect", TOOLS_IMAGE],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _tools_volume_exists() -> bool:
+    result = subprocess.run(
+        ["docker", "volume", "inspect", TOOLS_VOLUME],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def ensure_tools_volume(verbose: bool = False) -> None:
+    """Create and populate the tools volume from the tools image if it doesn't exist.
+
+    The volume contains tmux + libutempter (so SWE-bench containers don't need apt),
+    node, node_modules, and rtk. Mounting read-only at /tools avoids copying the large
+    Node stack into instance containers' writable layers.
+    """
+    if _tools_volume_exists():
+        if verbose:
+            print(f"  [docker] Tools volume '{TOOLS_VOLUME}' already exists.", file=sys.stderr)
+        return
+    if verbose:
+        print(f"  [docker] Creating tools volume '{TOOLS_VOLUME}'...", file=sys.stderr)
+    subprocess.run(["docker", "volume", "create", TOOLS_VOLUME], check=True, capture_output=True)
+    # Populate volume by running a one-shot container that copies from the image into the volume.
+    # libutempter is copied alongside tmux because SWE-bench containers don't have it.
+    subprocess.run(
+        [
+            "docker", "run", "--rm", "--platform", "linux/amd64",
+            "-v", f"{TOOLS_VOLUME}:/tools",
+            TOOLS_IMAGE,
+            "/bin/bash", "-c",
+            "cp -a /usr/bin/tmux /usr/bin/node /usr/lib/node_modules /tools/"
+            " && mkdir -p /tools/lib/x86_64-linux-gnu"
+            " && cp /lib/x86_64-linux-gnu/libutempter.so.* /tools/lib/x86_64-linux-gnu/"
+            " && cp /lib/x86_64-linux-gnu/libevent_core-2.1.so.* /tools/lib/x86_64-linux-gnu/",
+        ],
+        check=True, capture_output=not verbose,
+    )
+    if verbose:
+        print(f"  [docker] Tools volume ready.", file=sys.stderr)
+
+
+def start_tools_container(verbose: bool = False) -> str:
+    """Start the shared tools container and return its container ID.
+
+    The tools container is a long-running instance of agtx/swebench-tools:latest
+    used as a source to copy tmux/Node/Claude Code binaries into benchmark containers.
+    Starting it once and sharing it across all concurrent runs avoids redundant installs.
+    """
+    # Kill any stale tools container
+    subprocess.run(["docker", "rm", "-f", TOOLS_CONTAINER], capture_output=True)
+    result = subprocess.run(
+        ["docker", "run", "-d", "--platform", "linux/amd64",
+         "--name", TOOLS_CONTAINER, TOOLS_IMAGE, "sleep", "infinity"],
+        check=True, capture_output=True, text=True,
+    )
+    container_id = result.stdout.strip()
+    if verbose:
+        print(f"  [docker] Started tools container {container_id[:12]}", file=sys.stderr)
+    return container_id
+
+
+def stop_tools_container(verbose: bool = False) -> None:
+    subprocess.run(["docker", "rm", "-f", TOOLS_CONTAINER], capture_output=True)
+
+
+def _agtx_db_dir() -> str:
+    """Return the host path to the agtx database directory."""
+    if sys.platform == "darwin":
+        return str(Path.home() / "Library" / "Application Support" / "agtx")
+    return str(Path.home() / ".config" / "agtx")
+
+
+def _docker_env_overrides() -> list[str]:
+    """Build -e flags for docker run to fix localhost URLs in Claude env settings.
+
+    Reads ~/.claude/settings.json env overrides (read-only, never modified) and
+    replaces http://localhost: with http://host.docker.internal: so proxies running
+    on the macOS host are reachable from inside the container.
+    Returns a flat list of ["-e", "KEY=VALUE", ...] suitable for subprocess args.
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if not settings_path.exists():
+        return []
+    try:
+        data = json.loads(settings_path.read_text())
+        env_overrides = data.get("env", {})
+    except Exception:
+        return []
+    result = []
+    for key, val in env_overrides.items():
+        if isinstance(val, str) and "localhost" in val:
+            val = val.replace("http://localhost:", "http://host.docker.internal:")
+            val = val.replace("https://localhost:", "https://host.docker.internal:")
+            result += ["-e", f"{key}={val}"]
+    return result
+
+
+def start_docker_container(
+    instance_id: str, slug: str, agtx_bin: str, verbose: bool = False
+) -> str:
+    """Pull the SWE-bench image and start a long-running container. Returns container_id."""
+    container_name = f"swebench-{slug}"
+    image = docker_image_name(instance_id)
+
+    # Kill any stale container with the same name
+    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+
+    if verbose:
+        print(f"  [docker] Pulling {image}...", file=sys.stderr)
+    subprocess.run(
+        ["docker", "pull", "--platform", "linux/amd64", image],
+        check=True,
+        capture_output=not verbose,
+    )
+
+    if verbose:
+        print(f"  [docker] Starting container {container_name}...", file=sys.stderr)
+
+    # Mount the tools volume if available — provides tmux, node, node_modules, rtk
+    # without consuming writable layer space in the instance container.
+    extra_mounts = []
+    if _tools_volume_exists():
+        extra_mounts = ["-v", f"{TOOLS_VOLUME}:/tools:ro"]
+        if verbose:
+            print(f"  [docker] Mounting tools volume.", file=sys.stderr)
+
+    run_result = subprocess.run(
+        [
+            "docker", "run", "-d",
+            "--platform", "linux/amd64",
+            "--name", container_name,
+            "-v", f"{agtx_bin}:/usr/local/bin/agtx",
+        ] + extra_mounts + [
+            image,
+            "sleep", "infinity",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    container_id = run_result.stdout.strip()
+    if verbose:
+        print(f"  [docker] Container id: {container_id[:12]}", file=sys.stderr)
+    return container_id
+
+
+def seed_agent_trust(container_id: str, agent: str, *, verbose: bool = False) -> None:
+    """Record /testbed as trusted for `agent`, the way the user would by hand.
+
+    Trust records are **path-keyed**, and the repo lands at /testbed inside the
+    container. Copying the host's ~/.claude.json (below) therefore does *not*
+    prevent the trust dialog: no entry matches that path. Until now the run
+    depended on agtx clearing the dialog by reading the pane, which is no longer
+    the default.
+
+    Deterministic and done up front, because here a stuck dialog costs a whole
+    instance run rather than one task.
+    """
+    py = {
+        "claude": (
+            "import json,os;p='/home/bench/.claude.json';"
+            "d=json.load(open(p)) if os.path.exists(p) else {};"
+            "d.setdefault('projects',{}).setdefault('/testbed',{})"
+            "['hasTrustDialogAccepted']=True;"
+            "json.dump(d,open(p,'w'))"
+        ),
+        "codex": (
+            "import os;p='/home/bench/.codex/config.toml';"
+            "os.makedirs(os.path.dirname(p),exist_ok=True);"
+            "s=open(p).read() if os.path.exists(p) else '';"
+            "s+='\\n[projects.\"/testbed\"]\\ntrust_level = \"trusted\"\\n' "
+            "if '[projects.\"/testbed\"]' not in s else '';"
+            "open(p,'w').write(s)"
+        ),
+        "gemini": (
+            "import json,os;p='/home/bench/.gemini/trustedFolders.json';"
+            "os.makedirs(os.path.dirname(p),exist_ok=True);"
+            "d=json.load(open(p)) if os.path.exists(p) else {};"
+            "d['/testbed']='TRUST_FOLDER';json.dump(d,open(p,'w'))"
+        ),
+        "antigravity": (
+            "import json,os;p='/home/bench/.gemini/antigravity-cli/settings.json';"
+            "os.makedirs(os.path.dirname(p),exist_ok=True);"
+            "d=json.load(open(p)) if os.path.exists(p) else {};"
+            "w=d.setdefault('trustedWorkspaces',[]);"
+            "w.append('/testbed') if '/testbed' not in w else None;"
+            "json.dump(d,open(p,'w'))"
+        ),
+    }.get(agent)
+    # cursor and grok pass --trust at launch; opencode has no trust gate; copilot
+    # is unmeasured. Nothing to seed, and nothing to guess at.
+    if py is None:
+        return
+    if verbose:
+        print(f"  [docker] Seeding {agent} trust for /testbed...", file=sys.stderr)
+    subprocess.run(
+        ["docker", "exec", container_id, "python3", "-c", py],
+        check=False, capture_output=not verbose,
+    )
+
+
+def setup_container(
+    container_id: str, config_path: Path, base_commit: str, verbose: bool = False,
+    tools_container_id: str | None = None,
+    extra_dirs: list[tuple[Path, str]] | None = None,
+    sandbox_init: list[str] | None = None,
+) -> None:
+    """Write agtx config into the container and install tmux + Node + Claude Code + Grok.
+
+    If tools_container_id is provided, binaries are copied from the shared tools
+    container instead of being installed from the network (~3-5 min saved).
+
+    extra_dirs is an optional list of (host_path, container_dest) pairs for copying
+    additional files into the container (e.g. third-party plugin skill directories).
+
+    sandbox_init is an optional list of shell commands to run inside the container
+    after setup (e.g. ["rtk init -g"] to activate rtk hooks).
+    """
+    # Parse default_agent from the benchmark config so we can write a global agtx config
+    # inside the container. Without it agtx shows the agent-selection wizard on startup.
+    bench_config = load_config_toml(config_path)
+    default_agent = bench_config.get("default_agent", "claude")
+
+    # Copy Claude credentials into the container as snapshots (not mounts).
+    # This avoids writing back to host files and lets us patch localhost URLs.
+    # We only copy the credential/config files — NOT ~/.claude/projects/ which can be
+    # gigabytes of conversation history and would exhaust the container's disk space.
+    home = Path.home()
+    subprocess.run(
+        ["docker", "exec", container_id, "/bin/bash", "-c",
+         "mkdir -p /home/bench/.config/claude /home/bench/.claude"],
+        check=True, capture_output=not verbose,
+    )
+    # ~/.config/claude/ — API key and auth tokens
+    config_claude = home / ".config" / "claude"
+    if config_claude.exists():
+        subprocess.run(
+            ["docker", "cp", f"{config_claude}/.", f"{container_id}:/home/bench/.config/claude"],
+            check=True, capture_output=not verbose,
+        )
+    # ~/.claude/ — copy only top-level files (settings.json, credentials), skip subdirs
+    # (projects/, worktrees/, etc.) which contain large conversation history
+    claude_dir = home / ".claude"
+    if claude_dir.exists():
+        for item in claude_dir.iterdir():
+            if item.is_file():
+                subprocess.run(
+                    ["docker", "cp", str(item), f"{container_id}:/home/bench/.claude/{item.name}"],
+                    check=True, capture_output=not verbose,
+                )
+
+    # macOS keeps the Claude OAuth credentials in the login Keychain, not in
+    # ~/.claude/.credentials.json, so a subscription login does not travel with the
+    # file copy above and the container lands on "Not logged in · Please run /login".
+    # Materialise the same JSON that Claude Code writes on Linux.
+    #
+    # The secret is piped through stdin: never written to a host temp file, and
+    # never placed in argv where `ps` would expose it.
+    if sys.platform == "darwin" and not (claude_dir / ".credentials.json").exists():
+        creds = ""
+        try:
+            creds = subprocess.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        if creds:
+            subprocess.run(
+                ["docker", "exec", "-i", container_id, "/bin/bash", "-c",
+                 "umask 077 && cat > /home/bench/.claude/.credentials.json"],
+                input=creds, text=True, check=True, capture_output=not verbose,
+            )
+            if verbose:
+                print("  [docker] Claude credentials taken from the macOS Keychain.",
+                      file=sys.stderr)
+        else:
+            print(
+                "  [docker] WARNING: no Claude credentials found. On macOS the OAuth token "
+                "lives in the Keychain; `security` could not read it (you may need to allow "
+                "access when prompted). Set ANTHROPIC_API_KEY instead, or the agent will "
+                "report 'Not logged in'.",
+                file=sys.stderr,
+            )
+
+    # Copy ~/.claude.json as a snapshot so Claude skips the first-launch welcome screen.
+    claude_json = home / ".claude.json"
+    if claude_json.exists():
+        subprocess.run(
+            ["docker", "cp", str(claude_json), f"{container_id}:/home/bench/.claude.json"],
+            check=True, capture_output=not verbose,
+        )
+
+    # Copy Grok credentials as snapshots so `grok` can authenticate inside the
+    # container without a browser login. Only the small auth/config files are copied —
+    # ~/.grok/sessions/ and friends are skipped. No-op unless the host has ~/.grok.
+    grok_home = home / ".grok"
+    if grok_home.exists():
+        subprocess.run(
+            ["docker", "exec", container_id, "/bin/bash", "-c", "mkdir -p /home/bench/.grok"],
+            check=True, capture_output=not verbose,
+        )
+        for name in ("auth.json", "config.toml"):
+            item = grok_home / name
+            if item.exists():
+                subprocess.run(
+                    ["docker", "cp", str(item), f"{container_id}:/home/bench/.grok/{name}"],
+                    check=True, capture_output=not verbose,
+                )
+
+    seed_agent_trust(container_id, default_agent, verbose=verbose)
+
+    # Copy extra directories into the container (e.g. third-party plugin skill dirs).
+    for src, dst in (extra_dirs or []):
+        if not src.exists():
+            print(f"  [docker] Warning: extra_dir source not found, skipping: {src}", file=sys.stderr)
+            continue
+        if verbose:
+            print(f"  [docker] Copying {src} → container:{dst}", file=sys.stderr)
+        subprocess.run(
+            ["docker", "exec", container_id, "/bin/bash", "-c", f"mkdir -p {dst}"],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["docker", "cp", f"{src}/.", f"{container_id}:{dst}"],
+            check=True, capture_output=not verbose,
+        )
+
+    # Patch localhost → host.docker.internal in settings.json inside the container.
+    # Claude reads ANTHROPIC_BASE_URL from settings.json["env"] which overrides process env,
+    # so we must fix it in the file itself (container-local copy only, host file untouched).
+    subprocess.run(
+        ["docker", "exec", container_id, "/bin/bash", "-c",
+         r"sed -i 's|http://localhost:|http://host.docker.internal:|g'"
+         r" /home/bench/.claude/settings.json 2>/dev/null || true"],
+        capture_output=True,
+    )
+
+    # Drop empty auth keys from the container's settings.json. Because that `env`
+    # block outranks process env, an `ANTHROPIC_AUTH_TOKEN: ""` left over from a
+    # proxy setup can shadow both the Keychain credentials and a real
+    # ANTHROPIC_API_KEY, and the agent reports "Not logged in" with valid auth
+    # available. Host file untouched.
+    subprocess.run(
+        ["docker", "exec", container_id, "/bin/bash", "-c",
+         "python3 - <<'ENDOFPATCH'\n"
+         "import json\n"
+         "p='/home/bench/.claude/settings.json'\n"
+         "try:\n"
+         "    d=json.load(open(p))\n"
+         "except Exception:\n"
+         "    raise SystemExit(0)\n"
+         "env=d.get('env')\n"
+         "if isinstance(env, dict):\n"
+         "    drop=[k for k,v in env.items() if v == '']\n"
+         "    for k in drop: env.pop(k)\n"
+         "    if drop:\n"
+         "        json.dump(d, open(p,'w'), indent=2)\n"
+         "        print('dropped empty env keys: ' + ', '.join(drop))\n"
+         "ENDOFPATCH"],
+        capture_output=not verbose,
+    )
+
+    # Write global agtx config for bench user so the TUI skips the agent-selection wizard.
+    #
+    # `auto_trust = true` because a benchmark container has no human at the board.
+    # agtx's default is off — a trust prompt surfaces as a Blocked card and waits
+    # for a person — which here would stall the instance until its timeout. Same
+    # reasoning as docker/entrypoint.sh: disposable container, nothing in it but
+    # the repo under test.
+    global_config_content = f'default_agent = "{default_agent}"\nauto_trust = true\n'
+    if verbose:
+        print(f"  [docker] Writing global agtx config (default_agent={default_agent})...", file=sys.stderr)
+    subprocess.run(
+        ["docker", "exec", container_id,
+         "/bin/bash", "-c",
+         f"mkdir -p /home/bench/.config/agtx && cat > /home/bench/.config/agtx/config.toml << 'ENDOFCONFIG'\n{global_config_content}\nENDOFCONFIG"],
+        check=True,
+        capture_output=not verbose,
+    )
+
+    # Write .agtx/config.toml into /testbed inside the container
+    # Build the config content (with base_branch injected) in memory
+    content = config_path.read_text()
+    base_branch_line = f'base_branch = "{base_commit}"\n'
+    lines = [l for l in content.splitlines(keepends=True) if not l.startswith("base_branch =")]
+    insert_at = next((i for i, l in enumerate(lines) if l.startswith("[")), len(lines))
+    lines.insert(insert_at, base_branch_line)
+    config_content = "".join(lines)
+
+    if verbose:
+        print(f"  [docker] Writing .agtx/config.toml into container...", file=sys.stderr)
+    subprocess.run(
+        ["docker", "exec", container_id,
+         "/bin/bash", "-c",
+         f"mkdir -p /testbed/.agtx && cat > /testbed/.agtx/config.toml << 'ENDOFCONFIG'\n{config_content}\nENDOFCONFIG"],
+        check=True,
+        capture_output=not verbose,
+    )
+
+    # Clean stale agtx state (worktrees, project DB) — same as _write_agtx_config
+    subprocess.run(
+        ["docker", "exec", container_id,
+         "/bin/bash", "-c",
+         "rm -rf /testbed/.agtx/worktrees /testbed/.agtx/db"],
+        capture_output=True,
+    )
+
+    # Activate the conda 'testbed' environment for all new shells.
+    # SWE-bench images ship with repo dependencies pre-installed in conda env 'testbed'.
+    # Without this, Claude uses the system python/pip and tries to reinstall everything.
+    subprocess.run(
+        ["docker", "exec", container_id, "/bin/bash", "-c",
+         "echo 'source /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed'"
+         " >> /root/.bashrc"],
+        check=True, capture_output=not verbose,
+    )
+
+    if tools_container_id:
+        # Tools volume is mounted at /tools (read-only). Symlink everything from there —
+        # zero writable-layer usage. libutempter is included in the volume because
+        # SWE-bench containers don't have it (tmux needs it).
+        if verbose:
+            print(f"  [docker] Wiring tools from volume...", file=sys.stderr)
+        subprocess.run(
+            ["docker", "exec", container_id, "/bin/bash", "-c",
+             "ln -sf /tools/tmux /usr/bin/tmux"
+             " && ln -sf /tools/node /usr/bin/node"
+             " && ln -sf /tools/node_modules/npm/bin/npm-cli.js /usr/bin/npm"
+             " && ln -sf /tools/node_modules/npm/bin/npx-cli.js /usr/bin/npx"
+             " && ln -sf /tools/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/bin/claude"
+             " && mkdir -p /usr/lib/node_modules"
+             " && ln -sf /tools/node_modules/@anthropic-ai /usr/lib/node_modules/@anthropic-ai"
+             " && ln -sf /tools/node_modules/npm /usr/lib/node_modules/npm"
+             " && test -f /tools/node_modules/.bin/caveman && ln -sf /tools/node_modules/.bin/caveman /usr/bin/caveman || true"
+             " && test -e /tools/node_modules/@xai-official/grok/bin/grok"
+             " && ln -sf /tools/node_modules/@xai-official/grok/bin/grok /usr/bin/grok"
+             " && ln -sf /tools/node_modules/@xai-official /usr/lib/node_modules/@xai-official || true"
+             " && mkdir -p /usr/lib/x86_64-linux-gnu"
+             " && ln -sf /tools/lib/x86_64-linux-gnu/libutempter.so.0 /usr/lib/x86_64-linux-gnu/libutempter.so.0"
+             " && ln -sf /tools/lib/x86_64-linux-gnu/libutempter.so.1.2.1 /usr/lib/x86_64-linux-gnu/libutempter.so.1.2.1"
+             " && ln -sf /tools/lib/x86_64-linux-gnu/libevent_core-2.1.so.7 /usr/lib/x86_64-linux-gnu/libevent_core-2.1.so.7"],
+            check=True, capture_output=not verbose,
+        )
+    else:
+        if verbose:
+            print(f"  [docker] Installing tmux, Node.js 22, Claude Code, Grok...", file=sys.stderr)
+        subprocess.run(
+            ["docker", "exec", container_id,
+             "/bin/bash", "-c",
+             "apt-get update -qq && apt-get install -y -qq tmux curl ca-certificates "
+             "&& curl -fsSL https://deb.nodesource.com/setup_22.x | bash - "
+             "&& apt-get install -y -qq nodejs "
+             "&& npm install -g @anthropic-ai/claude-code @xai-official/grok"],
+            check=True,
+            capture_output=not verbose,
+        )
+
+    # Run optional sandbox init commands (e.g. "rtk init -g").
+    # These run after credentials are in place so tools can write into ~/.claude/.
+    # Prepend ~/.local/bin to PATH so tools installed there (e.g. rtk) are found.
+    for cmd in (sandbox_init or []):
+        if verbose:
+            print(f"  [docker] sandbox_init: {cmd}", file=sys.stderr)
+        subprocess.run(
+            ["docker", "exec", container_id, "/bin/bash", "-c",
+             f"HOME=/home/bench && export HOME PATH=$HOME/.local/bin:$PATH && {cmd}"],
+            check=True, capture_output=not verbose,
+        )
+
+
+def start_tui_in_container(slug: str, container_id: str, verbose: bool = False) -> None:
+    """Start the agtx TUI inside the container's tmux session."""
+    if verbose:
+        print(f"  [docker] Starting agtx TUI in container tmux session '{slug}'...", file=sys.stderr)
+    # Launch agtx with all required env vars baked into the command so every tmux
+    # window it spawns (agent sessions) inherits them from the start — no race.
+    #   HOME=/home/bench   — agtx reads ~/.config/agtx/config.toml
+    #   IS_SANDBOX=1       — bypasses Claude's root check (--dangerously-skip-permissions)
+    #   PATH/CONDA vars    — activate conda 'testbed' env so pre-installed deps are used
+    testbed_bin = "/opt/miniconda3/envs/testbed/bin"
+    env_prefix = (
+        f"HOME=/home/bench "
+        f"IS_SANDBOX=1 "
+        f"CONDA_DEFAULT_ENV=testbed "
+        f"CONDA_PREFIX=/opt/miniconda3/envs/testbed "
+        f"PATH={testbed_bin}:/opt/miniconda3/bin:/home/bench/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
+    # Pass through API keys that agents read from the environment (only when set
+    # on the host). Grok uses XAI_API_KEY when ~/.grok/auth.json is absent.
+    passthrough_env = {
+        k: v for k in ("XAI_API_KEY", "ANTHROPIC_API_KEY") if (v := os.environ.get(k))
+    }
+    for key, val in passthrough_env.items():
+        env_prefix += f" {key}={shlex.quote(val)}"
+    subprocess.run(
+        ["docker", "exec", "-d", container_id,
+         "tmux", "new-session", "-d", "-s", slug,
+         f"env {env_prefix} agtx /testbed"],
+        check=True,
+        capture_output=not verbose,
+    )
+    # Also set them in the agtx tmux server global env so windows created later
+    # (e.g. after a phase transition) also inherit the correct PATH.
+    time.sleep(3)
+    for key, val in [
+        ("HOME", "/home/bench"),
+        ("IS_SANDBOX", "1"),
+        ("CONDA_DEFAULT_ENV", "testbed"),
+        ("CONDA_PREFIX", "/opt/miniconda3/envs/testbed"),
+        ("PATH", f"{testbed_bin}:/opt/miniconda3/bin:/home/bench/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+    ] + list(passthrough_env.items()):
+        subprocess.run(
+            ["docker", "exec", container_id,
+             "tmux", "-L", "agtx", "set-environment", "-g", key, val],
+            capture_output=True,
+        )
+    # Give the TUI time to fully start before the caller proceeds
+    time.sleep(5)
+
+
+def stop_docker_container(container_id: str, verbose: bool = False) -> None:
+    """Stop and remove the container."""
+    if verbose:
+        print(f"  [docker] Stopping container {container_id[:12]}...", file=sys.stderr)
+    subprocess.run(["docker", "stop", container_id], capture_output=True)
+    subprocess.run(["docker", "rm", container_id], capture_output=True)
+
+
+# ---------------------------------------------------------------------------
 # Token/cost tracking via tokscale
 # ---------------------------------------------------------------------------
 
@@ -472,9 +1070,63 @@ def tokscale_diff(before: dict, after: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Results store
-# ---------------------------------------------------------------------------
+def tokscale_from_container(container_id: str, agent: str) -> dict:
+    """
+    Read token/cost usage from a sandbox container by copying /home/bench/.claude
+    to a temp dir and running tokscale --home against it.
+    Returns the standard cost_data dict {cost_usd, cost_tokens}, or nulls on failure.
+    """
+    tokscale = _find_tokscale()
+    if not tokscale:
+        return {"cost_usd": None, "cost_tokens": None}
+
+    flag = _TOKSCALE_FLAG.get(agent)
+    if not flag:
+        return {"cost_usd": None, "cost_tokens": None}
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Copy /home/bench/.claude out of the container
+            result = subprocess.run(
+                ["docker", "cp", f"{container_id}:/home/bench/.claude", tmpdir],
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                return {"cost_usd": None, "cost_tokens": None}
+
+            # tokscale --home expects the home dir (parent of .claude)
+            result = subprocess.run(
+                [tokscale, "--home", tmpdir, "--json", flag],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return {"cost_usd": None, "cost_tokens": None}
+
+            data = json.loads(result.stdout)
+            entries = data.get("entries", [])
+
+            inp = out = cr = cw = reasoning = 0
+            cost = 0.0
+            for entry in entries:
+                inp       += entry.get("input", 0)
+                out       += entry.get("output", 0)
+                cr        += entry.get("cacheRead", 0)
+                cw        += entry.get("cacheWrite", 0)
+                reasoning += entry.get("reasoning", 0)
+                cost      += entry.get("cost", 0.0)
+
+            total = inp + out + cr + cw + reasoning
+            return {
+                "cost_usd":    round(cost, 6) if cost > 0 else None,
+                "cost_tokens": total if total > 0 else None,
+            }
+    except Exception:
+        return {"cost_usd": None, "cost_tokens": None}
+
+
+
 
 class ResultsStore:
     """Thread-safe, resumable persistence for benchmark results."""
@@ -554,7 +1206,8 @@ PLUGIN_PLANNING_ARTIFACTS: dict[str, str | None] = {
     "spec-kit":         None,
     "bmad":             None,
     "openspec":         None,
-    "superpowers":      None,
+    "agent-skills":     None,
+    "superpowers":      "docs/superpowers/plans/*.md",
     "oh-my-claudecode": None,
     "void":             None,
 }
@@ -567,7 +1220,8 @@ PLUGIN_RUNNING_ARTIFACTS: dict[str, str | None] = {
     "gsd":              ".planning/phases/*/{phase}-SUMMARY.md",
     "spec-kit":         None,
     "bmad":             "_bmad-output/implementation-artifacts/*.md",
-    "openspec":         "openspec/changes/*/tasks.md",
+    "openspec":         None,
+    "agent-skills":     None,
     "superpowers":      None,
     "oh-my-claudecode": None,
     "void":             None,
@@ -582,20 +1236,33 @@ PLUGIN_REVIEW_ARTIFACTS: dict[str, str | None] = {
     "spec-kit":         None,
     "bmad":             None,
     "openspec":         None,
+    "agent-skills":     None,
     "superpowers":      None,
     "oh-my-claudecode": None,
     "void":             None,
 }
 
 
-def _artifact_exists(worktree: Path, pattern: str) -> bool:
-    """Return True if the artifact path (possibly with * or {phase} placeholders) exists."""
+def _artifact_exists(worktree: Path, pattern: str, container_id: str | None = None) -> bool:
+    """Return True if the artifact path (possibly with * or {phase} placeholders) exists.
+
+    In Docker mode (container_id provided), checks inside the container via docker exec
+    instead of the local filesystem (the worktree lives inside the container).
+    """
     if "{phase}" in pattern:
         for n in range(1, 21):
             for fmt in (f"{n:02d}", str(n)):
-                if _artifact_exists(worktree, pattern.replace("{phase}", fmt)):
+                if _artifact_exists(worktree, pattern.replace("{phase}", fmt), container_id):
                     return True
         return False
+    if container_id:
+        # In Docker: use shell glob via docker exec so * patterns work
+        path = str(worktree / pattern)
+        result = subprocess.run(
+            ["docker", "exec", container_id, "/bin/bash", "-c", f"ls {path} 2>/dev/null | head -1"],
+            capture_output=True, text=True,
+        )
+        return bool(result.stdout.strip())
     if "*" not in pattern:
         return (worktree / pattern).exists()
     parts = Path(pattern).parts
@@ -627,10 +1294,12 @@ class TaskRunner:
     )
 
     NOTE = (
-        "Note: the repo may not be fully installable in this environment. "
-        "Do not attempt to build, install, or run tests. "
-        "Do not run any git commands (no fetch, pull, merge, or commit). "
-        "Read the source code, understand the bug, and fix it by editing the relevant files directly."
+        "IMPORTANT CONSTRAINTS — these apply to all phases including review:\n"
+        "- NEVER install packages, dependencies, or build the project.\n"
+        "- NEVER run tests under any circumstances.\n"
+        "- Do not run any git commands (no fetch, pull, merge, or commit).\n"
+        "- The repo may not be installable in this environment — do not attempt it.\n"
+        "- Read the source code, understand the bug, and fix it by editing the relevant files directly."
     )
 
     @staticmethod
@@ -660,6 +1329,7 @@ class TaskRunner:
         verbose: bool = False,
         smoke_test: bool = False,
         hard: bool = False,
+        container_id: str | None = None,
     ):
         self.instance = instance
         self.instance_id = instance["instance_id"]
@@ -673,6 +1343,7 @@ class TaskRunner:
         self.verbose = verbose
         self.smoke_test = smoke_test
         self.hard = hard
+        self.container_id = container_id
         self.mcp: McpClient | None = None
 
     def _poll_transition(self, request_id: str, timeout: int = 120) -> None:
@@ -721,36 +1392,115 @@ class TaskRunner:
         worktree = Path(worktree_path)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if _artifact_exists(worktree, artifact_pattern):
+            if _artifact_exists(worktree, artifact_pattern, self.container_id):
                 return True
             time.sleep(5)
         return False
 
+    # Patterns that indicate a shell command run by the agent is waiting for input,
+    # blocking Claude from finishing. Only used in the stability fallback path.
+    _INTERACTIVE_PROMPT_PATTERNS = [
+        r"\[y/N\]",
+        r"\[Y/n\]",
+        r"\[y/n\]",
+        r"\[Y/N\]",
+        r"Press Enter to continue",
+        r"Press any key",
+        # Claude's usage-limit pause. It ends the turn and waits on a keypress
+        # that nothing sends, so the task parks indefinitely — observed sitting
+        # ~50 minutes, past both the stated reset time and --phase-timeout.
+        # Matching it turns a silent stall into a named failure.
+        r"You've hit your session limit",
+        r"Press .* to continue after reset",
+    ]
+
+    def _check_interactive_prompt(self, content: str) -> str | None:
+        """Return the matching line if pane content looks like an interactive prompt, else None."""
+        for line in content.splitlines()[-20:]:
+            for pattern in self._INTERACTIVE_PROMPT_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    return line.strip()
+        return None
+
+    # Claude always prints one of these lines when it finishes a response.
+    # Detecting this (plus the ❯ prompt) is more reliable than pure pane stability.
+    _CLAUDE_FINISHED_RE = re.compile(r"✻\s+[A-Z][a-z]+ for \d+s")
+
+    def _is_claude_idle(self, content: str) -> bool:
+        """Return True when Claude has finished its last response and shows the ❯ prompt."""
+        lines = content.splitlines()
+        has_finish_marker = any(self._CLAUDE_FINISHED_RE.search(l) for l in lines)
+        has_prompt = any(l.strip() == "❯" or l.strip().startswith("❯ ") for l in lines[-10:])
+        return has_finish_marker and has_prompt
+
     def _wait_for_pane_stable(self, task_id: str, timeout: int) -> None:
-        """Wait for pane content to be stable for 2 consecutive 30s checks (no artifact available)."""
+        """Wait until Claude has finished its last response (no artifact available).
+
+        Primary signal: Claude prints '✻ Cooked/Worked/Crunched for Xs' + ❯ prompt.
+        Fallback: pane content identical for 2 consecutive 10s checks.
+
+        If an interactive prompt is detected while stable, prints a warning so the user
+        can attach to the session and answer it.
+        """
         prev_content: str | None = None
         stable_count = 0
+        prompt_warned = False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            time.sleep(30)
+            time.sleep(5)
             try:
                 result = self.mcp.call("read_pane_content", task_id=task_id, lines=80)
                 content = result.get("content", "")
             except McpError:
                 content = ""
+            # Primary: Claude idle signal
+            if self._is_claude_idle(content):
+                return
+            # Interactive prompt check (even when not yet stable)
             if content == prev_content:
                 stable_count += 1
-                if stable_count >= 2:
-                    return
+                prompt_line = self._check_interactive_prompt(content)
+                if prompt_line:
+                    if not prompt_warned:
+                        print(f"\n[{self.instance_id}] ⚠ Agent is waiting for input: \"{prompt_line}\"", file=sys.stderr)
+                        slug = self.instance_id.replace("__", "-").replace("_", "-")
+                        print(f"  Attach to answer: docker exec -it swebench-{slug} tmux -L agtx attach -t testbed:1", file=sys.stderr)
+                        prompt_warned = True
+                    stable_count = 0  # Reset — not actually done
+                elif stable_count >= 2:
+                    # Pane stable but no Claude finish marker — needs attention.
+                    # Possible causes: agent error, waiting for user approval (e.g. superpowers brainstorm),
+                    # or genuinely stuck. Warn once and keep polling; do NOT advance.
+                    if not prompt_warned:
+                        slug = self.instance_id.replace("__", "-").replace("_", "-")
+                        print(f"\n[{self.instance_id}] ⚠ Pane stable but no finish marker — agent may be stuck, hit an error, or requires manual approval.", file=sys.stderr)
+                        print(f"  Attach to inspect or interact: docker exec -it swebench-{slug} tmux -L agtx attach -t testbed:1", file=sys.stderr)
+                        prompt_warned = True
+                    stable_count = 0  # Keep polling, don't advance
             else:
                 stable_count = 0
+                prompt_warned = False
                 prev_content = content
 
     def run(self) -> dict:
         start = time.monotonic()
+        # What `git diff <base_commit>` already reports before the agent has done
+        # anything. SWE-bench images are not pristine checkouts of base_commit:
+        # for astropy-12907 the baseline is 1861 files (3722 lines of
+        # `old mode 100644` / `new mode 100755`) plus the image's own
+        # `setuptools==68.0.0` pin in pyproject.toml. Subtracted at collection so
+        # a real fix is not buried in ~224KB of noise.
+        self.baseline_patch = self._raw_diff()
+        if self.verbose and self.baseline_patch:
+            n = self.baseline_patch.count("diff --git ")
+            print(
+                f"  [{self.instance_id}] Baseline diff: {n} file(s) already differ from "
+                f"base_commit before the agent runs; these are excluded from the prediction.",
+                file=sys.stderr,
+            )
         if self.verbose:
             print(f"  [{self.instance_id}] Starting MCP handshake...", file=sys.stderr)
-        self.mcp = McpClient(self.agtx_bin, str(self.repo_path))
+        self.mcp = McpClient(self.agtx_bin, str(self.repo_path), container_id=self.container_id)
         task_id = None
 
         try:
@@ -781,8 +1531,8 @@ class TaskRunner:
             planning_task = self._wait_for_worktree(task_id, timeout=180)
             worktree_path = planning_task.get("worktree_path", "")
 
-            # Snapshot tokscale before agent starts working
-            cost_before = _tokscale_snapshot(self.running_agent)
+            # Snapshot tokscale before agent starts working (non-sandbox only)
+            cost_before = _tokscale_snapshot(self.running_agent) if not self.container_id else None
 
             # Wait for planning phase artifact (.agtx/plan.md for agtx/agtx-terse plugins)
             planning_artifact = PLUGIN_PLANNING_ARTIFACTS.get(self.plugin)
@@ -820,8 +1570,13 @@ class TaskRunner:
                     print(f"  [{self.instance_id}] Waiting for running phase (pane stability)...", file=sys.stderr)
                 self._wait_for_pane_stable(task_id, self.phase_timeout)
 
-            # Snapshot again and diff to get this task's usage
-            cost_data = tokscale_diff(cost_before, _tokscale_snapshot(self.running_agent))
+            # Collect token/cost usage:
+            # - sandbox: read directly from container's /home/bench/.claude via tokscale --home
+            # - non-sandbox: diff host tokscale snapshots taken before/after running phase
+            if self.container_id:
+                cost_data = tokscale_from_container(self.container_id, self.running_agent)
+            else:
+                cost_data = tokscale_diff(cost_before, _tokscale_snapshot(self.running_agent))
 
             if self.verbose:
                 print(f"  [{self.instance_id}] Running done, moving to Review...", file=sys.stderr)
@@ -871,11 +1626,66 @@ class TaskRunner:
             if self.mcp:
                 self.mcp.close()
 
+    @staticmethod
+    def _split_file_sections(patch: str) -> dict[str, str]:
+        """Split a unified diff into {path_header: section_text}."""
+        sections: dict[str, str] = {}
+        current: str | None = None
+        buf: list[str] = []
+        for line in patch.splitlines(keepends=True):
+            if line.startswith("diff --git "):
+                if current is not None:
+                    sections[current] = "".join(buf)
+                current = line.strip()
+                buf = [line]
+            elif current is not None:
+                buf.append(line)
+        if current is not None:
+            sections[current] = "".join(buf)
+        return sections
+
+    def _strip_baseline(self, patch: str) -> str:
+        """Drop file sections identical to the pre-agent baseline.
+
+        Per file rather than per line: a file the agent genuinely edited has a
+        different section and survives whole, so an agent that legitimately
+        touches pyproject.toml is not silently dropped along with the image's
+        own pin of it.
+        """
+        baseline = getattr(self, "baseline_patch", "") or ""
+        if not baseline:
+            return patch
+        base_sections = self._split_file_sections(baseline)
+        kept = [
+            text
+            for header, text in self._split_file_sections(patch).items()
+            if base_sections.get(header) != text
+        ]
+        return "".join(kept)
+
     def _collect_patch(self, task: dict) -> str:
-        worktree_path = task.get("worktree_path")
+        return self._strip_baseline(self._raw_diff(task))
+
+    def _raw_diff(self, task: dict | None = None) -> str:
+        base_commit = self.instance["base_commit"]
+
+        if self.container_id:
+            # In Docker mode, diff /testbed directly inside the container
+            result = subprocess.run(
+                [
+                    "docker", "exec", self.container_id,
+                    "git", "-C", "/testbed", "diff", base_commit,
+                    "--", ".", ":!.agtx/",
+                ],
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                return ""
+            return result.stdout.decode("utf-8", errors="replace")
+
+        worktree_path = (task or {}).get("worktree_path") or str(self.repo_path)
         if not worktree_path:
             return ""
-        base_commit = self.instance["base_commit"]
         # Diff the worktree's actual files against the base commit.
         # Using the worktree path directly avoids picking up any extra commits
         # the agent may have merged/fetched onto the branch — we only care about
@@ -932,6 +1742,9 @@ class BenchmarkOrchestrator:
         verbose: bool = False,
         smoke_test: bool = False,
         hard: bool = False,
+        docker: bool = False,
+        extra_dirs: list[tuple[Path, str]] | None = None,
+        sandbox_init: list[str] | None = None,
     ):
         self.instances = instances
         self.agtx_bin = agtx_bin
@@ -947,6 +1760,10 @@ class BenchmarkOrchestrator:
         self.verbose = verbose
         self.smoke_test = smoke_test
         self.hard = hard
+        self.docker = docker
+        self.extra_dirs = extra_dirs or []
+        self.sandbox_init = sandbox_init or []
+        self.tools_container_id: str | None = None  # set in run() when --sandbox is active
 
     def _run_one(self, instance: dict, progress: tqdm) -> None:
         instance_id = instance["instance_id"]
@@ -958,36 +1775,92 @@ class BenchmarkOrchestrator:
         slug = re.sub(r"[^a-z0-9]+", "-", instance_id.lower()).strip("-")[:50]
         start = time.monotonic()
 
-        if self.verbose:
-            print(f"\n[{instance_id}] Setting up repo...", file=sys.stderr)
-        try:
-            repo_path = setup_repo(instance, self.workdir, self.config_path, verbose=self.verbose, smoke_test=self.smoke_test)
-        except Exception as e:
-            self.store.save_result(
-                instance_id=instance_id,
-                status="setup_error",
-                duration_seconds=time.monotonic() - start,
-                model_name=self.model_name,
-                error=str(e),
-            )
-            progress.update(1)
-            return
+        container_id: str | None = None
+        repo_path: Path | None = None
 
-        if self.verbose:
-            print(f"[{instance_id}] Starting TUI...", file=sys.stderr)
-        try:
-            start_tui_in_tmux(slug, repo_path, self.agtx_bin, verbose=self.verbose)
-            time.sleep(8)  # Wait for TUI startup + project registration
-        except Exception as e:
-            self.store.save_result(
-                instance_id=instance_id,
-                status="setup_error",
-                duration_seconds=time.monotonic() - start,
-                model_name=self.model_name,
-                error=f"TUI startup failed: {e}",
-            )
-            progress.update(1)
-            return
+        if self.docker:
+            if self.verbose:
+                print(f"\n[{instance_id}] Starting Docker container...", file=sys.stderr)
+            try:
+                container_id = start_docker_container(
+                    instance_id, slug, self.agtx_bin, verbose=self.verbose
+                )
+                setup_container(
+                    container_id, self.config_path, instance["base_commit"],
+                    verbose=self.verbose, tools_container_id=self.tools_container_id,
+                    extra_dirs=self.extra_dirs or None,
+                    sandbox_init=self.sandbox_init or None,
+                )
+            except Exception as e:
+                if container_id:
+                    stop_docker_container(container_id, verbose=self.verbose)
+                self.store.save_result(
+                    instance_id=instance_id,
+                    status="setup_error",
+                    duration_seconds=time.monotonic() - start,
+                    model_name=self.model_name,
+                    error=str(e),
+                )
+                progress.update(1)
+                return
+
+            if self.verbose:
+                print(f"[{instance_id}] Starting TUI inside container...", file=sys.stderr)
+                print(f"  [docker] To watch the agent:", file=sys.stderr)
+                print(f"    docker exec -it swebench-{slug} tmux -L agtx attach -t testbed:1", file=sys.stderr)
+            try:
+                start_tui_in_container(slug, container_id, verbose=self.verbose)
+                # start_tui_in_container already waits for TUI startup internally
+            except Exception as e:
+                stop_docker_container(container_id, verbose=self.verbose)
+                self.store.save_result(
+                    instance_id=instance_id,
+                    status="setup_error",
+                    duration_seconds=time.monotonic() - start,
+                    model_name=self.model_name,
+                    error=f"TUI startup failed: {e}",
+                )
+                progress.update(1)
+                return
+
+            # In Docker mode, repo_path is unused by McpClient/patch collection
+            # but TaskRunner still needs a Path object (used as identifier).
+            repo_path = Path("/testbed")
+
+        else:
+            if self.verbose:
+                print(f"\n[{instance_id}] Setting up repo...", file=sys.stderr)
+            try:
+                repo_path = setup_repo(
+                    instance, self.workdir, self.config_path,
+                    verbose=self.verbose, smoke_test=self.smoke_test,
+                )
+            except Exception as e:
+                self.store.save_result(
+                    instance_id=instance_id,
+                    status="setup_error",
+                    duration_seconds=time.monotonic() - start,
+                    model_name=self.model_name,
+                    error=str(e),
+                )
+                progress.update(1)
+                return
+
+            if self.verbose:
+                print(f"[{instance_id}] Starting TUI...", file=sys.stderr)
+            try:
+                start_tui_in_tmux(slug, repo_path, self.agtx_bin, verbose=self.verbose)
+                time.sleep(8)  # Wait for TUI startup + project registration
+            except Exception as e:
+                self.store.save_result(
+                    instance_id=instance_id,
+                    status="setup_error",
+                    duration_seconds=time.monotonic() - start,
+                    model_name=self.model_name,
+                    error=f"TUI startup failed: {e}",
+                )
+                progress.update(1)
+                return
 
         if self.verbose:
             print(f"[{instance_id}] Connecting MCP client...", file=sys.stderr)
@@ -1003,9 +1876,14 @@ class BenchmarkOrchestrator:
             verbose=self.verbose,
             smoke_test=self.smoke_test,
             hard=self.hard,
+            container_id=container_id,
         )
         result = runner.run()
-        kill_tmux_session(slug, repo_path)
+
+        if self.docker:
+            stop_docker_container(container_id, verbose=self.verbose)
+        else:
+            kill_tmux_session(slug, repo_path)
 
         self.store.save_result(
             instance_id=instance_id,
@@ -1023,21 +1901,31 @@ class BenchmarkOrchestrator:
         print(f"Agent: {self.agent} | Plugin: {self.plugin} | Tasks: {len(pending)} | Concurrency: {self.concurrency}")
         print(f"Output: {self.store.output_dir}")
 
-        with tqdm(total=total, initial=already_done, unit="task") as progress:
-            if self.concurrency == 1:
-                for instance in pending:
-                    self._run_one(instance, progress)
-            else:
-                with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
-                    futures = {
-                        pool.submit(self._run_one, instance, progress): instance
-                        for instance in pending
-                    }
-                    for future in as_completed(futures):
-                        exc = future.exception()
-                        if exc:
-                            inst = futures[future]
-                            print(f"\nUnhandled error for {inst['instance_id']}: {exc}", file=sys.stderr)
+        if self.docker and _tools_image_exists():
+            if self.verbose:
+                print("[docker] Ensuring tools volume is ready...", file=sys.stderr)
+            ensure_tools_volume(verbose=self.verbose)
+            self.tools_container_id = "volume"  # sentinel: volume is mounted, no container needed
+
+        try:
+            with tqdm(total=total, initial=already_done, unit="task") as progress:
+                if self.concurrency == 1:
+                    for instance in pending:
+                        self._run_one(instance, progress)
+                else:
+                    with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+                        futures = {
+                            pool.submit(self._run_one, instance, progress): instance
+                            for instance in pending
+                        }
+                        for future in as_completed(futures):
+                            exc = future.exception()
+                            if exc:
+                                inst = futures[future]
+                                print(f"\nUnhandled error for {inst['instance_id']}: {exc}", file=sys.stderr)
+        finally:
+            if self.tools_container_id and self.tools_container_id != "volume":
+                stop_tools_container(verbose=self.verbose)
 
         statuses: dict[str, int] = {}
         for r in self.store._results:
@@ -1051,9 +1939,9 @@ class BenchmarkOrchestrator:
 # Dataset loader
 # ---------------------------------------------------------------------------
 
-def load_swebench(split: str = "test") -> list[dict]:
-    print(f"Loading SWE-bench Lite ({split} split)...")
-    dataset = load_dataset("princeton-nlp/SWE-bench_Lite", split=split)
+def load_swebench(split: str = "test", dataset_name: str = "princeton-nlp/SWE-bench_Lite") -> list[dict]:
+    print(f"Loading {dataset_name} ({split} split)...")
+    dataset = load_dataset(dataset_name, split=split)
     return list(dataset)
 
 
@@ -1115,7 +2003,7 @@ other agtx project settings. Example:
     parser.add_argument(
         "--agtx",
         default="./target/release/agtx",
-        help="Path to agtx binary (default: ./target/release/agtx)",
+        help="Path to agtx binary (default: ../target/release/agtx relative to benchmark/)",
     )
     parser.add_argument(
         "--phase-timeout",
@@ -1136,6 +2024,13 @@ other agtx project settings. Example:
         help="HuggingFace dataset split (default: test)",
     )
     parser.add_argument(
+        "--dataset",
+        default="princeton-nlp/SWE-bench_Lite",
+        dest="dataset",
+        help="HuggingFace dataset name (default: princeton-nlp/SWE-bench_Lite). "
+             "Use princeton-nlp/SWE-bench_Verified for multi-file/long-exploration tasks.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Print step-by-step progress to stderr",
@@ -1154,6 +2049,17 @@ other agtx project settings. Example:
         help="Strip code blocks and stack traces from the problem statement, keeping only the prose. "
              "The agent must find and fix the bug from first principles.",
     )
+    parser.add_argument(
+        "--sandbox",
+        action="store_true",
+        dest="docker",
+        help=(
+            "Run each task inside its SWE-bench Docker image "
+            "(swebench/sweb.eval.x86_64.*). Gives agents a working test "
+            "environment with pre-installed dependencies. "
+            "Requires Docker with Rosetta on Apple Silicon."
+        ),
+    )
     args = parser.parse_args()
 
     # Load and validate config
@@ -1166,6 +2072,16 @@ other agtx project settings. Example:
     agent = config.get("default_agent", "claude")
     run_agent = running_agent(config)
 
+    # Resolve sandbox_copy_dirs — paths relative to the config file's directory
+    extra_dirs: list[tuple[Path, str]] = []
+    for entry in config.get("sandbox_copy_dirs", []):
+        src = (config_path.parent / entry["src"]).resolve()
+        dst = entry["dst"]
+        extra_dirs.append((src, dst))
+
+    # Resolve sandbox_init — shell commands to run inside the container after setup
+    sandbox_init: list[str] = config.get("sandbox_init", [])
+
     # Resolve agtx binary
     agtx_bin = str(Path(args.agtx).resolve())
     if not Path(agtx_bin).exists():
@@ -1173,11 +2089,12 @@ other agtx project settings. Example:
         print("Build with: cargo build --release", file=sys.stderr)
         sys.exit(1)
 
-    model_name = args.model_name or f"agtx-{plugin}-{agent}"
+    model_name = args.model_name or config_path.stem
 
     if args.output_dir is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path(f"./swebench_output/{plugin}_{agent}_{ts}").resolve()
+        config_stem = config_path.stem  # e.g. "claude-rtk-caveman-ponytail-agtx"
+        output_dir = Path(f"./swebench_output/{config_stem}_{ts}").resolve()
     else:
         output_dir = Path(args.output_dir).resolve()
 
@@ -1186,7 +2103,7 @@ other agtx project settings. Example:
     if args.smoke_test and args.instance_ids is None and args.instances is None:
         instances = [{"instance_id": "smoke-test", "repo": "", "base_commit": "HEAD", "problem_statement": ""}]
     else:
-        instances = load_swebench(args.split)
+        instances = load_swebench(args.split, args.dataset)
         if args.instance_ids:
             id_set = set(args.instance_ids)
             instances = [i for i in instances if i["instance_id"] in id_set]
@@ -1211,16 +2128,24 @@ other agtx project settings. Example:
         verbose=args.verbose,
         smoke_test=args.smoke_test,
         hard=args.hard,
+        docker=args.docker,
+        extra_dirs=extra_dirs or None,
+        sandbox_init=sandbox_init or None,
     )
     orchestrator.run()
 
     print(f"\nPredictions: {orchestrator.store.predictions_path}")
     print(f"Results:     {orchestrator.store.results_path}")
+    run_id = f"{config_path.stem}-{int(time.time())}"
     print("\nTo evaluate:")
-    print(f"  python -m swebench.harness.run_evaluation \\")
-    print(f"    --dataset_name princeton-nlp/SWE-bench_Lite \\")
+    print(f"  uv run python -m swebench.harness.run_evaluation \\")
+    print(f"    --dataset_name {args.dataset} \\")
     print(f"    --predictions_path {orchestrator.store.predictions_path} \\")
-    print(f"    --run_id {plugin}-{agent}-$(date +%s)")
+    print(f"    --run_id {run_id}")
+    print("\nTo report (after evaluation):")
+    print(f"  uv run python swebench/report.py \\")
+    print(f"    --results {orchestrator.store.results_path} \\")
+    print(f"    --logs logs/run_evaluation/{run_id}/")
 
 
 if __name__ == "__main__":

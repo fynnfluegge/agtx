@@ -1,0 +1,25 @@
+default_agent = "claude"
+workflow_plugin = "agtx"
+worktree_dir = ".agtx/worktrees"
+skip_worktree = true
+
+# Install rtk and activate caveman inside the container (config-specific).
+# caveman is pre-installed in the tools image; rtk is downloaded at runtime (small binary).
+# Both are inert unless activated here — other configs are unaffected.
+sandbox_init = [
+    # Install rtk binary
+    "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh",
+    # Register rtk global hook (writes RTK.md + CLAUDE.md reference)
+    "export PATH=$HOME/.local/bin:$PATH && rtk init -g",
+    # Patch settings.json to add rtk PreToolUse hook (rtk init can't do it non-interactively)
+    # Use full path to rtk so it works regardless of Claude Code's PATH
+    "python3 -c \"import json,pathlib; p=pathlib.Path('/home/bench/.claude/settings.json'); d=json.loads(p.read_text()); h={'matcher':'Bash','hooks':[{'type':'command','command':'/home/bench/.local/bin/rtk hook claude'}]}; d.setdefault('hooks',{}).setdefault('PreToolUse',[]).append(h); p.write_text(json.dumps(d,indent=2))\"",
+    # Activate caveman (pre-installed in tools image once apt is fixed; falls back to curl install)
+    # Must run with HOME=/home/bench so the plugin is registered in the correct Claude config
+    "HOME=/home/bench curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh | bash 2>/dev/null || true",
+]
+
+[agents]
+planning = "claude"
+running  = "claude"
+review   = "claude"

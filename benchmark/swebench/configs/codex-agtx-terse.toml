@@ -1,6 +1,7 @@
 default_agent = "codex"
 workflow_plugin = "agtx-terse"
 worktree_dir = ".agtx/worktrees"
+skip_worktree = true
 
 [agents]
 planning = "codex"

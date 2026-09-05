@@ -1,0 +1,13 @@
+# Plain Grok session: no skills, no phase prompting.
+# Interactive use only — in an automated benchmark run agtx prefills the task in
+# the input box and waits for a human Enter, so the run stalls. Use grok-agtx.toml
+# for benchmarks.
+default_agent = "grok"
+workflow_plugin = "void"
+worktree_dir = ".agtx/worktrees"
+skip_worktree = true
+
+[agents]
+planning = "grok"
+running  = "grok"
+review   = "grok"

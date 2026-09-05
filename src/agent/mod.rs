@@ -1,6 +1,13 @@
+pub mod hook_status;
 mod operations;
+pub mod spec;
+pub mod trust;
 
 pub use operations::{AgentOperations, AgentRegistry, CodingAgent, RealAgentRegistry};
+pub use spec::{
+    spec, AgentDialog, AgentSpec, CommandSyntax, DialogScope, HookConfigKind, HookEventSource,
+    McpConfigKind, PromptForm, ResumeArgs, SendStrategy, SkillLayout, AGENT_SPECS,
+};
 
 #[cfg(feature = "test-mocks")]
 pub use operations::{MockAgentOperations, MockAgentRegistry};
@@ -12,19 +19,66 @@ use serde::{Deserialize, Serialize};
 pub struct Agent {
     pub name: String,
     pub command: String,
-    pub args: Vec<String>,
     pub description: String,
     pub co_author: String,
 }
 
+/// How an agent accepts an initial prompt at launch.
+///
+/// `Argv`/`FlagInteractive` let agtx hand the opening message to the process
+/// itself, so there is no window in which keystrokes can be dropped and nothing
+/// to poll for. `Unknown` keeps the historical path: launch bare, wait for the
+/// TUI to look ready, then type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptInjection {
+    /// Positional argument: `claude "<text>"`.
+    Argv,
+    /// Interactive prompt flag: `gemini -i "<text>"`.
+    FlagInteractive(&'static str),
+    /// No verified interactive launch form — send after readiness instead.
+    Unknown,
+}
+
 impl Agent {
+    /// Whether this agent can take the opening message at launch.
+    ///
+    /// Derived from the agent's spec: the launch *form* is always known, but it
+    /// is only used once verified against the real binary, because getting this
+    /// wrong means the task text is silently swallowed (a `-p`-style flag that
+    /// runs headless and exits) rather than failing loudly.
+    pub fn prompt_injection(&self) -> PromptInjection {
+        match spec::spec(&self.name) {
+            Some(s) if s.launch_prompt_verified => match s.prompt_form {
+                spec::PromptForm::Argv => PromptInjection::Argv,
+                spec::PromptForm::Flag(flag) => PromptInjection::FlagInteractive(flag),
+            },
+            _ => PromptInjection::Unknown,
+        }
+    }
+
     pub fn new(name: &str, command: &str, description: &str, co_author: &str) -> Self {
         Self {
             name: name.to_string(),
             command: command.to_string(),
-            args: vec![],
             description: description.to_string(),
             co_author: co_author.to_string(),
+        }
+    }
+
+    /// Argv for the agent's headless (print) invocation, used for one-shot
+    /// generation like PR descriptions.
+    ///
+    /// Note this deliberately does *not* apply the interactive launch env
+    /// (Gemini's `GEMINI_TRUST_WORKSPACE`): headless runs never touch the
+    /// workspace, and adding it here would change behaviour.
+    pub fn headless_invocation<'a>(&'a self, prompt: &'a str) -> (&'a str, Vec<&'a str>) {
+        match spec::spec(&self.name) {
+            Some(s) => {
+                let mut args: Vec<&str> = s.headless_args.to_vec();
+                args.push(prompt);
+                (s.binary, args)
+            }
+            None => (self.command.as_str(), vec![prompt]),
         }
     }
 
@@ -36,89 +90,38 @@ impl Agent {
     /// Build the shell command to resume the agent's most recent session
     /// in the current working directory. Used to recover from tmux/server restarts.
     pub fn build_resume_command(&self) -> String {
-        match self.name.as_str() {
-            "claude" => "claude --dangerously-skip-permissions --continue".to_string(),
-            "codex" => "codex resume --last".to_string(),
-            "copilot" => "copilot --allow-all-tools --continue".to_string(),
-            "gemini" => "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo --resume".to_string(),
-            "opencode" => "opencode --continue".to_string(),
-            "cursor" => "agent --yolo --continue".to_string(),
-            _ => self.build_interactive_command(""),
-        }
+        let Some(s) = spec::spec(&self.name) else {
+            // Nothing is known about how this agent resumes; start it fresh.
+            return self.build_interactive_command("");
+        };
+        let args: Vec<&str> = match s.resume {
+            spec::ResumeArgs::Append(extra) => s.base_args.iter().chain(extra).copied().collect(),
+            spec::ResumeArgs::Replace(args) => args.to_vec(),
+        };
+        spec::compose_command(s, &args, None)
     }
 
     /// Build the shell command to start the agent interactively.
     /// When prompt is empty, the agent starts with no initial message
     /// (task content and skill commands are sent later via tmux send_keys).
     pub fn build_interactive_command(&self, prompt: &str) -> String {
-        if prompt.is_empty() {
-            return match self.name.as_str() {
-                "claude" => "claude --dangerously-skip-permissions".to_string(),
-                "codex" => "codex --full-auto".to_string(),
-                "copilot" => "copilot --allow-all-tools".to_string(),
-                "gemini" => "GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo".to_string(),
-                "opencode" => "opencode".to_string(),
-                "cursor" => "agent --yolo".to_string(),
-                _ => self.command.clone(),
-            };
-        }
-
-        let escaped_prompt = prompt.replace('\'', "'\"'\"'");
-        match self.name.as_str() {
-            "claude" => format!("claude --dangerously-skip-permissions '{}'", escaped_prompt),
-            "codex" => format!("codex --full-auto '{}'", escaped_prompt),
-            "copilot" => format!("copilot --allow-all-tools -p '{}'", escaped_prompt),
-            "gemini" => format!("GEMINI_TRUST_WORKSPACE=true gemini --approval-mode yolo -i '{}'", escaped_prompt),
-            "opencode" => format!("opencode -p '{}'", escaped_prompt),
-            "cursor" => format!("agent --yolo '{}'", escaped_prompt),
-            _ => format!("{} '{}'", self.command, escaped_prompt),
+        match spec::spec(&self.name) {
+            Some(s) => spec::compose_command(s, s.base_args, Some(prompt)),
+            None if prompt.is_empty() => self.command.clone(),
+            None => format!("{} '{}'", self.command, prompt.replace('\'', "'\"'\"'")),
         }
     }
 }
 
-/// Get the list of known agents
+/// Get the list of known agents, in preference order.
+///
+/// Derived from [`AGENT_SPECS`] — adding an agent means adding a spec entry,
+/// not editing this function.
 pub fn known_agents() -> Vec<Agent> {
-    vec![
-        Agent::new(
-            "claude",
-            "claude",
-            "Anthropic's Claude Code CLI",
-            "Claude <noreply@anthropic.com>",
-        ),
-        Agent::new(
-            "codex",
-            "codex",
-            "OpenAI's Codex CLI",
-            "Codex <noreply@openai.com>",
-        ),
-        Agent::new(
-            "copilot",
-            "copilot",
-            "GitHub Copilot CLI",
-            "GitHub Copilot <noreply@github.com>",
-        ),
-        Agent::new(
-            "gemini",
-            "gemini",
-            "Google Gemini CLI",
-            "Gemini <noreply@google.com>",
-        ),
-        Agent::new(
-            "opencode",
-            "opencode",
-            "AI-powered coding assistant",
-            "OpenCode <noreply@opencode.ai>",
-        ),
-        Agent::new(
-            "cursor",
-            "agent",
-            "Cursor Agent CLI",
-            "Cursor Agent <noreply@cursor.com>",
-        ),
-        // TODO: investigate CLI usage before enabling
-        // Agent::new("aider", "aider", "AI pair programming in your terminal", "Aider <noreply@aider.chat>"),
-        // Agent::new("cline", "cline", "AI coding assistant for VS Code", "Cline <noreply@cline.bot>"),
-    ]
+    spec::AGENT_SPECS
+        .iter()
+        .map(|s| Agent::new(s.name, s.binary, s.description, s.co_author))
+        .collect()
 }
 
 /// Detect which agents are available on the system
@@ -167,4 +170,3 @@ pub fn parse_agent_selection(input: &str, agent_count: usize) -> Option<usize> {
     }
     None
 }
-

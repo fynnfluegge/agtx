@@ -10,10 +10,21 @@ pub struct Database {
 }
 
 impl Database {
+    /// Root directory holding `index.db` and `projects/`.
+    ///
+    /// `AGTX_DATA_DIR` overrides it so tests (and the smoke runner) can open real
+    /// databases without writing into the user's own store — otherwise every
+    /// `Database::open_project(TempDir)` in the suite leaves an orphan DB behind,
+    /// keyed by a temp path that no longer exists. Same reasoning as
+    /// `AGTX_AGENT_HOME`.
+    pub fn data_root() -> Result<std::path::PathBuf> {
+        crate::config::GlobalConfig::config_dir()
+    }
+
     /// Open or create a project database (stored centrally in the platform
     /// config dir).
     pub fn open_project(project_path: &Path) -> Result<Self> {
-        let config_dir = crate::config::GlobalConfig::config_dir()?;
+        let config_dir = Self::data_root()?;
         Self::open_project_in(&config_dir, project_path)
     }
 
@@ -63,12 +74,15 @@ impl Database {
     /// Create a stable hash from a path string for database filename.
     /// Uses SHA-256 (truncated to 16 hex chars) for cross-version stability.
     fn hash_path(path: &str) -> String {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(path.as_bytes());
         let result = hasher.finalize();
         // Take first 8 bytes (16 hex chars) — same length as the old DefaultHasher output
-        format!("{:016x}", u64::from_be_bytes(result[..8].try_into().unwrap()))
+        format!(
+            "{:016x}",
+            u64::from_be_bytes(result[..8].try_into().unwrap())
+        )
     }
 
     /// Legacy hash function (DefaultHasher). Used only for migration from pre-SHA256 databases.
@@ -83,7 +97,7 @@ impl Database {
 
     /// Open or create the global index database (in the platform config dir).
     pub fn open_global() -> Result<Self> {
-        let config_dir = crate::config::GlobalConfig::config_dir()?;
+        let config_dir = Self::data_root()?;
         Self::open_global_in(&config_dir)
     }
 
@@ -449,10 +463,9 @@ impl Database {
             _ => return true,
         };
         refs_str.split(',').filter(|s| !s.is_empty()).all(|ref_id| {
-            self.get_task(ref_id)
-                .ok()
-                .flatten()
-                .map_or(true, |t| matches!(t.status, TaskStatus::Review | TaskStatus::Done))
+            self.get_task(ref_id).ok().flatten().map_or(true, |t| {
+                matches!(t.status, TaskStatus::Review | TaskStatus::Done)
+            })
         })
     }
 
@@ -482,9 +495,7 @@ impl Database {
     }
 
     pub fn get_project_by_id(&self, id: &str) -> Result<Option<Project>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM projects WHERE id = ?1")?;
+        let mut stmt = self.conn.prepare("SELECT * FROM projects WHERE id = ?1")?;
 
         let project = stmt
             .query_row(params![id], |row| {

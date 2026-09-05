@@ -33,6 +33,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The released binary reports env!("CARGO_PKG_VERSION"), and `agtx update`
+      # compares it against the tag. A tag pushed without the manifest bump would
+      # ship a binary that lies about its own version, so fail here instead.
+      - name: Tag matches Cargo.toml
+        shell: bash
+        run: |
+          MANIFEST=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$MANIFEST" != "${{ github.ref_name }}" ]; then
+            echo "tag ${{ github.ref_name }} != Cargo.toml v$MANIFEST"
+            exit 1
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -56,12 +68,20 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar -czvf ../../../${{ matrix.archive }} agtx
           cd ../../..
+          # install.sh and `agtx update` both fetch <archive>.sha256 and verify it.
+          if command -v sha256sum > /dev/null; then
+            sha256sum ${{ matrix.archive }} > ${{ matrix.archive }}.sha256
+          else
+            shasum -a 256 ${{ matrix.archive }} > ${{ matrix.archive }}.sha256
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive }}
-          path: ${{ matrix.archive }}
+          path: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
 
   release:
     name: Create Release
@@ -85,7 +105,9 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.tar.gz
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.sha256
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}

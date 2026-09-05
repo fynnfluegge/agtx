@@ -32,6 +32,12 @@ pub trait AgentOperations: Send + Sync {
     /// in the current working directory. Used to recover from tmux/server restarts.
     fn build_resume_command(&self) -> String;
 
+    /// Whether this agent takes the opening message at launch; see
+    /// [`crate::agent::PromptInjection`].
+    fn prompt_injection(&self) -> crate::agent::PromptInjection {
+        crate::agent::PromptInjection::Unknown
+    }
+
     /// Build the full shell command to run this agent as an orchestrator.
     /// Includes MCP registration (if supported by the agent) and cleanup on exit.
     /// Default implementation: no MCP, just launches the agent interactively.
@@ -54,15 +60,7 @@ impl CodingAgent {
 
 impl AgentOperations for CodingAgent {
     fn generate_text(&self, working_dir: &Path, prompt: &str) -> Result<String> {
-        // Build the command based on agent type
-        let (cmd, args) = match self.agent.name.as_str() {
-            "claude" => ("claude", vec!["--print", prompt]),
-            "codex" => ("codex", vec!["exec", "--full-auto", prompt]),
-            "copilot" => ("copilot", vec!["-p", prompt]),
-            "gemini" => ("gemini", vec!["-p", prompt]),
-            "cursor" => ("agent", vec!["--print", "--yolo", prompt]),
-            _ => (self.agent.command.as_str(), vec![prompt]),
-        };
+        let (cmd, args) = self.agent.headless_invocation(prompt);
 
         let output = std::process::Command::new(cmd)
             .current_dir(working_dir)
@@ -89,15 +87,35 @@ impl AgentOperations for CodingAgent {
         self.agent.build_resume_command()
     }
 
+    fn prompt_injection(&self) -> crate::agent::PromptInjection {
+        self.agent.prompt_injection()
+    }
+
     fn build_orchestrator_command(&self, mcp_json: &str, _agtx_bin: &str) -> String {
         match self.agent.name.as_str() {
-            // Pre-remove any stale `agtx` registration (last run crashed before
-            // its own `mcp remove`) so `add-json` doesn't fail with "already
-            // exists" and short-circuit the `&&` into an empty shell.
+            // Register under a unique name (`agtx-orchestrator`) rather than
+            // `agtx` to avoid colliding with an `agtx` server already defined in
+            // another scope (the Claude Code plugin's `plugin:agtx:agtx`, a
+            // user-scope entry in ~/.claude.json, or the repo's .mcp.json).
+            // A same-named server across scopes with different endpoints makes
+            // Claude Code report a configuration conflict and refuse to connect.
+            //
+            // Pre-remove any stale registration (last run crashed before its own
+            // `mcp remove`) so `add-json` doesn't fail with "already exists" and
+            // short-circuit the `&&` into an empty shell.
+            //
+            // The JSON is a single-quoted word for `add-json`, and that is all
+            // this layer does. `create_window` wraps the whole command in
+            // `sh -c '…'` and quotes it properly on the way through
+            // (`single_quote` in src/tmux/operations.rs), so the wrapping quotes
+            // must **not** be pre-escaped here — doing so double-escapes them and
+            // the inner shell dies on an unterminated quote before `add-json`
+            // ever runs. Any apostrophe *inside* the JSON is escaped by the
+            // caller, which is the only thing that needs handling at this layer.
             "claude" => format!(
-                "claude mcp remove agtx --scope local 2>/dev/null || true; \
-                 claude mcp add-json agtx '{}' --scope local && {}; \
-                 claude mcp remove agtx --scope local",
+                "claude mcp remove agtx-orchestrator --scope local 2>/dev/null || true; \
+                 claude mcp add-json agtx-orchestrator '{}' --scope local && {}; \
+                 claude mcp remove agtx-orchestrator --scope local",
                 mcp_json,
                 self.build_interactive_command("")
             ),

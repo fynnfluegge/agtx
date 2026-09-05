@@ -1,7 +1,9 @@
 {
-  "agtx": {
-    "type": "stdio",
-    "command": "agtx",
-    "args": ["mcp-serve"]
+  "mcpServers": {
+    "agtx": {
+      "type": "stdio",
+      "command": "agtx",
+      "args": ["mcp-serve"]
+    }
   }
 }

@@ -1,6 +1,6 @@
 name = "bmad"
 description = "BMAD Method - AI-driven agile development with structured phases"
-init_script = "npx bmad-method install --non-interactive"
+init_script = "npx bmad-method install --yes"
 copy_dirs = ["_bmad", "_bmad-output"]
 
 [artifacts]

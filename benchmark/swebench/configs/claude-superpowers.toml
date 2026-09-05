@@ -1,0 +1,19 @@
+default_agent = "claude"
+workflow_plugin = "superpowers"
+worktree_dir = ".agtx/worktrees"
+skip_worktree = true
+
+# Install the superpowers plugin inside the container before the TUI starts.
+# init_script runs inside the worktree which doesn't exist in skip_worktree mode,
+# so we install it here via sandbox_init instead.
+sandbox_init = [
+    # Register the official Claude plugins marketplace (not present in container by default)
+    "HOME=/home/bench claude plugin marketplace add anthropics/claude-plugins-official 2>/dev/null || true",
+    # Install superpowers plugin from the marketplace
+    "HOME=/home/bench claude plugin install superpowers@claude-plugins-official --scope local 2>/dev/null || true",
+]
+
+[agents]
+planning = "claude"
+running  = "claude"
+review   = "claude"

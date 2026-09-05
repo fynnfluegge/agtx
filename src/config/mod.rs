@@ -24,6 +24,44 @@ pub struct GlobalConfig {
     /// Whether to automatically fullscreen-attach to the tmux session when opening a task popup
     #[serde(default)]
     pub fullscreen_on_enter: bool,
+
+    /// Write agent lifecycle-hook configs into worktrees so agents report their
+    /// own phase status. When false, agtx falls back to inferring liveness from
+    /// tmux pane output.
+    #[serde(default = "default_agent_hooks")]
+    pub agent_hooks: bool,
+    /// Answer agents' trust and permission-bypass prompts on the user's behalf.
+    ///
+    /// Off by default: those prompts ask the user to vouch for a directory or to
+    /// accept unattended tool execution, and that is their decision. With this
+    /// off a task whose agent is waiting on one shows as `Blocked` with the reason
+    /// on the card, and the user answers in the agent's own pane.
+    ///
+    /// Turning it on restores the historical behaviour — agtx reads the pane and
+    /// sends the answer — which is what unattended runs want. It is already
+    /// effectively on inside the Docker sandbox and the benchmark, where the
+    /// container is disposable and pre-accepting is the documented policy.
+    ///
+    /// Most users never need it: trust is inherited from the project root for
+    /// claude, codex and gemini, `--trust` covers cursor and grok, opencode never
+    /// asks, and antigravity's per-worktree entry is seeded from the consent the
+    /// user already gave the project (see `agent::trust`).
+    #[serde(default)]
+    pub auto_trust: bool,
+
+    /// Check GitHub once a day for a newer agtx release and show a notice in
+    /// the header. Set false to never ask; `AGTX_NO_UPDATE_CHECK=1` is the
+    /// per-invocation equivalent, for CI and containers.
+    #[serde(default = "default_update_check")]
+    pub update_check: bool,
+}
+
+fn default_update_check() -> bool {
+    true
+}
+
+fn default_agent_hooks() -> bool {
+    true
 }
 
 impl Default for GlobalConfig {
@@ -34,6 +72,9 @@ impl Default for GlobalConfig {
             worktree: WorktreeConfig::default(),
             theme: ThemeConfig::default(),
             fullscreen_on_enter: false,
+            agent_hooks: default_agent_hooks(),
+            auto_trust: false,
+            update_check: default_update_check(),
         }
     }
 }
@@ -237,7 +278,227 @@ pub struct ProjectConfig {
 
     /// Override branch prefix for this project (e.g. "user/name")
     pub branch_prefix: Option<String>,
+
+    /// Skip git worktree creation — agent works directly in the project root.
+    /// Useful when the repo is already an isolated environment (e.g. Docker container).
+    pub skip_worktree: Option<bool>,
 }
+
+/// Serialise `value` over the TOML already at `path`, keeping everything agtx
+/// did not put there.
+///
+/// The rule: *agtx rewrites the values of keys it knows, never deletes a key it
+/// does not recognise, and removes a key it manages when that field becomes
+/// unset.* `managed` names the keys that may be removed — the optional ones,
+/// since a required key is always re-emitted. Everything else in the file
+/// survives untouched, formatting and comments included.
+///
+/// Serialising the struct alone would not do: it emits a pristine document and
+/// so drops every comment and unrecognised key the user wrote.
+fn write_toml_preserving(path: &Path, value: &impl Serialize, managed: &ManagedKeys) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut rendered = toml_edit::ser::to_document(value).context("Failed to serialize config")?;
+    // serde renders a nested struct as an *inline* table (`worktree = { .. }`).
+    // Normalising to real tables keeps the user's `[worktree]` section on its
+    // own lines with its comments, and keeps a fresh file in the documented
+    // format.
+    expand_inline_tables(rendered.as_table_mut());
+
+    // A file that does not parse cannot be merged into, so start clean. The
+    // alternative — refusing to save — leaves the user unable to fix it from
+    // inside agtx.
+    let mut doc = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
+        .unwrap_or_default();
+
+    merge_table(doc.as_table_mut(), rendered.as_table(), managed);
+    std::fs::write(path, doc.to_string())?;
+    Ok(())
+}
+
+/// Remove `key`, moving any comments above it onto the key that follows.
+///
+/// A comment belongs to the *next* key's decor, so removing the first key in a
+/// file would take the file's header comment with it. Erring toward keeping the
+/// user's text leaves a comment that really was about the removed key slightly
+/// orphaned, which is visible and fixable where deletion is not.
+///
+/// A comment above the *last* key in a table has nothing to move onto and is
+/// dropped.
+fn remove_key_keeping_comments(table: &mut toml_edit::Table, key: &str) {
+    if !table.contains_key(key) {
+        return;
+    }
+    let prefix = table
+        .key(key)
+        .and_then(|k| k.leaf_decor().prefix())
+        .and_then(|p| p.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let successor = table
+        .iter()
+        .map(|(k, _)| k.to_string())
+        .skip_while(|k| k != key)
+        .nth(1);
+
+    table.remove(key);
+
+    if !prefix.contains('#') {
+        return;
+    }
+    if let Some(next) = successor {
+        if let Some(mut next_key) = table.key_mut(&next) {
+            let decor = next_key.leaf_decor_mut();
+            let existing = decor.prefix().and_then(|p| p.as_str()).unwrap_or("");
+            decor.set_prefix(format!("{prefix}{existing}"));
+        }
+    }
+}
+
+/// Turn every inline table into a `[section]`, recursively.
+fn expand_inline_tables(table: &mut toml_edit::Table) {
+    let inline_keys: Vec<String> = table
+        .iter()
+        .filter(|(_, item)| item.is_inline_table())
+        .map(|(key, _)| key.to_string())
+        .collect();
+    for key in inline_keys {
+        if let Some(item) = table.get_mut(&key) {
+            let expanded = std::mem::replace(item, toml_edit::Item::None)
+                .into_table()
+                .unwrap_or_else(|original| {
+                    // Cannot happen for an inline table, but losing the value
+                    // would be worse than an odd-looking one.
+                    let mut fallback = toml_edit::Table::new();
+                    fallback.insert(&key, original);
+                    fallback
+                });
+            *item = toml_edit::Item::Table(expanded);
+        }
+    }
+    for (_, item) in table.iter_mut() {
+        if let Some(sub) = item.as_table_mut() {
+            expand_inline_tables(sub);
+        }
+    }
+}
+
+/// The keys a writer is allowed to delete, per table. See
+/// `write_toml_preserving`.
+struct ManagedKeys {
+    /// Deletable keys at the top level.
+    root: &'static [&'static str],
+    /// Deletable keys inside a named sub-table.
+    nested: &'static [(&'static str, &'static [&'static str])],
+}
+
+impl ManagedKeys {
+    fn for_table(&self, table: Option<&str>) -> &'static [&'static str] {
+        match table {
+            None => self.root,
+            Some(name) => self
+                .nested
+                .iter()
+                .find(|(t, _)| *t == name)
+                .map(|(_, keys)| *keys)
+                .unwrap_or(&[]),
+        }
+    }
+}
+
+fn merge_table(target: &mut toml_edit::Table, source: &toml_edit::Table, managed: &ManagedKeys) {
+    merge_table_named(target, source, managed, None);
+}
+
+fn merge_table_named(
+    target: &mut toml_edit::Table,
+    source: &toml_edit::Table,
+    managed: &ManagedKeys,
+    name: Option<&str>,
+) {
+    for (key, item) in source.iter() {
+        match (
+            item.as_table(),
+            target.get_mut(key).and_then(|i| i.as_table_mut()),
+        ) {
+            // Both sides are tables: recurse, so the sub-table's own comments
+            // and layout survive too.
+            (Some(sub_source), Some(sub_target)) => {
+                merge_table_named(sub_target, sub_source, managed, Some(key));
+            }
+            _ => match target.get_mut(key) {
+                // Replacing an existing value keeps the decor around it, which
+                // is where a trailing `# comment` on that line lives.
+                Some(existing) => {
+                    let decor = existing.as_value().map(|v| v.decor().clone());
+                    *existing = item.clone();
+                    if let (Some(decor), Some(value)) = (decor, existing.as_value_mut()) {
+                        *value.decor_mut() = decor;
+                    }
+                }
+                // An empty table is nothing but a header. Writing one into a
+                // file that had no `[agents]` only appends noise — and appends
+                // it *after* whatever sections the user wrote.
+                None if item.as_table().is_some_and(|t| t.is_empty()) => {}
+                None => {
+                    target.insert(key, item.clone());
+                }
+            },
+        }
+    }
+
+    // An optional field the user cleared has to actually leave the file.
+    for key in managed.for_table(name) {
+        if !source.contains_key(key) {
+            remove_key_keeping_comments(target, key);
+        }
+    }
+
+    // Recurse into managed sub-tables the serialization omitted entirely, so a
+    // cleared `[agents]` still drops its keys.
+    for (table_name, _) in managed.nested {
+        if source.contains_key(table_name) {
+            continue;
+        }
+        if let Some(sub) = target.get_mut(table_name).and_then(|i| i.as_table_mut()) {
+            for key in managed.for_table(Some(table_name)) {
+                remove_key_keeping_comments(sub, key);
+            }
+        }
+    }
+}
+
+/// Optional keys on `GlobalConfig`. Everything else it writes is required, so
+/// it is always re-emitted and can never need deleting.
+const GLOBAL_MANAGED: ManagedKeys = ManagedKeys {
+    root: &[],
+    nested: &[("agents", &["research", "planning", "running", "review"])],
+};
+
+/// `ProjectConfig` is optional all the way down: every field can be cleared.
+const PROJECT_MANAGED: ManagedKeys = ManagedKeys {
+    root: &[
+        // `agents` is itself optional here, so clearing it must drop the whole
+        // `[agents]` section rather than leaving an empty header behind.
+        "agents",
+        "default_agent",
+        "base_branch",
+        "github_url",
+        "worktree_dir",
+        "copy_files",
+        "init_script",
+        "cleanup_script",
+        "workflow_plugin",
+        "branch_prefix",
+        "skip_worktree",
+    ],
+    nested: &[("agents", &["research", "planning", "running", "review"])],
+};
 
 impl GlobalConfig {
     /// Load global config from default location
@@ -253,23 +514,24 @@ impl GlobalConfig {
         }
     }
 
-    /// Save global config to default location
+    /// Save global config to its default location, keeping the user's comments
+    /// and any keys agtx does not recognise. See `write_toml_preserving`.
     pub fn save(&self) -> Result<()> {
-        let config_path = Self::config_path()?;
-
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(&config_path, content)?;
-
-        Ok(())
+        write_toml_preserving(&Self::config_path()?, self, &GLOBAL_MANAGED)
     }
 
-    /// Get the path to the global config file
-    /// Always uses ~/.config/agtx/ on all platforms
+    /// Get the path to the global config file.
+    ///
+    /// Always `~/.config/agtx/` on every platform — see the config-path split
+    /// note in CLAUDE.md. Honours `AGTX_CONFIG_DIR` like `TrustStore::path`, so
+    /// a test exercising the writer cannot overwrite the real user's
+    /// `config.toml`.
     pub fn config_path() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("AGTX_CONFIG_DIR") {
+            if !dir.is_empty() {
+                return Ok(PathBuf::from(dir).join("config.toml"));
+            }
+        }
         let home = std::env::var("HOME").context("Could not determine home directory")?;
         Ok(PathBuf::from(home)
             .join(".config")
@@ -278,7 +540,16 @@ impl GlobalConfig {
     }
 
     /// Get the path to the global data directory
+    ///
+    /// Honours `AGTX_DATA_DIR` like `Database::data_root`, so a test or smoke run
+    /// that redirects the databases also redirects the first-run probe that looks
+    /// for `index.db` beside them.
     pub fn data_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("AGTX_DATA_DIR") {
+            if !dir.is_empty() {
+                return Ok(PathBuf::from(dir));
+            }
+        }
         let dirs = directories::ProjectDirs::from("", "", "agtx")
             .context("Could not determine data directory")?;
         Ok(dirs.data_dir().to_path_buf())
@@ -286,7 +557,17 @@ impl GlobalConfig {
 
     /// Get the path to the global config directory (where `index.db` and
     /// per-project databases live).
+    ///
+    /// Honours `AGTX_DATA_DIR`, so a test or smoke run that redirects the
+    /// databases redirects every reader of them — the TUI, the web server and
+    /// `Database::open_global` alike — rather than leaving one of them
+    /// pointed at the user's own store.
     pub fn config_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("AGTX_DATA_DIR") {
+            if !dir.is_empty() {
+                return Ok(PathBuf::from(dir));
+            }
+        }
         let dirs = directories::ProjectDirs::from("", "", "agtx")
             .context("Could not determine config directory")?;
         Ok(dirs.config_dir().to_path_buf())
@@ -307,18 +588,15 @@ impl ProjectConfig {
         }
     }
 
-    /// Save project config
+    /// Save project config, keeping the user's comments and any keys agtx does
+    /// not recognise. See `write_toml_preserving`.
+    ///
+    /// Note this invalidates the project's trust hash — see
+    /// `TrustStore::retrust_after_agtx_write`, which every in-agtx caller of
+    /// this must go through.
     pub fn save(&self, project_path: &Path) -> Result<()> {
         let config_path = project_path.join(".agtx").join("config.toml");
-
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(&config_path, content)?;
-
-        Ok(())
+        write_toml_preserving(&config_path, self, &PROJECT_MANAGED)
     }
 }
 
@@ -360,6 +638,7 @@ pub struct MergedConfig {
     pub default_agent: String,
     pub phase_agents: PhaseAgentsConfig,
     pub worktree_enabled: bool,
+    pub skip_worktree: bool,
     pub auto_cleanup: bool,
     pub base_branch: String,
     pub worktree_dir: String,
@@ -371,6 +650,11 @@ pub struct MergedConfig {
     pub workflow_plugin: Option<String>,
     pub fullscreen_on_enter: bool,
     pub branch_prefix: String,
+    pub agent_hooks: bool,
+    pub auto_trust: bool,
+    /// Global-only: a project does not get to decide whether the user is told
+    /// about agtx releases.
+    pub update_check: bool,
 }
 
 impl MergedConfig {
@@ -389,6 +673,7 @@ impl MergedConfig {
                 review: project_agents.review.or(global.agents.review.clone()),
             },
             worktree_enabled: global.worktree.enabled,
+            skip_worktree: project.skip_worktree.unwrap_or(!global.worktree.enabled),
             auto_cleanup: global.worktree.auto_cleanup,
             base_branch: project
                 .base_branch
@@ -405,6 +690,9 @@ impl MergedConfig {
             cleanup_script: project.cleanup_script.clone(),
             workflow_plugin: project.workflow_plugin.clone(),
             fullscreen_on_enter: global.fullscreen_on_enter,
+            agent_hooks: global.agent_hooks,
+            auto_trust: global.auto_trust,
+            update_check: global.update_check,
             branch_prefix: project
                 .branch_prefix
                 .clone()
@@ -580,7 +868,10 @@ impl WorkflowPlugin {
                 name
             );
         }
-        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             anyhow::bail!(
                 "Plugin name '{}' contains invalid characters (only a-z, A-Z, 0-9, -, _ allowed)",
                 name
@@ -589,27 +880,36 @@ impl WorkflowPlugin {
         Ok(())
     }
 
+    /// Directory holding global (user-level) plugins: `~/.config/agtx/plugins`.
+    pub fn global_plugins_dir() -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("agtx")
+                .join("plugins"),
+        )
+    }
+
+    /// Directory holding a project's local plugins: `{project}/.agtx/plugins`.
+    pub fn project_plugins_dir(project_path: &Path) -> PathBuf {
+        project_path.join(".agtx").join("plugins")
+    }
+
     /// Load a plugin by name, checking project-local then global directories
     pub fn load(name: &str, project_path: Option<&Path>) -> Result<Self> {
         Self::validate_plugin_name(name)?;
         // 1. Check project-local
         if let Some(pp) = project_path {
-            let local_path = pp
-                .join(".agtx")
-                .join("plugins")
-                .join(name)
-                .join("plugin.toml");
+            let local_path = Self::project_plugins_dir(pp).join(name).join("plugin.toml");
             if local_path.exists() {
                 let content = std::fs::read_to_string(&local_path)?;
                 return toml::from_str(&content).context("Failed to parse plugin.toml");
             }
         }
         // 2. Check global
-        let home = std::env::var("HOME").context("Could not determine home directory")?;
-        let global_path = PathBuf::from(home)
-            .join(".config")
-            .join("agtx")
-            .join("plugins")
+        let global_path = Self::global_plugins_dir()
+            .context("Could not determine home directory")?
             .join(name)
             .join("plugin.toml");
         if global_path.exists() {
@@ -626,17 +926,12 @@ impl WorkflowPlugin {
         }
         // Same lookup order: project-local first, then global
         if let Some(pp) = project_path {
-            let local = pp.join(".agtx").join("plugins").join(name);
+            let local = Self::project_plugins_dir(pp).join(name);
             if local.join("plugin.toml").exists() {
                 return Some(local);
             }
         }
-        let home = std::env::var("HOME").ok()?;
-        let global = PathBuf::from(home)
-            .join(".config")
-            .join("agtx")
-            .join("plugins")
-            .join(name);
+        let global = Self::global_plugins_dir()?.join(name);
         if global.join("plugin.toml").exists() {
             return Some(global);
         }
@@ -677,7 +972,18 @@ impl TrustStore {
         Ok(())
     }
 
+    /// Where `trusted_projects.toml` lives.
+    ///
+    /// Honours `AGTX_CONFIG_DIR` like `Database::data_root` honours
+    /// `AGTX_DATA_DIR`: `App::new` reads this store and several paths write it,
+    /// so without a redirect the test suite would append temp-dir entries to
+    /// the real user's file.
     fn path() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("AGTX_CONFIG_DIR") {
+            if !dir.is_empty() {
+                return Ok(PathBuf::from(dir).join("trusted_projects.toml"));
+            }
+        }
         let dirs = directories::ProjectDirs::from("", "", "agtx")
             .context("Could not determine config directory")?;
         Ok(dirs.config_dir().join("trusted_projects.toml"))
@@ -687,14 +993,15 @@ impl TrustStore {
     pub fn hash_config(project_path: &Path) -> Option<String> {
         let config_path = project_path.join(".agtx").join("config.toml");
         let content = std::fs::read(&config_path).ok()?;
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let hash = Sha256::digest(&content);
         Some(format!("{:x}", hash))
     }
 
     /// Check if a project's config is trusted (hash matches stored value).
     pub fn is_trusted(&self, project_path: &Path) -> bool {
-        let canonical = project_path.canonicalize()
+        let canonical = project_path
+            .canonicalize()
             .unwrap_or_else(|_| project_path.to_path_buf());
         let key = canonical.to_string_lossy().to_string();
         match (self.projects.get(&key), Self::hash_config(project_path)) {
@@ -706,7 +1013,8 @@ impl TrustStore {
 
     /// Mark a project's current config as trusted.
     pub fn trust_project(&mut self, project_path: &Path) -> Result<()> {
-        let canonical = project_path.canonicalize()
+        let canonical = project_path
+            .canonicalize()
             .unwrap_or_else(|_| project_path.to_path_buf());
         let key = canonical.to_string_lossy().to_string();
         if let Some(hash) = Self::hash_config(project_path) {
@@ -714,5 +1022,105 @@ impl TrustStore {
             self.save()?;
         }
         Ok(())
+    }
+
+    /// Re-record trust after **agtx itself** rewrote `.agtx/config.toml`.
+    ///
+    /// Trust is a hash of that file, so every write agtx makes on the user's
+    /// behalf invalidates it: the project would show the untrusted banner on
+    /// the next launch and silently lose its `init_script`, `cleanup_script`
+    /// and `copy_files` — over a change the user made in agtx's own UI, to a
+    /// field (`workflow_plugin`) that is not one of the dangerous three.
+    ///
+    /// `was_trusted` is the state read *before* the write, and it is the whole
+    /// safety of this: a project the user has never approved must not become
+    /// trusted just because agtx touched its config, or an `init_script` they
+    /// never vouched for starts running on the next worktree. This restores a
+    /// prior decision; it never makes one.
+    pub fn retrust_after_agtx_write(project_path: &Path, was_trusted: bool) -> Result<()> {
+        if !was_trusted {
+            return Ok(());
+        }
+        let mut store = Self::load()?;
+        store.trust_project(project_path)
+    }
+}
+
+#[cfg(test)]
+mod managed_keys_tests {
+    use super::*;
+
+    /// The managed-key lists say what a save may *delete*. A field missing from
+    /// them survives being cleared: the value goes on living in the file after
+    /// the user removed it.
+    ///
+    /// Both literals below are exhaustive on purpose, so adding a field to the
+    /// struct fails to compile here until someone has looked at this list.
+    #[test]
+    fn project_managed_keys_covers_every_optional_field() {
+        let config = ProjectConfig {
+            default_agent: Some("claude".into()),
+            agents: Some(PhaseAgentsConfig {
+                research: Some("claude".into()),
+                planning: Some("claude".into()),
+                running: Some("codex".into()),
+                review: Some("claude".into()),
+            }),
+            base_branch: Some("main".into()),
+            github_url: Some("https://example.invalid".into()),
+            worktree_dir: Some(".agtx/worktrees".into()),
+            copy_files: Some(".env".into()),
+            init_script: Some("true".into()),
+            cleanup_script: Some("true".into()),
+            workflow_plugin: Some("gsd".into()),
+            branch_prefix: Some("task".into()),
+            skip_worktree: Some(false),
+        };
+        let mut doc = toml_edit::ser::to_document(&config).unwrap();
+        // The writer expands inline tables before merging, so the guard has to
+        // look at the same shape it will.
+        expand_inline_tables(doc.as_table_mut());
+        for (key, item) in doc.as_table().iter() {
+            if item.is_table() {
+                // Sub-tables need both: `nested` so their own keys can be
+                // cleared, and `root` when the whole section is optional.
+                assert!(
+                    PROJECT_MANAGED.nested.iter().any(|(t, _)| *t == key),
+                    "sub-table `{key}` is not in PROJECT_MANAGED.nested"
+                );
+            }
+            assert!(
+                PROJECT_MANAGED.root.contains(&key),
+                "`{key}` can be cleared but PROJECT_MANAGED would not remove it"
+            );
+        }
+
+        let agents = doc["agents"].as_table().unwrap();
+        for (key, _) in agents.iter() {
+            assert!(
+                PROJECT_MANAGED.for_table(Some("agents")).contains(&key),
+                "`agents.{key}` can be cleared but would not be removed"
+            );
+        }
+    }
+
+    /// `GlobalConfig`'s only optional fields are the four phase agents; every
+    /// other key is required and therefore always re-emitted.
+    #[test]
+    fn global_managed_keys_covers_the_phase_agents() {
+        let agents = PhaseAgentsConfig {
+            research: Some("claude".into()),
+            planning: Some("claude".into()),
+            running: Some("codex".into()),
+            review: Some("claude".into()),
+        };
+        let mut doc = toml_edit::ser::to_document(&agents).unwrap();
+        expand_inline_tables(doc.as_table_mut());
+        for (key, _) in doc.as_table().iter() {
+            assert!(
+                GLOBAL_MANAGED.for_table(Some("agents")).contains(&key),
+                "`agents.{key}` can be cleared but would not be removed"
+            );
+        }
     }
 }

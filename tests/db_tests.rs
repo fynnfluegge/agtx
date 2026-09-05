@@ -333,7 +333,9 @@ fn test_claim_transition_request_fails_if_already_processed() {
 #[test]
 fn test_claim_transition_request_fails_for_unknown_id() {
     let db = Database::open_in_memory_project().unwrap();
-    assert!(!db.claim_transition_request("does-not-exist", "agtx-A").unwrap());
+    assert!(!db
+        .claim_transition_request("does-not-exist", "agtx-A")
+        .unwrap());
 }
 
 #[test]
@@ -347,16 +349,28 @@ fn test_cleanup_old_transition_requests_sweeps_stale_claims() {
     db.create_transition_request(&stale_claim).unwrap();
     db.create_transition_request(&fresh_unclaimed).unwrap();
 
-    db.claim_transition_request(&fresh_claim.id, "agtx-A").unwrap();
-    db.claim_transition_request(&stale_claim.id, "agtx-A").unwrap();
+    db.claim_transition_request(&fresh_claim.id, "agtx-A")
+        .unwrap();
+    db.claim_transition_request(&stale_claim.id, "agtx-A")
+        .unwrap();
     let two_hours_ago = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
-    db.backdate_transition_requested_at(&stale_claim.id, &two_hours_ago).unwrap();
+    db.backdate_transition_requested_at(&stale_claim.id, &two_hours_ago)
+        .unwrap();
 
     db.cleanup_old_transition_requests().unwrap();
 
-    assert!(db.get_transition_request(&stale_claim.id).unwrap().is_none());
-    assert!(db.get_transition_request(&fresh_claim.id).unwrap().is_some());
-    assert!(db.get_transition_request(&fresh_unclaimed.id).unwrap().is_some());
+    assert!(db
+        .get_transition_request(&stale_claim.id)
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get_transition_request(&fresh_claim.id)
+        .unwrap()
+        .is_some());
+    assert!(db
+        .get_transition_request(&fresh_unclaimed.id)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -367,7 +381,8 @@ fn test_get_pending_transition_requests_excludes_claimed() {
     let req_b = TransitionRequest::new("task-b", "move_forward");
     db.create_transition_request(&req_a).unwrap();
     db.create_transition_request(&req_b).unwrap();
-    db.claim_transition_request(&req_a.id, "other-instance").unwrap();
+    db.claim_transition_request(&req_a.id, "other-instance")
+        .unwrap();
 
     let pending = db.get_pending_transition_requests().unwrap();
     let ids: Vec<&str> = pending.iter().map(|r| r.id.as_str()).collect();
@@ -406,17 +421,26 @@ fn test_claim_transition_request_atomic_under_concurrent_claims() {
         }));
     }
 
-    let wins: usize = handles.into_iter().filter_map(|h| h.join().ok()).filter(|w| *w).count();
+    let wins: usize = handles
+        .into_iter()
+        .filter_map(|h| h.join().ok())
+        .filter(|w| *w)
+        .count();
     assert_eq!(wins, 1, "exactly one thread must win the claim; got {wins}");
 
     // Row must now be excluded from pending — a late claim must also fail.
     let followup = Database::open_project_at_path(&db_path).unwrap();
     assert!(
-        followup.get_pending_transition_requests().unwrap().is_empty(),
+        followup
+            .get_pending_transition_requests()
+            .unwrap()
+            .is_empty(),
         "claimed request must be filtered from pending"
     );
     assert!(
-        !followup.claim_transition_request(&req.id, "late-comer").unwrap(),
+        !followup
+            .claim_transition_request(&req.id, "late-comer")
+            .unwrap(),
         "a later claim after the race must return false"
     );
 }
@@ -435,7 +459,9 @@ fn test_consume_notifications_atomic_under_concurrent_consumers() {
     const NOTIFS: usize = 64;
     let setup = Database::open_project_at_path(&db_path).unwrap();
     for i in 0..NOTIFS {
-        setup.create_notification(&Notification::new(format!("msg-{i}"))).unwrap();
+        setup
+            .create_notification(&Notification::new(format!("msg-{i}")))
+            .unwrap();
     }
     drop(setup);
 
@@ -457,7 +483,11 @@ fn test_consume_notifications_atomic_under_concurrent_consumers() {
         seen.extend(h.join().unwrap());
     }
 
-    assert_eq!(seen.len(), NOTIFS, "total consumed must equal total created");
+    assert_eq!(
+        seen.len(),
+        NOTIFS,
+        "total consumed must equal total created"
+    );
     let unique_ids: HashSet<&str> = seen.iter().map(|n| n.id.as_str()).collect();
     assert_eq!(
         unique_ids.len(),
@@ -476,11 +506,31 @@ fn test_consume_notifications_atomic_under_concurrent_consumers() {
 
 // === Stable Hash and DB Permissions Tests (Fix 3, Fix 7) ===
 
-use tempfile::TempDir;
 use std::path::Path;
+use tempfile::TempDir;
+
+/// Point `Database` at a throwaway data root for the tests below.
+///
+/// These are the only tests that open a *real* database rather than an
+/// in-memory one. Without the redirect each run leaves an orphan
+/// `projects/<hash>.db` in the user's own store, keyed by a temp path that no
+/// longer exists — nothing ever collects them. The lock is needed because the
+/// redirect target is process-global.
+///
+/// Hold the returned guard for the duration of the test.
+fn redirect_data_dir() -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
+    static DATA_DIR: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking test poisons the lock; the data is unit, so recover and carry on.
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = DATA_DIR.get_or_init(|| TempDir::new().unwrap());
+    std::env::set_var("AGTX_DATA_DIR", dir.path());
+    (dir.path().to_path_buf(), guard)
+}
 
 #[test]
 fn test_open_project_same_path_returns_same_db() {
+    let (_data_dir, _guard) = redirect_data_dir();
     let temp_dir = TempDir::new().unwrap();
     let project_path = temp_dir.path();
 
@@ -498,6 +548,7 @@ fn test_open_project_same_path_returns_same_db() {
 
 #[test]
 fn test_open_project_different_paths_are_isolated() {
+    let (_data_dir, _guard) = redirect_data_dir();
     let temp1 = TempDir::new().unwrap();
     let temp2 = TempDir::new().unwrap();
 
@@ -517,6 +568,7 @@ fn test_project_db_file_permissions_are_0600() {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
 
+    let (data_dir, _guard) = redirect_data_dir();
     let temp_dir = TempDir::new().unwrap();
     let _db = Database::open_project(temp_dir.path()).unwrap();
 
@@ -527,15 +579,18 @@ fn test_project_db_file_permissions_are_0600() {
     let mut hasher = Sha256::new();
     hasher.update(path_str.as_bytes());
     let result = hasher.finalize();
-    let path_hash = format!("{:016x}", u64::from_be_bytes(result[..8].try_into().unwrap()));
+    let path_hash = format!(
+        "{:016x}",
+        u64::from_be_bytes(result[..8].try_into().unwrap())
+    );
 
-    let config_dir = directories::ProjectDirs::from("", "", "agtx").unwrap();
-    let db_path = config_dir
-        .config_dir()
-        .join("projects")
-        .join(format!("{}.db", path_hash));
+    let db_path = data_dir.join("projects").join(format!("{}.db", path_hash));
 
-    assert!(db_path.exists(), "Expected DB file not found at {:?}", db_path);
+    assert!(
+        db_path.exists(),
+        "Expected DB file not found at {:?}",
+        db_path
+    );
     let perms = std::fs::metadata(&db_path).unwrap().permissions();
     let mode = perms.mode() & 0o777;
     assert_eq!(mode, 0o600, "DB file should be owner-only read/write");
@@ -546,15 +601,101 @@ fn test_project_db_file_permissions_are_0600() {
 fn test_global_db_file_permissions_are_0600() {
     use std::os::unix::fs::PermissionsExt;
 
+    let (data_dir, _guard) = redirect_data_dir();
     let _db = Database::open_global().unwrap();
 
-    let config_dir = directories::ProjectDirs::from("", "", "agtx")
-        .unwrap();
-    let db_path = config_dir.config_dir().join("index.db");
+    // The redirect makes this unconditional: before it, the test opened the
+    // user's own index.db and skipped the assertion when it happened not to
+    // exist yet.
+    let db_path = data_dir.join("index.db");
+    assert!(db_path.exists(), "Expected index.db at {:?}", db_path);
 
-    if db_path.exists() {
-        let perms = std::fs::metadata(&db_path).unwrap().permissions();
-        let mode = perms.mode() & 0o777;
-        assert_eq!(mode, 0o600, "Global DB file should be owner-only read/write");
-    }
+    let perms = std::fs::metadata(&db_path).unwrap().permissions();
+    let mode = perms.mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "Global DB file should be owner-only read/write"
+    );
+}
+
+// === Dependency-graph integration tests (real Database + deps_satisfied) ===
+
+use agtx::tui::dep_graph::build_dep_graph;
+
+/// Build a dependency graph from a real in-memory database, exercising the
+/// same `deps_satisfied` rule the board uses. This complements the pure-model
+/// unit tests in src/tui/dep_graph.rs.
+#[test]
+fn test_dep_graph_levels_and_unblocked_from_db() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    // Level 0: a completed dependency.
+    let mut base = Task::new("Base", "claude", "proj");
+    base.status = TaskStatus::Done;
+    db.create_task(&base).unwrap();
+
+    // Level 1: a Backlog task whose only dep (base) is Done -> unblocked.
+    let mut api = Task::new("API", "claude", "proj");
+    api.referenced_tasks = Some(base.id.clone());
+    db.create_task(&api).unwrap();
+
+    // Level 2: a Backlog task depending on API (still Backlog) -> blocked.
+    let mut ui = Task::new("UI", "claude", "proj");
+    ui.referenced_tasks = Some(api.id.clone());
+    db.create_task(&ui).unwrap();
+
+    let tasks = db.get_all_tasks().unwrap();
+    let graph = build_dep_graph(&tasks, |t| db.deps_satisfied(t));
+
+    let node = |id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.task_id == id)
+            .expect("node present")
+    };
+
+    // Topological columns.
+    assert_eq!(node(&base.id).level, 0);
+    assert_eq!(node(&api.id).level, 1);
+    assert_eq!(node(&ui.id).level, 2);
+
+    // Only API is an actionable (unblocked) Backlog task: its dep is Done.
+    assert!(node(&api.id).unblocked);
+    // UI's dep (API) is still in Backlog, so UI is blocked.
+    assert!(!node(&ui.id).unblocked);
+    // Base is Done, so it is not "unblocked" (not actionable).
+    assert!(!node(&base.id).unblocked);
+
+    let unblocked = graph.unblocked_ids();
+    assert_eq!(unblocked, vec![api.id.clone()]);
+}
+
+#[test]
+fn test_dep_graph_unblocks_chain_as_deps_complete() {
+    let db = Database::open_in_memory_project().unwrap();
+
+    // a (Backlog) -> b (Backlog): b depends on a.
+    let a = Task::new("A", "claude", "proj");
+    db.create_task(&a).unwrap();
+    let mut b = Task::new("B", "claude", "proj");
+    b.referenced_tasks = Some(a.id.clone());
+    db.create_task(&b).unwrap();
+
+    // Initially only A is unblocked (no deps); B is blocked on A.
+    let tasks = db.get_all_tasks().unwrap();
+    let graph = build_dep_graph(&tasks, |t| db.deps_satisfied(t));
+    let mut unblocked = graph.unblocked_ids();
+    unblocked.sort();
+    assert_eq!(unblocked, vec![a.id.clone()]);
+
+    // Complete A (move to Review). Now B should become unblocked.
+    let mut a_done = db.get_task(&a.id).unwrap().unwrap();
+    a_done.status = TaskStatus::Review;
+    db.update_task(&a_done).unwrap();
+
+    let tasks = db.get_all_tasks().unwrap();
+    let graph = build_dep_graph(&tasks, |t| db.deps_satisfied(t));
+    // A is no longer Backlog, so it drops out of the unblocked set; B enters it.
+    assert_eq!(graph.unblocked_ids(), vec![b.id.clone()]);
 }

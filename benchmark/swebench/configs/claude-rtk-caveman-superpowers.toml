@@ -1,0 +1,23 @@
+default_agent = "claude"
+workflow_plugin = "superpowers"
+worktree_dir = ".agtx/worktrees"
+skip_worktree = true
+
+sandbox_init = [
+    # Register the official Claude plugins marketplace and install superpowers
+    "HOME=/home/bench claude plugin marketplace add anthropics/claude-plugins-official 2>/dev/null || true",
+    "HOME=/home/bench claude plugin install superpowers@claude-plugins-official --scope local 2>/dev/null || true",
+    # Install rtk binary
+    "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh",
+    # Register rtk global hook (writes RTK.md + CLAUDE.md reference)
+    "export PATH=$HOME/.local/bin:$PATH && rtk init -g",
+    # Patch settings.json to add rtk PreToolUse hook
+    "python3 -c \"import json,pathlib; p=pathlib.Path('/home/bench/.claude/settings.json'); d=json.loads(p.read_text()); h={'matcher':'Bash','hooks':[{'type':'command','command':'/home/bench/.local/bin/rtk hook claude'}]}; d.setdefault('hooks',{}).setdefault('PreToolUse',[]).append(h); p.write_text(json.dumps(d,indent=2))\"",
+    # Install caveman plugin
+    "HOME=/home/bench curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh | bash 2>/dev/null || true",
+]
+
+[agents]
+planning = "claude"
+running  = "claude"
+review   = "claude"

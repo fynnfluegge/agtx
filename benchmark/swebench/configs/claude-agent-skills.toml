@@ -1,0 +1,15 @@
+default_agent = "claude"
+workflow_plugin = "agent-skills"
+worktree_dir = ".agtx/worktrees"
+skip_worktree = true
+
+sandbox_init = [
+    # Register the agent-skills marketplace and install the plugin
+    "HOME=/home/bench claude plugin marketplace add addyosmani/agent-skills 2>/dev/null || true",
+    "HOME=/home/bench claude plugin install agent-skills@addy-agent-skills --scope local 2>/dev/null || true",
+]
+
+[agents]
+planning = "claude"
+running  = "claude"
+review   = "claude"

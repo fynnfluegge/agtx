@@ -6,6 +6,7 @@ pub mod mcp;
 pub mod skills;
 pub mod tmux;
 pub mod tui;
+pub mod update;
 pub mod web;
 
 use std::path::PathBuf;
@@ -23,4 +24,8 @@ pub struct FeatureFlags {
     pub experimental: bool,
     /// When true, init_script fields in project and plugin configs are not executed.
     pub no_init_scripts: bool,
+    /// This is the user's first launch: no config file existed and nothing was
+    /// migrated. The TUI opens the config editor on the default-agent field
+    /// instead of running a separate first-run menu of its own.
+    pub first_run: bool,
 }

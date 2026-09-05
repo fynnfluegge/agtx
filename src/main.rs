@@ -3,18 +3,35 @@ use agtx::{
     config::{self, GlobalConfig},
     git, tui, AppMode, FeatureFlags,
 };
-use anyhow::Result;
-use crossterm::{
-    cursor,
-    event::{self, Event, KeyCode},
-    style::{self, Stylize},
-    terminal, ExecutableCommand,
-};
-use std::io::{self, Write};
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Fast path: `agtx hook <task-id> <worktree> [agent]` is invoked by agent
+    // lifecycle hooks, potentially on every tool call. Handle it before the
+    // logging and config setup below — building a daily rolling file appender
+    // per invocation is pure waste, and the agent consumes this process's stdout.
+    {
+        let raw: Vec<String> = std::env::args().collect();
+        if raw.get(1).map(String::as_str) == Some("hook") {
+            return agtx::agent::hook_status::run_hook_cli(&raw[2..]);
+        }
+        // Same reasoning for the version/update commands: they print a line or
+        // two and exit, and neither wants a daily log file created for it. They
+        // are handled here rather than in the `mode` match below because that
+        // match filters out every `--`-prefixed argument, so `--version` would
+        // otherwise fall through and open the current directory as a project.
+        match raw.get(1).map(String::as_str) {
+            Some("--version" | "-V" | "version") => {
+                println!("agtx {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            Some("update") => return run_update(&raw[2..]),
+            _ => {}
+        }
+    }
+
     // Initialize audit logging to ~/.config/agtx/logs/
     let log_dir = GlobalConfig::config_path()?
         .parent()
@@ -53,9 +70,7 @@ async fn main() -> Result<()> {
             return agtx::web::serve(port).await;
         }
         Some("mcp-serve") => {
-            let project_path = positional_args
-                .get(1)
-                .map(PathBuf::from);
+            let project_path = positional_args.get(1).map(PathBuf::from);
             let project_path = match project_path {
                 Some(p) => {
                     let p = p.canonicalize()?;
@@ -89,7 +104,11 @@ async fn main() -> Result<()> {
         }
     };
 
-    let flags = FeatureFlags { experimental, no_init_scripts };
+    let mut flags = FeatureFlags {
+        experimental,
+        no_init_scripts,
+        first_run: false,
+    };
 
     // First-run: determine action based on config/data state
     let config_path = GlobalConfig::config_path()?;
@@ -109,13 +128,16 @@ async fn main() -> Result<()> {
             GlobalConfig::default().save()?;
         }
         config::FirstRunAction::NewUserPrompt => {
-            let available = agent::detect_available_agents();
-            if !available.is_empty() {
-                let selected = prompt_agent_selection(&available)?;
-                let mut cfg = GlobalConfig::default();
-                cfg.default_agent = selected.name.clone();
-                cfg.save()?;
+            // Write the defaults so a config file always exists after a first
+            // launch, then let the TUI ask which agent to use: the config editor
+            // already *is* that question, plus every other one, and answering it
+            // there keeps first run looking like the rest of the app.
+            let mut cfg = GlobalConfig::default();
+            if let Some(first) = agent::detect_available_agents().first() {
+                cfg.default_agent = first.name.clone();
             }
+            cfg.save()?;
+            flags.first_run = true;
         }
     }
 
@@ -149,110 +171,45 @@ fn migrate_old_config(new_path: &std::path::Path) -> bool {
     false
 }
 
-fn prompt_agent_selection(agents: &[agent::Agent]) -> Result<&agent::Agent> {
-    let mut stdout = io::stdout();
-    let mut selected: usize = 0;
+/// `agtx update [--check]`
+///
+/// The dedicated command the header notice points at. `--check` only reports,
+/// and exits 1 when an update is available so it can drive a script.
+fn run_update(args: &[String]) -> Result<()> {
+    use agtx::update;
 
-    // Enter raw mode for arrow key handling
-    terminal::enable_raw_mode()?;
-    stdout.execute(cursor::Hide)?;
+    let check_only = args.iter().any(|a| a == "--check");
+    let current = update::Version::current();
 
-    // Print ASCII art banner
-    let gold = style::Color::Rgb {
-        r: 234,
-        g: 212,
-        b: 154,
-    }; // #ead49a
-    let banner: &[(&str, &str)] = &[
-        (" █████╗  ██████╗████████╗██╗  ██╗", ""),
-        ("██╔══██╗██╔════╝╚══██╔══╝╚██╗██╔╝", ""),
-        (
-            "███████║██║  ███╗  ██║    ╚███╔╝ ",
-            "  Autonomous multi-session spec-driven",
-        ),
-        (
-            "██╔══██║██║   ██║  ██║    ██╔██╗ ",
-            "  AI coding orchestration in the terminal",
-        ),
-        ("██║  ██║╚██████╔╝  ██║   ██╔╝ ██╗", ""),
-        ("╚═╝  ╚═╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝", ""),
-    ];
-    stdout.execute(style::Print("\r\n"))?;
-    for (art, tagline) in banner {
-        stdout.execute(style::PrintStyledContent(
-            style::style(format!("  {}", art)).with(gold),
-        ))?;
-        if !tagline.is_empty() {
-            stdout.execute(style::PrintStyledContent((*tagline).dark_grey()))?;
-        }
-        stdout.execute(style::Print("\r\n"))?;
+    // Ask GitHub directly rather than going through the cached path: someone
+    // typing `agtx update` wants the answer now, not yesterday's answer.
+    let release = update::github::fetch_latest_release(&update::release::repo())
+        .context("could not reach GitHub to check for a new release")?;
+    let latest = update::Version::parse(&release.tag_name)
+        .with_context(|| format!("unrecognised release tag: {}", release.tag_name))?;
+
+    if !latest.supersedes(&current) {
+        println!("agtx {current} is up to date (latest release: {latest})");
+        return Ok(());
     }
-    stdout.execute(style::Print("\r\n"))?;
-    stdout.execute(style::Print("  Select your default coding agent "))?;
-    stdout.execute(style::PrintStyledContent(
-        "(can be changed later via config)\r\n\r\n".dark_grey(),
-    ))?;
 
-    // Draw the list
-    let draw = |stdout: &mut io::Stdout, selected: usize| -> Result<()> {
-        for (i, a) in agents.iter().enumerate() {
-            if i == selected {
-                stdout.execute(style::PrintStyledContent("  > ".cyan()))?;
-                stdout.execute(style::PrintStyledContent(a.name.as_str().cyan().bold()))?;
-                let desc = format!(" - {}", a.description);
-                stdout.execute(style::PrintStyledContent(desc.as_str().dark_grey()))?;
-            } else {
-                stdout.execute(style::Print("    "))?;
-                stdout.execute(style::Print(&a.name))?;
-                let desc = format!(" - {}", a.description);
-                stdout.execute(style::PrintStyledContent(desc.as_str().dark_grey()))?;
-            }
-            stdout.execute(style::Print("\r\n"))?;
+    println!("  current {current}  →  latest {latest}");
+    if check_only {
+        if !release.html_url.is_empty() {
+            println!("  {}", release.html_url);
         }
-        stdout.execute(style::Print("\r\n"))?;
-        stdout.execute(style::PrintStyledContent("\n".dark_grey()))?;
-        stdout.flush()?;
-        Ok(())
-    };
+        println!("  run `agtx update` to install it");
+        std::process::exit(1);
+    }
 
-    draw(&mut stdout, selected)?;
+    let installed = update::install::install_release(&release.tag_name, &mut |step| {
+        println!("  {step}");
+    })?;
 
-    let result = loop {
-        if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if selected > 0 {
-                        selected -= 1;
-                    }
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if selected < agents.len() - 1 {
-                        selected += 1;
-                    }
-                }
-                KeyCode::Enter => break Ok(selected),
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    break Err(anyhow::anyhow!("Selection cancelled"));
-                }
-                KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                    break Err(anyhow::anyhow!("Selection cancelled"));
-                }
-                _ => continue,
-            }
-
-            // Move cursor back up to redraw
-            let lines_to_move_up = agents.len() + 2; // agents + blank + hint
-            stdout.execute(cursor::MoveUp(lines_to_move_up as u16))?;
-            stdout.execute(cursor::MoveToColumn(0))?;
-            draw(&mut stdout, selected)?;
-        }
-    };
-
-    // Restore terminal
-    stdout.execute(cursor::Show)?;
-    terminal::disable_raw_mode()?;
-
-    let idx = result?;
-    println!("\n  Selected: {}\n", agents[idx].name);
-    Ok(&agents[idx])
+    println!();
+    println!("  agtx {latest} installed to {}", installed.path.display());
+    // The running process still holds the old inode; tmux sessions and their
+    // agents are untouched. Say so rather than implying the swap took effect.
+    println!("  restart any running agtx to pick it up");
+    Ok(())
 }

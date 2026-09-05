@@ -1,7 +1,7 @@
 name = "gsd"
 description = "Get Shit Done - structured spec-driven development framework"
 init_script = "npx get-shit-done-cc@latest --{agent} --local --non-interactive"
-supported_agents = ["claude", "codex", "gemini", "opencode"]
+supported_agents = ["claude", "codex", "gemini", "opencode", "grok"]
 cyclic = true
 copy_files = [".planning/config.json", ".planning/PROJECT.md", ".planning/REQUIREMENTS.md", ".planning/ROADMAP.md", ".planning/STATE.md"]
 

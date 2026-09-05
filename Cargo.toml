@@ -1,11 +1,11 @@
 [package]
 name = "agtx"
-version = "0.1.0"
+version = "1.0.4"
 edition = "2021"
 description = "Terminal-native kanban board for managing coding agents"
 authors = ["agtx contributors"]
 license = "MIT"
-repository = "https://github.com/yourusername/agtx"
+repository = "https://github.com/fynnfluegge/agtx"
 keywords = ["tui", "tmux", "agents", "kanban", "claude"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -24,6 +24,10 @@ rusqlite = { version = "0.34", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
+# Already in the tree as `toml`'s own dependency, so this is free. Needed for
+# the config *writer*: `toml::to_string_pretty` round-trips through the struct
+# and destroys every comment and unrecognised key in a hand-edited file.
+toml_edit = { version = "0.22", features = ["serde"] }
 
 # Utilities
 anyhow = "1.0"
@@ -40,7 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 
 # MCP server
-rmcp = { version = "0.16", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
 
 # Web server
 axum = "0.8"
@@ -49,6 +53,16 @@ pulldown-cmark = "0.12"
 [features]
 default = []
 test-mocks = ["dep:mockall"]
+
+# Dev tooling for the smoke tests, not part of the shipped binary. Declared with
+# an explicit path so it can live next to its only consumer in tests/smoke/
+# rather than in an `examples/` directory that implies "here is how to use the
+# library". Kept an example rather than a bin so `cargo install` never ships it,
+# while `cargo test` still compiles it — a new `AgentSpec` field or enum variant
+# breaks the build here instead of silently drifting from the runner.
+[[example]]
+name = "agent_matrix"
+path = "tests/smoke/agent_matrix.rs"
 
 [dev-dependencies]
 tempfile = "3"
