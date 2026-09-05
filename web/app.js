@@ -740,7 +740,13 @@ async function screenTask(pid, tid) {
   // The terminal tab owns its own updates: frames arrive over the socket, and
   // re-rendering here would blank the pane between frames and — worse — take
   // focus out of the compose field every two seconds, mid-message.
-  if (taskTab === "terminal" && mountedTask === `${pid}/${tid}/terminal`) return;
+  if (taskTab === "terminal" && mountedTask === `${pid}/${tid}/terminal`) {
+    // Refresh also handles a socket that still looks OPEN after suspension.
+    const { pane, live } = term;
+    closeSocket();
+    openSocket(pid, tid, pane, live);
+    return;
+  }
 
   let task;
   try {
@@ -990,6 +996,7 @@ function colourDiff(patch) {
 /// capturing — nothing is captured for a task nobody is looking at.
 let socket = null;
 let socketTask = null;
+let reconnectTimer = null;
 /// Where the live socket paints, and the last frame it painted.
 ///
 /// The frame is cached because the server only sends what *changed*: an idle
@@ -998,6 +1005,8 @@ let socketTask = null;
 const term = { pane: null, live: null, frame: null };
 
 function closeSocket() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
   if (socket) {
     try {
       socket.send(JSON.stringify({ type: "unsubscribe" }));
@@ -1046,9 +1055,8 @@ function terminalBody(pid, task) {
 
   const wrap = el("div", {}, bar, pane);
 
-  // Input, only where the server would accept it: a Backlog or Review task has
-  // no composer, and offering a keyboard there produces a 409 per keystroke.
-  if (INPUTTABLE.has(task.status)) {
+  // Research and review have composers too, provided a session exists.
+  if (INPUTTABLE.has(task.status) && task.session_name) {
     const send = async (payload, what) => {
       try {
         await api.input(pid, tid, payload);
@@ -1110,7 +1118,10 @@ function terminalBody(pid, task) {
 function openSocket(pid, tid, pane, live) {
   term.pane = pane;
   term.live = live;
-  if (socket && socketTask === tid) {
+  if (
+    socket && socketTask === tid &&
+    (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+  ) {
     // Already watching this pane — the new nodes were repainted from the frame
     // cache above, so there is nothing to re-request.
     if (socket.readyState === WebSocket.OPEN) {
@@ -1161,7 +1172,16 @@ function openSocket(pid, tid, pane, live) {
     term.live.className = "live off";
     term.live.textContent = "○ offline";
   };
-  ws.addEventListener("close", offline);
+  ws.addEventListener("close", () => {
+    offline();
+    if (socket !== ws) return;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => {
+      if (socket === ws && term.pane && term.live) {
+        openSocket(pid, tid, term.pane, term.live);
+      }
+    }, 1000);
+  });
   ws.addEventListener("error", offline);
 }
 

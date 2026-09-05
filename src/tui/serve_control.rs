@@ -135,9 +135,11 @@ impl ServeSession {
             // that enables Tailscale Serve, and discarding that leaves the
             // overlay able to say only "it stopped", which helps nobody.
             //
-            // Safe to pipe without a reader because the banner and QR go to
-            // stdout: stderr carries a line or two at most, far below the pipe
-            // buffer that would block the child.
+            // The overlay only starts LAN or private Tailscale serving, whose
+            // stderr is limited to startup errors; the banner and QR use stdout.
+            // Before adding public tunnels here, drain stderr continuously:
+            // cloudflared forwards ongoing logs through agtx serve's stderr,
+            // and waiting until exit would fill this pipe and block the tunnel.
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -353,7 +355,7 @@ impl MobilePopup {
         } else {
             // Last line first: anyhow prints `Error: <context>` then the cause,
             // and the cause is the part that says what to do.
-            let line = detail.lines().filter(|l| !l.trim().is_empty()).next_back();
+            let line = detail.lines().rfind(|l| !l.trim().is_empty());
             format!("Server stopped: {}", line.unwrap_or(&detail))
         });
         true

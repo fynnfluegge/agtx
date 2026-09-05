@@ -1140,25 +1140,55 @@ async fn only_known_keys_are_forwarded() {
     }
 }
 
-/// A task with no composer has nothing to type into. Same rule as
-/// `send_to_task`, so MCP and HTTP refuse the same requests.
+/// Research and review are input-capable, but still require a session.
 #[tokio::test]
 async fn input_only_reaches_an_active_phase() {
     let f = fixture();
-    for status in [TaskStatus::Backlog, TaskStatus::Review, TaskStatus::Done] {
-        let t = add_task(&f, &format!("Task {}", status.as_str()), status);
-        let (code, body) = send(
+    for status in [
+        TaskStatus::Backlog,
+        TaskStatus::Planning,
+        TaskStatus::Running,
+        TaskStatus::Review,
+        TaskStatus::Done,
+    ] {
+        let mut t = add_task(&f, &format!("Task {}", status.as_str()), status);
+        let uri = format!("/api/projects/{}/tasks/{}/input", f.project_id, t.id);
+        let (code, _) = send(
             state_for(&f, ServeMode::Global),
             "POST",
-            &format!("/api/projects/{}/tasks/{}/input", f.project_id, t.id),
+            &uri,
             Some(serde_json::json!({ "text": "hello" })),
         )
         .await;
-        assert_eq!(code, StatusCode::CONFLICT, "{status:?} accepted input");
-        assert!(body["error"]
-            .as_str()
+        assert_eq!(
+            code,
+            if status == TaskStatus::Done {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        );
+        t.session_name = Some("test:agent".into());
+        Database::open_project(&f.project_path)
             .unwrap()
-            .contains("Planning or Running"));
+            .update_task(&t)
+            .unwrap();
+        // Invalid input reaches payload validation without invoking real tmux.
+        let (code, _) = send(
+            state_for(&f, ServeMode::Global),
+            "POST",
+            &uri,
+            Some(serde_json::json!({ "text": "hello", "key": "Enter" })),
+        )
+        .await;
+        assert_eq!(
+            code,
+            if status == TaskStatus::Done {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
     }
 }
 

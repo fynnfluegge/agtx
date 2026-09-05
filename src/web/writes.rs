@@ -368,11 +368,11 @@ pub async fn task_input(
     let db = state.project_db(&pid)?;
     let task = load_task(&db, &tid)?;
 
-    // Same rule as `send_to_task`: a task that is not in an active phase has no
-    // composer to type into, and a Backlog task has no pane at all.
-    if !matches!(task.status, TaskStatus::Planning | TaskStatus::Running) {
+    // Research keeps its task in Backlog; review and conflict resolution also
+    // retain an agent. Every phase except Done can have an active session.
+    if task.status == TaskStatus::Done {
         return Err(ApiError::Conflict(format!(
-            "can only send input to a Planning or Running task; {:?} is in {}",
+            "cannot send input to a completed task; {:?} is in {}",
             task.title,
             task.status.as_str()
         )));

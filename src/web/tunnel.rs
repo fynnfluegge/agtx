@@ -169,6 +169,7 @@ pub fn plan(scope: TunnelScope, port: u16, available: &dyn Fn(&str) -> bool) -> 
 pub struct Tunnel {
     child: Option<Child>,
     teardown: Option<Vec<String>>,
+    pub public_url: Option<String>,
 }
 
 impl Tunnel {
@@ -202,24 +203,43 @@ impl Tunnel {
             return Ok(Self {
                 child: None,
                 teardown: plan.teardown.clone(),
+                public_url: plan.public_url.clone(),
             });
         }
 
-        let child = Command::new(&plan.program)
+        let mut child = Command::new(&plan.program)
             .args(&plan.args)
             .stdin(Stdio::null())
-            // Inherited, not captured: `cloudflared` prints the hostname it was
-            // assigned to stderr, and swallowing that would leave the user with
-            // a running tunnel and no address for it.
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("starting {}", plan.program))?;
 
-        Ok(Self {
+        let stderr = child.stderr.take().context("capturing tunnel output")?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                if let Some(url) = quick_tunnel_url(&line) {
+                    let _ = tx.send(url);
+                }
+                // Keep draining after discovery so provider logs cannot fill
+                // the pipe and stall the tunnel.
+                eprintln!("{line}");
+            }
+        });
+        // Own the child before waiting: errors and timeout must kill it too.
+        let mut tunnel = Self {
             child: Some(child),
             teardown: plan.teardown.clone(),
-        })
+            public_url: None,
+        };
+        let url = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .context("cloudflared did not report a public URL within 30 seconds")?;
+        tunnel.public_url = Some(url);
+        Ok(tunnel)
     }
 }
 
@@ -291,4 +311,61 @@ pub fn parse_tailnet_hostname(json: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+/// Read only the assigned quick-tunnel hostname, not documentation links.
+fn quick_tunnel_url(line: &str) -> Option<String> {
+    line.split_whitespace().find_map(|word| {
+        let host = word.strip_prefix("https://")?;
+        let label = host.strip_suffix(".trycloudflare.com")?;
+        (!label.is_empty()
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+        .then(|| word.to_string())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovers_only_quick_tunnel_urls() {
+        assert_eq!(
+            quick_tunnel_url("INF | https://some-host.trycloudflare.com |"),
+            Some("https://some-host.trycloudflare.com".into())
+        );
+        assert_eq!(
+            quick_tunnel_url("Visit https://developers.cloudflare.com"),
+            None
+        );
+        assert_eq!(
+            quick_tunnel_url("https://fake.trycloudflare.com.evil.test"),
+            None
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn running_tunnel_exposes_the_discovered_url() {
+        let plan = TunnelPlan {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "echo 'INF | https://test-board.trycloudflare.com |' >&2; exec sleep 30".into(),
+            ],
+            teardown: None,
+            scope: TunnelScope::Public,
+            reach: "test",
+            backgrounds: false,
+            public_url: None,
+        };
+        let tunnel = Tunnel::start(&plan).unwrap();
+        assert_eq!(
+            tunnel.public_url.as_deref(),
+            Some("https://test-board.trycloudflare.com")
+        );
+        // Drop terminates the fake provider rather than waiting for sleep.
+    }
 }

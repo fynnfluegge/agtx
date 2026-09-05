@@ -106,10 +106,18 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
     let mut public_base: Option<String> = None;
     let _tunnel = match opts.tunnel {
         Some(scope) => {
-            let plan = tunnel::plan(scope, opts.port, &tunnel::installed)?;
-            let started = tunnel::Tunnel::start(&plan)?;
-            println!("tunnel: {} — reachable from {}", plan.program, plan.reach);
-            public_base = plan.public_url.clone();
+            let port = opts.port;
+            // Provider discovery and startup run subprocesses; cloudflared may
+            // also take up to 30 seconds to report its public hostname.
+            let started = tokio::task::spawn_blocking(move || {
+                let plan = tunnel::plan(scope, port, &tunnel::installed)?;
+                let started = tunnel::Tunnel::start(&plan)?;
+                println!("tunnel: {} — reachable from {}", plan.program, plan.reach);
+                Ok::<_, anyhow::Error>(started)
+            })
+            .await
+            .context("joining tunnel startup")??;
+            public_base = started.public_url.clone();
             Some(started)
         }
         None => None,

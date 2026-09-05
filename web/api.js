@@ -259,7 +259,7 @@ export const KEY_CHIPS = [
 
 /// Phases whose pane can be typed into. Matches the server's own rule, so the
 /// keyboard toggle is not offered where every keystroke would 409.
-export const INPUTTABLE = new Set(["planning", "running"]);
+export const INPUTTABLE = new Set(["backlog", "planning", "running", "review"]);
 
 /// The subprotocol that carries the token on a WebSocket handshake.
 ///
