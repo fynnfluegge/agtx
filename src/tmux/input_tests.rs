@@ -371,6 +371,26 @@ fn an_acknowledged_flush_waits_out_a_slow_drain() {
     // it expired mid-drain and handed back a guarantee that had not been kept:
     // with a queue of keys still in flight it reported failure, and the caller
     // went on to resize the pane anyway.
+    //
+    // The drain is spread over a few long commands rather than many short ones.
+    // Its length is what the test needs, but the jitter a loaded machine adds is
+    // paid per `sleep`: the same nominal drain split twenty ways lands four
+    // times closer to the budget on a runner that stretches every wake-up, which
+    // is a timeout that says nothing about the code under test.
+    const COMMANDS: usize = 4;
+    const PER_COMMAND: Duration = Duration::from_millis(100);
+    let drain = PER_COMMAND * COMMANDS as u32;
+    assert!(
+        drain > BARRIER_TIMEOUT,
+        "a drain of {drain:?} would fit inside a barrier-sized budget, so the \
+         regression this locks would pass"
+    );
+    assert!(
+        drain * 4 < FLUSH_SYNC_TIMEOUT,
+        "a fourfold slowdown of a {drain:?} drain must still fit inside \
+         {FLUSH_SYNC_TIMEOUT:?}"
+    );
+
     let recorder = Recorder::default();
     let (tx, rx) = sync_channel(64);
     let depth = Arc::new(AtomicUsize::new(0));
@@ -380,7 +400,7 @@ fn an_acknowledged_flush_waits_out_a_slow_drain() {
         batch_window: NEVER,
         fallback: Box::new(SlowBackend {
             recorder: recorder.clone(),
-            per_command: Duration::from_millis(25),
+            per_command: PER_COMMAND,
         }),
         control: None,
         control_factory: None,
@@ -403,13 +423,19 @@ fn an_acknowledged_flush_waits_out_a_slow_drain() {
     };
 
     // Non-text keys, because adjacent text would coalesce into one command.
-    for _ in 0..20 {
+    for _ in 0..COMMANDS {
         sink.key("s:w", "BSpace").unwrap();
     }
-    assert_eq!(sink.flush_sync(), Ok(()));
+    let started = Instant::now();
+    assert_eq!(
+        sink.flush_sync(),
+        Ok(()),
+        "the flush gave up after {:?} of a {drain:?} drain",
+        started.elapsed()
+    );
     assert_eq!(
         recorder.ops().len(),
-        20,
+        COMMANDS,
         "every queued key must have been delivered before the flush returned"
     );
 }
