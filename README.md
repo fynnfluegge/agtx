@@ -8,7 +8,7 @@
 <div align="left">
     
 > **A blackboard for coding agents** - One shared board. A fleet of agents. Add tasks, delegate to multiple coding agents running in parallel and let
-> **different models collaborate** on the same task with automatic session switching and context awareness, e.g. Codex -> planning, Claude -> implementing, Grok -> review.
+> **different models collaborate** on the same task with automatic session switching and context awareness, e.g. Codex planning, Claude implementing, Grok review.
 
 </div>
 
