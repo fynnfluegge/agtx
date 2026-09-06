@@ -9,6 +9,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 
 use crate::config::{GlobalConfig, ProjectConfig};
+use crate::core::actions::CallerKind;
 use crate::db::{Database, Task, TaskStatus, TransitionRequest};
 
 /// Whether the MCP server is bound to a specific project or serves all projects globally.
@@ -480,48 +481,12 @@ impl AgtxMcpServer {
         }
     }
 
-    /// Compute which move_task actions are valid for a task given its status and plugin rules.
+    /// Which `move_task` actions a task permits, as the orchestrator.
+    ///
+    /// The web API asks the same question as [`CallerKind::Human`] and gets a
+    /// different answer for Backlog — see [`crate::core::actions`].
     fn allowed_actions(&self, task: &Task, deps_satisfied: bool) -> Vec<String> {
-        let project_path = self.resolve_project_path(None).ok();
-        let mut actions = Vec::new();
-
-        let _plugin = match &task.plugin {
-            Some(name) => crate::config::WorkflowPlugin::load(name, project_path.as_deref())
-                .ok()
-                .or_else(|| crate::skills::load_bundled_plugin(name)),
-            None => crate::skills::load_bundled_plugin("agtx"),
-        };
-
-        match task.status {
-            TaskStatus::Backlog => {
-                // Orchestrator does not manage Backlog — user triages manually
-            }
-            TaskStatus::Planning => {
-                actions.push("move_forward".to_string());
-                actions.push("escalate_to_user".to_string());
-            }
-            TaskStatus::Running => {
-                actions.push("move_forward".to_string());
-                actions.push("escalate_to_user".to_string());
-            }
-            TaskStatus::Review => {
-                actions.push("move_to_done".to_string());
-                actions.push("resume".to_string());
-            }
-            TaskStatus::Done => {}
-        }
-
-        // Block forward transitions out of Backlog when dependencies are not satisfied
-        if !deps_satisfied && task.status == TaskStatus::Backlog {
-            actions.retain(|a| {
-                !matches!(
-                    a.as_str(),
-                    "move_forward" | "move_to_planning" | "move_to_running"
-                )
-            });
-        }
-
-        actions
+        crate::core::actions::allowed_actions(task, deps_satisfied, CallerKind::Orchestrator)
     }
 }
 
@@ -687,16 +652,7 @@ impl AgtxMcpServer {
     )]
     fn move_task(&self, Parameters(params): Parameters<MoveTaskParams>) -> String {
         tracing::info!(tool = "move_task", task_id = %params.task_id, action = %params.action, "MCP tool called");
-        let valid_actions = [
-            "research",
-            "move_forward",
-            "move_to_planning",
-            "move_to_running",
-            "move_to_review",
-            "move_to_done",
-            "resume",
-            "escalate_to_user",
-        ];
+        let valid_actions = crate::core::actions::ACTIONS;
         if !valid_actions.contains(&params.action.as_str()) {
             return format!(
                 "Invalid action: '{}'. Valid actions: {}",

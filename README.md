@@ -7,10 +7,8 @@
 
 <div align="left">
     
->
-> **Let different coding agents collaborate** autonomously on the same task with automatic session switching and context awareness.  
-> **A blackboard for coding agents** - One shared board. A fleet of agents. Add tasks, delegate to multiple coding agents running in parallel.
-> **Capture ideas without leaving your session** — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to push the conversation to the board as tasks in one step.
+> **A blackboard for coding agents** - One shared board. A fleet of agents. Add tasks, delegate to multiple coding agents running in parallel and let
+> **different models collaborate** on the same task with automatic session switching and context awareness, e.g. Codex planning, Claude implementing, Grok review.
 
 </div>
 
@@ -25,6 +23,7 @@
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
   <a href="#usage">Usage</a> •
+  <a href="#mobile">Mobile</a> •
   <a href="#brainstorm--sweep-skills">Skills</a> •
   <a href="#mcp-server">MCP Server</a> •
   <a href="#plugins">Plugins</a> •
@@ -58,9 +57,10 @@
 <a href="https://github.com/google-gemini/gemini-cli"><kbd><img src="docs/logos/gemini.svg" width="18" valign="middle" /> Gemini CLI</kbd></a>
 <a href="https://github.com/github/copilot-cli"><kbd><img src="docs/logos/copilot-dark.svg" width="18" valign="middle" /> Copilot</kbd></a>
 <a href="https://github.com/earendil-works/pi"><kbd><img src="docs/logos/pi-dark.svg" width="18" valign="middle" /> pi</kbd></a>
-- **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching.
-- **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI.
-- **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously.
+- **Parallel Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Grok for research, Claude for implementation, Codex for review — with automatic agent switching and context handover.
+- **Multi-project Kanban board**: Manage agent sessions across all projects via a single TUI without leaving your terminal.
+- **Vim-native Keybindings**: Control the board and agent sessions with your Vim-powered muscle memory.
+- **Mobile support**: Press `W` and scan the QR for an installable web app with the board, task details, diffs and the agent's live terminal — including a keyboard, so you can answer a permission prompt without going back to your desk. Over your wifi, or from anywhere via your tailnet. See <a href="#mobile">Mobile</a>.
 - **Orchestrator agent (experimental)**: A dedicated agent that autonomously manages your kanban board via MCP — delegates to coding agents, advances phases, checks for merge conflicts.
 - **Brainstorm & Sweep skills**: Capture ideas and push them to the board from any coding agent session — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to decompose and create tasks with one confirmation step.
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) and more — fully customizable. Ddefine your own workflow via a single TOML file. See <a href="#plugins">Plugins</a> how to create a plugin.
@@ -70,8 +70,112 @@
 >
 > Choose the **`void` plugin** and enjoy agtx as a batteries included multi-agent session-manager.
 
-> [!TIP]
-> Check out the [Contributing](#contributing) section or have a look at [`good first issues`](https://github.com/fynnfluegge/agtx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) to get involved and become a contributor ⭐️
+## Quick Start
+
+```bash
+# Install
+curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh | bash
+```
+
+```bash
+# Run in any git repository
+cd your-project && agtx
+```
+
+> [!NOTE]
+> Add `.agtx/` to your project's `.gitignore` to avoid committing worktrees and local task data.
+
+```bash
+# Install from source — `serve` adds the mobile board (`W`), and the
+# published binaries are built with it
+cargo build --release --features serve
+cp target/release/agtx ~/.local/bin/
+```
+
+### Updating
+
+agtx checks GitHub once a day for a newer release and shows `⬆ 0.2.8 [u]` in the
+board header when there is one. Press **`u`** for the details and one key to
+install it, or from a shell:
+
+```bash
+agtx update          # download, verify and replace this binary in place
+agtx update --check  # report only; exits 1 when an update is available
+agtx --version
+```
+
+### Requirements
+
+- **tmux** — agent sessions run in a dedicated tmux server
+- **gh** (optional) — GitHub CLI for PR operations
+
+## Usage
+
+<details>
+<summary><strong>Keyboard Shortcuts</strong></summary>
+
+| Key | Action |
+|-----|--------|
+| `h/l` or `←/→` | Move between columns |
+| `j/k` or `↑/↓` | Move between tasks |
+| `o` | Create new task |
+| `R` | Enter research mode |
+| `↩` | Open task (view agent session) |
+| `Ctrl+f` | Open the task popup fullscreen; press again to return to windowed mode |
+| `m` | Move task forward in workflow |
+| `r` | Resume task (Review → Running) / Move back (Running → Planning) |
+| `p` | Next phase (Review → Planning, cyclic plugins only) |
+| `d` | Show git diff |
+| `x` | Delete task |
+| `/` | Search tasks |
+| `P` | Select spec-driven workflow plugin |
+| `,` | Open the config editor |
+| `?` | Show every keyboard shortcut |
+| `u` | Update agtx (only shown when a new release is available) |
+| `W` | Serve the board to a phone (QR pairing, device list) |
+| `O` | Toggle orchestrator agent (`--experimental`) |
+| `e` | Toggle project sidebar |
+| `q` | Quit |
+
+</details>
+
+<details>
+<summary><strong>Task Creation Wizard</strong></summary>
+
+Press `o` to create a new task. The wizard guides you through:
+1. **Title** — enter a short task name
+2. **Plugin** — select a workflow plugin (auto-skipped if only one option)
+3. **Prompt** — write a detailed task description with inline references
+
+The agent is configured at the project level via `config.toml` (not per-task).
+
+</details>
+
+<details>
+<summary><strong>Task Description Editor</strong></summary>
+
+When writing a task description, you can reference files, skills, and other tasks inline:
+
+| Key | Action |
+|-----|--------|
+| `#` or `@` | Fuzzy search and insert a file path |
+| `/` | Fuzzy search and insert an agent skill/command (at line start or after space) |
+| `!` | Fuzzy search and insert a task reference (at line start or after space) |
+
+</details>
+
+<details>
+<summary><strong>Agent Sessions</strong></summary>
+
+Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to open it fullscreen inside agtx.
+
+- **Persistent context**: The agent's full conversation history is preserved across Planning → Running → Review
+- **Resume from Review**: Moving a task back to Running simply reconnects to the existing session — no re-initialization needed
+- **Inline view**: Press `↩` on any active task to open a scrollable tmux view inside the TUI
+- **Fullscreen**: Press `Ctrl+f` to expand the task popup inside agtx. Press `Ctrl+f` again for windowed mode or `Ctrl+q` to return to the board.
+- **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch using a non-destructive virtual merge (`git merge-tree`). If conflicts are detected, the agent is automatically sent the `/agtx:merge-conflicts` skill to resolve them and re-commit
+
+</details>
 
 ## Why agtx? - The blackboard model
 
@@ -116,128 +220,120 @@ Review or Done, then carries the relevant diffs and artifacts into the dependent
 | **Knowledge sources** — independent specialists that never talk to each other, only to the board | Eight coding agent CLIs, each running in its **own git worktree and tmux window**. No agent can see another's context — they exchange only what lands on the board |
 | **Control shell** — decides opportunistically which specialist runs next | Plugin phase gates determine when a task can advance; the dependency graph determines which tasks are ready to start; and the [orchestrator agent](#orchestrator-agent-experimental) coordinates the board over MCP |
 
-## Quick Start
+## Mobile
+
+[//]: <> (screenshot: the board on a phone — take it on a real device, then drag it into a GitHub comment and paste the attachment URL here, as with the TUI shot above)
+
+Press `W` on the board to serve it to your phone. agtx prints a QR code; scanning
+it pairs the device and opens an installable web app with the board, task
+details, git diffs, and the agent's live terminal — including a keyboard, so you
+can answer a permission prompt from wherever you are.
 
 ```bash
-# Install
-curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh | bash
-
-# Run in any git repository
-cd your-project && agtx
+# Or start it yourself, without the TUI
+agtx serve                       # this machine only
+agtx serve --tunnel              # your tailnet — anywhere, your devices only
+agtx serve --devices             # list paired devices
+agtx serve --revoke <id>         # revoke one; --revoke-all for the lot
 ```
 
-```bash
-# Dashboard mode — manage all projects
-agtx -g
+Two keys in the overlay, each a whole action: `s` serves to the local network,
+`t` serves via your tailnet.
 
-# Orchestrator mode — let an AI manage the board for you
-agtx --experimental
-```
+> [!IMPORTANT]
+> **agtx never opens a port on its own.** Serving lasts for as long as that agtx
+> runs: quit it and the server stops, so the next time you want the board on
+> your phone you press `W` then `s`/`t` again. Pairing does not change this — it
+> is a credential, not a trigger, and a paired phone whose Mac is not serving
+> just times out.
 
 > [!NOTE]
-> Add `.agtx/` to your project's `.gitignore` to avoid committing worktrees and local task data.
-
-```bash
-# Install from source
-cargo build --release
-cp target/release/agtx ~/.local/bin/
-```
-
-### Updating
-
-agtx checks GitHub once a day for a newer release and shows `⬆ 0.2.8 [u]` in the
-board header when there is one. Press **`u`** for the details and one key to
-install it, or from a shell:
-
-```bash
-agtx update          # download, verify and replace this binary in place
-agtx update --check  # report only; exits 1 when an update is available
-agtx --version
-```
-
-The running agtx keeps the old binary until you restart it; open tmux sessions
-and their agents are untouched.
-
-To never check, set `update_check = false` in `~/.config/agtx/config.toml`, or
-export `AGTX_NO_UPDATE_CHECK=1` for a single run (CI, containers). To pin or roll
-back to a specific release, re-run the installer with `AGTX_VERSION`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh \
-  | AGTX_VERSION=v0.2.6 bash
-```
-
-### Requirements
-
-- **tmux** — agent sessions run in a dedicated tmux server
-- **gh** (optional) — GitHub CLI for PR operations
-
-## Usage
+> This needs a binary built with `--features serve`. The released ones are; a
+> local `cargo build --release` without it reports "this build has no web
+> server" under both options.
 
 <details>
-<summary><strong>Keyboard Shortcuts</strong></summary>
+<summary><strong>Setup — on your wifi</strong></summary>
 
-| Key | Action |
-|-----|--------|
-| `h/l` or `←/→` | Move between columns |
-| `j/k` or `↑/↓` | Move between tasks |
-| `o` | Create new task |
-| `R` | Enter research mode |
-| `↩` | Open task (view agent session) |
-| `Ctrl+f` | Open the task popup fullscreen; press again to return to windowed mode |
-| `m` | Move task forward in workflow |
-| `r` | Resume task (Review → Running) / Move back (Running → Planning) |
-| `p` | Next phase (Review → Planning, cyclic plugins only) |
-| `d` | Show git diff |
-| `x` | Delete task |
-| `/` | Search tasks |
-| `P` | Select spec-driven workflow plugin |
-| `,` | Open the config editor |
-| `?` | Show every keyboard shortcut |
-| `u` | Update agtx (only shown when a new release is available) |
-| `O` | Toggle orchestrator agent (`--experimental`) |
-| `e` | Toggle project sidebar |
-| `q` | Quit |
+Works in about thirty seconds, and needs nothing installed.
+
+1. Run `agtx` in a project and press `W`
+2. Press `s`
+3. Point your phone's camera at the QR code — the phone must be on the same wifi
+4. In Safari or Chrome: **Share → Add to Home Screen**
+
+That last step is what turns it into an app: its own icon, no address bar, and
+the pairing remembered so you never scan again — but you still press `W` then
+`s` to start serving each time you run agtx.
+
+The URL here is a private address like `192.168.1.20`, which exists only on your
+network. **It will not work on mobile data** — if you leave the house, the app
+will sit there timing out. That is what the tailnet option below is for.
 
 </details>
 
 <details>
-<summary><strong>Task Creation Wizard</strong></summary>
+<summary><strong>Setup — from anywhere, via Tailscale</strong></summary>
 
-Press `o` to create a new task. The wizard guides you through:
-1. **Title** — enter a short task name
-2. **Plugin** — select a workflow plugin (auto-skipped if only one option)
-3. **Prompt** — write a detailed task description with inline references
+A few minutes once, then it is the same two taps forever. Your board becomes
+reachable from your phone on any network, while staying invisible to everyone
+else.
 
-The agent is configured at the project level via `config.toml` (not per-task).
+**One-time, on your Mac and your phone:**
+
+1. Install [Tailscale](https://tailscale.com/download) on both
+2. Sign both into the **same** account — they need to be on one tailnet
+3. Enable Serve for your tailnet. It is off by default and is a separate switch
+   from installing Tailscale — the step most people miss. The simplest way is to
+   just press `t` in agtx once: Tailscale refuses with a one-time link that
+   enables it for this machine, and agtx prints that link rather than swallowing
+   it. Follow it, then press `t` again.
+
+**Once more, to install the app:**
+
+1. Run `agtx`, press `W`, press `t`
+2. Scan the QR, and **Share → Add to Home Screen**
+
+**Then, every time you want the board on your phone:** run `agtx`, press `W`,
+press `t`. That is all — the pairing is remembered, so there is no QR to scan;
+what you are starting is the server.
+
+Now the icon on your home screen works on 5G, on hotel wifi, anywhere — the
+address is an HTTPS name on your tailnet, and only devices signed into it can
+resolve or reach it.
 
 </details>
 
 <details>
-<summary><strong>Task Description Editor</strong></summary>
+<summary><strong>When it does not work</strong></summary>
 
-When writing a task description, you can reference files, skills, and other tasks inline:
-
-| Key | Action |
-|-----|--------|
-| `#` or `@` | Fuzzy search and insert a file path |
-| `/` | Fuzzy search and insert an agent skill/command (at line start or after space) |
-| `!` | Fuzzy search and insert a task reference (at line start or after space) |
-
-</details>
-
-<details>
-<summary><strong>Agent Sessions</strong></summary>
-
-Each task runs in its own tmux window with a dedicated coding agent. The session persists across the entire task lifecycle — you can open the task popup at any time to see live agent output, or press `Ctrl+f` to open it fullscreen inside agtx.
-
-- **Persistent context**: The agent's full conversation history is preserved across Planning → Running → Review
-- **Resume from Review**: Moving a task back to Running simply reconnects to the existing session — no re-initialization needed
-- **Inline view**: Press `↩` on any active task to open a scrollable tmux view inside the TUI
-- **Fullscreen**: Press `Ctrl+f` to expand the task popup inside agtx. Press `Ctrl+f` again for windowed mode or `Ctrl+q` to return to the board.
-- **Auto merge-conflict resolution**: When a Review task becomes idle, agtx checks for merge conflicts with the default branch using a non-destructive virtual merge (`git merge-tree`). If conflicts are detected, the agent is automatically sent the `/agtx:merge-conflicts` skill to resolve them and re-commit
+| What you see | What it means |
+|---|---|
+| `Unavailable: install Tailscale and sign this machine in` | `t` needs Tailscale on *this* machine. Install it, or use `s` for wifi. |
+| `Unavailable: Tailscale is installed but not signed in` | Run `tailscale up`. |
+| `could not start the tunnel: … Serve is not enabled on your tailnet` | The one-time switch above. agtx relays Tailscale's own message, which carries the URL that enables it. |
+| Scanned fine, then the app times out | You pressed `s` (wifi) and the phone is on mobile data. Press `s` again to stop, then `t`. |
+| The tailnet URL loads on the Mac but not the phone | The phone is not on the tailnet. Open the Tailscale app there and connect. |
+| `This device is not authorised` | The pairing code expired — it lasts two minutes and is single-use. Press `s` or `t` again for a fresh QR. |
+| The app worked yesterday, today it just times out | Nothing is serving. agtx does not start the server on its own — run it, press `W`, then `s`/`t`. The pairing is still good; the port is not open. |
+| `No agtx running` on the board | Expected with no TUI open. Reading works; actions queue until one is. |
 
 </details>
+
+> [!IMPORTANT]
+> Anything that can reach this server can read every task, every diff and every
+> agent's screen, and can type into a running agent — which is arbitrary code
+> execution on your machine. So: loopback needs no credential because reaching it
+> already means being on the machine, and **everything wider requires a paired
+> device**. Tokens are per-device and stored hashed, so a lost phone is revoked
+> without disturbing the rest. `--tunnel public` publishes to the open internet
+> and is deliberately not offered behind a keypress.
+
+**Actions queue; they do not execute on their own.** Moving a task writes a
+request that only a running `agtx` picks up, so with no TUI open your taps are
+accepted and then wait — the board says so rather than pretending. Creating,
+editing and deleting Backlog tasks take effect immediately, since they need no
+agent. Starting the server with `W` keeps the two together by construction.
 
 ## Brainstorm & Sweep Skills
 

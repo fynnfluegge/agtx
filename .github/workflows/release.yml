@@ -61,7 +61,8 @@ jobs:
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           fi
-          cargo build --release --target ${{ matrix.target }}
+          # `--features serve` is what puts the mobile board in the shipped binary.
+          cargo build --release --features serve --target ${{ matrix.target }}
 
       - name: Package
         run: |

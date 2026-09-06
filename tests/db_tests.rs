@@ -1,4 +1,7 @@
-use agtx::db::{Database, Notification, Project, Task, TaskStatus, TransitionRequest};
+use agtx::db::{
+    Database, Notification, NotificationKind, PhaseStatus, Project, Task, TaskRuntime, TaskStatus,
+    TransitionRequest,
+};
 
 // === TaskStatus Tests ===
 
@@ -698,4 +701,168 @@ fn test_dep_graph_unblocks_chain_as_deps_complete() {
     let graph = build_dep_graph(&tasks, |t| db.deps_satisfied(t));
     // A is no longer Backlog, so it drops out of the unblocked set; B enters it.
     assert_eq!(graph.unblocked_ids(), vec![b.id.clone()]);
+}
+
+// === Task Runtime (published phase status) ===
+
+fn runtime_for(task_id: &str, phase: PhaseStatus) -> TaskRuntime {
+    TaskRuntime {
+        task_id: task_id.to_string(),
+        phase_status: phase,
+        pane_hash: Some("abc123".to_string()),
+        pane_changed_at: Some(chrono::Utc::now()),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn task_runtime_round_trips() {
+    let db = Database::open_in_memory_project().unwrap();
+    let task = Task::new("Runtime", "claude", "proj");
+    db.create_task(&task).unwrap();
+
+    db.publish_task_runtime(&[runtime_for(&task.id, PhaseStatus::Blocked)])
+        .unwrap();
+
+    let got = db.get_task_runtime(&task.id).unwrap().expect("row written");
+    assert_eq!(got.task_id, task.id);
+    assert_eq!(got.phase_status, PhaseStatus::Blocked);
+    assert_eq!(got.pane_hash.as_deref(), Some("abc123"));
+    assert!(got.pane_changed_at.is_some());
+}
+
+/// Every `PhaseStatus` must survive the trip. A variant that serialises to a
+/// string `from_str` does not accept reads back as the `Working` fallback, and
+/// the board would report a blocked task as busy.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn every_phase_status_survives_the_database() {
+    let db = Database::open_in_memory_project().unwrap();
+    let task = Task::new("Round trip", "claude", "proj");
+    db.create_task(&task).unwrap();
+
+    for phase in [
+        PhaseStatus::Working,
+        PhaseStatus::Blocked,
+        PhaseStatus::Idle,
+        PhaseStatus::Ready,
+        PhaseStatus::Exited,
+    ] {
+        db.publish_task_runtime(&[runtime_for(&task.id, phase)])
+            .unwrap();
+        let got = db.get_task_runtime(&task.id).unwrap().unwrap();
+        assert_eq!(got.phase_status, phase, "{:?} did not round-trip", phase);
+    }
+}
+
+/// The refresh rewrites every live task on each pass, so the row is a current
+/// snapshot rather than a history — a second write must replace, not duplicate
+/// or fail on the primary key.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn task_runtime_publish_replaces() {
+    let db = Database::open_in_memory_project().unwrap();
+    let task = Task::new("Upsert", "claude", "proj");
+    db.create_task(&task).unwrap();
+
+    db.publish_task_runtime(&[runtime_for(&task.id, PhaseStatus::Working)])
+        .unwrap();
+    db.publish_task_runtime(&[runtime_for(&task.id, PhaseStatus::Ready)])
+        .unwrap();
+
+    assert_eq!(db.list_task_runtime().unwrap().len(), 1);
+    let got = db.get_task_runtime(&task.id).unwrap().unwrap();
+    assert_eq!(got.phase_status, PhaseStatus::Ready);
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn task_runtime_missing_row_is_none() {
+    let db = Database::open_in_memory_project().unwrap();
+    assert!(db.get_task_runtime("nope").unwrap().is_none());
+}
+
+/// A deleted task's last status must not be served to readers as current. The
+/// refresh only ever publishes live tasks, so the pruning has to ride inside the
+/// publish rather than depend on the deleting caller remembering it — MCP
+/// deletes tasks from another process entirely.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn publishing_drops_runtime_for_deleted_tasks() {
+    let db = Database::open_in_memory_project().unwrap();
+    let live = Task::new("Live", "claude", "proj");
+    let gone = Task::new("Gone", "claude", "proj");
+    db.create_task(&live).unwrap();
+    db.create_task(&gone).unwrap();
+    db.publish_task_runtime(&[
+        runtime_for(&live.id, PhaseStatus::Working),
+        runtime_for(&gone.id, PhaseStatus::Ready),
+    ])
+    .unwrap();
+    assert_eq!(db.list_task_runtime().unwrap().len(), 2);
+
+    db.delete_task(&gone.id).unwrap();
+    // The next pass carries only the surviving task, as the refresh would.
+    db.publish_task_runtime(&[runtime_for(&live.id, PhaseStatus::Working)])
+        .unwrap();
+
+    let rows = db.list_task_runtime().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].task_id, live.id);
+}
+
+// === Notification routing fields ===
+
+/// A consumer outside the TUI filters on the event and threads replies by task,
+/// so both must survive the write — against prose, neither is recoverable.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn notifications_carry_task_and_kind() {
+    let db = Database::open_in_memory_project().unwrap();
+    let notif = Notification::for_task(
+        NotificationKind::TaskStuck,
+        "task-42",
+        "Task is blocked waiting for user input",
+    );
+    db.create_notification(&notif).unwrap();
+
+    let peeked = db.peek_notifications().unwrap();
+    assert_eq!(peeked.len(), 1);
+    assert_eq!(peeked[0].task_id.as_deref(), Some("task-42"));
+    assert_eq!(peeked[0].kind, Some(NotificationKind::TaskStuck));
+
+    // `consume` names its columns explicitly where `peek` uses `SELECT *`, so
+    // the two can drift apart silently.
+    let consumed = db.consume_notifications().unwrap();
+    assert_eq!(consumed[0].task_id.as_deref(), Some("task-42"));
+    assert_eq!(consumed[0].kind, Some(NotificationKind::TaskStuck));
+}
+
+/// Rows written before the columns existed still read back.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn untagged_notifications_still_read() {
+    let db = Database::open_in_memory_project().unwrap();
+    db.create_notification(&Notification::new("no task, no kind"))
+        .unwrap();
+
+    let notifs = db.consume_notifications().unwrap();
+    assert_eq!(notifs.len(), 1);
+    assert!(notifs[0].task_id.is_none());
+    assert!(notifs[0].kind.is_none());
+}
+
+/// The stored spelling and the serde spelling are the same string, so a reader
+/// going through the database and one going through serialised output agree.
+#[test]
+fn notification_kind_spellings_match_serde() {
+    for kind in [
+        NotificationKind::PhaseCompleted,
+        NotificationKind::TaskStuck,
+    ] {
+        let json = serde_json::to_string(&kind).unwrap();
+        assert_eq!(json, format!("\"{}\"", kind.as_str()));
+        assert_eq!(NotificationKind::from_str(kind.as_str()), Some(kind));
+    }
 }

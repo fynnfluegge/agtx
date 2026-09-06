@@ -49,6 +49,27 @@ pub fn current_branch(path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Whether `rev` resolves to a commit in the repository at `path`.
+///
+/// Needed because [`diff_stat`] and [`diff_full`] only fail when git cannot be
+/// *spawned*: a nonzero exit — `fatal: ambiguous argument 'main'` for a base
+/// branch that does not exist — leaves stdout empty and returns `Ok("")`. A
+/// caller that renders that as "no changes" is asserting something it was never
+/// told, which on a review screen is a claim someone may merge on.
+pub fn ref_exists(path: &Path, rev: &str) -> bool {
+    Command::new("git")
+        .current_dir(path)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Get the diff between two branches (stat format)
 pub fn diff_stat(path: &Path, base: &str, target: &str) -> Result<String> {
     let output = Command::new("git")

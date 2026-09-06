@@ -15505,3 +15505,567 @@ fn an_unmapped_key_is_dropped_rather_than_guessed() {
         None
     );
 }
+
+// =============================================================================
+// The `W` overlay — serving the board to a phone
+// =============================================================================
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_w_opens_the_mobile_overlay_and_esc_closes_it() {
+    let mut app = make_test_app();
+    assert!(app.state.mobile_popup.is_none());
+
+    press_key(&mut app, KeyCode::Char('W'));
+    assert!(
+        app.state.mobile_popup.is_some(),
+        "W did not open the overlay"
+    );
+    assert!(app.draw().is_ok());
+
+    press_key(&mut app, KeyCode::Esc);
+    assert!(app.state.mobile_popup.is_none());
+}
+
+/// The overlay swallows keys rather than letting them reach the board behind
+/// it — otherwise `x` would delete the selected *task* while someone is aiming
+/// at a device row.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_the_mobile_overlay_swallows_board_keys() {
+    let mut app = make_test_app();
+    let before = app.state.board.tasks.len();
+
+    press_key(&mut app, KeyCode::Char('W'));
+    for key in ['x', 'o', 'd', 'm', 'p'] {
+        press_key(&mut app, KeyCode::Char(key));
+    }
+
+    assert!(app.state.mobile_popup.is_some(), "a key closed the overlay");
+    assert_eq!(
+        app.state.board.tasks.len(),
+        before,
+        "a key reached the board behind the overlay"
+    );
+    assert!(
+        app.state.wizard.is_none(),
+        "`o` opened the wizard underneath"
+    );
+}
+
+/// Everything currently on the test terminal, as one string.
+///
+/// Reads the cells rather than any of the app's own state, so it sees what a
+/// person would see — which is the point when the bug under test is bytes
+/// reaching the screen that should never have been drawn.
+#[cfg(feature = "test-mocks")]
+fn rendered_text(app: &App) -> String {
+    match app.terminal.backend() {
+        AppBackend::Test(backend) => {
+            let buffer = backend.buffer();
+            let area = buffer.area();
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        _ => String::new(),
+    }
+}
+
+/// A QR drawn through ratatui must be **styled spans**, never the ANSI string
+/// the CLI banner prints: ratatui does not interpret escape sequences, so those
+/// bytes would be drawn as literal garbage — a QR that cannot scan and looks
+/// like corruption.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_overlay_never_draws_raw_ansi() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('W'));
+    assert!(app.draw().is_ok());
+
+    let rendered = rendered_text(&app);
+    assert!(
+        !rendered.contains('\u{1b}') && !rendered.contains("[97m") && !rendered.contains("[107m"),
+        "an escape sequence reached the screen: {rendered:?}"
+    );
+}
+
+/// Closing the overlay must not stop the server: the point is to scan, close,
+/// and carry on using the board.
+///
+/// This needs a live session to mean anything. An earlier version of this test
+/// had none and asserted only that the overlay opened and closed — so it passed
+/// while `Esc` was killing the child, because `MobilePopup` owned the
+/// `ServeSession` and dropping the view dropped the server. The session now
+/// lives on `AppState`; this is what holds that.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_closing_the_overlay_does_not_stop_serving() {
+    use crate::tui::serve_control::{MobilePopup, ServeSession};
+
+    let mut app = make_test_app();
+    // A stand-in child that stays alive long enough to observe.
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn a stand-in child");
+    app.state.serve_session = Some(ServeSession::for_test(
+        child,
+        "http://10.0.0.2:8787/#pair=x",
+    ));
+    app.state.mobile_popup = Some(MobilePopup::new());
+
+    press_key(&mut app, KeyCode::Esc);
+    assert!(
+        app.state.mobile_popup.is_none(),
+        "Esc should close the overlay"
+    );
+    assert!(
+        app.state.serve_session.is_some(),
+        "closing the overlay stopped the server"
+    );
+    // And the child is genuinely still running, not merely still referenced.
+    assert!(
+        app.state.serve_session.as_mut().unwrap().check().is_none(),
+        "the child exited when the overlay closed"
+    );
+
+    // Reopening finds it still serving.
+    press_key(&mut app, KeyCode::Char('W'));
+    assert!(app.state.mobile_popup.is_some());
+    assert!(app.state.serve_session.is_some());
+
+    // Quitting is what stops it.
+    app.state.serve_session = None;
+}
+
+/// `move_selection` is the only thing standing between an empty device list and
+/// an index panic on the next draw.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_device_selection_is_clamped() {
+    use crate::tui::serve_control::MobilePopup;
+
+    let mut popup = MobilePopup {
+        devices: Vec::new(),
+        selected: 0,
+        message: None,
+    };
+    popup.move_selection(1);
+    popup.move_selection(-1);
+    assert_eq!(popup.selected, 0, "an empty list must not move the cursor");
+
+    popup.devices = vec![
+        crate::db::MobileDevice::new("a", "h1"),
+        crate::db::MobileDevice::new("b", "h2"),
+    ];
+    popup.move_selection(5);
+    assert_eq!(popup.selected, 1, "selection ran past the end");
+    popup.move_selection(-5);
+    assert_eq!(popup.selected, 0, "selection ran before the start");
+}
+
+/// A QR invites the assumption that it works from anywhere. A private address
+/// does not, and the failure — a phone on mobile data timing out against an
+/// unroutable host — looks like broken pairing rather than a network that was
+/// never going to carry it. So the overlay says which it is.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_a_lan_only_url_is_named_as_such() {
+    use crate::tui::serve_control::ServeSession;
+
+    for private in [
+        "http://192.168.178.26:8787/#pair=abc",
+        "http://10.0.0.4:8787/#pair=abc",
+        "http://172.16.5.9:8787/#pair=abc",
+        "http://127.0.0.1:8787/#pair=abc",
+        "http://169.254.1.1:8787/#pair=abc",
+    ] {
+        assert!(
+            ServeSession::lan_only_url(private),
+            "{private} should be flagged as LAN-only"
+        );
+    }
+
+    for reachable in [
+        "https://mac.tailnet.ts.net/#pair=abc",
+        "https://brave-fox-1234.trycloudflare.com/#pair=abc",
+        "http://203.0.113.7:8787/#pair=abc",
+    ] {
+        assert!(
+            !ServeSession::lan_only_url(reachable),
+            "{reachable} should not be flagged as LAN-only"
+        );
+    }
+}
+
+/// Tailscale reports a fully-qualified name with the root dot. Leaving it on
+/// produces a URL some clients accept and others reject — the worst of both.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_tailnet_hostname_is_parsed_and_trimmed() {
+    use crate::web::tunnel::parse_tailnet_hostname;
+
+    let json = r#"{"Self":{"DNSName":"macbook.tail1a2b.ts.net.","HostName":"macbook"}}"#;
+    assert_eq!(
+        parse_tailnet_hostname(json).as_deref(),
+        Some("macbook.tail1a2b.ts.net")
+    );
+
+    // Not signed in, or a shape we do not recognise: no hostname rather than a
+    // guess, so the overlay says it cannot serve instead of building a URL
+    // that resolves nowhere.
+    assert_eq!(parse_tailnet_hostname(r#"{"Self":{}}"#), None);
+    assert_eq!(parse_tailnet_hostname(r#"{"Self":{"DNSName":"."}}"#), None);
+    assert_eq!(parse_tailnet_hostname("not json"), None);
+    assert_eq!(parse_tailnet_hostname("{}"), None);
+}
+
+/// The overlay's body is drawn unwrapped — wrapping would break the QR's rows
+/// into nonsense — so a line longer than the box is silently truncated. A
+/// sentence losing its last word reads as a typo rather than a layout bug, so
+/// the box has to be wide enough for everything it says.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_mobile_overlay_never_truncates_its_own_text() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('W'));
+
+    app.draw().unwrap();
+    let screen = rendered_text(&app);
+    for line in screen.lines().filter(|l| l.contains('│')) {
+        let inner = line.trim_matches(|c| c != '│').trim_matches('│');
+        // A body line that ends flush against the border, with no space before
+        // it, is one that ran out of room.
+        assert!(
+            inner.is_empty() || inner.ends_with(' ') || inner.trim().is_empty(),
+            "a line reaches the border and is probably cut: {inner:?}"
+        );
+    }
+}
+
+/// Draw the `W` overlay on its own, at a size a real terminal has.
+///
+/// The shared `TestBackend` is 80x24 and a QR is 21 rows, so through `App::draw`
+/// everything below the QR — the URL, the hint, the footer — is clipped
+/// vertically and no assertion about it can mean anything.
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn render_mobile_overlay(url: &str, w: u16, h: u16) -> String {
+    use crate::tui::serve_control::{MobilePopup, ServeSession};
+
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn a stand-in child");
+    let session = ServeSession::for_test(child, url);
+    let popup = MobilePopup::new();
+    let theme = crate::config::ThemeConfig::default();
+
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            App::draw_mobile_popup(&popup, Some(&session), frame, area, &theme);
+        })
+        .expect("draw");
+
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(w as usize)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A realistic pairing URL: a LAN address and a full 32-character code. The
+/// length is the whole point, so a short stand-in would pass against a box that
+/// truncates.
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn sample_pairing_url() -> String {
+    format!("http://192.168.178.26:8787/#pair={}", "be29ea5a".repeat(4))
+}
+
+/// The URL under the QR must appear **in full**.
+///
+/// It is a link people click — for a demo on the machine itself, or to paste
+/// somewhere — and a pairing code missing its last characters is not a shorter
+/// code, it is an invalid one. The failure is silent and misdirects: pairing
+/// fails, the app falls back to an unauthenticated request, and the browser
+/// reports "This device is not authorised", which reads as a pairing problem
+/// rather than a layout one.
+///
+/// The box was sized from the QR alone, and the URL is longer than the QR is
+/// wide.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_overlay_shows_the_whole_pairing_url() {
+    let url = sample_pairing_url();
+    let screen = render_mobile_overlay(&url, 120, 44);
+    assert!(
+        screen.contains(&url),
+        "the pairing URL is cut off, so clicking it pairs with an invalid code.\n\
+         wanted: {url}\nscreen:\n{screen}"
+    );
+}
+
+/// Every line drawn while serving has to fit, for the same reason: the body is
+/// unwrapped, so anything too wide is silently cut.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_serving_overlay_never_truncates_its_own_text() {
+    let screen = render_mobile_overlay(&sample_pairing_url(), 120, 44);
+    for line in screen.lines().filter(|l| l.contains('│')) {
+        let inner = line.trim_matches(|c| c != '│').trim_matches('│');
+        assert!(
+            inner.is_empty() || inner.ends_with(' ') || inner.trim().is_empty(),
+            "a line reaches the border and is probably cut: {inner:?}"
+        );
+    }
+}
+
+/// `s` and `t` are each a whole action — serve to this wifi, serve via the
+/// tailnet — rather than one key setting a mode another key acts on. A hidden
+/// mode means neither label can say what pressing it will do, which is the
+/// confusion this design replaced.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_overlay_offers_both_reaches_directly() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('W'));
+    app.draw().unwrap();
+    let screen = rendered_text(&app);
+
+    assert!(screen.contains("local network"), "{screen}");
+    assert!(screen.contains("tailnet"), "{screen}");
+    assert!(
+        screen.contains("this wifi only"),
+        "the wifi option must say it is unroutable off the network: {screen}"
+    );
+    assert!(
+        !screen.contains("t to switch"),
+        "nothing should still advertise the removed mode toggle"
+    );
+}
+
+/// Only those two behind a key. `--tunnel public` publishes an endpoint that
+/// can type into a running agent; that should cost more than one keystroke.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_the_overlay_never_offers_the_public_internet() {
+    let mut app = make_test_app();
+    press_key(&mut app, KeyCode::Char('W'));
+    app.draw().unwrap();
+    let screen = rendered_text(&app).to_lowercase();
+    assert!(
+        !screen.contains("public") && !screen.contains("funnel"),
+        "the overlay offers public exposure: {screen}"
+    );
+}
+
+/// A served board whose child has died must say *why*.
+///
+/// The child knows things the TUI does not — that the port is taken, or that
+/// Tailscale Serve is disabled for this tailnet and the one-time link that
+/// enables it. Discarding its stderr leaves the overlay able to say only "it
+/// stopped", which helps nobody; and until this was wired up, `poll_session`
+/// was dead code, so a dead child was never noticed at all and the overlay
+/// went on showing a QR for a server that was gone.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_a_dead_server_reports_what_the_child_said() {
+    use crate::tui::serve_control::{MobilePopup, ServeSession};
+
+    let child = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "echo 'Error: binding 127.0.0.1:8787' >&2; \
+                      echo '' >&2; \
+                      echo 'Address already in use (os error 48)' >&2; \
+                      exit 1",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+
+    let mut session = Some(ServeSession::for_test(
+        child,
+        "http://10.0.0.2:8787/#pair=x",
+    ));
+    let mut popup = MobilePopup::new();
+
+    // Give it a moment to exit, then poll as housekeeping does.
+    for _ in 0..30 {
+        if popup.poll_session(&mut session) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    assert!(session.is_none(), "a dead session must be dropped");
+    let message = popup.message.expect("a dead server must explain itself");
+    assert!(
+        message.contains("Address already in use"),
+        "the child's own words were dropped: {message}"
+    );
+    // The *last* line, because anyhow prints the context first and the cause —
+    // the part that says what to do — last.
+    assert!(
+        !message.contains("binding 127.0.0.1"),
+        "reported the context rather than the cause: {message}"
+    );
+}
+
+/// An idle TUI must not write `task_runtime` at all.
+///
+/// The table mirrors phase status for a reader in another process. With no
+/// reader the write is pure cost — one transaction every couple of seconds for
+/// the life of every session — so publishing is gated on someone actually
+/// asking for a board, and compiled out entirely in a build with no server.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_an_unwatched_board_publishes_no_runtime() {
+    let app = make_test_app();
+    assert!(
+        !app.should_publish_runtime(),
+        "a board nobody has asked for should not be mirrored to the database"
+    );
+}
+
+/// Starting the server from the overlay is an explicit request for mobile, so
+/// it counts without waiting for the phone's first request.
+#[test]
+#[cfg(all(feature = "test-mocks", feature = "serve"))]
+fn test_serving_from_the_overlay_turns_publishing_on() {
+    use crate::tui::serve_control::ServeSession;
+
+    let mut app = make_test_app();
+    assert!(!app.should_publish_runtime());
+
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn a stand-in child");
+    app.state.serve_session = Some(ServeSession::for_test(
+        child,
+        "http://10.0.0.2:8787/#pair=x",
+    ));
+
+    assert!(
+        app.should_publish_runtime(),
+        "serving should start the mirror without waiting for a request"
+    );
+    app.state.serve_session = None;
+}
+
+/// A build without the `serve` feature still has the `W` binding, so both
+/// options are permanently unavailable — and must say what to do about it. The
+/// published binaries carry the feature; a plain `cargo build --release` does
+/// not, and "this build has no web server" left the reader guessing whether
+/// that was a bug, a missing dependency, or something they could fix.
+#[test]
+#[cfg(all(feature = "test-mocks", not(feature = "serve")))]
+fn test_a_build_without_the_server_says_how_to_get_one() {
+    use crate::tui::serve_control::Reach;
+
+    for reach in [Reach::Lan, Reach::Tailnet] {
+        let why = reach.unavailable().expect("must be unavailable");
+        assert!(
+            why.contains("--features serve"),
+            "the reason must name the fix: {why}"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn queued_completion_refuses_dirty_worktree() {
+    for action in ["move_to_done", "move_forward"] {
+        let mut git = MockGitOperations::new();
+        git.expect_has_changes().times(1).returning(|_| true);
+        // No kill/remove expectations: either side effect would fail the test.
+        let mut app = App::new_for_test(
+            Some(PathBuf::from("/tmp/test-project")),
+            Arc::new(MockTmuxOperations::new()),
+            Arc::new(git),
+            Arc::new(MockGitProviderOperations::new()),
+            Arc::new(MockAgentRegistry::new()),
+        )
+        .unwrap();
+        let mut task = Task::new("Dirty review", "claude", "test-project");
+        task.status = TaskStatus::Review;
+        task.worktree_path = Some("/tmp/test-project/worktree".into());
+        task.session_name = Some("session:task".into());
+        let db = app.state.db.as_ref().unwrap();
+        db.create_task(&task).unwrap();
+        let req = crate::db::TransitionRequest::new(&task.id, action);
+        db.create_transition_request(&req).unwrap();
+        app.process_transition_requests().unwrap();
+        let db = app.state.db.as_ref().unwrap();
+        let saved = db.get_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Review);
+        assert_eq!(saved.worktree_path, task.worktree_path);
+        assert_eq!(saved.session_name, task.session_name);
+        let result = db.get_transition_request(&req.id).unwrap().unwrap();
+        assert!(result.error.unwrap().contains("Uncommitted changes"));
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn queued_completion_allows_clean_worktree() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut git = MockGitOperations::new();
+    git.expect_has_changes().times(1).returning(|_| false);
+    git.expect_remove_worktree()
+        .times(1)
+        .returning(move |_, _| {
+            tx.send(()).unwrap();
+            Ok(())
+        });
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(MockTmuxOperations::new()),
+        Arc::new(git),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+    let mut task = Task::new("Clean completion", "claude", "test-project");
+    task.status = TaskStatus::Review;
+    task.worktree_path = Some("/tmp/test-project/worktree".into());
+    let db = app.state.db.as_ref().unwrap();
+    db.create_task(&task).unwrap();
+    let req = crate::db::TransitionRequest::new(&task.id, "move_to_done");
+    db.create_transition_request(&req).unwrap();
+    app.process_transition_requests().unwrap();
+    rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+    let db = app.state.db.as_ref().unwrap();
+    let saved = db.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(saved.status, TaskStatus::Done);
+    assert!(saved.worktree_path.is_none());
+    assert!(db
+        .get_transition_request(&req.id)
+        .unwrap()
+        .unwrap()
+        .error
+        .is_none());
+}
