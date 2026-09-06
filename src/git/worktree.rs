@@ -324,28 +324,60 @@ pub fn detect_main_branch(project_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Remove a git worktree
-pub fn remove_worktree(project_path: &Path, task_id: &str, worktree_dir: &str) -> Result<()> {
-    let wt_path = worktree_path(project_path, task_id, worktree_dir);
+/// True when `path` is a repository's *main* working tree rather than a linked
+/// worktree.
+///
+/// This is the shape `skip_worktree` produces: a task's `worktree_path` is the
+/// user's own checkout, and every cleanup path then asks for that to be removed.
+/// git already refuses ("is a main working tree"), so today the protection is
+/// inherited rather than intended — and `fs::rename`, which a background trash
+/// would use instead, has no such concept.
+///
+/// Two conditions, and both are needed:
+///
+/// - `--git-dir` == `--git-common-dir`. A linked worktree's git dir is
+///   `{repo}/.git/worktrees/{name}` while its common dir is `{repo}/.git`.
+/// - `--show-toplevel` is `path` itself.
+///
+/// The second is not redundant. The default `worktree_dir` is `.agtx/worktrees`,
+/// *inside* the project, so a worktree there that has lost its `.git` link makes
+/// git walk up to the main repository and report the first condition as true.
+/// Without the toplevel check, exactly the half-deleted worktrees that most need
+/// removing would be refused as if they were the user's checkout.
+pub fn is_main_working_tree(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    let rev_parse = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
 
-    // Remove the worktree
-    let output = Command::new("git")
-        .current_dir(project_path)
-        .args(["worktree", "remove"])
-        .arg(&wt_path)
-        .args(["--force"]) // Force in case of uncommitted changes
-        .output()
-        .context("Failed to remove git worktree")?;
-
-    if !output.status.success() {
-        // Try to prune if remove failed
-        Command::new("git")
-            .current_dir(project_path)
-            .args(["worktree", "prune"])
-            .output()?;
+    let common = rev_parse(&["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    let dir = rev_parse(&["rev-parse", "--path-format=absolute", "--git-dir"]);
+    match (common, dir) {
+        (Some(common), Some(dir)) if common == dir => {}
+        // A linked worktree, not a repository at all, or a git too old for
+        // --path-format. Not provably a main working tree, so this does not
+        // block the removal; the caller's project-root comparison is the second
+        // line of defence.
+        _ => return false,
     }
 
-    Ok(())
+    let Some(toplevel) = rev_parse(&["rev-parse", "--show-toplevel"]) else {
+        return false;
+    };
+    match (Path::new(&toplevel).canonicalize(), path.canonicalize()) {
+        (Ok(top), Ok(this)) => top == this,
+        _ => false,
+    }
 }
 
 /// Get the worktree path for a task
