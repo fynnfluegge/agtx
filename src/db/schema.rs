@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::Path;
 
-use super::models::{Notification, Project, Task, TaskStatus, TransitionRequest};
+use super::models::{
+    MobileDevice, Notification, NotificationKind, PhaseStatus, Project, Task, TaskRuntime,
+    TaskStatus, TransitionRequest,
+};
 
 /// Database wrapper for SQLite operations
 pub struct Database {
@@ -221,6 +224,18 @@ impl Database {
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            -- Published mirror of the TUI's in-memory PhaseStatus, for readers
+            -- in other processes. One row per task, rewritten by each session
+            -- refresh; `updated_at` is what tells a reader whether anything is
+            -- still refreshing it.
+            CREATE TABLE IF NOT EXISTS task_runtime (
+                task_id TEXT PRIMARY KEY,
+                phase_status TEXT NOT NULL,
+                pane_hash TEXT,
+                pane_changed_at TEXT,
+                updated_at TEXT NOT NULL
+            );
             "#,
         )?;
 
@@ -233,6 +248,15 @@ impl Database {
             "ALTER TABLE transition_requests ADD COLUMN claimed_by TEXT",
             [],
         );
+
+        // Migration: notifications gain the two fields an out-of-process reader
+        // needs to route them. Nullable, so rows written before this survive.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE notifications ADD COLUMN task_id TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE notifications ADD COLUMN kind TEXT", []);
 
         Ok(())
     }
@@ -265,8 +289,54 @@ impl Database {
             );
 
             CREATE INDEX IF NOT EXISTS idx_running_project ON running_agents(project_id);
+
+            -- One row per project a TUI is currently open on. Its only job is
+            -- to answer "is anything draining the transition queue?" — a phone
+            -- can enqueue a request whenever, but nothing executes it without a
+            -- running TUI, and a board that accepts taps and silently does
+            -- nothing is worse than one that says so.
+            CREATE TABLE IF NOT EXISTS tui_heartbeat (
+                project_path TEXT PRIMARY KEY,
+                beat_at TEXT NOT NULL
+            );
+
+            -- When a phone last asked for a project's board.
+            --
+            -- The TUI publishes `task_runtime` only while this is fresh, so a
+            -- board nobody is looking at costs no writes at all. Without it the
+            -- refresh wrote a transaction every couple of seconds forever, to
+            -- keep a mirror current for a reader that might never exist.
+            CREATE TABLE IF NOT EXISTS board_watch (
+                project_path TEXT PRIMARY KEY,
+                beat_at TEXT NOT NULL
+            );
+
+            -- Devices paired with `agtx serve`. One row per phone, so a lost
+            -- one can be revoked without re-pairing the rest.
+            --
+            -- The token is stored **hashed**. This file is 0600, but a
+            -- credential that grants shell-equivalent access to the machine
+            -- should not be readable from a backup, a stray copy, or anything
+            -- that later gets a wider mode by accident.
+            CREATE TABLE IF NOT EXISTS mobile_devices (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                last_seen TEXT,
+                session_id TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_devices_hash ON mobile_devices(token_hash);
             "#,
         )?;
+
+        // Migration: a device records the serve session that paired it.
+        // Nullable, so a row written before this column existed survives.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE mobile_devices ADD COLUMN session_id TEXT", []);
+
         Ok(())
     }
 
@@ -657,8 +727,15 @@ impl Database {
 
     pub fn create_notification(&self, notif: &Notification) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO notifications (id, message, created_at) VALUES (?1, ?2, ?3)",
-            params![notif.id, notif.message, notif.created_at.to_rfc3339()],
+            "INSERT INTO notifications (id, message, created_at, task_id, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                notif.id,
+                notif.message,
+                notif.created_at.to_rfc3339(),
+                notif.task_id,
+                notif.kind.map(|k| k.as_str()),
+            ],
         )?;
         Ok(())
     }
@@ -679,6 +756,11 @@ impl Database {
                     )
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
+                    task_id: row.get("task_id")?,
+                    kind: row
+                        .get::<_, Option<String>>("kind")?
+                        .as_deref()
+                        .and_then(NotificationKind::from_str),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -689,9 +771,10 @@ impl Database {
 
     /// Atomic fetch-and-delete via `DELETE ... RETURNING`.
     pub fn consume_notifications(&self) -> Result<Vec<Notification>> {
-        let mut stmt = self
-            .conn
-            .prepare("DELETE FROM notifications RETURNING id, message, created_at")?;
+        let mut stmt = self.conn.prepare(
+            "DELETE FROM notifications
+                 RETURNING id, message, created_at, task_id, kind",
+        )?;
 
         let mut notifs: Vec<Notification> = stmt
             .query_map([], |row| {
@@ -703,6 +786,11 @@ impl Database {
                     )
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
+                    task_id: row.get("task_id")?,
+                    kind: row
+                        .get::<_, Option<String>>("kind")?
+                        .as_deref()
+                        .and_then(NotificationKind::from_str),
                 })
             })?
             .filter_map(|r| r.ok())
@@ -711,5 +799,270 @@ impl Database {
         // `RETURNING` doesn't guarantee any particular row order — sort in Rust.
         notifs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         Ok(notifs)
+    }
+
+    // ── Paired devices ──────────────────────────────────────────────────
+
+    pub fn add_mobile_device(&self, device: &MobileDevice) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO mobile_devices (id, label, token_hash, created_at, last_seen, session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                device.id,
+                device.label,
+                device.token_hash,
+                device.created_at.to_rfc3339(),
+                device.last_seen.map(|t| t.to_rfc3339()),
+                device.session_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The device holding this token hash, if any.
+    ///
+    /// Looked up by hash rather than compared in Rust so the secret itself
+    /// never has to be read out of the database to check a request.
+    pub fn mobile_device_by_hash(&self, token_hash: &str) -> Result<Option<MobileDevice>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM mobile_devices WHERE token_hash = ?1")?;
+        let mut rows = stmt.query_map(params![token_hash], Self::mobile_device_from_row)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn list_mobile_devices(&self) -> Result<Vec<MobileDevice>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM mobile_devices ORDER BY created_at ASC")?;
+        let rows = stmt
+            .query_map([], Self::mobile_device_from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Record that a device was used. Callers should throttle: this is a write,
+    /// and a phone polling the board would otherwise cause one every two
+    /// seconds to store a timestamp nobody reads that often.
+    pub fn touch_mobile_device(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE mobile_devices SET last_seen = ?1 WHERE id = ?2",
+            params![chrono::Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns whether a row was removed, so a caller can tell "revoked" from
+    /// "no such device" rather than reporting success either way.
+    pub fn revoke_mobile_device(&self, id: &str) -> Result<bool> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM mobile_devices WHERE id = ?1", params![id])?;
+        Ok(rows > 0)
+    }
+
+    /// Drop every device paired by one serve session.
+    ///
+    /// Nothing calls this on shutdown — pairings persist until revoked. It is
+    /// the scoped primitive an expiry or forget-on-exit policy needs, and the
+    /// scoping is the point: `mobile_devices` is global, so a blanket delete
+    /// would cut off a second agtx serving another project.
+    ///
+    /// A `NULL` session_id is never matched, so a row written before the
+    /// column existed is left for the user to revoke by hand.
+    pub fn revoke_session_devices(&self, session_id: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM mobile_devices WHERE session_id = ?1",
+            params![session_id],
+        )?)
+    }
+
+    /// Returns how many were removed.
+    pub fn revoke_all_mobile_devices(&self) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM mobile_devices", [])?)
+    }
+
+    fn mobile_device_from_row(row: &rusqlite::Row) -> rusqlite::Result<MobileDevice> {
+        let parse = |s: String| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
+        };
+        Ok(MobileDevice {
+            id: row.get("id")?,
+            label: row.get("label")?,
+            token_hash: row.get("token_hash")?,
+            created_at: row
+                .get::<_, Option<String>>("created_at")?
+                .and_then(parse)
+                .unwrap_or_else(chrono::Utc::now),
+            last_seen: row.get::<_, Option<String>>("last_seen")?.and_then(parse),
+            session_id: row.get("session_id")?,
+        })
+    }
+
+    // ── TUI heartbeat ───────────────────────────────────────────────────
+
+    /// Record that a TUI is live on `project_path`, as of now.
+    ///
+    /// Called on the transition-poll cadence rather than per event-loop
+    /// iteration: the loop wakes on `HOUSEKEEPING_TICK` (100 ms) and on every
+    /// keystroke, so beating per iteration would be a write ten-plus times a
+    /// second to answer a question whose useful resolution is seconds.
+    pub fn beat_tui_heartbeat(&self, project_path: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO tui_heartbeat (project_path, beat_at) VALUES (?1, ?2)
+             ON CONFLICT(project_path) DO UPDATE SET beat_at = excluded.beat_at",
+            params![project_path, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Record that something asked for this project's board.
+    ///
+    /// Written by the web server on a board request. Callers should throttle:
+    /// this is a write, and it answers a question whose useful resolution is
+    /// minutes.
+    pub fn note_board_watched(&self, project_path: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO board_watch (project_path, beat_at) VALUES (?1, ?2)
+             ON CONFLICT(project_path) DO UPDATE SET beat_at = excluded.beat_at",
+            params![project_path, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether a board was asked for within `stale_after`.
+    ///
+    /// The gate on publishing `task_runtime`. Absent and stale are the same
+    /// answer — nobody is reading — so a missing row is not an error.
+    pub fn board_watched_recently(
+        &self,
+        project_path: &str,
+        stale_after: chrono::Duration,
+    ) -> Result<bool> {
+        let beat: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT beat_at FROM board_watch WHERE project_path = ?1",
+                params![project_path],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(beat
+            .and_then(|b| chrono::DateTime::parse_from_rfc3339(&b).ok())
+            .is_some_and(|t| chrono::Utc::now() - t.with_timezone(&chrono::Utc) < stale_after))
+    }
+
+    /// Whether a TUI has beaten for `project_path` within `stale_after`.
+    ///
+    /// Absent and stale are the same answer — nothing is draining the queue —
+    /// so a missing row is not an error.
+    pub fn tui_is_live(&self, project_path: &str, stale_after: chrono::Duration) -> Result<bool> {
+        let beat: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT beat_at FROM tui_heartbeat WHERE project_path = ?1",
+                params![project_path],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(beat
+            .and_then(|b| chrono::DateTime::parse_from_rfc3339(&b).ok())
+            .is_some_and(|t| chrono::Utc::now() - t.with_timezone(&chrono::Utc) < stale_after))
+    }
+
+    // ── Task runtime (published phase status) ───────────────────────────
+
+    /// Publish one refresh pass as a whole: upsert every live task's row and
+    /// drop rows for tasks that no longer exist, in one transaction.
+    ///
+    /// The refresh writes every live task on every pass — that is what makes
+    /// `updated_at` mean "last observed" rather than "last changed", which is
+    /// the distinction a reader needs to tell a steadily-working task from a
+    /// board nothing has refreshed since the TUI died. Batching is what keeps
+    /// that affordable: one commit per pass instead of one per task.
+    ///
+    /// Pruning removes rows for tasks that no longer *exist*, not rows absent
+    /// from this pass: the refresh tracks only active phases, so a task that
+    /// reaches Done stops being published and keeps its last row. That row is
+    /// stale rather than wrong, and `updated_at` is what a reader checks — the
+    /// same contract that covers a board nothing is refreshing at all. Pruning
+    /// to the published set instead would empty the table on any pass that
+    /// transiently reported nothing.
+    ///
+    /// Uses an unchecked transaction because the caller holds `&Database`.
+    pub fn publish_task_runtime(&self, rows: &[TaskRuntime]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for rt in rows {
+            tx.execute(
+                "INSERT INTO task_runtime
+                     (task_id, phase_status, pane_hash, pane_changed_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(task_id) DO UPDATE SET
+                     phase_status    = excluded.phase_status,
+                     pane_hash       = excluded.pane_hash,
+                     pane_changed_at = excluded.pane_changed_at,
+                     updated_at      = excluded.updated_at",
+                params![
+                    rt.task_id,
+                    rt.phase_status.as_str(),
+                    rt.pane_hash,
+                    rt.pane_changed_at.map(|t| t.to_rfc3339()),
+                    rt.updated_at.to_rfc3339(),
+                ],
+            )?;
+        }
+        // A deleted task's last status would otherwise be served to readers
+        // forever as current. In the same transaction so a reader never sees a
+        // pass applied without its prune.
+        tx.execute(
+            "DELETE FROM task_runtime WHERE task_id NOT IN (SELECT id FROM tasks)",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_task_runtime(&self, task_id: &str) -> Result<Option<TaskRuntime>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM task_runtime WHERE task_id = ?1")?;
+        let mut rows = stmt.query_map(params![task_id], Self::task_runtime_from_row)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn list_task_runtime(&self) -> Result<Vec<TaskRuntime>> {
+        let mut stmt = self.conn.prepare("SELECT * FROM task_runtime")?;
+        let rows = stmt
+            .query_map([], Self::task_runtime_from_row)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    fn task_runtime_from_row(row: &rusqlite::Row) -> rusqlite::Result<TaskRuntime> {
+        let parse = |s: String| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
+        };
+        Ok(TaskRuntime {
+            task_id: row.get("task_id")?,
+            // An unparseable status means a writer from a newer version wrote a
+            // variant this build has no arm for. Treating that as `Working` is
+            // the honest fallback: it is the state that claims the least.
+            phase_status: PhaseStatus::from_str(&row.get::<_, String>("phase_status")?)
+                .unwrap_or(PhaseStatus::Working),
+            pane_hash: row.get("pane_hash")?,
+            pane_changed_at: row
+                .get::<_, Option<String>>("pane_changed_at")?
+                .and_then(parse),
+            updated_at: row
+                .get::<_, Option<String>>("updated_at")?
+                .and_then(parse)
+                .unwrap_or_else(chrono::Utc::now),
+        })
     }
 }

@@ -18,6 +18,10 @@ use std::time::Instant;
 use crate::agent::hook_status::{self, HookState};
 use crate::agent::{self, AgentOperations};
 use crate::config::{GlobalConfig, MergedConfig, ProjectConfig, ThemeConfig, WorkflowPlugin};
+use crate::core::input::{
+    composer_holds, delivery_needle, pane_shows, submit_message, COMPOSER_TAIL_LINES,
+    SUBMIT_ATTEMPTS, SUBMIT_CONFIRM_POLLS,
+};
 use crate::db::{Database, PhaseStatus, Task, TaskStatus, TransitionRequest};
 use crate::git::{
     self, GitOperations, GitProviderOperations, PullRequestState, RealGitHubOps, RealGitOps,
@@ -432,6 +436,15 @@ struct AppState {
     deps_satisfied_cache: HashMap<String, bool>,
     // Full-screen dependency-graph overlay (Shift+D)
     dep_graph_popup: Option<DepGraphPopup>,
+    /// The `W` overlay: serve the board to a phone, and manage paired devices.
+    mobile_popup: Option<crate::tui::serve_control::MobilePopup>,
+    /// The child `agtx serve`, if one is running.
+    ///
+    /// Held here and **not on the popup**, because the popup is a view that is
+    /// dropped whenever the overlay closes — and dropping a `ServeSession`
+    /// kills the child. Someone opens `W`, scans, closes it, and carries on
+    /// using the board; the server has to survive that.
+    serve_session: Option<crate::tui::serve_control::ServeSession>,
     // Queue of task IDs awaiting serialized worktree setup (batch-move from the
     // dependency view). Worktree setup runs one-at-a-time via `setup_rx`; this
     // queue is drained as each setup completes.
@@ -928,6 +941,8 @@ impl App {
                 update_install_rx: None,
                 deps_satisfied_cache: HashMap::new(),
                 dep_graph_popup: None,
+                mobile_popup: None,
+                serve_session: None,
                 setup_queue: VecDeque::new(),
                 instance_id: uuid::Uuid::new_v4().to_string(),
             },
@@ -1177,6 +1192,8 @@ impl App {
                 update_install_rx: None,
                 deps_satisfied_cache: HashMap::new(),
                 dep_graph_popup: None,
+                mobile_popup: None,
+                serve_session: None,
                 setup_queue: VecDeque::new(),
                 instance_id: uuid::Uuid::new_v4().to_string(),
             },
@@ -1483,6 +1500,38 @@ impl App {
             self.state.last_transition_poll = now;
             if let Err(e) = self.process_transition_requests() {
                 tracing::warn!(error = %e, "failed to process transition requests");
+            }
+            // Notice a served board whose child has died — a taken port, or a
+            // tunnel the provider refused. Without this the overlay keeps
+            // showing a QR for a server that is gone, which is the worst of
+            // both: it looks fine and nothing works.
+            if self.state.serve_session.is_some() {
+                if let Some(popup) = self.state.mobile_popup.as_mut() {
+                    if popup.poll_session(&mut self.state.serve_session) {
+                        changed = true;
+                    }
+                } else if self
+                    .state
+                    .serve_session
+                    .as_mut()
+                    .and_then(|s| s.check())
+                    .is_some()
+                {
+                    // Overlay closed, so there is nowhere to show a message —
+                    // but the dead session must still be dropped, or `s` would
+                    // report "stopped serving" for something already gone.
+                    self.state.serve_session = None;
+                }
+            }
+
+            // Beat on the same tick, because it answers a question about
+            // exactly this loop: something out of process can enqueue a
+            // transition whenever, but only a running TUI drains the queue.
+            if let Some(path) = &self.state.project_path {
+                let _ = self
+                    .state
+                    .global_db
+                    .beat_tui_heartbeat(&path.to_string_lossy());
             }
         }
 
@@ -2727,6 +2776,17 @@ impl App {
         if let Some(ref popup) = state.dep_graph_popup {
             Self::draw_dependency_graph(popup, frame, area, &state.config.theme);
         }
+
+        // Mobile overlay
+        if let Some(ref popup) = state.mobile_popup {
+            Self::draw_mobile_popup(
+                popup,
+                state.serve_session.as_ref(),
+                frame,
+                area,
+                &state.config.theme,
+            );
+        }
     }
 
     /// Render the dependency-graph overlay: topological columns of task cards,
@@ -3434,6 +3494,11 @@ impl App {
         // Handle dependency-graph overlay if open
         if self.state.dep_graph_popup.is_some() {
             return self.handle_dep_graph_key(key);
+        }
+
+        // Handle the mobile overlay if open
+        if self.state.mobile_popup.is_some() {
+            return self.handle_mobile_key(key);
         }
 
         // Handle PR confirmation popup if open
@@ -4640,6 +4705,10 @@ impl App {
             KeyCode::Char('x') => self.delete_selected_task()?,
             KeyCode::Char('d') => self.show_task_diff()?,
             KeyCode::Char('D') => self.show_dependency_graph()?,
+            KeyCode::Char('W') => {
+                // `W` and not `R`/`r`: those are start-research and resume.
+                self.state.mobile_popup = Some(crate::tui::serve_control::MobilePopup::new());
+            }
             KeyCode::Char('m') => self.move_task_right()?,
             KeyCode::Char('M') => self.move_backlog_to_running()?,
             KeyCode::Char('R') => {
@@ -6522,6 +6591,239 @@ impl App {
     }
 
     /// Key handling for the dependency-graph overlay.
+    /// Keys for the `W` overlay.
+    ///
+    /// Closing it does **not** stop the server: someone opens this, scans, and
+    /// closes it while carrying on with the board. Only `s` and quitting stop
+    /// serving.
+    fn handle_mobile_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let Some(popup) = self.state.mobile_popup.as_mut() else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('W') => {
+                self.state.mobile_popup = None;
+            }
+            // Each key is a whole action, not a mode plus a trigger.
+            KeyCode::Char('s') => popup.serve(
+                &mut self.state.serve_session,
+                crate::tui::serve_control::DEFAULT_PORT,
+                crate::tui::serve_control::Reach::Lan,
+            ),
+            KeyCode::Char('t') => popup.serve(
+                &mut self.state.serve_session,
+                crate::tui::serve_control::DEFAULT_PORT,
+                crate::tui::serve_control::Reach::Tailnet,
+            ),
+            KeyCode::Char('x') => popup.revoke_selected(),
+            KeyCode::Char('j') | KeyCode::Down => popup.move_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => popup.move_selection(-1),
+            KeyCode::Char('r') => {
+                popup.reload_devices();
+                popup.message = Some("Reloaded.".to_string());
+            }
+            // Swallow everything else rather than letting it reach the board
+            // behind the overlay.
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The `W` overlay: a QR to scan, and the devices already paired.
+    fn draw_mobile_popup(
+        popup: &crate::tui::serve_control::MobilePopup,
+        session: Option<&crate::tui::serve_control::ServeSession>,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &crate::config::ThemeConfig,
+    ) {
+        use ratatui::widgets::Clear;
+
+        let accent = hex_to_color(&theme.color_accent);
+        let dim = hex_to_color(&theme.color_dimmed);
+        let text = hex_to_color(&theme.color_text);
+        let selected = hex_to_color(&theme.color_selected);
+
+        let qr = session.and_then(|s| crate::tui::serve_control::qr_grid(&s.url));
+        // The QR is the widest thing here and it must not wrap — a wrapped QR
+        // is unscannable and reads as corruption rather than as a layout bug.
+        // Two module rows per text row, so the height is half the width.
+        let qr_width = qr.as_ref().map_or(0, |(w, _)| *w);
+        let qr_height = qr_width.div_ceil(2);
+
+        let serving = session.is_some();
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        match (session, &qr) {
+            (Some(session), Some((total, dark))) => {
+                lines.extend(qr_lines(*total, dark));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    session.url.clone(),
+                    Style::default().fg(accent),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Scan it. The code is single-use; paired devices need nothing.",
+                    Style::default().fg(dim),
+                )));
+                // Say the reach out loud. A QR invites the assumption that it
+                // works from anywhere, and a private address does not — the
+                // failure is a phone on mobile data timing out against an
+                // unroutable host, which looks like a broken pairing rather
+                // than a network that was never going to carry it.
+                lines.push(Line::from(Span::styled(
+                    if session.is_lan_only() {
+                        "Works on this wifi only — a private address is unroutable from mobile data."
+                    } else {
+                        "Reachable from outside this network."
+                    },
+                    Style::default().fg(selected),
+                )));
+            }
+            (Some(session), None) => {
+                lines.push(Line::from(Span::styled(
+                    session.url.clone(),
+                    Style::default().fg(accent),
+                )));
+            }
+            (None, _) => {
+                // Both options, each stating what it gives. The alternative —
+                // one key setting a mode another key acts on — means neither
+                // label can say what pressing it will do.
+                lines.push(Line::from(Span::styled(
+                    "Not serving.",
+                    Style::default().fg(dim),
+                )));
+                lines.push(Line::from(""));
+                for (key, reach) in [
+                    ("s", crate::tui::serve_control::Reach::Lan),
+                    ("t", crate::tui::serve_control::Reach::Tailnet),
+                ] {
+                    let blocked = reach.unavailable();
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {key}  "),
+                            Style::default()
+                                .fg(if blocked.is_some() { dim } else { selected })
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{:<15}", reach.label()),
+                            Style::default().fg(if blocked.is_some() { dim } else { text }),
+                        ),
+                        Span::styled(reach.describe(), Style::default().fg(dim)),
+                    ]));
+                    if let Some(why) = blocked {
+                        lines.push(Line::from(Span::styled(
+                            format!("     unavailable: {why}"),
+                            Style::default().fg(hex_to_color(&theme.color_description)),
+                        )));
+                    }
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "A paired device can type into your agents.",
+                    Style::default().fg(dim),
+                )));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Paired devices ({})", popup.devices.len()),
+            Style::default().fg(text).add_modifier(Modifier::BOLD),
+        )));
+
+        if popup.devices.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  none yet",
+                Style::default().fg(dim),
+            )));
+        } else {
+            for (i, device) in popup.devices.iter().enumerate() {
+                let marker = if i == popup.selected { "▸ " } else { "  " };
+                let seen = device
+                    .last_seen
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "never".to_string());
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{marker}{}", device.label),
+                        Style::default().fg(if i == popup.selected { selected } else { text }),
+                    ),
+                    Span::styled(format!("  last seen {seen}"), Style::default().fg(dim)),
+                ]));
+            }
+        }
+
+        if let Some(ref message) = popup.message {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                message.clone(),
+                Style::default().fg(selected),
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            // Trimmed to fit the box, like the board's own footer: `r` still
+            // reloads, it just lives in HELP rather than here. A footer that
+            // runs off the edge advertises a key by half its name.
+            if serving {
+                "[s] stop  [x] revoke  [j/k] move  [Esc] close, keeps serving"
+            } else {
+                "[s] wifi  [t] tailnet  [x] revoke  [j/k] move  [Esc] close"
+            },
+            Style::default().fg(dim),
+        )));
+
+        // Sized from the longest line it will actually draw. `Paragraph` is
+        // left unwrapped on purpose — wrapping would break the QR's rows into
+        // nonsense — so anything wider than the box is silently truncated.
+        //
+        // Measuring the QR alone is not enough, and the shortfall is not
+        // cosmetic: the pairing URL is longer than the QR is wide, and a code
+        // missing its last characters is not a shorter code but an invalid
+        // one. Clicking that link fails to pair and then reports "This device
+        // is not authorised", which reads as a pairing bug rather than a
+        // layout one.
+        let content_width = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+        let width = (qr_width as u16 + 6)
+            .max(content_width + 4)
+            .max(MOBILE_POPUP_MIN_WIDTH)
+            .min(area.width.saturating_sub(2));
+        let body_height = qr_height as u16 + popup.devices.len().max(1) as u16 + 10;
+        let height = body_height.min(area.height.saturating_sub(2));
+        let rect = centered_rect_fixed_width(width, 100, area);
+        let rect = Rect {
+            x: rect.x,
+            y: area.y + (area.height.saturating_sub(height)) / 2,
+            width: rect.width.min(width),
+            height,
+        };
+
+        frame.render_widget(Clear, rect);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(hex_to_color(&theme.color_popup_border)))
+            .title(Span::styled(
+                if serving {
+                    " Mobile — serving "
+                } else {
+                    " Mobile "
+                },
+                Style::default()
+                    .fg(hex_to_color(&theme.color_popup_header))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
     fn handle_dep_graph_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         let Some(popup) = self.state.dep_graph_popup.as_mut() else {
             return Ok(());
@@ -7264,6 +7566,19 @@ impl App {
         let mut task = db
             .get_task(&req.task_id)?
             .ok_or_else(|| anyhow::anyhow!("Task not found: {}", req.task_id))?;
+
+        // Recheck when the queue is drained: an agent may have written more
+        // work since the phone rendered the card or submitted the request.
+        // Include move_forward so stale/legacy requests cannot bypass this.
+        if task.status == TaskStatus::Review
+            && matches!(req.action.as_str(), "move_to_done" | "move_forward")
+            && task
+                .worktree_path
+                .as_ref()
+                .is_some_and(|wt| self.state.git_ops.has_changes(Path::new(wt)))
+        {
+            anyhow::bail!("Uncommitted changes prevent moving this task to Done. Commit or resolve them first.");
+        }
 
         // Block forward transitions when dependencies are not satisfied
         let is_forward = matches!(
@@ -8150,9 +8465,52 @@ impl App {
         });
     }
 
+    /// Whether `task_runtime` is worth writing right now.
+    ///
+    /// The table exists so a *reader outside this process* can see phase status
+    /// it cannot recompute. With no such reader the write is pure cost — and it
+    /// is not a small one in aggregate: a transaction every couple of seconds,
+    /// for the life of every agtx session, forever, on the chance a phone might
+    /// one day connect.
+    ///
+    /// So it is gated twice. Without the `serve` feature there is no server in
+    /// this binary and nothing could ever read the table, so the call is
+    /// compiled out entirely. With it, publishing starts when someone actually
+    /// asks for a board and stops when they stop — the web server marks
+    /// `board_watch` on a board request, and the overlay's own child counts too,
+    /// since starting it is an explicit request for mobile.
+    ///
+    /// The window is generous because the board no longer polls: someone can
+    /// read it for minutes without issuing a request, and going quiet mid-read
+    /// would freeze their phase icons rather than save anything worth having.
+    #[cfg(feature = "serve")]
+    fn should_publish_runtime(&self) -> bool {
+        const WATCH_WINDOW: i64 = 10 * 60;
+
+        if self.state.serve_session.is_some() {
+            return true;
+        }
+        let Some(path) = &self.state.project_path else {
+            return false;
+        };
+        self.state
+            .global_db
+            .board_watched_recently(
+                &path.to_string_lossy(),
+                chrono::Duration::seconds(WATCH_WINDOW),
+            )
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(feature = "serve"))]
+    fn should_publish_runtime(&self) -> bool {
+        false
+    }
+
     /// Apply results from the background session refresh thread.
     fn apply_session_refresh(&mut self, result: SessionRefreshResult) {
         let now = Instant::now();
+        let mut runtime_rows: Vec<crate::db::TaskRuntime> = Vec::new();
 
         for task_status in result.statuses {
             // The refresh ran on a thread, so the task may have moved on since
@@ -8263,6 +8621,26 @@ impl App {
                 .phase_status_cache
                 .insert(task_status.task_id.clone(), (phase, now));
 
+            // Collect the resolved status for readers in other processes, to be
+            // published as one transaction below. This is the only writer:
+            // `phase` is final here, after every override above, and recomputing
+            // it elsewhere would mean duplicating the artifact-check and
+            // pane-hash pipeline against the same panes.
+            let pane = self.state.pane_content_hashes.get(&task_status.task_id);
+            runtime_rows.push(crate::db::TaskRuntime {
+                task_id: task_status.task_id.clone(),
+                phase_status: phase,
+                pane_hash: pane.map(|(h, _)| h.to_string()),
+                // `Instant` has no epoch, so the stored wall-clock time is
+                // derived from how long ago the change was.
+                pane_changed_at: pane.map(|(_, at)| {
+                    chrono::Utc::now()
+                        - chrono::Duration::from_std(now.duration_since(*at))
+                            .unwrap_or_else(|_| chrono::Duration::zero())
+                }),
+                updated_at: chrono::Utc::now(),
+            });
+
             // Notify orchestrator when a phase completes (newly Ready)
             if newly_ready {
                 if self.state.orchestrator_session.is_some() {
@@ -8285,10 +8663,14 @@ impl App {
                         } else {
                             &task_status.task_id
                         };
-                        let notif = crate::db::Notification::new(format!(
-                            "Task \"{}\" ({}) completed phase: {}",
-                            task_title, short_id, phase_name
-                        ));
+                        let notif = crate::db::Notification::for_task(
+                            crate::db::NotificationKind::PhaseCompleted,
+                            &task_status.task_id,
+                            format!(
+                                "Task \"{}\" ({}) completed phase: {}",
+                                task_title, short_id, phase_name
+                            ),
+                        );
                         let _ = db.create_notification(&notif);
                     }
                 }
@@ -8411,7 +8793,7 @@ impl App {
                                 &task_status.task_id
                             };
                             let reason = self.state.blocked_reasons.get(&task_status.task_id);
-                            let notif = crate::db::Notification::new(match (blocked, reason) {
+                            let message = match (blocked, reason) {
                                 (true, Some(r)) => format!(
                                     "Task \"{}\" ({}) is blocked in phase {} waiting for: {}",
                                     task_title,
@@ -8431,7 +8813,12 @@ impl App {
                                     short_id,
                                     task_status.status.as_str()
                                 ),
-                            });
+                            };
+                            let notif = crate::db::Notification::for_task(
+                                crate::db::NotificationKind::TaskStuck,
+                                &task_status.task_id,
+                                message,
+                            );
                             let _ = db.create_notification(&notif);
                         }
                     }
@@ -8441,6 +8828,18 @@ impl App {
                 self.state
                     .stuck_task_idle_since
                     .remove(&task_status.task_id);
+            }
+        }
+
+        // One commit for the whole pass, and only when something is reading.
+        // Pruning rides along inside it — see `publish_task_runtime`; it is done
+        // there rather than at the delete sites because MCP deletes tasks from
+        // another process entirely.
+        if self.should_publish_runtime() {
+            if let Some(db) = &self.state.db {
+                if let Err(e) = db.publish_task_runtime(&runtime_rows) {
+                    tracing::warn!(error = %e, "failed to publish task runtime");
+                }
             }
         }
     }
@@ -8515,6 +8914,12 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        // Stop a server started from the overlay. tmux windows deliberately
+        // outlive agtx; a child server must not, or it holds its port with
+        // nothing on screen owning it. Quitting is the only thing that stops
+        // it — closing the overlay does not.
+        self.state.serve_session = None;
+
         // Deliver what is still queued and stop the broker before the process
         // goes away — the last characters typed into a pane were typed on
         // purpose. Bounded by the queue depth, so quitting stays instant.
@@ -10953,36 +11358,9 @@ fn spawn_send_to_agent(
 const DELIVERY_ATTEMPTS: u32 = 3;
 const DELIVERY_CONFIRM_POLLS: u32 = 10; // x 200ms = 2s
 
-/// Attempts and per-attempt budget for [`submit_message`].
-///
-/// Smaller than the delivery budget on purpose: by the time this runs the text is
-/// known to be in the composer, so this is only absorbing a composer that is still
-/// mid-render, not a session that never attached its stdin.
-const SUBMIT_ATTEMPTS: u32 = 3;
-const SUBMIT_CONFIRM_POLLS: u32 = 5; // x 200ms = 1s
 /// Pane-settle budget before each attempt: 1s of quiet, given up on after 10s.
 const SETTLE_STABLE_POLLS: u32 = 5;
 const SETTLE_MAX_POLLS: u32 = 50;
-
-/// Longest prefix of a message used to confirm it landed on a pane that never
-/// went quiet. Short on purpose: a composer wraps and re-indents what it echoes,
-/// so a long needle straddles a line break and reads as absent.
-const DELIVERY_NEEDLE_CHARS: usize = 16;
-
-/// Whitespace-collapsed prefix of `text`, or `None` when there is nothing
-/// distinctive enough to look for.
-fn delivery_needle(text: &str) -> Option<String> {
-    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let needle: String = flat.chars().take(DELIVERY_NEEDLE_CHARS).collect();
-    (needle.chars().count() >= 4).then_some(needle)
-}
-
-/// Whether `needle` is visible in `pane`, comparing both whitespace-collapsed so
-/// a wrap or re-indent in the composer does not hide it.
-fn pane_shows(pane: &str, needle: &str) -> bool {
-    let flat: String = pane.split_whitespace().collect::<Vec<_>>().join(" ");
-    flat.contains(needle)
-}
 
 /// Wait for the pane to stop changing, up to [`SETTLE_MAX_POLLS`].
 ///
@@ -11026,84 +11404,6 @@ fn wait_for_pane_settled(tmux_ops: &Arc<dyn TmuxOperations>, target: &str) -> bo
 /// Returns whether the message was seen to land. Callers submit either way,
 /// because a false negative (a pane that happened not to redraw) must not
 /// swallow the task.
-/// Lines at the bottom of a pane treated as the composer.
-///
-/// Sized from the worst real layout, not from the composer alone: while the
-/// command picker is open the agent draws its suggestions *below* the composer,
-/// and cursor's footer wraps the worktree path over three more lines. That puts
-/// the text being submitted eight or more lines off the bottom — a snugger
-/// window reads it as already gone and stops pressing Enter after one.
-///
-/// The cost of erring wide is one extra Enter into a composer that already
-/// submitted, which is inert; the cost of erring narrow is a command parked
-/// forever.
-const COMPOSER_TAIL_LINES: usize = 14;
-
-/// Whether the message is still sitting in the composer rather than submitted.
-///
-/// Only the bottom of the pane is examined: after a submit the text moves up into
-/// the scrollback, and finding it *there* is proof it went, not that it stayed.
-fn composer_holds(pane: &str, needle: &str) -> bool {
-    // Trailing blanks first. `capture-pane -p` emits one line per pane *row*, not
-    // per rendered line — verified against tmux 3.5a: a 20-row pane holding one
-    // word comes back as 20 lines, 19 of them empty. Anchoring the window to the
-    // raw end would put it entirely inside that padding whenever the agent's
-    // output has not yet filled the pane, find nothing, and stop pressing Enter
-    // after one — the very park this exists to catch.
-    let mut lines: Vec<&str> = pane.lines().collect();
-    while lines.last().is_some_and(|l| l.trim().is_empty()) {
-        lines.pop();
-    }
-    let start = lines.len().saturating_sub(COMPOSER_TAIL_LINES);
-    pane_shows(&lines[start..].join("\n"), needle)
-}
-
-/// Press Enter until the message actually leaves the composer.
-///
-/// The check is "the text is gone from the composer", not "the pane changed".
-/// A repaint is not a submit: a **bare skill command** — one with no prompt after
-/// it, which is what a phase whose command carries no `{task}`/`{task_id}` sends —
-/// exactly matches a skill name, so the composer's command picker opens *on the
-/// paste*. Enter is then consumed by the picker ("Press enter to insert"), which
-/// inserts the command and repaints. The old change-detector read that repaint as
-/// success and returned, leaving the command parked in the composer forever.
-///
-/// Measured against codex-cli 0.144.5 and cursor-agent 2026.08.25: both open the
-/// picker on a pasted bare command, both need the second Enter, and both run the
-/// skill once it arrives.
-///
-/// Falls back to the change-detector when the text is too short to track, and is
-/// bounded either way — an agent that never submits costs `SUBMIT_ATTEMPTS`
-/// keypresses, not an unbounded stream.
-///
-/// Known cost: agents echo the submitted message into the transcript just above
-/// the composer, so a *successful* submit can leave the needle inside the window
-/// and spend the remaining attempts. Those Enters land in an empty composer,
-/// which is inert — except against a dialog that renders mid-submit, where a bare
-/// Enter picks the highlighted option. `answer_session_dialogs` is what answers
-/// those, and it runs on the refresh loop rather than here.
-fn submit_message(tmux_ops: &Arc<dyn TmuxOperations>, target: &str, text: &str) {
-    let needle = delivery_needle(text);
-    for _ in 0..SUBMIT_ATTEMPTS {
-        let before = tmux_ops.capture_pane(target).unwrap_or_default();
-        let _ = tmux_ops.send_key(target, "Enter");
-        for _ in 0..SUBMIT_CONFIRM_POLLS {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let Ok(now) = tmux_ops.capture_pane(target) else {
-                continue;
-            };
-            match needle.as_deref() {
-                Some(n) if !composer_holds(&now, n) => return,
-                Some(_) => {}
-                // Nothing distinctive enough to look for; the pane moving is all
-                // there is to go on.
-                None if now != before => return,
-                None => {}
-            }
-        }
-    }
-}
-
 fn deliver_message(
     tmux_ops: &Arc<dyn TmuxOperations>,
     target: &str,
@@ -11810,7 +12110,11 @@ fn run_orchestrator_catchup(db: &Database, tasks: &[Task], project_path: Option<
         if existing.contains(&message) {
             continue;
         }
-        let _ = db.create_notification(&crate::db::Notification::new(message));
+        let _ = db.create_notification(&crate::db::Notification::for_task(
+            crate::db::NotificationKind::PhaseCompleted,
+            &task.id,
+            message,
+        ));
     }
 }
 
@@ -14131,3 +14435,41 @@ fn draw_wizard_list(
         );
     }
 }
+
+/// A QR module grid as ratatui lines.
+///
+/// `▀` splits each cell into an upper and a lower module, coloured
+/// independently, so the code is square in a terminal whose cells are about
+/// twice as tall as they are wide — and half as tall as one module per cell.
+///
+/// The colours are set explicitly, not left to the theme: a QR must be
+/// dark-on-light to scan, and most terminals running agtx are the other way
+/// round.
+fn qr_lines(total: usize, dark: &[bool]) -> Vec<Line<'static>> {
+    let at = |x: usize, y: usize| -> bool { y < total && dark[y * total + x] };
+    (0..total)
+        .step_by(2)
+        .map(|row| {
+            let spans: Vec<Span> = (0..total)
+                .map(|x| {
+                    let upper = at(x, row);
+                    let lower = at(x, row + 1);
+                    Span::styled(
+                        "▀",
+                        Style::default()
+                            .fg(if upper { Color::Black } else { Color::White })
+                            .bg(if lower { Color::Black } else { Color::White }),
+                    )
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Narrowest the `W` overlay may be.
+///
+/// Wide enough for its longest sentence: the body is drawn unwrapped, because
+/// wrapping would break the QR's rows, so a narrower box truncates text rather
+/// than reflowing it.
+const MOBILE_POPUP_MIN_WIDTH: u16 = 64;

@@ -28,6 +28,7 @@ pub const HELP: &[HelpSection] = &[
             e("C-f", "Open the task's pane fullscreen"),
             e("d", "Show the task's git diff"),
             e("D", "Dependency graph overlay"),
+            e("W", "Serve the board to a phone, and manage paired devices"),
             e("/", "Search tasks"),
             e("x", "Delete task"),
             e("q", "Quit"),
@@ -96,6 +97,18 @@ pub const HELP: &[HelpSection] = &[
             e("j / k", "Scroll one line"),
             e("C-g / Home", "Jump to the bottom / top"),
             e("? / Esc / q", "Close"),
+        ],
+    },
+    HelpSection {
+        title: "Mobile (W)",
+        entries: &[
+            e("s", "Serve to this wifi — not reachable on mobile data"),
+            e("t", "Serve via your tailnet — anywhere, your devices only"),
+            e("s / t", "While serving, either one stops it"),
+            e("j k  ↓↑", "Select a paired device"),
+            e("x", "Revoke the selected device"),
+            e("r", "Reload the device list"),
+            e("Esc q W", "Close — serving continues"),
         ],
     },
     HelpSection {

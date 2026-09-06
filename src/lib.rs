@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod config;
+pub mod core;
 pub mod db;
 pub mod git;
 pub mod mcp;
@@ -7,6 +8,10 @@ pub mod skills;
 pub mod tmux;
 pub mod tui;
 pub mod update;
+
+/// The HTTP + WebSocket server behind `agtx serve`.
+#[cfg(feature = "serve")]
+pub mod web;
 
 use std::path::PathBuf;
 

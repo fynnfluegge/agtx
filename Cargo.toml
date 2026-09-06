@@ -46,9 +46,21 @@ tracing-appender = "0.2"
 # MCP server
 rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
 
+# Web server for `agtx serve` (feature = "serve"). Optional not for binary size
+# — `tokio` above is unconditional with `features = ["full"]`, so the runtime is
+# paid for either way — but for blast radius: this serves a board that can start
+# agents running with `--dangerously-skip-permissions`, and an opt-in compile is
+# one more step in front of that.
+axum = { version = "0.8", features = ["ws"], optional = true }
+# The pairing QR. `default-features = false` drops `image` and `svg`, which pull
+# in an image codec stack for output this never produces — the only renderer
+# here writes half-blocks to a terminal.
+qrcode = { version = "0.14", default-features = false, optional = true }
+
 [features]
 default = []
 test-mocks = ["dep:mockall"]
+serve = ["dep:axum", "dep:qrcode"]
 
 # Dev tooling for the smoke tests, not part of the shipped binary. Declared with
 # an explicit path so it can live next to its only consumer in tests/smoke/
@@ -63,6 +75,10 @@ path = "tests/smoke/agent_matrix.rs"
 [dev-dependencies]
 tempfile = "3"
 mockall = "0.13"
+# `ServiceExt::oneshot` — drives a `Router` in-process, so the route tests need
+# no listener, no port and no network.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [dependencies.mockall]
 version = "0.13"

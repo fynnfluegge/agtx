@@ -46,8 +46,18 @@ jobs:
       # - name: Clippy
       #   run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Build
+      # Both builds, because the two differ: `serve` is optional and the
+      # default build must keep compiling without it.
+      - name: Build (default)
         run: cargo build --verbose
 
+      - name: Build (serve)
+        run: cargo build --verbose --features serve
+
+      # With `serve`, or the web suite is skipped entirely — its tests are
+      # behind the same feature as the code they cover.
       - name: Run tests
-        run: cargo test --verbose --features test-mocks
+        run: cargo test --verbose --features "serve test-mocks"
+
+      - name: Run web client tests
+        run: node --test tests/web_client_tests.mjs

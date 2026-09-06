@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
             };
             return agtx::mcp::serve(project_path).await;
         }
+        Some("serve") => return run_serve(&args[2..]).await,
         Some("trust") => {
             let project_path = std::env::current_dir()?.canonicalize()?;
             let mut store = config::TrustStore::load().unwrap_or_default();
@@ -170,6 +171,234 @@ fn migrate_old_config(new_path: &std::path::Path) -> bool {
 ///
 /// The dedicated command the header notice points at. `--check` only reports,
 /// and exits 1 when an update is available so it can drive a script.
+/// `agtx serve [path] [--port N] [--host ADDR]`.
+///
+/// Lives in the `mode` match rather than the early fast path beside `hook` and
+/// `--version`: it is long-running and wants the log appender those two skip.
+/// The `cfg(not(...))` arm is not decoration — the match below ends with
+/// `Some(path) => AppMode::Project(...)`, and `serve` is not `--`-prefixed, so
+/// without it a default build would open a directory named `serve` as a project.
+/// What `agtx serve --help` prints.
+///
+/// Hand-written because agtx parses its own arguments; the cost of that is
+/// that `--help` has to be remembered, and forgetting it means the first thing
+/// anyone types at a new subcommand is an error.
+#[cfg(feature = "serve")]
+const SERVE_HELP: &str = "\
+agtx serve — open the board to a phone
+
+USAGE
+  agtx serve [path] [options]
+
+  With no path, every project in the global index is served and the phone picks
+  one. With a path, only that project.
+
+OPTIONS
+  --host <addr>       Bind address. Defaults to 127.0.0.1, which nothing else
+                      can reach; anything wider requires a paired device.
+  --port <n>          Default 8787.
+  --tunnel [private|public]
+                      Reach the board from outside this network. `private`
+                      (the default, and what a bare --tunnel means) is
+                      `tailscale serve`: anywhere, but only devices signed into
+                      your tailnet. `public` is cloudflared or `tailscale
+                      funnel` — the open internet, to anyone with the URL.
+  --devices           List paired devices.
+  --revoke <id>       Revoke one device.
+  --revoke-all        Revoke every device.
+
+PAIRING
+  Off loopback, agtx prints a QR encoding a single-use pairing code. Scanning it
+  exchanges the code for that device's own token, so a lost phone can be revoked
+  without disturbing the rest. Already-paired devices need nothing.
+
+WHAT WORKS WITHOUT A TUI
+  Reading does: the board, task details, diffs and the live agent pane are all
+  served from the databases and tmux directly.
+
+  Acting does not, yet. Moving a task writes a request to a queue that only a
+  running `agtx` drains, so with no TUI open your taps are accepted and then
+  wait. The board says so rather than pretending. Anything that does not need
+  an agent — creating, editing or deleting a Backlog task — takes effect
+  immediately.
+
+  From the TUI, `W` starts this server and shows the QR, so the two are running
+  together by construction.
+";
+
+#[cfg(feature = "serve")]
+async fn run_serve(args: &[String]) -> Result<()> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{SERVE_HELP}");
+        return Ok(());
+    }
+
+    let parsed = parse_serve_args(args)?;
+
+    // Device management runs and exits — it is about the paired devices, not
+    // about serving, and doing it without starting a listener means it works
+    // while a server is already running.
+    if parsed.devices {
+        return list_devices();
+    }
+    if parsed.revoke_all {
+        return revoke_all_devices();
+    }
+    if let Some(id) = parsed.revoke {
+        return revoke_device(&id);
+    }
+
+    agtx::web::serve(parsed.opts).await
+}
+
+#[cfg(not(feature = "serve"))]
+async fn run_serve(_args: &[String]) -> Result<()> {
+    anyhow::bail!(
+        "this agtx was built without the web server. Rebuild with `--features serve` \
+         (the published binaries have it) to use `agtx serve`."
+    )
+}
+
+#[cfg(feature = "serve")]
+struct ParsedServeArgs {
+    opts: agtx::web::ServeOptions,
+    devices: bool,
+    revoke_all: bool,
+    revoke: Option<String>,
+}
+
+/// `agtx serve --devices`
+#[cfg(feature = "serve")]
+fn list_devices() -> Result<()> {
+    let devices = agtx::db::Database::open_global()?.list_mobile_devices()?;
+    if devices.is_empty() {
+        println!("No paired devices. Run `agtx serve --host 0.0.0.0` and scan the QR code.");
+        return Ok(());
+    }
+    println!("{:<38}  {:<24}  {}", "ID", "LABEL", "LAST SEEN");
+    for d in devices {
+        let seen = d
+            .last_seen
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "never".to_string());
+        println!("{:<38}  {:<24}  {}", d.id, d.label, seen);
+    }
+    println!("\nRevoke one with `agtx serve --revoke <ID>`, or all with `--revoke-all`.");
+    Ok(())
+}
+
+/// `agtx serve --revoke <id>`
+#[cfg(feature = "serve")]
+fn revoke_device(id: &str) -> Result<()> {
+    let db = agtx::db::Database::open_global()?;
+    if db.revoke_mobile_device(id)? {
+        println!("Revoked {id}. That device must scan a new QR code to return.");
+    } else {
+        // Distinguished from success so a typo does not read as a revocation
+        // that never happened.
+        anyhow::bail!("no paired device with id {id}; `agtx serve --devices` lists them");
+    }
+    Ok(())
+}
+
+/// `agtx serve --revoke-all`
+#[cfg(feature = "serve")]
+fn revoke_all_devices() -> Result<()> {
+    let removed = agtx::db::Database::open_global()?.revoke_all_mobile_devices()?;
+    match removed {
+        0 => println!("No paired devices to revoke."),
+        1 => println!("Revoked 1 device."),
+        n => println!("Revoked {n} devices."),
+    }
+    Ok(())
+}
+
+/// Parse `serve`'s own arguments.
+///
+/// Deliberately *not* built on the `positional_args` filter above. That filter
+/// drops `--`-prefixed tokens, which leaves a flag's **value** looking exactly
+/// like a positional: `serve --port 8791` would take `8791` as the project
+/// path and fail with "resolving 8791: no such file or directory". A flag that
+/// takes a value has to consume it.
+#[cfg(feature = "serve")]
+fn parse_serve_args(args: &[String]) -> Result<ParsedServeArgs> {
+    let mut opts = agtx::web::ServeOptions::default();
+    let mut devices = false;
+    let mut revoke_all = false;
+    let mut revoke = None;
+    let mut iter = args.iter().peekable();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--port" => {
+                let v = iter
+                    .next()
+                    .context("--port needs a value, e.g. `--port 8787`")?;
+                opts.port = v
+                    .parse()
+                    .with_context(|| format!("--port expects a number, got {v:?}"))?;
+            }
+            "--host" => {
+                let v = iter
+                    .next()
+                    .context("--host needs a value, e.g. `--host 127.0.0.1`")?;
+                opts.host = v
+                    .parse()
+                    .with_context(|| format!("--host expects an IP address, got {v:?}"))?;
+            }
+            "--tunnel" => {
+                // A bare `--tunnel` means private. `public` is never inferred:
+                // the difference is a tailnet versus the open internet, and it
+                // has to be a thing someone typed.
+                let scope = match iter.peek() {
+                    Some(next) if !next.starts_with("--") => {
+                        let v = iter.next().unwrap();
+                        agtx::web::tunnel::TunnelScope::parse(v).with_context(|| {
+                            format!("--tunnel takes `private` or `public`, got {v:?}")
+                        })?
+                    }
+                    _ => agtx::web::tunnel::TunnelScope::Private,
+                };
+                opts.tunnel = Some(scope);
+            }
+            "--pair-code" => {
+                opts.pair_code = Some(iter.next().context("--pair-code needs a value")?.clone())
+            }
+            // Set by the `W` overlay so the TUI can drop this session's
+            // pairings if the child is killed before it cleans up after
+            // itself. Not for humans; a standalone serve mints its own.
+            "--session-id" => {
+                opts.session_id = Some(iter.next().context("--session-id needs a value")?.clone())
+            }
+            "--devices" => devices = true,
+            "--revoke-all" => revoke_all = true,
+            "--revoke" => {
+                revoke = Some(
+                    iter.next()
+                        .context("--revoke needs a device id; see `agtx serve --devices`")?
+                        .clone(),
+                )
+            }
+            other if other.starts_with("--") => {
+                anyhow::bail!("unknown option for `agtx serve`: {other}. Try `agtx serve --help`.")
+            }
+            path => {
+                if opts.project_path.is_some() {
+                    anyhow::bail!("`agtx serve` takes at most one project path, got {path:?}");
+                }
+                opts.project_path = Some(PathBuf::from(path));
+            }
+        }
+    }
+
+    Ok(ParsedServeArgs {
+        opts,
+        devices,
+        revoke_all,
+        revoke,
+    })
+}
+
 fn run_update(args: &[String]) -> Result<()> {
     use agtx::update;
 
