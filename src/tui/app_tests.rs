@@ -1015,6 +1015,50 @@ fn the_interval_becomes_a_rate_limit_under_push() {
 }
 
 #[test]
+fn the_rate_limit_holds_against_a_paint_and_yields_to_a_keystroke() {
+    use std::time::{Duration, Instant};
+    // A paint is the thing being rate-limited, so it must not end the wait.
+    // `wait_timeout` returns on *any* notification and the condvar is shared
+    // with `mark_output`, so the ceiling only holds if the wait is resumed for
+    // the remainder — otherwise a pane painting flat out drives one capture per
+    // notification, which is what `PANE_OUTPUT_MIN_INTERVAL` exists to stop.
+    let ceiling = Duration::from_millis(150);
+    let watch = Arc::new(PaneWatch::default());
+    watch.set_pane_id(Some("%1".to_string()));
+    let painter = Arc::clone(&watch);
+    std::thread::spawn(move || {
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(10));
+            painter.mark_output("%1");
+        }
+    });
+    let start = Instant::now();
+    assert_eq!(watch.wait_out_rate_limit(ceiling), Some(false));
+    assert!(
+        start.elapsed() >= ceiling,
+        "a paint released the ceiling after {:?}",
+        start.elapsed()
+    );
+
+    // A keystroke does end it: the user's own echo is what the fast floor is
+    // for, and holding the agent's ceiling against it would delay every first
+    // character typed after a pause.
+    let watch = Arc::new(PaneWatch::default());
+    let typist = Arc::clone(&watch);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(10));
+        typist.poke();
+    });
+    let start = Instant::now();
+    assert_eq!(watch.wait_out_rate_limit(Duration::from_secs(5)), Some(true));
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "a keystroke waited {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn output_is_sampled_slower_than_a_keystroke_echo() {
     use std::time::Duration;
     // The two reasons to capture deserve different answers. One shared ceiling
