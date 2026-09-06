@@ -9916,18 +9916,35 @@ impl PaneWatch {
     /// Same reasoning as [`wait_for_change`](Self::wait_for_change): the guard
     /// stays inside the call. A plain sleep would be simpler and wrong — it would
     /// hold the ceiling meant for the agent's paints against the user's own echo.
+    ///
+    /// **It has to resume the wait**, which a single `wait_timeout` does not: the
+    /// condvar is shared with [`mark_output`](Self::mark_output), so a paint
+    /// notifies it, and returning there releases the ceiling to the very thing
+    /// it is a ceiling *on*. A pane painting flat out then drives one capture per
+    /// notification — exactly what [`PANE_OUTPUT_MIN_INTERVAL`] exists to stop —
+    /// and no wait longer than the gap between two paints is ever served.
     fn wait_out_rate_limit(&self, wait: std::time::Duration) -> Option<bool> {
-        let Ok(state) = self.inner.lock() else {
+        let deadline = Instant::now() + wait;
+        let Ok(mut state) = self.inner.lock() else {
             return None;
         };
         let before = state.poke;
-        let Ok((state, _)) = self.cv.wait_timeout(state, wait) else {
-            return None;
-        };
-        if state.stopped {
-            return None;
+        loop {
+            if state.stopped {
+                return None;
+            }
+            if state.poke != before {
+                return Some(true);
+            }
+            // `None` once the deadline is behind us: the ceiling has been served.
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Some(false);
+            };
+            let Ok((next, _)) = self.cv.wait_timeout(state, remaining) else {
+                return None;
+            };
+            state = next;
         }
-        Some(state.poke != before)
     }
 
     fn set_pane_id(&self, pane_id: Option<String>) {
