@@ -56,9 +56,9 @@
 <a href="https://github.com/google-gemini/gemini-cli"><kbd><img src="docs/logos/gemini.svg" width="18" valign="middle" /> Gemini CLI</kbd></a>
 <a href="https://github.com/github/copilot-cli"><kbd><img src="docs/logos/copilot-dark.svg" width="18" valign="middle" /> Copilot</kbd></a>
 <a href="https://github.com/earendil-works/pi"><kbd><img src="docs/logos/pi-dark.svg" width="18" valign="middle" /> pi</kbd></a>
-- **Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Gemini for research, Claude for implementation, Codex for review — with automatic agent switching.
-- **Multi-project dashboard**: Manage agent sessions across all projects via a single TUI.
-- **Parallel execution**: Every task gets its own git worktree and tmux window — run as many agents as needed, simultaneously.
+- **Parallel Multi-agent task lifecycle**: Configure different agents per workflow phase — e.g. Grok for research, Claude for implementation, Codex for review — with automatic agent switching and context handover.
+- **Multi-project Kanban board**: Manage agent sessions across all projects via a single TUI without leaving your terminal.
+- **Vim-native Keybindings**: Control the board and agent sessions with your Vim-powered muscle memory.
 - **Orchestrator agent (experimental)**: A dedicated agent that autonomously manages your kanban board via MCP — delegates to coding agents, advances phases, checks for merge conflicts.
 - **Brainstorm & Sweep skills**: Capture ideas and push them to the board from any coding agent session — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to decompose and create tasks with one confirmation step.
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) and more — fully customizable. Ddefine your own workflow via a single TOML file. See <a href="#plugins">Plugins</a> how to create a plugin.
@@ -68,8 +68,65 @@
 >
 > Choose the **`void` plugin** and enjoy agtx as a batteries included multi-agent session-manager.
 
-> [!TIP]
-> Check out the [Contributing](#contributing) section or have a look at [`good first issues`](https://github.com/fynnfluegge/agtx/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) to get involved and become a contributor ⭐️
+## Quick Start
+
+```bash
+# Install
+curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh | bash
+
+```bash
+# Run in any git repository
+cd your-project && agtx
+
+# Dashboard mode — manage all projects from any directory
+agtx -g
+
+# Drive the board from your phone — press W in the TUI, or:
+agtx serve --tunnel
+
+# Orchestrator mode — let an AI manage the board for you
+agtx --experimental
+```
+
+> [!NOTE]
+> Add `.agtx/` to your project's `.gitignore` to avoid committing worktrees and local task data.
+
+```bash
+# Install from source — `serve` adds the mobile board (`W`), and the
+# published binaries are built with it
+cargo build --release --features serve
+cp target/release/agtx ~/.local/bin/
+```
+
+### Updating
+
+agtx checks GitHub once a day for a newer release and shows `⬆ 0.2.8 [u]` in the
+board header when there is one. Press **`u`** for the details and one key to
+install it, or from a shell:
+
+```bash
+agtx update          # download, verify and replace this binary in place
+agtx update --check  # report only; exits 1 when an update is available
+agtx --version
+```
+
+The running agtx keeps the old binary until you restart it; open tmux sessions
+and their agents are untouched.
+
+To never check, set `update_check = false` in `~/.config/agtx/config.toml`, or
+export `AGTX_NO_UPDATE_CHECK=1` for a single run (CI, containers). To pin or roll
+back to a specific release, re-run the installer with `AGTX_VERSION`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh \
+  | AGTX_VERSION=v0.2.6 bash
+```
+
+### Requirements
+
+- **tmux** — agent sessions run in a dedicated tmux server
+- **gh** (optional) — GitHub CLI for PR operations
+
 
 ## Why agtx? - The blackboard model
 
@@ -114,65 +171,6 @@ Review or Done, then carries the relevant diffs and artifacts into the dependent
 | **Knowledge sources** — independent specialists that never talk to each other, only to the board | Eight coding agent CLIs, each running in its **own git worktree and tmux window**. No agent can see another's context — they exchange only what lands on the board |
 | **Control shell** — decides opportunistically which specialist runs next | Plugin phase gates determine when a task can advance; the dependency graph determines which tasks are ready to start; and the [orchestrator agent](#orchestrator-agent-experimental) coordinates the board over MCP |
 
-## Quick Start
-
-```bash
-# Install
-curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh | bash
-
-# Run in any git repository
-cd your-project && agtx
-```
-
-```bash
-# Dashboard mode — manage all projects
-agtx -g
-
-# Orchestrator mode — let an AI manage the board for you
-agtx --experimental
-
-# Drive the board from your phone — press W in the TUI, or:
-agtx serve --tunnel
-```
-
-> [!NOTE]
-> Add `.agtx/` to your project's `.gitignore` to avoid committing worktrees and local task data.
-
-```bash
-# Install from source — `serve` adds the mobile board (`W`), and the
-# published binaries are built with it
-cargo build --release --features serve
-cp target/release/agtx ~/.local/bin/
-```
-
-### Updating
-
-agtx checks GitHub once a day for a newer release and shows `⬆ 0.2.8 [u]` in the
-board header when there is one. Press **`u`** for the details and one key to
-install it, or from a shell:
-
-```bash
-agtx update          # download, verify and replace this binary in place
-agtx update --check  # report only; exits 1 when an update is available
-agtx --version
-```
-
-The running agtx keeps the old binary until you restart it; open tmux sessions
-and their agents are untouched.
-
-To never check, set `update_check = false` in `~/.config/agtx/config.toml`, or
-export `AGTX_NO_UPDATE_CHECK=1` for a single run (CI, containers). To pin or roll
-back to a specific release, re-run the installer with `AGTX_VERSION`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh \
-  | AGTX_VERSION=v0.2.6 bash
-```
-
-### Requirements
-
-- **tmux** — agent sessions run in a dedicated tmux server
-- **gh** (optional) — GitHub CLI for PR operations
 
 ## Usage
 
