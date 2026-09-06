@@ -7,9 +7,8 @@
 
 <div align="left">
     
->
-> **Let different coding agents collaborate** autonomously on the same task with automatic session switching and context awareness.  
-> **A blackboard for coding agents** - One shared board. A fleet of agents. Add tasks, delegate to multiple coding agents running in parallel.
+> **A blackboard for coding agents** - One shared board. A fleet of agents. Add tasks, delegate to multiple coding agents running in parallel.  
+> **Let different coding agents and models collaborate** on the same task with automatic session switching and context awareness, e.g. Codex -> planning, Claude -> implementing, Grok -> review.
 > **Capture ideas without leaving your session** — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to push the conversation to the board as tasks in one step.
 
 </div>
