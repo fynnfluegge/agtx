@@ -38,21 +38,7 @@ async fn require_token(
     // handler: `WebSocketUpgrade` is an extractor, so a handler-side check runs
     // only after the upgrade has been accepted, and an exemption in this layer
     // to let that happen is an open socket for as long as anyone forgets why.
-    let headers = req.headers();
-    let presented = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .or_else(|| {
-            headers
-                .get(header::SEC_WEBSOCKET_PROTOCOL)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| {
-                    v.split(',')
-                        .map(str::trim)
-                        .find_map(|p| p.strip_prefix(super::auth::WS_TOKEN_PREFIX))
-                })
-        });
+    let presented = super::auth::presented_token(req.headers());
 
     if state.token_ok(presented) {
         next.run(req).await

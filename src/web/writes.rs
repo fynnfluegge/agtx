@@ -71,6 +71,33 @@ pub async fn task_action(
         ActionRefusal::NotPermitted(m) => ApiError::Conflict(m),
     })?;
 
+    // Refuse before queueing so the phone can show the reason immediately.
+    // The TUI checks again at execution time because the agent may keep writing.
+    if body.action == "move_to_done" {
+        if let Some(worktree) = task.worktree_path.clone() {
+            let dirty = tokio::task::spawn_blocking(move || {
+                let output = std::process::Command::new("git")
+                    .current_dir(&worktree)
+                    .args(["status", "--porcelain"])
+                    .output()
+                    .map_err(|e| ApiError::Internal(format!("checking worktree: {e}")))?;
+                if !output.status.success() {
+                    return Err(ApiError::Conflict(
+                        "Cannot verify that the worktree is clean; completion is blocked.".into(),
+                    ));
+                }
+                Ok(!output.stdout.is_empty())
+            })
+            .await
+            .map_err(|e| ApiError::Internal(format!("checking worktree: {e}")))??;
+            if dirty {
+                return Err(ApiError::Conflict(
+                    "Uncommitted changes prevent moving this task to Done. Commit or resolve them first.".into(),
+                ));
+            }
+        }
+    }
+
     let mut req = TransitionRequest::new(&tid, &body.action);
     req.reason = body.reason.clone();
     let request_id = req.id.clone();

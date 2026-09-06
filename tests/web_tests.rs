@@ -1,7 +1,7 @@
 //! Route tests for `agtx serve`.
 //!
-//! Driven through `tower`'s `oneshot`, so there is no listener, no port and no
-//! network — the `Router` is exercised exactly as `axum::serve` would call it.
+//! Most tests use `tower`'s `oneshot` without a listener. The revocation
+//! regression uses an ephemeral loopback listener to exercise existing sockets.
 //!
 //! These run only with `--features serve`; the whole module compiles away
 //! otherwise, the same way the server does.
@@ -2012,4 +2012,136 @@ async fn only_a_board_request_counts_as_watching() {
         !db.board_watched_recently(&path, window).unwrap(),
         "a non-board read switched publishing on"
     );
+}
+
+/// Real upgrades exercise the running socket, not just the HTTP auth gate.
+#[tokio::test]
+async fn revoking_a_device_closes_its_existing_socket_only() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{timeout, Duration};
+    let f = fixture();
+    let lost = paired_token("Lost phone");
+    let kept = paired_token("Kept phone");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = agtx::web::routes::router(guarded(&f));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    async fn connect(address: std::net::SocketAddr, token: &str) -> tokio::net::TcpStream {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!("GET /ws HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: agtx.token.{token}\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            response.push(stream.read_u8().await.unwrap());
+        }
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 101"));
+        stream
+    }
+    let mut lost_socket = timeout(Duration::from_secs(3), connect(address, &lost))
+        .await
+        .unwrap();
+    let mut kept_socket = timeout(Duration::from_secs(3), connect(address, &kept))
+        .await
+        .unwrap();
+    let device = agtx::web::auth::device_for_token(&lost).unwrap();
+    Database::open_global()
+        .unwrap()
+        .revoke_mobile_device(&device.id)
+        .unwrap();
+    // An idle socket must be closed too: no new request triggers this check.
+    let opcode = timeout(Duration::from_secs(3), lost_socket.read_u8())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(opcode & 0x0f, 8, "expected a WebSocket close frame");
+    // A masked ping verifies the other connection is still usable.
+    kept_socket
+        .write_all(&[0x89, 0x80, 0, 0, 0, 0])
+        .await
+        .unwrap();
+    let opcode = timeout(Duration::from_secs(3), kept_socket.read_u8())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        opcode & 0x0f,
+        10,
+        "expected a pong from the retained device"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn completion_refuses_dirty_worktrees_without_queueing() {
+    let f = fixture();
+    let mut task = add_task(&f, "Dirty review", TaskStatus::Review);
+    task.worktree_path = Some(f.project_path.to_string_lossy().into_owned());
+    let db = Database::open_project(&f.project_path).unwrap();
+    db.update_task(&task).unwrap();
+    // Tracked, staged and untracked changes must all block completion.
+    for kind in ["tracked", "staged", "untracked"] {
+        if kind == "untracked" {
+            std::fs::write(f.project_path.join("new.txt"), "new work").unwrap();
+        } else {
+            std::fs::write(f.project_path.join("a.txt"), "unfinished work").unwrap();
+            if kind == "staged" {
+                assert!(std::process::Command::new("git")
+                    .current_dir(&f.project_path)
+                    .args(["add", "a.txt"])
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+        }
+        let (status, body) = send(
+            state_for(&f, ServeMode::Global),
+            "POST",
+            &format!("/api/projects/{}/tasks/{}/action", f.project_id, task.id),
+            Some(serde_json::json!({ "action": "move_to_done" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{kind}");
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Uncommitted changes"));
+        assert!(db.get_pending_transition_requests().unwrap().is_empty());
+        // Restore only the tracked test file before the next variant.
+        assert!(std::process::Command::new("git")
+            .current_dir(&f.project_path)
+            .args([
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "a.txt"
+            ])
+            .status()
+            .unwrap()
+            .success());
+    }
+    assert_eq!(
+        db.get_task(&task.id).unwrap().unwrap().status,
+        TaskStatus::Review
+    );
+}
+
+#[tokio::test]
+async fn completion_allows_a_clean_worktree() {
+    let f = fixture();
+    let mut task = add_task(&f, "Clean review", TaskStatus::Review);
+    task.worktree_path = Some(f.project_path.to_string_lossy().into_owned());
+    let db = Database::open_project(&f.project_path).unwrap();
+    db.update_task(&task).unwrap();
+    let (status, _) = send(
+        state_for(&f, ServeMode::Global),
+        "POST",
+        &format!("/api/projects/{}/tasks/{}/action", f.project_id, task.id),
+        Some(serde_json::json!({ "action": "move_to_done" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(db.get_pending_transition_requests().unwrap().len(), 1);
 }

@@ -269,3 +269,22 @@ pub fn migrate_legacy_token(session_id: Option<&str>) -> Result<Option<String>> 
     let _ = std::fs::remove_file(&path);
     Ok(Some(token))
 }
+
+/// Shared by the HTTP gate and the socket's ongoing authorization checks.
+pub fn presented_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    use axum::http::header;
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| {
+            headers
+                .get(header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .find_map(|p| p.strip_prefix(WS_TOKEN_PREFIX))
+                })
+        })
+}

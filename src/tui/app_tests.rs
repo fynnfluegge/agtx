@@ -15907,3 +15907,77 @@ fn test_a_build_without_the_server_says_how_to_get_one() {
     }
 }
 
+#[test]
+#[cfg(feature = "test-mocks")]
+fn queued_completion_refuses_dirty_worktree() {
+    for action in ["move_to_done", "move_forward"] {
+        let mut git = MockGitOperations::new();
+        git.expect_has_changes().times(1).returning(|_| true);
+        // No kill/remove expectations: either side effect would fail the test.
+        let mut app = App::new_for_test(
+            Some(PathBuf::from("/tmp/test-project")),
+            Arc::new(MockTmuxOperations::new()),
+            Arc::new(git),
+            Arc::new(MockGitProviderOperations::new()),
+            Arc::new(MockAgentRegistry::new()),
+        )
+        .unwrap();
+        let mut task = Task::new("Dirty review", "claude", "test-project");
+        task.status = TaskStatus::Review;
+        task.worktree_path = Some("/tmp/test-project/worktree".into());
+        task.session_name = Some("session:task".into());
+        let db = app.state.db.as_ref().unwrap();
+        db.create_task(&task).unwrap();
+        let req = crate::db::TransitionRequest::new(&task.id, action);
+        db.create_transition_request(&req).unwrap();
+        app.process_transition_requests().unwrap();
+        let db = app.state.db.as_ref().unwrap();
+        let saved = db.get_task(&task.id).unwrap().unwrap();
+        assert_eq!(saved.status, TaskStatus::Review);
+        assert_eq!(saved.worktree_path, task.worktree_path);
+        assert_eq!(saved.session_name, task.session_name);
+        let result = db.get_transition_request(&req.id).unwrap().unwrap();
+        assert!(result.error.unwrap().contains("Uncommitted changes"));
+    }
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn queued_completion_allows_clean_worktree() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut git = MockGitOperations::new();
+    git.expect_has_changes().times(1).returning(|_| false);
+    git.expect_remove_worktree()
+        .times(1)
+        .returning(move |_, _| {
+            tx.send(()).unwrap();
+            Ok(())
+        });
+    let mut app = App::new_for_test(
+        Some(PathBuf::from("/tmp/test-project")),
+        Arc::new(MockTmuxOperations::new()),
+        Arc::new(git),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap();
+    let mut task = Task::new("Clean completion", "claude", "test-project");
+    task.status = TaskStatus::Review;
+    task.worktree_path = Some("/tmp/test-project/worktree".into());
+    let db = app.state.db.as_ref().unwrap();
+    db.create_task(&task).unwrap();
+    let req = crate::db::TransitionRequest::new(&task.id, "move_to_done");
+    db.create_transition_request(&req).unwrap();
+    app.process_transition_requests().unwrap();
+    rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+    let db = app.state.db.as_ref().unwrap();
+    let saved = db.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(saved.status, TaskStatus::Done);
+    assert!(saved.worktree_path.is_none());
+    assert!(db
+        .get_transition_request(&req.id)
+        .unwrap()
+        .unwrap()
+        .error
+        .is_none());
+}

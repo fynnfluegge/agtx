@@ -102,16 +102,29 @@ pub async fn handler(
         Some(proto) => ws.protocols([proto]),
         None => ws,
     };
-    upgrade.on_upgrade(move |socket| run(socket, state))
+    let token = super::auth::presented_token(&headers).map(str::to_owned);
+    upgrade.on_upgrade(move |socket| run(socket, state, token))
 }
 
-async fn run(mut socket: WebSocket, state: Arc<ServerState>) {
+async fn run(mut socket: WebSocket, state: Arc<ServerState>, token: Option<String>) {
+    let mut auth_tick = interval(Duration::from_secs(1));
     let mut sub: Option<Subscription> = None;
     let mut ticker = interval(FRAME_INTERVAL);
     let mut last_sent: Option<String> = None;
 
     loop {
         tokio::select! {
+            // Check even idle/unsubscribed sockets. Removing a device from
+            // SQLite must also end connections established before revocation.
+            _ = auth_tick.tick() => {
+                if !state.token_ok(token.as_deref()) {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(1), socket.send(Message::Close(None)),
+                    ).await;
+                    break;
+                }
+            }
+
             // A client message. `None` is a closed socket.
             incoming = socket.recv() => {
                 match incoming {
@@ -181,7 +194,18 @@ async fn run(mut socket: WebSocket, state: Arc<ServerState>) {
 
 async fn send(socket: &mut WebSocket, msg: &ServerMessage<'_>) -> Result<(), axum::Error> {
     let text = serde_json::to_string(msg).unwrap_or_else(|_| "{}".to_string());
-    socket.send(Message::Text(text.into())).await
+    match tokio::time::timeout(
+        Duration::from_secs(1),
+        socket.send(Message::Text(text.into())),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(axum::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "websocket send timed out",
+        ))),
+    }
 }
 
 /// What a socket needs to capture one pane, resolved once at subscribe time

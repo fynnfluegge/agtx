@@ -7544,6 +7544,19 @@ impl App {
             .get_task(&req.task_id)?
             .ok_or_else(|| anyhow::anyhow!("Task not found: {}", req.task_id))?;
 
+        // Recheck when the queue is drained: an agent may have written more
+        // work since the phone rendered the card or submitted the request.
+        // Include move_forward so stale/legacy requests cannot bypass this.
+        if task.status == TaskStatus::Review
+            && matches!(req.action.as_str(), "move_to_done" | "move_forward")
+            && task
+                .worktree_path
+                .as_ref()
+                .is_some_and(|wt| self.state.git_ops.has_changes(Path::new(wt)))
+        {
+            anyhow::bail!("Uncommitted changes prevent moving this task to Done. Commit or resolve them first.");
+        }
+
         // Block forward transitions when dependencies are not satisfied
         let is_forward = matches!(
             req.action.as_str(),

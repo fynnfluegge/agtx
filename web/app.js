@@ -175,9 +175,8 @@ function sheet(title, ...rows) {
 ///
 /// The row lands in `transition_requests` and a TUI executes it later, so there
 /// is nothing to await: the card is marked pending immediately and the next
-/// poll shows the real state. `undo` is offered only while the request is still
-/// pending — once a TUI has picked it up there is nothing to take back, and a
-/// button that silently does nothing is worse than no button.
+/// refresh shows the real state. Failed transitions report their error when
+/// the board reconciles the queued request.
 async function runAction(pid, task, action) {
   closeOverlay();
   const label = ACTION_LABELS[action] || action;
@@ -191,7 +190,6 @@ async function runAction(pid, task, action) {
     pending.set(task.id, { pid, status: task.status, label, rid: res.request_id });
     toast(
       res.tui_connected ? `${label}: queued` : `${label}: queued — no agtx running`,
-      { undo: () => cancelAction(pid, task.id, res.request_id) },
     );
   } catch (e) {
     // Roll back: the server refused, so nothing is queued and the card must
@@ -199,23 +197,6 @@ async function runAction(pid, task, action) {
     pending.delete(task.id);
     currentRender && currentRender();
     toast(e.message, { bad: true, ms: 7000 });
-  }
-}
-
-/// There is no "cancel a transition request" endpoint, so undo is honest about
-/// what it can do: it reports whether the request had already been picked up.
-/// Inventing a cancel would mean racing the TUI for a row it may already be
-/// acting on.
-async function cancelAction(pid, tid, rid) {
-  try {
-    const status = await api.requestStatus(pid, rid);
-    if (status.status === "pending") {
-      toast("Still queued — cancel it from the desktop board.", { ms: 6000 });
-    } else {
-      toast("Too late: agtx already ran it.", { ms: 6000 });
-    }
-  } catch {
-    toast("Too late: agtx already ran it.", { ms: 6000 });
   }
 }
 
