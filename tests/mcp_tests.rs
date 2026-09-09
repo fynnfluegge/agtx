@@ -565,3 +565,142 @@ fn test_send_to_task_requires_active_phase() {
         );
     }
 }
+
+// === Local integration action ===
+
+fn review_task() -> Task {
+    let mut t = Task::new("Add the thing", "claude", "p1");
+    t.status = TaskStatus::Review;
+    t
+}
+
+/// Merging into the project's own checkout is the unattended caller's path to
+/// Done. A person lands the same work by merging the PR on the remote, so
+/// offering them both would be two ways to land one branch.
+#[test]
+fn local_merge_is_offered_to_the_orchestrator_and_not_to_a_person() {
+    use agtx::core::actions::{allowed_actions, CallerKind};
+
+    let task = review_task();
+    let orchestrator = allowed_actions(&task, true, CallerKind::Orchestrator);
+    let human = allowed_actions(&task, true, CallerKind::Human);
+
+    assert!(orchestrator.contains(&"move_to_done_and_merge".to_string()));
+    assert!(!human.contains(&"move_to_done_and_merge".to_string()));
+    // It is an addition, not a replacement: a caller that does its integration
+    // elsewhere still reaches Done the plain way.
+    assert!(orchestrator.contains(&"move_to_done".to_string()));
+    assert!(human.contains(&"move_to_done".to_string()));
+}
+
+#[test]
+fn local_merge_is_only_valid_from_review() {
+    use agtx::core::actions::{validate_action, CallerKind};
+
+    let task = review_task();
+    assert!(validate_action(&task, true, CallerKind::Orchestrator, "move_to_done_and_merge").is_ok());
+
+    for status in [
+        TaskStatus::Backlog,
+        TaskStatus::Planning,
+        TaskStatus::Running,
+        TaskStatus::Done,
+    ] {
+        let mut t = review_task();
+        t.status = status;
+        assert!(
+            validate_action(&t, true, CallerKind::Orchestrator, "move_to_done_and_merge").is_err(),
+            "should be refused from {}",
+            status.as_str()
+        );
+    }
+}
+
+/// The verb has to be in `ACTIONS` or `move_task` rejects it as unknown before
+/// it ever reaches the executor.
+#[test]
+fn local_merge_is_a_known_action() {
+    assert!(agtx::core::actions::ACTIONS.contains(&"move_to_done_and_merge"));
+}
+
+// === Reclaiming a dead instance's claims ===
+
+/// A Backlog transition is claimed when picked up but only *marked* once the
+/// serialized setup slot frees up and it actually starts. A TUI that exits in
+/// between strands it: the row is claimed, so `get_pending_transition_requests`
+/// filters it out and no restarted TUI ever runs it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_dead_instance_claim_is_reclaimed_and_becomes_pending_again() {
+    let db = Database::open_in_memory_project().unwrap();
+    let req = TransitionRequest::new("task-1", "move_to_planning");
+    db.create_transition_request(&req).unwrap();
+    assert!(db.claim_transition_request(&req.id, "dead-instance").unwrap());
+    assert!(
+        db.get_pending_transition_requests().unwrap().is_empty(),
+        "a claimed row is invisible to the drain — that is what strands it"
+    );
+
+    // Zero window: everything not held by this instance is fair game.
+    let n = db
+        .reclaim_stale_transition_requests("live-instance", chrono::Duration::zero())
+        .unwrap();
+
+    assert_eq!(n, 1);
+    let pending = db.get_pending_transition_requests().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, req.id);
+}
+
+/// This instance's own claims are its in-memory queue. Reclaiming them would
+/// have it race itself and set the same worktree up twice.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn an_instance_never_reclaims_its_own_claims() {
+    let db = Database::open_in_memory_project().unwrap();
+    let req = TransitionRequest::new("task-1", "move_to_planning");
+    db.create_transition_request(&req).unwrap();
+    db.claim_transition_request(&req.id, "me").unwrap();
+
+    let n = db
+        .reclaim_stale_transition_requests("me", chrono::Duration::zero())
+        .unwrap();
+
+    assert_eq!(n, 0);
+    assert!(db.get_pending_transition_requests().unwrap().is_empty());
+}
+
+/// The age window is what keeps a *live* second instance's genuine backlog out
+/// of reach — a queued task waits out every setup ahead of it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_recent_claim_is_left_alone() {
+    let db = Database::open_in_memory_project().unwrap();
+    let req = TransitionRequest::new("task-1", "move_to_planning");
+    db.create_transition_request(&req).unwrap();
+    db.claim_transition_request(&req.id, "other-instance").unwrap();
+
+    let n = db
+        .reclaim_stale_transition_requests("me", chrono::Duration::minutes(5))
+        .unwrap();
+
+    assert_eq!(n, 0, "claimed seconds ago — the other instance may be alive");
+}
+
+/// A processed row is finished, whoever claimed it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_processed_request_is_not_reclaimed() {
+    let db = Database::open_in_memory_project().unwrap();
+    let req = TransitionRequest::new("task-1", "move_to_planning");
+    db.create_transition_request(&req).unwrap();
+    db.claim_transition_request(&req.id, "dead-instance").unwrap();
+    db.mark_transition_processed(&req.id, None).unwrap();
+
+    let n = db
+        .reclaim_stale_transition_requests("me", chrono::Duration::zero())
+        .unwrap();
+
+    assert_eq!(n, 0);
+    assert!(db.get_pending_transition_requests().unwrap().is_empty());
+}

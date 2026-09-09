@@ -852,3 +852,258 @@ fn test_initialize_worktree_symlink_traversal_blocked() {
         assert!(warnings[0].contains("outside project root"));
     }
 }
+
+// =============================================================================
+// merge_task_branch — integrating a task branch into its base
+// =============================================================================
+
+/// Commit `content` to `file` on a branch cut from `base`, then return to base.
+fn commit_on_branch(repo: &std::path::Path, branch: &str, file: &str, content: &str, base: &str) {
+    Command::new("git")
+        .current_dir(repo)
+        .args(["checkout", "-q", "-b", branch, base])
+        .output()
+        .unwrap();
+    std::fs::write(repo.join(file), content).unwrap();
+    Command::new("git")
+        .current_dir(repo)
+        .args(["add", "."])
+        .output()
+        .unwrap();
+    Command::new("git")
+        .current_dir(repo)
+        .args(["commit", "-q", "-m", &format!("work on {branch}")])
+        .output()
+        .unwrap();
+    Command::new("git")
+        .current_dir(repo)
+        .args(["checkout", "-q", base])
+        .output()
+        .unwrap();
+}
+
+fn head_message(repo: &std::path::Path) -> String {
+    let out = Command::new("git")
+        .current_dir(repo)
+        .args(["log", "-1", "--pretty=%s"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn merging_a_clean_branch_lands_a_merge_commit() {
+    let temp = setup_git_repo();
+    let repo = temp.path();
+    commit_on_branch(repo, "task/feature", "feature.txt", "hello", "main");
+
+    let outcome =
+        git::merge_task_branch(repo, "main", "task/feature", "Merge task 'feature'").unwrap();
+
+    assert_eq!(outcome, git::MergeOutcome::Merged);
+    assert!(repo.join("feature.txt").exists());
+    assert_eq!(head_message(repo), "Merge task 'feature'");
+}
+
+#[test]
+fn conflicting_branches_are_reported_without_touching_the_checkout() {
+    let temp = setup_git_repo();
+    let repo = temp.path();
+
+    // Both sides edit the same file, from the same starting point.
+    commit_on_branch(repo, "task/feature", "README.md", "# From the task", "main");
+    std::fs::write(repo.join("README.md"), "# From main").unwrap();
+    Command::new("git")
+        .current_dir(repo)
+        .args(["commit", "-qam", "diverge on main"])
+        .output()
+        .unwrap();
+    let before = head_message(repo);
+
+    let outcome = git::merge_task_branch(repo, "main", "task/feature", "merge").unwrap();
+
+    match outcome {
+        git::MergeOutcome::Conflicts(files) => assert_eq!(files, vec!["README.md".to_string()]),
+        other => panic!("expected conflicts, got {other:?}"),
+    }
+
+    // Nothing was attempted, so no merge is left half-finished for the user to
+    // find: the checkout is exactly where it was.
+    assert_eq!(head_message(repo), before);
+    assert!(!repo.join(".git").join("MERGE_HEAD").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.join("README.md")).unwrap(),
+        "# From main"
+    );
+}
+
+#[test]
+fn merging_is_refused_when_the_checkout_is_on_another_branch() {
+    let temp = setup_git_repo();
+    let repo = temp.path();
+    commit_on_branch(repo, "task/feature", "feature.txt", "hello", "main");
+    Command::new("git")
+        .current_dir(repo)
+        .args(["checkout", "-q", "-b", "somewhere-else"])
+        .output()
+        .unwrap();
+
+    let outcome = git::merge_task_branch(repo, "main", "task/feature", "merge").unwrap();
+
+    match outcome {
+        git::MergeOutcome::Refused(why) => {
+            assert!(why.contains("somewhere-else"), "{why}");
+            assert!(why.contains("main"), "{why}");
+        }
+        other => panic!("expected refusal, got {other:?}"),
+    }
+    // The merge must not have happened on the branch that *was* checked out.
+    assert!(!repo.join("feature.txt").exists());
+}
+
+#[test]
+fn merging_is_refused_when_the_checkout_has_uncommitted_changes() {
+    let temp = setup_git_repo();
+    let repo = temp.path();
+    commit_on_branch(repo, "task/feature", "feature.txt", "hello", "main");
+    std::fs::write(repo.join("README.md"), "edited by the user").unwrap();
+
+    let outcome = git::merge_task_branch(repo, "main", "task/feature", "merge").unwrap();
+
+    match outcome {
+        git::MergeOutcome::Refused(why) => assert!(why.contains("uncommitted"), "{why}"),
+        other => panic!("expected refusal, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(repo.join("README.md")).unwrap(),
+        "edited by the user"
+    );
+}
+
+/// An untracked file is not a reason to refuse: the project root always has
+/// some, since worktrees live under `.agtx/`.
+#[test]
+fn untracked_files_do_not_block_a_merge() {
+    let temp = setup_git_repo();
+    let repo = temp.path();
+    commit_on_branch(repo, "task/feature", "feature.txt", "hello", "main");
+    std::fs::create_dir_all(repo.join(".agtx/worktrees")).unwrap();
+    std::fs::write(repo.join(".agtx/worktrees/stray"), "not tracked").unwrap();
+
+    let outcome = git::merge_task_branch(repo, "main", "task/feature", "merge").unwrap();
+
+    assert_eq!(outcome, git::MergeOutcome::Merged);
+}
+
+// =============================================================================
+// A repository with no commits
+// =============================================================================
+
+/// A worktree must be cut from a commit, so a `git init` with no history — the
+/// starting state of any greenfield project — could not host a task at all.
+/// `git rev-parse --abbrev-ref HEAD` fails there *and still prints* the literal
+/// string `HEAD`, which reached `git worktree add` as a base revision.
+#[test]
+fn a_repo_with_no_commits_gets_one_so_a_worktree_can_be_cut() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "t@t.com"],
+        vec!["config", "user.name", "T"],
+    ] {
+        Command::new("git")
+            .current_dir(repo)
+            .args(&args)
+            .output()
+            .unwrap();
+    }
+
+    // Precondition: HEAD really is unborn.
+    assert!(!Command::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    let branch = git::detect_main_branch(repo).expect("should recover, not fail");
+    assert!(!branch.is_empty());
+    assert_ne!(branch, "HEAD", "the literal rev-parse output is not a branch");
+
+    // The repo now has exactly one commit, and a worktree can be cut from it.
+    let log = Command::new("git")
+        .current_dir(repo)
+        .args(["log", "--oneline"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 1);
+
+    let wt = git::create_worktree(repo, "some-task").expect("worktree from the new commit");
+    assert!(wt.join(".git").exists());
+}
+
+/// The recovery is scoped to an *empty* repo. A repo that has commits and fails
+/// for some other reason must surface that, not have history written into it.
+#[test]
+fn a_repo_with_commits_is_never_given_an_extra_one() {
+    let temp = setup_git_repo();
+    let repo = temp.path();
+    let before = Command::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+
+    assert_eq!(git::detect_main_branch(repo).unwrap(), "main");
+
+    let after = Command::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(before.stdout, after.stdout, "HEAD must not have moved");
+}
+
+/// `git merge` reports success for a branch with no commits — "Already up to
+/// date", exit 0 — so a caller that trusts the exit status concludes the work
+/// landed. It did not. The usual cause is an agent that wrote files and never
+/// committed them, and the caller's next step is to delete the worktree those
+/// files live in.
+#[test]
+fn a_branch_with_no_commits_reports_nothing_to_merge_rather_than_success() {
+    let temp = setup_git_repo();
+    let repo = temp.path();
+    // A branch, but no work committed on it — what an agent leaves behind when
+    // it writes files and never runs `git commit`.
+    Command::new("git")
+        .current_dir(repo)
+        .args(["branch", "task/empty"])
+        .output()
+        .unwrap();
+
+    let outcome = git::merge_task_branch(repo, "main", "task/empty", "merge").unwrap();
+
+    assert_eq!(outcome, git::MergeOutcome::NothingToMerge);
+    assert_eq!(
+        git::commits_ahead(repo, "main", "task/empty").unwrap(),
+        0,
+        "and the count is what the outcome is derived from"
+    );
+}
+
+/// The companion: a branch with real commits still merges, so the guard above
+/// cannot be satisfied by refusing everything.
+#[test]
+fn a_branch_with_commits_still_merges() {
+    let temp = setup_git_repo();
+    let repo = temp.path();
+    commit_on_branch(repo, "task/real", "real.txt", "work", "main");
+
+    assert_eq!(git::commits_ahead(repo, "main", "task/real").unwrap(), 1);
+    assert_eq!(
+        git::merge_task_branch(repo, "main", "task/real", "merge").unwrap(),
+        git::MergeOutcome::Merged
+    );
+}

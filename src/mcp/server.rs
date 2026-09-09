@@ -1,5 +1,8 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -26,6 +29,15 @@ pub enum ServerMode {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListProjectsParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetConfigParams {
+    /// Project ID (required in global mode — call list_projects first to get IDs).
+    #[schemars(
+        description = "Project ID. Required in global mode. Call list_projects first to get project IDs."
+    )]
+    pub project_id: Option<String>,
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTasksParams {
@@ -266,6 +278,65 @@ struct TaskSummary {
     referenced_tasks: Option<String>,
     base_branch: Option<String>,
     deps_satisfied: bool,
+    /// The TUI's published phase status, or `None` when nothing has been
+    /// observed for this task. Weigh it against `phase_age_secs` rather than
+    /// treating it as live — with no TUI running, nothing refreshes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase_status: Option<String>,
+    /// How many seconds ago that status was observed. The refresh republishes
+    /// every live task on every pass, so a small age means "seen just now" and
+    /// a large one means nothing is watching this board — which is a different
+    /// problem from a task that is genuinely idle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase_age_secs: Option<i64>,
+}
+
+/// The settings that decide how a run behaves, already merged.
+///
+/// Only the fields a caller acts on. The theme is not here — nothing driving
+/// the board makes a decision from it — and neither is anything secret.
+#[derive(Serialize)]
+struct EffectiveConfig {
+    /// Where these values came from, so a caller can say *which* file to edit
+    /// rather than guess at `~/.config/agtx/config.toml`.
+    global_config_path: String,
+    project_config_path: String,
+    project_config_exists: bool,
+    /// Whether agtx answers agents' trust and bypass-permission dialogs. When
+    /// false, an unattended run parks every task as `blocked` on its first
+    /// dialog with nobody to answer it. Global-only: a project config cannot
+    /// set this, because a repository must not be able to grant itself trust.
+    auto_trust: bool,
+    default_agent: String,
+    /// Per-phase overrides. A phase absent here uses `default_agent`.
+    phase_agents: serde_json::Value,
+    worktree_enabled: bool,
+    skip_worktree: bool,
+    auto_cleanup: bool,
+    /// Empty means auto-detect (main, then master).
+    base_branch: String,
+    worktree_dir: String,
+    branch_prefix: String,
+    workflow_plugin: Option<String>,
+    agent_hooks: bool,
+    github_url: Option<String>,
+}
+
+/// The board, plus the one fact that says whether any of it is live.
+///
+/// `tui_connected` belongs at board level rather than on each card: it is one
+/// answer for the whole project, and repeating it per task would imply it could
+/// differ between them. It is wrapped around the task list rather than offered
+/// as a separate tool because a caller needs it on *every* poll — a separate
+/// call is one a polling loop will skip, and skipping it means reading frozen
+/// rows as live state.
+#[derive(Serialize)]
+struct BoardListing {
+    /// Whether a TUI has beaten recently. When false, nothing is executing
+    /// queued transitions and every `phase_status` below is frozen at whatever
+    /// was last observed — stale, not current.
+    tui_connected: bool,
+    tasks: Vec<TaskSummary>,
 }
 
 #[derive(Serialize)]
@@ -303,6 +374,19 @@ struct TaskDetail {
     /// the permission prompt or question text the agent itself reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     blocked_reason: Option<String>,
+    /// The TUI's own verdict on the phase: working, blocked, idle, ready or
+    /// exited. Distinct from `agent_state`, which is what the agent reports
+    /// about itself — this one also covers agents with no hooks, and is the
+    /// only signal that can say `ready` (the phase artifact exists) or
+    /// `exited` (the window is gone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase_status: Option<String>,
+    /// How many seconds ago `phase_status` was observed. See `TaskSummary`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase_age_secs: Option<i64>,
+    /// Whether a TUI is running for this project. When false, `phase_status` is
+    /// frozen rather than current, and no queued transition will execute.
+    tui_connected: bool,
 }
 
 #[derive(Serialize)]
@@ -402,11 +486,20 @@ struct DeleteTaskResponse {
     message: String,
 }
 
+/// How long a TUI heartbeat stays trusted. Three beats of the TUI's
+/// `TRANSITION_POLL_INTERVAL`, so one missed tick is not read as a disconnect —
+/// the same window the web API applies, since the two answer the same question.
+const TUI_HEARTBEAT_STALE_AFTER: chrono::Duration = chrono::Duration::seconds(6);
+
 // === MCP Server ===
 
 #[derive(Debug, Clone)]
 pub struct AgtxMcpServer {
     mode: ServerMode,
+    /// When each project's `board_watch` row was last marked, so a read burst
+    /// costs one write rather than one per tool call. Shared across clones
+    /// because rmcp clones the server per request.
+    watched: Arc<Mutex<HashMap<String, Instant>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -414,8 +507,65 @@ impl AgtxMcpServer {
     fn new(mode: ServerMode) -> Self {
         Self {
             mode,
+            watched: Arc::new(Mutex::new(HashMap::new())),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Tell the TUI someone is reading this board, so it starts publishing
+    /// `task_runtime`.
+    ///
+    /// Publishing is gated on a recent reader because a board nobody reads
+    /// should cost no writes. An MCP client is such a reader — without this the
+    /// orchestrator and any driver session poll a table that is never written,
+    /// and every task reports no phase status forever.
+    ///
+    /// Throttled on the same reasoning as the web server's copy: the question
+    /// it answers resolves in minutes, and `get_task` is called once per task
+    /// in a polling loop.
+    fn note_board_watched(&self, project_id: Option<&str>) {
+        const NOTE_INTERVAL: Duration = Duration::from_secs(30);
+        let Ok(path) = self.resolve_project_path(project_id) else {
+            return;
+        };
+        let key = path.to_string_lossy().to_string();
+        {
+            let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
+            if watched.get(&key).is_some_and(|at| at.elapsed() < NOTE_INTERVAL) {
+                return;
+            }
+            watched.insert(key.clone(), Instant::now());
+        }
+        if let Ok(db) = Database::open_global() {
+            let _ = db.note_board_watched(&key);
+        }
+    }
+
+    /// Whether a TUI has beaten for this project recently enough to be draining
+    /// the queue and refreshing phase status.
+    ///
+    /// Without this a caller can only *infer* a dead board from `phase_age_secs`
+    /// climbing across every task at once — and until it does, a frozen row
+    /// reads as live state. A task showing `blocked` while its agent works
+    /// normally is what that looks like, and the answer was already in
+    /// `tui_heartbeat` the whole time.
+    fn tui_connected(&self, project_id: Option<&str>) -> bool {
+        let Ok(path) = self.resolve_project_path(project_id) else {
+            return false;
+        };
+        let Ok(db) = Database::open_global() else {
+            return false;
+        };
+        db.tui_is_live(&path.to_string_lossy(), TUI_HEARTBEAT_STALE_AFTER)
+            .unwrap_or(false)
+    }
+
+    /// The published phase status for a task, as `(status, age_secs)`.
+    fn runtime_fields(rt: Option<&crate::db::TaskRuntime>) -> (Option<String>, Option<i64>) {
+        (
+            rt.map(|r| r.phase_status.as_str().to_string()),
+            rt.map(|r| (chrono::Utc::now() - r.updated_at).num_seconds()),
+        )
     }
 
     /// Resolve a project path from an optional `project_id`.
@@ -516,10 +666,53 @@ impl AgtxMcpServer {
     }
 
     #[tool(
+        description = "Read the effective agtx configuration for a project — the global config merged with the project's own, which is what actually governs a run. Use this instead of reading ~/.config/agtx/config.toml: that path is not authoritative (AGTX_CONFIG_DIR relocates it), and a project config overrides much of it. Returns auto_trust (whether agents' trust dialogs are answered automatically — an unattended run needs this true), default_agent, per-phase agents, worktree settings, the active workflow plugin, and the paths both files live at."
+    )]
+    fn get_config(&self, Parameters(params): Parameters<GetConfigParams>) -> String {
+        tracing::info!(tool = "get_config", project_id = ?params.project_id, "MCP tool called");
+        let project_path = match self.resolve_project_path(params.project_id.as_deref()) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let global = GlobalConfig::load().unwrap_or_default();
+        let project = ProjectConfig::load(&project_path).unwrap_or_default();
+        let merged = crate::config::MergedConfig::merge(&global, &project);
+
+        let project_config_path = project_path.join(".agtx").join("config.toml");
+        let cfg = EffectiveConfig {
+            global_config_path: GlobalConfig::config_path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "<unresolved>".to_string()),
+            project_config_exists: project_config_path.exists(),
+            project_config_path: project_config_path.to_string_lossy().to_string(),
+            auto_trust: merged.auto_trust,
+            default_agent: merged.default_agent,
+            phase_agents: serde_json::json!({
+                "research": merged.phase_agents.research,
+                "planning": merged.phase_agents.planning,
+                "running": merged.phase_agents.running,
+                "review": merged.phase_agents.review,
+            }),
+            worktree_enabled: merged.worktree_enabled,
+            skip_worktree: merged.skip_worktree,
+            auto_cleanup: merged.auto_cleanup,
+            base_branch: merged.base_branch,
+            worktree_dir: merged.worktree_dir,
+            branch_prefix: merged.branch_prefix,
+            workflow_plugin: merged.workflow_plugin,
+            agent_hooks: merged.agent_hooks,
+            github_url: merged.github_url,
+        };
+        serde_json::to_string_pretty(&cfg)
+            .unwrap_or_else(|e| format!("Error serializing: {}", e))
+    }
+
+    #[tool(
         description = "List tasks for a project, optionally filtered by status (backlog, planning, running, review, done). In global mode, project_id is required — call list_projects first."
     )]
     fn list_tasks(&self, Parameters(params): Parameters<ListTasksParams>) -> String {
         tracing::info!(tool = "list_tasks", status = ?params.status, project_id = ?params.project_id, "MCP tool called");
+        self.note_board_watched(params.project_id.as_deref());
         match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => {
                 let tasks_result = if let Some(status_str) = &params.status {
@@ -532,11 +725,20 @@ impl AgtxMcpServer {
                 };
                 match tasks_result {
                     Ok(tasks) => {
+                        // One query for the whole board rather than one per
+                        // task: this is the call a polling driver makes most,
+                        // and it is the one that grows with the project.
+                        let runtime = db.list_task_runtime().unwrap_or_default();
                         let summaries: Vec<TaskSummary> = tasks
                             .into_iter()
                             .map(|t| {
                                 let deps_satisfied = db.deps_satisfied(&t);
+                                let (phase_status, phase_age_secs) = Self::runtime_fields(
+                                    runtime.iter().find(|r| r.task_id == t.id),
+                                );
                                 TaskSummary {
+                                    phase_status,
+                                    phase_age_secs,
                                     id: t.id,
                                     title: t.title,
                                     description: t.description,
@@ -551,7 +753,11 @@ impl AgtxMcpServer {
                                 }
                             })
                             .collect();
-                        serde_json::to_string_pretty(&summaries)
+                        let listing = BoardListing {
+                            tui_connected: self.tui_connected(params.project_id.as_deref()),
+                            tasks: summaries,
+                        };
+                        serde_json::to_string_pretty(&listing)
                             .unwrap_or_else(|e| format!("Error serializing: {}", e))
                     }
                     Err(e) => format!("Error listing tasks: {}", e),
@@ -566,6 +772,7 @@ impl AgtxMcpServer {
     )]
     fn get_task(&self, Parameters(params): Parameters<GetTaskParams>) -> String {
         tracing::info!(tool = "get_task", task_id = %params.task_id, "MCP tool called");
+        self.note_board_watched(params.project_id.as_deref());
         match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => match db.get_task(&params.task_id) {
                 Ok(Some(t)) => {
@@ -611,8 +818,13 @@ impl AgtxMcpServer {
                         .to_string()
                     });
                     let blocked_reason = hook.as_ref().and_then(|h| h.message.clone());
+                    let runtime = db.get_task_runtime(&params.task_id).ok().flatten();
+                    let (phase_status, phase_age_secs) = Self::runtime_fields(runtime.as_ref());
 
                     let detail = TaskDetail {
+                        phase_status,
+                        phase_age_secs,
+                        tui_connected: self.tui_connected(params.project_id.as_deref()),
                         id: t.id,
                         title: t.title,
                         description: t.description,
@@ -648,7 +860,7 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "Queue a task state transition. The agtx TUI will process it and execute all side effects (worktree creation, agent spawning, etc). Use get_transition_status to check completion. Actions: research (start research phase for backlog task), move_forward, move_to_planning, move_to_running, move_to_review, move_to_done, resume, escalate_to_user (flag task for user attention with an optional reason)"
+        description = "Queue a task state transition. The agtx TUI will process it and execute all side effects (worktree creation, agent spawning, etc). Use get_transition_status to check completion — a transition out of Backlog waits for the single worktree-setup slot, so it stays 'pending' until its turn. Actions: research (start research phase for backlog task), move_forward, move_to_planning, move_to_running, move_to_review, move_to_done, move_to_done_and_merge (merge the task branch into its base branch in the project checkout first, and stay in Review if it conflicts — for unattended callers that integrate locally instead of through a PR), resume, escalate_to_user (flag task for user attention with an optional reason)"
     )]
     fn move_task(&self, Parameters(params): Parameters<MoveTaskParams>) -> String {
         tracing::info!(tool = "move_task", task_id = %params.task_id, action = %params.action, "MCP tool called");

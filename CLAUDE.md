@@ -129,7 +129,9 @@ web/                   # The mobile PWA — plain ES modules, no build step
 
 skills/                # Plugin skill files — auto-discovered as /agtx:* (Claude) or @agtx:* (Codex)
 ├── sweep/SKILL.md     # Sweep skill — push any conversation to the board (/agtx:sweep)
-└── brainstorm/SKILL.md # Brainstorm skill — free-form exploration (/agtx:brainstorm)
+├── brainstorm/SKILL.md # Brainstorm skill — free-form exploration (/agtx:brainstorm)
+└── oneshot/SKILL.md   # Oneshot skill — an outside session runs the board as the human,
+                       # all five columns, polling instead of notifications (/agtx:oneshot)
 
 .claude-plugin/        # Claude Code plugin manifest
 ├── plugin.json        # Plugin metadata + MCP server registration
@@ -232,6 +234,99 @@ Three properties, none of them incidental:
 have a worktree and no branch. Branch deletion stays paired with having had a worktree on purpose: a
 task with a branch and no worktree is one that reached Done, whose branch the workflow keeps, and
 `delete_branch` is `git branch -D`.
+
+#### Reaping what a task spawned
+
+`kill-window` signals the pane's own process group, which misses anything the agent backgrounded
+into a group of its own — a dev server, a watcher, a `python3 -m http.server`. Those get reparented
+to init and keep holding their ports. Measured: a review agent's static server was still listening
+six hours after its task reached Done, serving a worktree that had been deleted, and a later agent
+loaded stale code from it and spent a turn debugging source that was never wrong.
+
+`reap_task_processes` finds them **two ways, because neither alone is enough**:
+
+- **By environment.** `create_window` sets `AGTX_TASK_ID` on the window, and a child inherits the
+  environment at spawn and never loses it. This is the one that catches a daemonized process, and
+  attribution is exact.
+- **By descent from the pane**, as the backstop for anything that never received the environment.
+  This half runs before `kill_window`, since the parent links vanish with the window.
+
+**Descent alone is not sufficient, and ordering does not make it so.** A process reparented to init
+*before* cleanup runs is already out of the tree, which is precisely the case that matters — the
+orphan above survived a descendants-only reap for exactly this reason.
+
+**The alternatives were measured and rejected.** A cwd scan (`lsof -u <uid> -d cwd`) takes ~12s;
+`lsof +D <worktree>` walks the tree — 26s on a large checkout — and matches nothing once the
+directory is gone, which is the state cleanup leaves. Session id is not readable per-process from
+`ps` on macOS (`sess=` reports 0).
+
+Whether `ps -Eww` exposes another process's environment varies by platform and by how the caller was
+launched, so `processes_for_task` reads `/proc/<pid>/environ` where it exists and falls back to `ps`
+— Linux's `ps -E` means something else entirely, so the two cannot share one command. The parsing is
+split into `pids_matching_env` and tested against fixtures, because that is the half that can
+regress into signalling the wrong pids.
+
+**A root pid is refused, not reaped.** On macOS pid 0 is the ancestor of launchd, so
+`descendants_of(0)` returns *every process on the machine*. A pane can never legitimately be pid 0
+or 1, so a value that low means tmux answered with something that is not a pane pid, and the only
+safe response is to reap nothing. `a_root_pid_is_refused_rather_than_reaped` asserts both halves —
+that pid 0 really does own the whole tree, and that cleanup declines it. agtx's own pid is filtered
+for the same reason: it cannot currently match, and the cost of being wrong is killing the board.
+
+Children are signalled before parents so a supervisor cannot restart one on the way down, TERM then
+KILL. `descendants_of` builds the tree from one `ps -Ao pid=,ppid=` snapshot rather than walking
+`/proc`, which does not exist on macOS. The signals go through the `kill` command rather than a
+`libc` dependency: this file already reaches git and tmux the same way, and it keeps the path free
+of `unsafe`.
+
+#### agtx's own files are excluded from git
+
+`.agtx/` and the per-agent configs agtx deploys show as untracked in every worktree, and
+`has_changes` — which the Done guard reads from `git status --porcelain` — counts untracked files.
+So agtx's own bookkeeping tripped agtx's own guard on a project's first task, before any
+`.gitignore` existed. A guard that cries wolf first and means it second stops being believed, and a
+driver that works around it with a committed `.gitignore` is doing agtx's job.
+
+`exclude_agtx_files_from_git` writes `AGTX_WRITTEN_PATHS` into the repository's exclude file at
+worktree setup, once, inside a marked block.
+
+**There is exactly one place this can go.** Measured against git 2.55.0: a per-worktree
+`.git/worktrees/<name>/info/exclude` is *ignored*; only `$GIT_COMMON_DIR/info/exclude` takes effect,
+and it applies to the main checkout as well as every worktree.
+
+Sharing it with the user's own checkout is safe because **exclude patterns only affect untracked
+files** — also measured, and `the_exclude_cannot_hide_a_file_the_project_tracks` pins it: a tracked
+`.mcp.json` still reports its modification with `.mcp.json` excluded. So a project that deliberately
+tracks any of these keeps tracking it, and nothing a user committed can be hidden. The patterns are
+specific rather than whole dotdirs (`.claude/commands/agtx/`, not `.claude/`) because a project may
+keep its own content there, and only what agtx creates is agtx's to hide.
+
+This is what makes `git add -A` safe in the phase skills below.
+
+#### The phase skills commit
+
+`execute.md` and `review.md` end by committing. Without that the bundled workflow was internally
+contradictory: Done requires a clean tree and merging requires commits, but nothing in research →
+plan → execute → review ever told the agent to commit, so an agent that followed the skills exactly
+produced a task that could not reach Done. Every success depended on the agent committing
+spontaneously or a driver noticing and instructing it — and when neither happened, the work sat
+uncommitted in a worktree that Done deletes.
+
+#### A repository with no commits
+
+A worktree must be cut from a commit, so `git init` with no history — the starting state of any
+greenfield project — could not host a task at all. `detect_main_branch` now checks the exit status
+of its `git rev-parse --abbrev-ref HEAD` fallback: on an unborn branch that fails with 128 *and
+still prints the literal string* `HEAD`, which reached `git worktree add` as a base revision and
+failed with `invalid reference: HEAD`. Every task died in setup behind an error naming neither the
+cause nor the fix.
+
+When `has_no_commits` confirms the repository is genuinely empty, `create_initial_commit` makes one
+(`git commit --allow-empty -m init`) and setup proceeds. Refusing would be defensible, but "run
+`git commit --allow-empty` and start again" is the only answer to that refusal, and an empty commit
+on a repo with no history discards nothing and conflicts with nothing. The check is what keeps this
+narrow — a repository that has commits and fails for some other reason surfaces that error and never
+has history written into it.
 
 ### Workflow Plugins
 Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin.toml`) that defines:
@@ -736,9 +831,161 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
 - On startup, if an orchestrator tmux session already exists, it is detected and reconnected; catch-up notifications are created for tasks that completed phases while the TUI was down (deduplicated via `peek_notifications`)
 
 **MCP tools**:
-- Discovery: `list_projects` (global mode only)
-- Read: `list_tasks`, `get_task` (includes `allowed_actions`), `get_transition_status`, `check_conflicts`, `get_notifications`, `read_pane_content`
-- Write: `move_task` (queues a transition request; actions `research`, `move_forward`, `move_to_planning`, `move_to_running`, `move_to_review`, `move_to_done`, `resume`, `escalate_to_user`), `send_to_task` (Planning/Running only, 4096-byte cap)
+- Discovery: `list_projects` (global mode only), `get_config` (the global and project configs
+  already merged — what actually governs a run). It exists because there is no other way for a
+  caller to learn `auto_trust`: the setting is global-only *by design*, since a project config that
+  could grant itself trust defeats the trust system, and `AGTX_CONFIG_DIR` means the global file is
+  not reliably at `~/.config/agtx/config.toml`. A driver that read that path directly got a stale
+  answer and stopped to ask a question it already had. The response carries both file paths, so a
+  caller can name the file to edit instead of guessing
+- Read: `list_tasks`, `get_task` (includes `allowed_actions`), `get_transition_status`, `check_conflicts`, `get_notifications`, `read_pane_content`. `list_tasks` and `get_task` also carry `phase_status` + `phase_age_secs` + `tui_connected` — see *Publishing phase status* below. `list_tasks` returns `{tui_connected, tasks: [...]}` rather than a bare array: `tui_connected` is one answer for the whole board, and a caller needs it on *every* poll — a separate tool is one a polling loop skips, and skipping it means reading frozen rows as live state
+- Write: `move_task` (queues a transition request; actions `research`, `move_forward`, `move_to_planning`, `move_to_running`, `move_to_review`, `move_to_done`, `move_to_done_and_merge`, `resume`, `escalate_to_user`), `send_to_task` (Planning/Running only, 4096-byte cap)
+
+#### Publishing phase status
+
+`task_runtime` is how a process that is not the TUI learns a phase's status, and
+the TUI publishes it only while someone is reading — `board_watch`, a 10-minute
+window. Two readers mark it: the web server on a board request, and the MCP
+server on `list_tasks` / `get_task` (throttled to 30s, since `get_task` is called
+once per task in a polling loop).
+
+**It is not gated on the `serve` feature.** A default build has no web server but
+always has `agtx mcp-serve`, and an orchestrator or driver polling phase status
+is exactly the out-of-process reader the table is for; compiling the publish call
+out left every such client reading a table nothing ever wrote.
+
+Read `phase_status` against `phase_age_secs`, never alone. The refresh
+republishes every live task on every pass, so a small age means "seen just now"
+and a large one means nothing is watching this board — which needs the opposite
+response from a task that is genuinely idle.
+
+`phase_status` is the TUI's verdict and `agent_state` is the agent's own report;
+they are not duplicates. `agent_state` needs hooks and covers five of eight
+agents, while `phase_status` covers all of them and is the only signal that can
+say `ready` (the phase artifact exists) or `exited` (the window is gone).
+
+**`tui_connected` is the one that says whether any of it is current.** It reads
+`tui_heartbeat` through `Database::tui_is_live`, on the same 6-second window the
+web API uses — three beats of `TRANSITION_POLL_INTERVAL`, so one missed tick is
+not a disconnect. Without it a caller can only *infer* a dead board from
+`phase_age_secs` climbing across every task at once, and until it does, a frozen
+row reads as live state: a live run showed a task as `blocked` for minutes while
+its agent worked normally, because that was the last verdict published before
+the TUI exited. The answer was in `tui_heartbeat` the whole time.
+
+#### Serialized worktree setup
+
+Worktree setup runs one at a time — `setup_rx` is a single slot — because it does
+`git worktree add`, file copies, an init script, a tmux window and an agent
+spawn. Everything that starts a Backlog task goes through `setup_queue`, which
+carries a `SetupIntent` alongside the task id: the dependency overlay's batch
+move lets each task's plugin choose between research and planning
+(`PluginDefault`), while an MCP request names one transition and must not be
+answered with a different one.
+
+A queued MCP request stays **claimed and unprocessed** — `get_transition_status`
+answers `pending` — until the drain starts it. Marking it completed at enqueue
+time would tell a caller the task had moved while it was still in a queue. Every
+way the drain can decline one (task gone, left Backlog, deps unsatisfied, the
+start itself failing) resolves the request with an error instead, because a
+dropped request leaves a caller polling `pending` forever.
+
+Rejecting instead of queuing is what this replaces: a caller that asked for five
+Backlog transitions in one pass had four marked as errors and four tasks left in
+Backlog with nothing retrying them — and since `move_task` had already answered
+`queued`, the failures were visible only to a caller that polled each request
+individually.
+
+**A claim outlives the instance holding it, so claims are reclaimed.** Deferring
+the mark opens a window where a request is claimed and unprocessed, and
+`get_pending_transition_requests` filters claimed rows out — so a TUI that exits
+with a setup queued strands it. Nothing re-ran it; `cleanup_old_transition_requests`
+deleted it an hour later having never executed it.
+`Database::reclaim_stale_transition_requests` releases claims held by another
+instance after `RECLAIM_CLAIMS_AFTER` (5 minutes), called at the top of each
+drain rather than only at startup — a TUI that dies mid-run should not wait for
+the next launch. The age window keeps a *live* second instance's genuine backlog
+out of reach; reclaiming one anyway is safe rather than merely unlikely, since
+the drain re-validates each task and the loser resolves its copy with an error
+instead of setting the worktree up twice.
+
+#### `move_to_done_and_merge`
+
+Merges the task's branch into its base branch in the **project's own checkout**,
+then moves it to Done. It exists for a caller that integrates locally; a person
+lands the same work by merging the PR on the remote, which is why
+`allowed_actions` offers it to `Orchestrator` and not to `Human` — two ways to
+land one branch is worse than one.
+
+`git::merge_task_branch` is the primitive, and it is deliberately narrow: it
+merges only when the checkout is already on the base branch with no *tracked*
+modifications, and returns `Refused` otherwise rather than stashing, switching
+branches, or moving HEAD out from under the user. Untracked files are not part of
+the gate — the project root always has some, since worktrees live under `.agtx/`
+— and git refuses on its own if the merge would overwrite one.
+
+The alternatives are worse, and were measured: `git fetch . branch:base` needs no
+working tree but git refuses it while `base` is checked out, which is the normal
+case here; `git update-ref` evades that check but leaves the user's index
+disagreeing with HEAD, so the working tree reads as "everything deleted".
+
+**Every route to Done must appear in the uncommitted-changes guard**, and this action is
+the worked example of what happens otherwise. Reaching Done deletes the worktree, and
+`GitOperations::has_changes` reads `git status --porcelain`, which counts **untracked**
+files — an agent that wrote its work and never ran `git commit` has all of it there and
+nowhere else. `move_to_done_and_merge` was added as a third route and left out of the
+`matches!` list beside `move_to_done` and `move_forward`: a task whose agent produced
+eleven files and committed none merged an empty branch, reached Done, and cleanup deleted
+every one of them. Only the `.md` artifacts survived, in `.agtx/archive/`. A new route to
+Done that forgets that line is a silent data-loss bug, not a missing check, and
+`every_route_to_done_refuses_a_worktree_with_uncommitted_work` iterates all three.
+
+**An empty branch is refused rather than merged**, as the second layer. `git merge` exits
+0 for a branch with no commits — "Already up to date" — so the exit status alone reports a
+success that landed nothing, and the caller then deletes the worktree on the strength of
+it. `commits_ahead` is checked first and `MergeOutcome::NothingToMerge` says so
+explicitly; the task stays in Review and the error names where the work would be. The two
+layers catch different states: the first, work that exists but is uncommitted; the second,
+a branch that is genuinely empty.
+
+**A conflict leaves the task in Review**, sets `escalation_note`, and sends
+`/agtx:merge-conflicts` to the task's own agent. That ordering is the whole point
+of doing both halves in one action: Done removes the worktree, and the worktree is
+where the agent that wrote the branch has to resolve it. The virtual merge
+(`check_merge_conflicts`) runs first so a conflict is *reported* rather than left
+half-applied in the user's checkout — and `merge_branch` runs `git merge --abort`
+on failure, since a stray `MERGE_HEAD` makes every later git command in the
+project root report a merge in progress.
+
+Note `fetch_and_check_conflicts` — used by the Review auto-conflict trigger — runs
+`git fetch origin` first and so is inert on a local-only repo. `merge_task_branch`
+uses the local `check_merge_conflicts`, which needs no remote.
+
+#### Incremental re-review
+
+Leaving Review for Running — the `resume` path — writes the worktree's current HEAD to
+`.agtx/reviewed-at` (`mark_reviewed_point`). The review skill reads it: present, it
+reviews `<marker>..HEAD` plus the prior `.agtx/review.md` and checks those points were
+addressed; absent, it reviews the whole branch as before.
+
+Without this every resume cost a full re-review. `clear_context_on_advance` means the
+review agent starts with no memory of its own previous pass, so it re-read the entire
+branch each cycle to re-confirm what it had already approved.
+
+A file in the worktree rather than a column on `Task`: the only reader is the skill, which
+is already reading `.agtx/`, nothing queries it, and it is removed with the worktree it
+describes.
+
+**Two things about the marker's scope.** It is a commit, so it covers committed work only
+— which is why the skill pairs the range with a second command for what is not committed
+yet. The two can overlap, and that is the intended direction: work uncommitted when the
+marker was written and committed afterwards is reviewed twice, never zero times.
+
+And that second command is **`git status --short`, not `git diff HEAD`**: `git diff` does
+not show untracked files at all. A new file from the running phase is absent from the
+range diff (not committed) and absent from the working-tree diff (not tracked), so the
+obvious pairing would review it in neither. `??` lines are where the newest work usually
+is. `the_marker_never_covers_uncommitted_work` pins this.
 - CRUD (Backlog only for update/delete): `create_task`, `create_tasks_batch` (max 50, index-based `depends_on` wiring), `update_task`, `delete_task`
 
 ### MCP Server Modes
@@ -1235,6 +1482,16 @@ writes one.
   `UserPromptSubmit`, `PreToolUse` (heartbeat) → `working`; `PermissionRequest`, `Notification` →
   `blocked`; `Stop`, `StopFailure` → `waiting`; `SessionEnd` → `ended`. Unregistered names are
   ignored by the agent
+- **Claude's `Notification` is scoped to `permission_prompt`**, like grok's, and for the same
+  reason. Measured against Claude Code 2.1.263, the payload carries a `notification_type`:
+  `permission_prompt` ("Claude needs your permission") and `idle_prompt` ("Claude is waiting for
+  your input"), the latter fired ~66s after a turn simply ends. Unscoped, a healthy agent that had
+  finished its turn reported `Blocked` — and an agent-reported `Blocked` fires the stuck-task
+  notification *immediately*, with no settle window, so a driver interrupts an agent that is merely
+  quiet. Verified that Claude honours a matcher on this event: with it, an idle turn produces no
+  hook call at all. The scoping therefore lives in `hook_events`, not `map_hook_event` — the payload
+  never reaches the mapper. A worktree deployed by an earlier binary keeps the unscoped
+  registration until `refresh_stale_worktree_configs` re-deploys it
 - **`src/agent/hook_status.rs`** is pure (no tmux/DB/TUI types): event mapping, atomic
   write-then-rename, staleness, and `merge_event`'s guard preventing a late `PreToolUse` from
   clearing a fresh `Blocked`

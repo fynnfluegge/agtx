@@ -24,6 +24,7 @@ mcp__agtx__get_task(task_id: "<the id passed to this command>")
 2. Implement the changes
 3. Run relevant tests to verify your changes
 4. Fix any issues found during testing
+5. Commit. `git add -A`, commit with a short imperative message, verify `git status --short` clean. Your worktree is deleted at task completion — uncommitted work is destroyed and the merge is blocked. agtx's own files are already git-excluded, so `add -A` takes only your work.
 
 ## Output
 

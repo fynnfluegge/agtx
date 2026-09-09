@@ -445,11 +445,50 @@ struct AppState {
     /// kills the child. Someone opens `W`, scans, closes it, and carries on
     /// using the board; the server has to survive that.
     serve_session: Option<crate::tui::serve_control::ServeSession>,
-    // Queue of task IDs awaiting serialized worktree setup (batch-move from the
-    // dependency view). Worktree setup runs one-at-a-time via `setup_rx`; this
-    // queue is drained as each setup completes.
-    setup_queue: VecDeque<String>,
+    // Tasks awaiting serialized worktree setup, with what each was asked to do.
+    // Worktree setup runs one-at-a-time via `setup_rx`; this queue is drained as
+    // each setup completes. Fed by the dependency view's batch move and by MCP
+    // transition requests, which is why the intent travels with the id: those
+    // two disagree about where a Backlog task should land.
+    setup_queue: VecDeque<QueuedSetup>,
     instance_id: String,
+}
+
+/// Where a queued Backlog task should go once a setup slot frees up.
+///
+/// The dependency overlay and the MCP queue want different things from the same
+/// mechanism: the overlay moves whatever the user marked and lets each task's
+/// plugin decide between research and planning, while an MCP request names one
+/// transition and must not be answered with a different one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupIntent {
+    /// Research if the task's plugin defines a research command, else planning.
+    PluginDefault,
+    Research,
+    Planning,
+    Running,
+}
+
+/// A task waiting for the single worktree-setup slot.
+#[derive(Debug, Clone)]
+struct QueuedSetup {
+    task_id: String,
+    intent: SetupIntent,
+    /// The MCP transition request this came from, if any. It stays claimed and
+    /// unprocessed — so `get_transition_status` reports `pending` — until the
+    /// drain either starts the setup or gives up on it. Marking it completed at
+    /// enqueue time would tell a driver the task had moved while it was still
+    /// sitting in a queue.
+    request_id: Option<String>,
+}
+
+/// What `execute_transition_request` did with a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransitionOutcome {
+    /// Handled now; the caller marks it processed.
+    Applied,
+    /// Waiting for the setup slot. The drain owns marking it from here.
+    Queued,
 }
 
 /// State for the dependency-graph overlay.
@@ -6942,11 +6981,33 @@ impl App {
     /// Enqueue unblocked tasks for serialized worktree setup, then kick off the first.
     fn batch_move_unblocked(&mut self, task_ids: Vec<String>) -> Result<()> {
         for id in task_ids {
-            if !self.state.setup_queue.contains(&id) {
-                self.state.setup_queue.push_back(id);
-            }
+            self.enqueue_setup(&id, SetupIntent::PluginDefault, None);
         }
         self.try_start_next_queued_setup()
+    }
+
+    /// Queue a Backlog task for the setup slot, unless it is already waiting.
+    ///
+    /// Deduplicated on the task rather than on the pair: a task queued twice
+    /// with different intents is a caller changing its mind, and running the
+    /// first one and then the second would set the worktree up twice. The
+    /// duplicate's request is resolved rather than dropped, so a driver polling
+    /// it is not left waiting on a row nothing will ever touch.
+    fn enqueue_setup(&mut self, task_id: &str, intent: SetupIntent, request_id: Option<String>) {
+        if self.state.setup_queue.iter().any(|q| q.task_id == task_id) {
+            if let (Some(db), Some(rid)) = (&self.state.db, request_id) {
+                let _ = db.mark_transition_processed(
+                    &rid,
+                    Some("Task is already queued for worktree setup"),
+                );
+            }
+            return;
+        }
+        self.state.setup_queue.push_back(QueuedSetup {
+            task_id: task_id.to_string(),
+            intent,
+            request_id,
+        });
     }
 
     /// If no worktree setup is currently running, start the next queued batch task.
@@ -6956,28 +7017,70 @@ impl App {
         if self.state.setup_rx.is_some() {
             return Ok(());
         }
-        while let Some(task_id) = self.state.setup_queue.pop_front() {
+        while let Some(QueuedSetup {
+            task_id,
+            intent,
+            request_id,
+        }) = self.state.setup_queue.pop_front()
+        {
             // Re-validate: the task may have changed status or deps since queuing.
+            // A queued request outlives the state it was accepted against, so
+            // each way of failing here has to resolve the request — dropping it
+            // silently leaves a driver polling `pending` forever.
             let Some(db) = self.state.db.as_ref() else {
+                self.resolve_queued_request(&request_id, Some("No project database"));
                 continue;
             };
             let Some(task) = db.get_task(&task_id).ok().flatten() else {
+                self.resolve_queued_request(&request_id, Some("Task no longer exists"));
                 continue;
             };
-            if task.status != TaskStatus::Backlog || !db.deps_satisfied(&task) {
+            if task.status != TaskStatus::Backlog {
+                self.resolve_queued_request(
+                    &request_id,
+                    Some(&format!(
+                        "Task left Backlog while queued (now: {})",
+                        task.status.as_str()
+                    )),
+                );
+                continue;
+            }
+            if !db.deps_satisfied(&task) {
+                self.resolve_queued_request(
+                    &request_id,
+                    Some("Cannot advance task: dependencies not in Review/Done"),
+                );
                 continue;
             }
 
-            // Prefer research if the plugin defines a research/preresearch command.
-            let plugin = self.load_task_plugin(&task);
-            let has_research_cmd = plugin.as_ref().map_or(false, |p| {
-                p.commands.research.is_some() || p.commands.preresearch.is_some()
-            });
+            let intent = match intent {
+                // Prefer research if the plugin defines a research/preresearch command.
+                SetupIntent::PluginDefault => {
+                    let plugin = self.load_task_plugin(&task);
+                    let has_research_cmd = plugin.as_ref().map_or(false, |p| {
+                        p.commands.research.is_some() || p.commands.preresearch.is_some()
+                    });
+                    if has_research_cmd {
+                        SetupIntent::Research
+                    } else {
+                        SetupIntent::Planning
+                    }
+                }
+                explicit => explicit,
+            };
 
-            if has_research_cmd {
-                self.start_research(&task_id)?;
-            } else {
-                self.start_planning_from_backlog(&task_id)?;
+            // A failure here belongs to this request, not to the drain: taking
+            // `?` would abandon everything queued behind it and leave every one
+            // of their requests pending.
+            let started = match intent {
+                SetupIntent::Research => self.start_research(&task_id),
+                SetupIntent::Planning => self.start_planning_from_backlog(&task_id),
+                SetupIntent::Running => self.move_backlog_to_running_by_id(&task_id),
+                SetupIntent::PluginDefault => unreachable!("resolved above"),
+            };
+            match started {
+                Ok(()) => self.resolve_queued_request(&request_id, None),
+                Err(e) => self.resolve_queued_request(&request_id, Some(&e.to_string())),
             }
 
             // start_research / start_planning_from_backlog set setup_rx when they
@@ -6989,6 +7092,35 @@ impl App {
         }
         self.refresh_tasks()?;
         Ok(())
+    }
+
+    /// Queue a Backlog task's setup and try to start it now.
+    ///
+    /// Every Backlog transition from MCP comes through here, whether or not the
+    /// setup slot is free, so the queue is the single ordering authority.
+    /// Rejecting when the slot was busy — which is what this replaces — meant a
+    /// caller that queued five tasks in one pass had four marked as errors and
+    /// four tasks left in Backlog, with nothing retrying them; and because
+    /// `move_task` had already answered `queued`, the failures were visible only
+    /// to a caller that polled each request individually.
+    fn queue_backlog_setup(
+        &mut self,
+        req: &TransitionRequest,
+        intent: SetupIntent,
+    ) -> Result<TransitionOutcome> {
+        self.enqueue_setup(&req.task_id, intent, Some(req.id.clone()));
+        self.try_start_next_queued_setup()?;
+        Ok(TransitionOutcome::Queued)
+    }
+
+    /// Mark a queued request's transition row processed, if it came from one.
+    ///
+    /// `Applied` deferred the marking to here, so this is the only place a
+    /// setup queued from MCP stops reporting `pending`.
+    fn resolve_queued_request(&self, request_id: &Option<String>, error: Option<&str>) {
+        if let (Some(db), Some(rid)) = (&self.state.db, request_id) {
+            let _ = db.mark_transition_processed(rid, error);
+        }
     }
 
     /// Move a Backlog task into Planning (the planning fallback for plugins with
@@ -7284,6 +7416,8 @@ impl App {
                     return Ok(());
                 }
 
+                mark_reviewed_point(&task);
+
                 // Switch agent if running phase uses a different agent than review
                 let (running_agent, agent_switch) =
                     needs_agent_switch(&self.state.config, &task, "running");
@@ -7509,6 +7643,23 @@ impl App {
 
     /// Poll the transition_requests table for unprocessed requests and execute them.
     fn process_transition_requests(&mut self) -> Result<()> {
+        let instance_id = self.state.instance_id.clone();
+
+        // Recover anything a previous TUI claimed and never finished, before
+        // reading the queue, so a reclaimed request is drained in this same
+        // pass. Done here rather than only at startup: a TUI that dies mid-run
+        // strands its queue, and the recovery should not wait for whenever
+        // someone next launches agtx.
+        if let Some(db) = self.state.db.as_ref() {
+            match db.reclaim_stale_transition_requests(&instance_id, RECLAIM_CLAIMS_AFTER) {
+                Ok(n) if n > 0 => {
+                    tracing::info!(count = n, "Reclaimed transition requests from a dead instance")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "Failed to reclaim transition requests"),
+            }
+        }
+
         // `self.state.db` is re-borrowed per use site to avoid holding it across `&mut self`.
         let pending = match self.state.db.as_ref() {
             Some(db) => db.get_pending_transition_requests()?,
@@ -7534,7 +7685,10 @@ impl App {
             let result = self.execute_transition_request(&req);
             if let Some(db) = &self.state.db {
                 let _ = match &result {
-                    Ok(()) => db.mark_transition_processed(&req.id, None),
+                    // A queued setup stays claimed and unprocessed; the drain
+                    // marks it when the slot frees up and it actually starts.
+                    Ok(TransitionOutcome::Queued) => Ok(()),
+                    Ok(TransitionOutcome::Applied) => db.mark_transition_processed(&req.id, None),
                     Err(e) => db.mark_transition_processed(&req.id, Some(&e.to_string())),
                 };
             }
@@ -7549,7 +7703,10 @@ impl App {
         Ok(())
     }
 
-    fn execute_transition_request(&mut self, req: &TransitionRequest) -> Result<()> {
+    fn execute_transition_request(
+        &mut self,
+        req: &TransitionRequest,
+    ) -> Result<TransitionOutcome> {
         tracing::info!(
             task_id = %req.task_id,
             action = %req.action,
@@ -7569,9 +7726,22 @@ impl App {
 
         // Recheck when the queue is drained: an agent may have written more
         // work since the phone rendered the card or submitted the request.
-        // Include move_forward so stale/legacy requests cannot bypass this.
+        //
+        // **Every** action that can reach Done must be listed here, because
+        // reaching Done deletes the worktree and `has_changes` reads
+        // `git status --porcelain`, which counts *untracked* files. An agent
+        // that wrote its work and never ran `git commit` has all of it here and
+        // nowhere else. Measured, by omitting `move_to_done_and_merge` from
+        // this list: a task whose agent produced eleven files and committed
+        // none merged an empty branch, went to Done, and cleanup deleted every
+        // one of them. `move_forward` is listed for the same reason — a stale
+        // request must not be a way around it — and a new route to Done that
+        // forgets this line is a silent data-loss bug, not a missing check.
         if task.status == TaskStatus::Review
-            && matches!(req.action.as_str(), "move_to_done" | "move_forward")
+            && matches!(
+                req.action.as_str(),
+                "move_to_done" | "move_to_done_and_merge" | "move_forward"
+            )
             && task
                 .worktree_path
                 .as_ref()
@@ -7602,9 +7772,12 @@ impl App {
                         "Task already has an active session (research may already be running)"
                     );
                 }
-                self.start_research(&req.task_id)?;
+                return self.queue_backlog_setup(req, SetupIntent::Research);
             }
             "move_forward" => {
+                if task.status == TaskStatus::Backlog {
+                    return self.queue_backlog_setup(req, SetupIntent::Planning);
+                }
                 self.execute_forward_transition(&mut task, &project_path)?;
             }
             "move_to_planning" => {
@@ -7614,7 +7787,7 @@ impl App {
                         task.status.as_str()
                     );
                 }
-                self.execute_forward_transition(&mut task, &project_path)?;
+                return self.queue_backlog_setup(req, SetupIntent::Planning);
             }
             "move_to_running" => {
                 if task.status != TaskStatus::Planning && task.status != TaskStatus::Backlog {
@@ -7624,10 +7797,9 @@ impl App {
                     );
                 }
                 if task.status == TaskStatus::Backlog {
-                    self.move_backlog_to_running_by_id(&req.task_id)?;
-                } else {
-                    self.execute_forward_transition(&mut task, &project_path)?;
+                    return self.queue_backlog_setup(req, SetupIntent::Running);
                 }
+                self.execute_forward_transition(&mut task, &project_path)?;
             }
             "move_to_review" => {
                 if task.status != TaskStatus::Running {
@@ -7646,6 +7818,25 @@ impl App {
                     );
                 }
                 self.force_move_to_done(&task.id)?;
+            }
+            "move_to_done_and_merge" => {
+                if task.status != TaskStatus::Review {
+                    // Names the action asked for, and — for the state this
+                    // actually gets asked from — what to do about it. A resume
+                    // puts a task back in Running, and trying to merge straight
+                    // afterwards is the common way a caller lands here.
+                    let fix = if task.status == TaskStatus::Running {
+                        " Move it forward to Review first."
+                    } else {
+                        ""
+                    };
+                    anyhow::bail!(
+                        "Task must be in Review to merge and move to Done (current: {}).{}",
+                        task.status.as_str(),
+                        fix
+                    );
+                }
+                self.merge_then_done(&task, &project_path)?;
             }
             "resume" => {
                 if task.status != TaskStatus::Review {
@@ -7678,7 +7869,7 @@ impl App {
             }
         }
 
-        Ok(())
+        Ok(TransitionOutcome::Applied)
     }
 
     /// Execute a forward transition (next column), mirroring move_task_right logic.
@@ -7694,9 +7885,6 @@ impl App {
         // Skip the phase-incomplete confirmation for MCP requests
         let handled = match (task.status, next_status) {
             (TaskStatus::Backlog, TaskStatus::Planning) => {
-                if self.state.setup_rx.is_some() {
-                    anyhow::bail!("Another task setup is already in progress, try again shortly");
-                }
                 self.transition_to_planning(task, project_path)?
             }
             (TaskStatus::Planning, TaskStatus::Running) => self.transition_to_running(task)?,
@@ -7723,6 +7911,122 @@ impl App {
     }
 
     /// MCP version of transition_to_review: sends review prompt but skips PR popup.
+    /// Merge a Review task's branch into its base, then move it to Done.
+    ///
+    /// The two halves are one action because doing them separately loses the
+    /// only chance to keep the worktree: Done removes it, and a conflict is
+    /// resolved by the task's own agent, in that worktree, against the branch it
+    /// has been working on. So a conflict leaves the task exactly where it was —
+    /// in Review, with its session alive — and hands the work to the agent that
+    /// is already there.
+    ///
+    /// Merging is synchronous, unlike the cleanup that follows it. Done is
+    /// reversible in the sense that matters (the branch survives); a merge
+    /// commit in the user's checkout is not, so its outcome has to be known
+    /// before the task's status is changed to match.
+    fn merge_then_done(&mut self, task: &Task, project_path: &Path) -> Result<()> {
+        let Some(branch) = task.branch_name.clone() else {
+            anyhow::bail!("Task has no branch to merge");
+        };
+        let base = match task.base_branch.as_deref() {
+            Some(b) if !b.trim().is_empty() => b.trim().to_string(),
+            _ => crate::git::detect_main_branch(project_path)?,
+        };
+
+        let message = format!("Merge task '{}' ({})", task.title, branch);
+        match crate::git::merge_task_branch(project_path, &base, &branch, &message)? {
+            crate::git::MergeOutcome::Merged => {
+                tracing::info!(task_id = %task.id, %branch, %base, "Merged task branch");
+                self.force_move_to_done(&task.id)
+            }
+            crate::git::MergeOutcome::NothingToMerge => {
+                anyhow::bail!(
+                    "Branch '{branch}' has no commits — nothing to merge into '{base}', \
+                     and the task stays in Review. If the agent wrote files, they are \
+                     uncommitted in the worktree and would be destroyed by Done: tell it \
+                     to commit, then retry."
+                );
+            }
+            crate::git::MergeOutcome::Conflicts(files) => {
+                self.send_to_conflict_resolution(task, &base, &files)?;
+                let shown: Vec<&str> = files.iter().take(5).map(String::as_str).collect();
+                let more = files.len().saturating_sub(shown.len());
+                anyhow::bail!(
+                    "Branch '{}' conflicts with '{}' in {} file(s): {}{}. \
+                     Task stays in Review; its agent was asked to resolve them. \
+                     Retry once it reports done.",
+                    branch,
+                    base,
+                    files.len(),
+                    shown.join(", "),
+                    if more > 0 {
+                        format!(" (+{more} more)")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            crate::git::MergeOutcome::Refused(why) => {
+                anyhow::bail!(
+                    "Cannot merge '{branch}' into '{base}': {why}. \
+                     Nothing was changed."
+                );
+            }
+        }
+    }
+
+    /// Hand a conflicting Review task to its own agent, and mark the card.
+    ///
+    /// The escalation note is set whether or not the agent could be reached: a
+    /// conflict the driver cannot resolve is exactly what the user needs to see
+    /// on the board, and a task whose session has already exited is the case
+    /// where that matters most.
+    fn send_to_conflict_resolution(
+        &mut self,
+        task: &Task,
+        base: &str,
+        files: &[String],
+    ) -> Result<()> {
+        if let Some(db) = &self.state.db {
+            if let Some(mut t) = db.get_task(&task.id)? {
+                t.escalation_note = Some(format!(
+                    "Merge conflicts with {base} in {} file(s)",
+                    files.len()
+                ));
+                t.updated_at = chrono::Utc::now();
+                db.update_task(&t)?;
+            }
+        }
+
+        if let Some(session) = task.session_name.clone() {
+            if self.state.tmux_ops.window_exists(&session).unwrap_or(false) {
+                let skill_cmd =
+                    skills::transform_plugin_command("/agtx:merge-conflicts", &task.agent);
+                let prompt = format!(
+                    "The feature branch has merge conflicts with {base} in: {}. \
+                     Please resolve them now.",
+                    files.join(", ")
+                );
+                let tmux_ops = Arc::clone(&self.state.tmux_ops);
+                let agent_name = task.agent.clone();
+                std::thread::spawn(move || {
+                    send_skill_and_prompt(
+                        &tmux_ops,
+                        &session,
+                        &skill_cmd,
+                        &prompt,
+                        &None,
+                        "",
+                        &agent_name,
+                        &[],
+                        false,
+                    );
+                });
+            }
+        }
+        self.refresh_tasks()
+    }
+
     fn mcp_transition_to_review(&mut self, task: &mut Task) -> Result<()> {
         let (review_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "review");
         if let Some(session_name) = &task.session_name {
@@ -8473,20 +8777,25 @@ impl App {
     /// for the life of every agtx session, forever, on the chance a phone might
     /// one day connect.
     ///
-    /// So it is gated twice. Without the `serve` feature there is no server in
-    /// this binary and nothing could ever read the table, so the call is
-    /// compiled out entirely. With it, publishing starts when someone actually
-    /// asks for a board and stops when they stop — the web server marks
-    /// `board_watch` on a board request, and the overlay's own child counts too,
-    /// since starting it is an explicit request for mobile.
+    /// So publishing starts when someone actually asks for a board and stops
+    /// when they stop. Two kinds of reader mark `board_watch`: the web server,
+    /// on a board request — the `W` overlay's own child counts too, since
+    /// starting it is an explicit request for mobile — and the MCP server, on
+    /// `list_tasks` / `get_task`.
+    ///
+    /// The MCP reader is why this is not gated on the `serve` feature. A
+    /// default build has no web server, but it always has `agtx mcp-serve`, and
+    /// an orchestrator or driver session polling phase status is exactly the
+    /// out-of-process reader this table is for. Compiling the call out left
+    /// every such client reading a table nothing ever wrote.
     ///
     /// The window is generous because the board no longer polls: someone can
     /// read it for minutes without issuing a request, and going quiet mid-read
     /// would freeze their phase icons rather than save anything worth having.
-    #[cfg(feature = "serve")]
     fn should_publish_runtime(&self) -> bool {
         const WATCH_WINDOW: i64 = 10 * 60;
 
+        #[cfg(feature = "serve")]
         if self.state.serve_session.is_some() {
             return true;
         }
@@ -8500,11 +8809,6 @@ impl App {
                 chrono::Duration::seconds(WATCH_WINDOW),
             )
             .unwrap_or(false)
-    }
-
-    #[cfg(not(feature = "serve"))]
-    fn should_publish_runtime(&self) -> bool {
-        false
     }
 
     /// Apply results from the background session refresh thread.
@@ -9185,6 +9489,18 @@ fn cleanup_task_resources(
     }
 
     if let Some(session_name) = session_name {
+        // Reap the pane's descendants *before* the window dies. `kill-window`
+        // signals the pane's own process group, which misses anything the agent
+        // backgrounded into a group of its own — a dev server, a watcher, a
+        // `python3 -m http.server`. Those survive, get reparented to init, and
+        // keep holding their ports long after the task is Done and its worktree
+        // is gone. One such orphan served a deleted worktree for hours and made
+        // a later run debug code that was never wrong.
+        //
+        // Order matters and is the whole reason this is not simply a `pkill`
+        // afterwards: once the window is killed the parent links are gone and
+        // the survivors can no longer be attributed to this task at all.
+        reap_task_processes(task_id, session_name, tmux_ops);
         let _ = tmux_ops.kill_window(session_name);
     }
     if let Some(worktree) = worktree_path {
@@ -9193,6 +9509,354 @@ fn cleanup_task_resources(
             tracing::warn!(worktree = %worktree, error = %e, "Failed to remove worktree");
         }
     }
+}
+
+/// The paths agtx writes into a worktree, as git exclude patterns.
+///
+/// Must track the writers in `write_skills_to_worktree`, `write_mcp_config` and
+/// `write_hook_config`. Deliberately specific rather than whole dotdirs: a
+/// project may keep its own `.claude/` or `.cursor/` content, and only the
+/// entries agtx creates are agtx's to hide.
+const AGTX_WRITTEN_PATHS: &[&str] = &[
+    ".agtx/",
+    ".mcp.json",
+    ".claude/settings.local.json",
+    ".claude/commands/agtx/",
+    ".gemini/settings.json",
+    ".gemini/commands/agtx/",
+    ".codex/config.toml",
+    ".codex/skills/agtx-*/",
+    ".cursor/mcp.json",
+    ".cursor/hooks.json",
+    ".cursor/skills/agtx-*/",
+    ".grok/config.toml",
+    ".grok/hooks/agtx.json",
+    ".grok/skills/agtx-*/",
+    ".agents/mcp_config.json",
+    ".agents/hooks.json",
+    ".agents/skills/agtx-*/",
+    ".opencode/command/agtx-*.md",
+    ".github/agents/agtx/",
+    ".pi/mcp.json",
+    ".pi/skills/agtx-*/",
+];
+
+/// Marks agtx's block in `info/exclude` so it is written once and is obvious to
+/// anyone who finds it.
+const AGTX_EXCLUDE_MARKER: &str = "# agtx: files agtx writes into worktrees";
+
+/// Hide agtx's own bookkeeping from git, so it does not read as the agent's
+/// uncommitted work.
+///
+/// Without this, `.agtx/` and the per-agent config agtx deploys show as
+/// untracked in every worktree — and `has_changes`, which the Done guard reads
+/// from `git status --porcelain`, counts untracked files. agtx's own writes
+/// therefore tripped agtx's own guard on a project's first task, before any
+/// `.gitignore` existed. A guard that cries wolf first and means it second is
+/// how a safety check stops being believed.
+///
+/// **There is exactly one place this can go.** Measured against git 2.55.0: a
+/// per-worktree `.git/worktrees/<name>/info/exclude` is *ignored*; only
+/// `$GIT_COMMON_DIR/info/exclude` takes effect, and it applies to the main
+/// checkout as well as every worktree.
+///
+/// Sharing it with the user's own checkout is safe because **exclude patterns
+/// only affect untracked files** — also measured: a tracked
+/// `.claude/settings.json` still reports `M` with `.claude/` excluded. So a
+/// project that deliberately tracks any of these keeps tracking it, and nothing
+/// a user committed can be hidden. What this changes is only whether files agtx
+/// created show up as noise.
+fn exclude_agtx_files_from_git(worktree: &Path) {
+    let Ok(out) = std::process::Command::new("git")
+        .current_dir(worktree)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if common.is_empty() {
+        return;
+    }
+    // `--git-common-dir` answers relative to the worktree unless it is absolute.
+    let common = {
+        let p = Path::new(&common);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            worktree.join(p)
+        }
+    };
+
+    let exclude = common.join("info").join("exclude");
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if existing.contains(AGTX_EXCLUDE_MARKER) {
+        return;
+    }
+
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "\n{AGTX_EXCLUDE_MARKER}\n\
+         # Only untracked files are affected; anything this project tracks is untouched.\n\
+         # Delete this block to see them in `git status` again.\n"
+    ));
+    for pattern in AGTX_WRITTEN_PATHS {
+        out.push_str(pattern);
+        out.push('\n');
+    }
+
+    if let Some(dir) = exclude.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(&exclude, out) {
+        tracing::warn!(path = %exclude.display(), error = %e, "Failed to write git exclude");
+    }
+}
+
+/// Record where review got to, so the next one can read only what came after.
+///
+/// Written when a task leaves Review for Running — the resume path — because
+/// that commit is exactly "what the last review already looked at". The next
+/// review reads the file and diffs from there instead of re-reading the whole
+/// branch, which it would otherwise do every cycle: `clear_context_on_advance`
+/// means the review agent starts with no memory of its own previous pass.
+///
+/// A file in the worktree rather than a column on the task, because the only
+/// reader is the review skill and it is already reading `.agtx/`. Nothing
+/// queries this, so a schema change would buy nothing, and it is removed with
+/// the worktree it describes.
+///
+/// **This is a commit, so it describes committed work only** — a phase that
+/// leaves changes uncommitted is not represented here. That is why the skill
+/// pairs `<marker>..HEAD` with `git status --short`: between them they cover
+/// what was committed since the marker *and* whatever is still uncommitted now.
+/// The two can overlap — work that was uncommitted when the marker was written
+/// and committed afterwards falls into both — so such a change is reviewed
+/// twice. Erring that way is deliberate: the failure mode is a redundant read,
+/// never a skipped one.
+///
+/// The second half is `git status --short` and not `git diff HEAD` because
+/// **`git diff` does not show untracked files at all**. A brand-new file from
+/// the running phase is absent from the range diff (not committed) and absent
+/// from the working-tree diff (not tracked), so the obvious pairing reviews it
+/// in neither. `the_marker_never_covers_uncommitted_work` pins that.
+///
+/// Best-effort: a task with no worktree, or a repository that cannot be read,
+/// simply leaves no marker and the next review falls back to the full diff —
+/// which is the correct answer when the reviewed point is unknown.
+fn mark_reviewed_point(task: &Task) {
+    let Some(worktree) = task.worktree_path.as_deref() else {
+        return;
+    };
+    let worktree = Path::new(worktree);
+    let Ok(sha) = crate::git::head_sha(worktree) else {
+        return;
+    };
+    let dir = worktree.join(".agtx");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Err(e) = std::fs::write(dir.join(REVIEWED_AT_FILE), format!("{sha}\n")) {
+        tracing::warn!(task_id = %task.id, error = %e, "Failed to record the reviewed point");
+    }
+}
+
+/// Terminate everything a task started, before its window and worktree go.
+///
+/// Two ways of finding them, because neither alone is enough:
+///
+/// - **By environment.** `create_window` sets `AGTX_TASK_ID` on the tmux window,
+///   and a child inherits the environment at spawn and never loses it. This is
+///   what catches a *daemonized* process: measured on a real run, an agent's
+///   `python3 -m http.server` was reparented to init as soon as it was
+///   backgrounded and was still serving a deleted worktree hours later — but it
+///   still carried the task id. Attribution is exact, and enumerating costs
+///   ~0.1s.
+/// - **By descent from the pane.** The backstop for anything that never received
+///   the environment.
+///
+/// Walking the pane's descendants alone is not enough, and this is the correction
+/// to that: a process reparented to init *before* cleanup runs is no longer in
+/// the tree, so ordering the walk ahead of `kill-window` — necessary, since the
+/// links vanish with the window — still misses exactly the case that matters.
+///
+/// The alternatives were measured and rejected. A cwd scan
+/// (`lsof -u <uid> -d cwd`) takes ~12s, and `lsof +D <worktree>` walks the tree
+/// — 26s on a large checkout — while matching nothing once the directory is
+/// gone. Session id is not readable per-process from `ps` on macOS.
+///
+/// Children are signalled before parents so a supervisor cannot restart one on
+/// the way down. Best-effort by design: a process that has already exited is
+/// skipped rather than treated as a failure. Cleanup runs on a background thread
+/// after the task is already Done, and there is nothing useful to abort.
+fn reap_task_processes(task_id: &str, target: &str, tmux_ops: &dyn TmuxOperations) {
+    let mut victims = processes_for_task(task_id);
+    for pid in pane_descendants(target, tmux_ops) {
+        if !victims.contains(&pid) {
+            victims.push(pid);
+        }
+    }
+    // Never signal agtx itself. It carries no `AGTX_TASK_ID` and is not
+    // descended from the pane, so this cannot currently match — it is here
+    // because the cost of being wrong is killing the board mid-cleanup.
+    let me = std::process::id();
+    victims.retain(|pid| *pid != me);
+
+    if victims.is_empty() {
+        return;
+    }
+    tracing::info!(
+        task_id = %task_id,
+        target = %target,
+        count = victims.len(),
+        "Terminating processes started by a task"
+    );
+    signal_all(&victims, "TERM");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    signal_all(&victims, "KILL");
+}
+
+/// Every process carrying this task's `AGTX_TASK_ID`, however it was reparented.
+///
+/// Reads `/proc/<pid>/environ` where it exists and falls back to `ps -Eww`,
+/// which is what macOS offers. The two cannot share one command: Linux's `ps -E`
+/// means something else entirely.
+fn processes_for_task(task_id: &str) -> Vec<u32> {
+    let needle = format!("{}={}", hook_status::ENV_TASK_ID, task_id);
+
+    if Path::new("/proc").is_dir() {
+        let mut found = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|n| n.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                // NUL-separated; a lossy read is fine, the needle is ASCII.
+                if let Ok(env) = std::fs::read(entry.path().join("environ")) {
+                    if String::from_utf8_lossy(&env)
+                        .split('\0')
+                        .any(|v| v == needle)
+                    {
+                        found.push(pid);
+                    }
+                }
+            }
+        }
+        return found;
+    }
+
+    // `-A` is load-bearing: without a process selector `ps` lists only the
+    // processes attached to the caller's own terminal, so a daemonized orphan —
+    // the entire reason this function exists — never appears. Verified against a
+    // real survivor: no selector found nothing, `-A` found it.
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-AEww", "-o", "pid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    pids_matching_env(&String::from_utf8_lossy(&out.stdout), &needle)
+}
+
+/// Pick the pids out of `ps -Eww -o pid=,command=` output whose line carries
+/// `needle`.
+///
+/// Split out because the surrounding call cannot be tested reliably: whether
+/// `ps` exposes another process's environment depends on the platform and on
+/// how the caller itself was launched. The parsing is what can regress, and a
+/// mis-parse here signals the wrong pids to kill.
+fn pids_matching_env(ps_output: &str, needle: &str) -> Vec<u32> {
+    ps_output
+        .lines()
+        .filter(|line| line.contains(needle))
+        .filter_map(|line| line.split_whitespace().next()?.parse().ok())
+        .collect()
+}
+
+/// Every process descended from a task pane, deepest first.
+fn pane_descendants(target: &str, tmux_ops: &dyn TmuxOperations) -> Vec<u32> {
+    let Some(root) = tmux_ops.pane_pid(target) else {
+        return Vec::new();
+    };
+    // pid 0 and pid 1 are the roots of the whole process tree — on macOS pid 0
+    // is the ancestor of launchd, so `descendants_of(0)` returns *every process
+    // on the machine*. A pane can never legitimately be either, so a value this
+    // low means tmux answered with something that is not a pane pid, and the
+    // only safe response is to reap nothing.
+    if root <= 1 {
+        tracing::warn!(target = %target, pane_pid = root, "Refusing to reap from a root pid");
+        return Vec::new();
+    }
+    descendants_of(root)
+}
+
+/// Send one signal to every pid, children before parents.
+///
+/// Shelling out to `kill` rather than taking a `libc` dependency for two
+/// signals: this file already reaches git and tmux the same way, and it keeps
+/// the whole path free of `unsafe`.
+fn signal_all(pids: &[u32], signal: &str) {
+    if pids.is_empty() {
+        return;
+    }
+    let mut cmd = std::process::Command::new("kill");
+    cmd.arg(format!("-{signal}"));
+    for pid in pids.iter().rev() {
+        cmd.arg(pid.to_string());
+    }
+    // Non-zero here means "already gone", which is the desired end state.
+    let _ = cmd.output();
+}
+
+/// Every descendant of `root`, parents before children.
+///
+/// Built from one `ps` snapshot rather than by walking `/proc`, which does not
+/// exist on macOS. `root` itself is excluded — `kill-window` owns the pane.
+fn descendants_of(root: u32) -> Vec<u32> {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-Ao", "pid=,ppid="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(Ok(pid)), Some(Ok(ppid))) = (
+            it.next().map(str::parse::<u32>),
+            it.next().map(str::parse::<u32>),
+        ) {
+            children.entry(ppid).or_default().push(pid);
+        }
+    }
+
+    let mut found = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root]);
+    while let Some(pid) = queue.pop_front() {
+        for &child in children.get(&pid).map(Vec::as_slice).unwrap_or(&[]) {
+            // A cycle is impossible in a real process tree, but the snapshot is
+            // read from text and a malformed row must not spin forever.
+            if child != root && !found.contains(&child) {
+                found.push(child);
+                queue.push_back(child);
+            }
+        }
+    }
+    found
 }
 
 /// Set up a worktree and tmux window for a task.
@@ -10182,6 +10846,20 @@ const REDRAW_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
 /// not latency-critical: it is a request to move a task between columns, and the
 /// phase status it acts on is itself refreshed on a 2-second cache.
 const TRANSITION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a claimed-but-unfinished transition request must sit before another
+/// instance may take it over.
+///
+/// The window has to clear the longest legitimate wait for the serialized setup
+/// slot — a queued task waits out every setup ahead of it — while still
+/// recovering promptly from a TUI that died holding a queue. Five minutes is
+/// well past a normal setup and well inside the hour after which
+/// `cleanup_old_transition_requests` deletes the row unexecuted.
+const RECLAIM_CLAIMS_AFTER: chrono::Duration = chrono::Duration::minutes(5);
+
+/// Where the last review's end point is recorded, inside a task's `.agtx/`.
+/// Read by the review skill; see [`mark_reviewed_point`].
+const REVIEWED_AT_FILE: &str = "reviewed-at";
 
 /// How long a phase status is trusted before the refresh looks again.
 const PHASE_STATUS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -13023,6 +13701,10 @@ fn write_skills_to_worktree(
     // It never grants trust that does not already exist — `seed_from_project` is a
     // no-op unless the project root is in the agent's own store. See
     // `agent::trust`.
+    // Before anything else agtx writes here, so the files below are invisible to
+    // git the moment they appear.
+    exclude_agtx_files_from_git(Path::new(worktree_path));
+
     if let Some(home) = agent_trust_home() {
         for agent_name in agent_names {
             if !agent::trust::needs_seeding(agent_name) {

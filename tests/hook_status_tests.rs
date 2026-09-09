@@ -738,3 +738,46 @@ fn a_grok_payload_reaching_a_neighbours_registration() {
     );
     assert_eq!(map_hook_event(HookConfigKind::ClaudeSettings, "stop"), None);
 }
+
+/// `Notification` is not one event. Measured against Claude Code 2.1.263 it
+/// carries a `notification_type`: `permission_prompt` when the agent is stopped
+/// waiting on a human, and `idle_prompt` roughly a minute after any turn simply
+/// ends. Both map to the same `Notification` name, so only the registration
+/// matcher can separate them.
+///
+/// Unscoped, a healthy agent that finished its turn reported Blocked — and an
+/// agent-reported Blocked fires the stuck-task path immediately, with no settle
+/// window, so a driver interrupts an agent that is merely quiet.
+#[test]
+fn claude_only_subscribes_to_permission_notifications() {
+    let matcher = agtx::agent::hook_status::hook_events(HookConfigKind::ClaudeSettings)
+        .iter()
+        .find(|(event, _)| *event == "Notification")
+        .map(|(_, m)| *m)
+        .expect("Claude registers Notification");
+
+    assert_eq!(
+        matcher,
+        Some("permission_prompt"),
+        "an unscoped Notification also fires on idle and reports a working agent as Blocked"
+    );
+}
+
+/// Grok reached the same conclusion first; the two must not drift, because the
+/// failure is silent in both directions — a wrong Blocked looks like a stuck
+/// agent, and a missing one looks like a hung task nobody is told about.
+#[test]
+fn every_agent_that_subscribes_to_notification_scopes_it_to_permissions() {
+    for kind in [HookConfigKind::ClaudeSettings, HookConfigKind::GrokHooksJson] {
+        if let Some((_, matcher)) = agtx::agent::hook_status::hook_events(kind)
+            .iter()
+            .find(|(event, _)| event.eq_ignore_ascii_case("notification"))
+        {
+            assert_eq!(
+                *matcher,
+                Some("permission_prompt"),
+                "{kind:?} subscribes to Notification without scoping it"
+            );
+        }
+    }
+}

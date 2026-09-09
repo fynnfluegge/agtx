@@ -9,7 +9,7 @@ You are in the **review phase** of an agtx-managed task.
 
 ## Instructions
 
-1. Review all changes made during execution: run `git diff HEAD` (staged+unstaged) and `git log --oneline $(git merge-base HEAD origin/HEAD)..HEAD` to see only your commits. Do NOT diff against `main` or `origin/main` — those may include unrelated upstream history.
+1. Pick the scope. If `.agtx/reviewed-at` exists, a prior review covered everything up to that commit: review `git diff $(cat .agtx/reviewed-at)..HEAD` plus `git status --short` for uncommitted work, and read the prior `.agtx/review.md` — check its points were addressed, don't re-review the branch. Otherwise review all changes made during execution: `git diff HEAD` (staged+unstaged) and `git log --oneline $(git merge-base HEAD origin/HEAD)..HEAD` for your commits. Do NOT diff against `main` or `origin/main` — those may include unrelated upstream history. Either way `??` lines in `git status --short` are untracked files that `git diff` never shows — read them in full.
 2. Check for:
    - Correctness and edge cases
    - Error handling
@@ -17,6 +17,7 @@ You are in the **review phase** of an agtx-managed task.
    - Test coverage
    - Security issues (injection, XSS, etc.)
 3. Fix any issues you find
+4. Commit them. `git add -A`, commit, verify `git status --short` clean. Uncommitted = destroyed at task completion; merge is blocked until clean.
 
 ## Output
 

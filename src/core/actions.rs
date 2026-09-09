@@ -30,6 +30,7 @@ pub const ACTIONS: &[&str] = &[
     "move_to_running",
     "move_to_review",
     "move_to_done",
+    "move_to_done_and_merge",
     "resume",
     "escalate_to_user",
 ];
@@ -68,6 +69,13 @@ pub fn allowed_actions(task: &Task, deps_satisfied: bool, caller: CallerKind) ->
         TaskStatus::Review => {
             actions.push("move_to_done".to_string());
             actions.push("resume".to_string());
+            // Integrating locally is the unattended caller's problem alone. A
+            // person reaches Done through a PR merged on the remote, and
+            // offering them a button that merges into their own checkout
+            // instead would be a second, conflicting way to land the same work.
+            if caller == CallerKind::Orchestrator {
+                actions.push("move_to_done_and_merge".to_string());
+            }
         }
         TaskStatus::Done => {}
     }

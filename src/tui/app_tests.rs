@@ -11346,6 +11346,14 @@ fn test_cleanup_task_resources_archives_md_files() {
 #[cfg(feature = "test-mocks")]
 fn test_cleanup_task_resources_kills_window_and_removes_worktree() {
     let mut mock_tmux = MockTmuxOperations::new();
+    // Asked before the window dies, so the pane's descendants can still be
+    // attributed to this task. `None` — tmux cannot answer — is the case where
+    // cleanup has nothing to reap and must carry on regardless.
+    mock_tmux
+        .expect_pane_pid()
+        .with(mockall::predicate::eq("proj:task-win"))
+        .times(1)
+        .returning(|_| None);
     mock_tmux
         .expect_kill_window()
         .with(mockall::predicate::eq("proj:task-win"))
@@ -16068,4 +16076,902 @@ fn queued_completion_allows_clean_worktree() {
         .unwrap()
         .error
         .is_none());
+}
+
+// =============================================================================
+// Serialized worktree setup — the single slot, and what queues for it
+// =============================================================================
+
+/// Occupy the setup slot the way a real setup does, without running one.
+#[cfg(feature = "test-mocks")]
+fn occupy_setup_slot(app: &mut App) -> mpsc::Sender<SetupResult> {
+    let (tx, rx) = mpsc::channel::<SetupResult>();
+    app.state.setup_rx = Some(rx);
+    tx
+}
+
+/// Worktree setup runs one at a time. A caller that asks for several Backlog
+/// transitions in one pass — the dependency overlay, or an MCP client moving a
+/// wave of tasks — must have them all queued: rejecting the ones that arrive
+/// while the slot is busy left those tasks in Backlog with nothing retrying
+/// them, and `move_task` had already answered `queued`.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn backlog_transitions_queue_behind_a_busy_setup_slot() {
+    let _data = redirect_data_dir();
+    let _config = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = make_test_app_at(dir.path());
+    let _slot = occupy_setup_slot(&mut app);
+
+    let db = app.state.db.as_ref().unwrap();
+    let mut ids = Vec::new();
+    for title in ["one", "two", "three"] {
+        let task = Task::new(title, "claude", "p1");
+        db.create_task(&task).unwrap();
+        ids.push(task.id);
+    }
+
+    for id in &ids {
+        let req = TransitionRequest::new(id, "move_to_planning");
+        app.state
+            .db
+            .as_ref()
+            .unwrap()
+            .create_transition_request(&req)
+            .unwrap();
+        let outcome = app.execute_transition_request(&req).unwrap();
+
+        assert_eq!(
+            outcome,
+            TransitionOutcome::Queued,
+            "a Backlog transition goes through the queue, busy slot or not"
+        );
+
+        // Still claimed and unprocessed, so `get_transition_status` answers
+        // `pending` — the task has not moved yet, and saying `completed` here
+        // would tell a driver that it had.
+        let stored = app
+            .state
+            .db
+            .as_ref()
+            .unwrap()
+            .get_transition_request(&req.id)
+            .unwrap()
+            .unwrap();
+        assert!(stored.processed_at.is_none());
+        assert!(stored.error.is_none());
+    }
+
+    let queued: Vec<&str> = app
+        .state
+        .setup_queue
+        .iter()
+        .map(|q| q.task_id.as_str())
+        .collect();
+    assert_eq!(queued, ids.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(app
+        .state
+        .setup_queue
+        .iter()
+        .all(|q| q.intent == SetupIntent::Planning));
+}
+
+/// The intent travels with the task because the two callers disagree about
+/// where a Backlog task should land: the overlay lets the plugin choose, while
+/// an MCP request names one transition and must not be answered with another.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn each_queued_task_keeps_the_intent_it_was_queued_with() {
+    let _data = redirect_data_dir();
+    let _config = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = make_test_app_at(dir.path());
+    let _slot = occupy_setup_slot(&mut app);
+
+    app.enqueue_setup("a", SetupIntent::Research, None);
+    app.enqueue_setup("b", SetupIntent::Running, None);
+    app.enqueue_setup("c", SetupIntent::PluginDefault, None);
+
+    let got: Vec<(&str, SetupIntent)> = app
+        .state
+        .setup_queue
+        .iter()
+        .map(|q| (q.task_id.as_str(), q.intent))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("a", SetupIntent::Research),
+            ("b", SetupIntent::Running),
+            ("c", SetupIntent::PluginDefault),
+        ]
+    );
+}
+
+/// Queuing a task twice would set its worktree up twice. The duplicate's
+/// request is resolved rather than dropped, so a driver polling it is not left
+/// waiting on a row nothing will ever touch.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_task_queued_twice_is_queued_once_and_the_duplicate_is_answered() {
+    let _data = redirect_data_dir();
+    let _config = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = make_test_app_at(dir.path());
+    let _slot = occupy_setup_slot(&mut app);
+
+    let task = Task::new("only once", "claude", "p1");
+    app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+
+    let first = TransitionRequest::new(&task.id, "move_to_planning");
+    let second = TransitionRequest::new(&task.id, "move_to_running");
+    for req in [&first, &second] {
+        app.state
+            .db
+            .as_ref()
+            .unwrap()
+            .create_transition_request(req)
+            .unwrap();
+        app.execute_transition_request(req).unwrap();
+    }
+
+    assert_eq!(app.state.setup_queue.len(), 1);
+    assert_eq!(app.state.setup_queue[0].intent, SetupIntent::Planning);
+
+    let db = app.state.db.as_ref().unwrap();
+    assert!(db
+        .get_transition_request(&first.id)
+        .unwrap()
+        .unwrap()
+        .processed_at
+        .is_none());
+    let dup = db.get_transition_request(&second.id).unwrap().unwrap();
+    assert!(dup.processed_at.is_some());
+    assert!(dup.error.is_some(), "the duplicate says why it did nothing");
+}
+
+/// A queued request outlives the state it was accepted against. Every way the
+/// drain can decline one has to resolve it — dropping it silently leaves a
+/// caller polling `pending` forever.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_queued_task_that_left_backlog_resolves_its_request_with_an_error() {
+    let _data = redirect_data_dir();
+    let _config = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = make_test_app_at(dir.path());
+    let slot = occupy_setup_slot(&mut app);
+
+    let mut task = Task::new("moved on", "claude", "p1");
+    app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+    let req = TransitionRequest::new(&task.id, "move_to_planning");
+    app.state
+        .db
+        .as_ref()
+        .unwrap()
+        .create_transition_request(&req)
+        .unwrap();
+    app.execute_transition_request(&req).unwrap();
+    assert_eq!(app.state.setup_queue.len(), 1);
+
+    // The task advances by some other route while it waits its turn.
+    task.status = TaskStatus::Running;
+    app.state.db.as_ref().unwrap().update_task(&task).unwrap();
+
+    // Free the slot and drain.
+    drop(slot);
+    app.state.setup_rx = None;
+    app.try_start_next_queued_setup().unwrap();
+
+    assert!(app.state.setup_queue.is_empty());
+    let stored = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_transition_request(&req.id)
+        .unwrap()
+        .unwrap();
+    assert!(stored.processed_at.is_some());
+    assert!(
+        stored.error.as_deref().unwrap_or_default().contains("Backlog"),
+        "the error says what changed: {:?}",
+        stored.error
+    );
+}
+
+// =============================================================================
+// move_to_done_and_merge — landing a branch in the project's own checkout
+// =============================================================================
+
+/// A git repo on `main` with one commit, at `dir`.
+#[cfg(feature = "test-mocks")]
+fn init_repo_at(dir: &std::path::Path) {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "test@test.com"]);
+    git(&["config", "user.name", "Test User"]);
+    std::fs::write(dir.join("README.md"), "# base\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial"]);
+    git(&["branch", "-M", "main"]);
+}
+
+/// A conflict must not cost the task its worktree. Done removes it, and the
+/// worktree is exactly where the agent that wrote the branch has to resolve the
+/// conflict — so the task stays in Review, carrying a note the board can show.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_conflicting_merge_leaves_the_task_in_review_with_a_note() {
+    let _data = redirect_data_dir();
+    let _config = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    init_repo_at(dir.path());
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+    };
+
+    // Two edits to the same line, from the same starting point.
+    git(&["checkout", "-q", "-b", "task/thing"]);
+    std::fs::write(dir.path().join("README.md"), "# from the task\n").unwrap();
+    git(&["commit", "-qam", "task edit"]);
+    git(&["checkout", "-q", "main"]);
+    std::fs::write(dir.path().join("README.md"), "# from main\n").unwrap();
+    git(&["commit", "-qam", "main edit"]);
+
+    let mut app = make_test_app_at(dir.path());
+    let mut task = Task::new("the thing", "claude", "p1");
+    task.status = TaskStatus::Review;
+    task.branch_name = Some("task/thing".to_string());
+    task.base_branch = Some("main".to_string());
+    // No session: the tmux send is skipped, but the note is not — a task whose
+    // agent has already exited is when that note matters most.
+    app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+
+    let req = TransitionRequest::new(&task.id, "move_to_done_and_merge");
+    let err = app.execute_transition_request(&req).unwrap_err().to_string();
+    assert!(err.contains("conflicts"), "{err}");
+    assert!(err.contains("README.md"), "{err}");
+
+    let stored = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task(&task.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, TaskStatus::Review);
+    assert!(stored
+        .escalation_note
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Merge conflicts"));
+
+    // The user's checkout is untouched: no half-finished merge, no lost edit.
+    assert!(!dir.path().join(".git").join("MERGE_HEAD").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("README.md")).unwrap(),
+        "# from main\n"
+    );
+}
+
+/// The refusal is about the *project checkout*, and it must not be worked
+/// around: agtx does not switch the user's branch or stash their work to land a
+/// merge.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn merging_into_a_checkout_on_the_wrong_branch_is_refused_and_changes_nothing() {
+    let _data = redirect_data_dir();
+    let _config = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    init_repo_at(dir.path());
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+    };
+    git(&["checkout", "-q", "-b", "task/thing"]);
+    std::fs::write(dir.path().join("feature.txt"), "work\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "task work"]);
+    // The user is left somewhere that is neither main nor the task branch.
+    git(&["checkout", "-q", "-b", "user-was-here", "main"]);
+
+    let mut app = make_test_app_at(dir.path());
+    let mut task = Task::new("the thing", "claude", "p1");
+    task.status = TaskStatus::Review;
+    task.branch_name = Some("task/thing".to_string());
+    task.base_branch = Some("main".to_string());
+    app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+
+    let req = TransitionRequest::new(&task.id, "move_to_done_and_merge");
+    let err = app.execute_transition_request(&req).unwrap_err().to_string();
+    assert!(err.contains("user-was-here"), "{err}");
+    assert!(err.contains("Nothing was changed"), "{err}");
+
+    let stored = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task(&task.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, TaskStatus::Review);
+    assert!(!dir.path().join("feature.txt").exists());
+    let branch = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    assert_eq!(branch, "user-was-here", "the user's branch is left alone");
+}
+
+/// The pane is inspected *before* `kill_window`, because once the window is gone
+/// the parent links are gone with it. Necessary but not sufficient — a process
+/// reparented to init earlier is already out of the tree, which is what the
+/// environment lookup in `processes_for_task` exists to catch.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn cleanup_reaps_pane_descendants_before_killing_the_window() {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    static PANE_PID_AT: AtomicUsize = AtomicUsize::new(0);
+    static KILL_AT: AtomicUsize = AtomicUsize::new(0);
+    SEQ.store(0, AtomicOrdering::SeqCst);
+
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_pane_pid().times(1).returning(|_| {
+        PANE_PID_AT.store(SEQ.fetch_add(1, AtomicOrdering::SeqCst), AtomicOrdering::SeqCst);
+        None
+    });
+    mock_tmux.expect_kill_window().times(1).returning(|_| {
+        KILL_AT.store(SEQ.fetch_add(1, AtomicOrdering::SeqCst), AtomicOrdering::SeqCst);
+        Ok(())
+    });
+
+    let mut mock_git = MockGitOperations::new();
+    mock_git
+        .expect_remove_worktree()
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    cleanup_task_resources(
+        "task-id",
+        "claude",
+        &Some("task/branch".to_string()),
+        &Some("proj:task-win".to_string()),
+        &Some("/tmp/wt".to_string()),
+        None,
+        Path::new("/tmp/proj"),
+        &mock_tmux,
+        &mock_git,
+    );
+
+    assert!(
+        PANE_PID_AT.load(AtomicOrdering::SeqCst) < KILL_AT.load(AtomicOrdering::SeqCst),
+        "the pane must be inspected before it is destroyed"
+    );
+}
+
+/// `descendants_of` walks a real `ps` snapshot, and pid 0 is the ancestor of
+/// every process on macOS — so asked for the tree under a root pid it returns
+/// the entire machine. Reaping from there would kill the user's session, their
+/// editor, and agtx itself.
+///
+/// The guard lives in `reap_pane_descendants` rather than in `descendants_of`,
+/// which is an honest tree walk and correct as written. This test pins the
+/// hazard so nobody moves the check or feeds it an unvalidated pid.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_root_pid_is_refused_rather_than_reaped() {
+    assert!(
+        !descendants_of(0).is_empty(),
+        "pid 0 really is the ancestor of everything — that is why the guard exists"
+    );
+
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_pane_pid().times(1).returning(|_| Some(0));
+    mock_tmux.expect_kill_window().times(1).returning(|_| Ok(()));
+    let mut mock_git = MockGitOperations::new();
+    mock_git
+        .expect_remove_worktree()
+        .times(1)
+        .returning(|_, _| Ok(()));
+
+    // Reaching `kill_window` at all proves the reap declined and returned
+    // rather than signalling the tree it found.
+    cleanup_task_resources(
+        "task-id",
+        "claude",
+        &None,
+        &Some("proj:task-win".to_string()),
+        &Some("/tmp/wt".to_string()),
+        None,
+        Path::new("/tmp/proj"),
+        &mock_tmux,
+        &mock_git,
+    );
+}
+
+// =============================================================================
+// Incremental re-review — recording where the last review got to
+// =============================================================================
+
+/// A resume from Review records the commit the last review covered, so the next
+/// one reads only what came after it. Without this the review agent re-reads the
+/// whole branch every cycle: `clear_context_on_advance` clears its memory of its
+/// own previous pass, so it has nothing else to go on.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn leaving_review_records_the_reviewed_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(wt)
+            .args(args)
+            .output()
+            .unwrap();
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t.com"]);
+    git(&["config", "user.name", "T"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "reviewed work"]);
+
+    let mut task = Task::new("reviewed thing", "claude", "p1");
+    task.worktree_path = Some(wt.to_string_lossy().to_string());
+
+    mark_reviewed_point(&task);
+
+    let recorded = std::fs::read_to_string(wt.join(".agtx").join(REVIEWED_AT_FILE)).unwrap();
+    let head = crate::git::head_sha(wt).unwrap();
+    assert_eq!(recorded.trim(), head);
+}
+
+/// A later resume moves the marker forward, so cycle three reviews only what
+/// cycle two produced rather than everything since the first review.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_second_resume_moves_the_marker_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(wt)
+            .args(args)
+            .output()
+            .unwrap();
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t.com"]);
+    git(&["config", "user.name", "T"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+
+    let mut task = Task::new("thing", "claude", "p1");
+    task.worktree_path = Some(wt.to_string_lossy().to_string());
+    mark_reviewed_point(&task);
+    let first = std::fs::read_to_string(wt.join(".agtx").join(REVIEWED_AT_FILE)).unwrap();
+
+    git(&["commit", "-q", "--allow-empty", "-m", "addressed the feedback"]);
+    mark_reviewed_point(&task);
+    let second = std::fs::read_to_string(wt.join(".agtx").join(REVIEWED_AT_FILE)).unwrap();
+
+    assert_ne!(first.trim(), second.trim());
+    assert_eq!(second.trim(), crate::git::head_sha(wt).unwrap());
+}
+
+/// No worktree means no marker, and the next review falls back to the full diff
+/// — the right answer when the reviewed point is unknown. It must not panic or
+/// leave a marker pointing at some other repository.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_task_with_no_worktree_records_nothing() {
+    let task = Task::new("no worktree", "claude", "p1");
+    mark_reviewed_point(&task); // must not panic
+    assert!(task.worktree_path.is_none());
+}
+
+/// The marker is a commit, so a phase that leaves work uncommitted is not
+/// represented in it. That is why the review skill pairs `<marker>..HEAD` with a
+/// plain `git diff HEAD`: this test pins the property those two rely on — the
+/// marker never advances past uncommitted work, so such work cannot fall
+/// between the two halves and be reviewed by neither.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_marker_never_covers_uncommitted_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(wt)
+            .args(args)
+            .output()
+            .unwrap();
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t.com"]);
+    git(&["config", "user.name", "T"]);
+    std::fs::write(wt.join("a.txt"), "reviewed\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "committed work"]);
+
+    // The running phase leaves this behind without committing it.
+    std::fs::write(wt.join("b.txt"), "not committed\n").unwrap();
+
+    let mut task = Task::new("thing", "claude", "p1");
+    task.worktree_path = Some(wt.to_string_lossy().to_string());
+    mark_reviewed_point(&task);
+
+    let marker = std::fs::read_to_string(wt.join(".agtx").join(REVIEWED_AT_FILE)).unwrap();
+    let marker = marker.trim();
+
+    // `<marker>..HEAD` is empty — the marker *is* HEAD — so the uncommitted file
+    // is invisible to that half...
+    let ranged = std::process::Command::new("git")
+        .current_dir(wt)
+        .args(["diff", "--name-only", &format!("{marker}..HEAD")])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&ranged.stdout).trim().is_empty());
+
+    // ...and `git diff HEAD` does not catch it either: an untracked file is
+    // invisible to `git diff` entirely. That is the trap this test exists for —
+    // the obvious pairing would have left new files reviewed by neither half.
+    let dirty = std::process::Command::new("git")
+        .current_dir(wt)
+        .args(["diff", "--name-only", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&dirty.stdout).contains("b.txt"),
+        "if this ever passes, git changed and the skill can be simplified"
+    );
+
+    // `git status --short` is what actually sees it, which is why the skill
+    // asks for that rather than a second diff.
+    let status = std::process::Command::new("git")
+        .current_dir(wt)
+        .args(["status", "--short"])
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(status.contains("b.txt"), "{status}");
+    assert!(status.contains("??"), "reported as untracked: {status}");
+}
+
+/// The refusal names the action that was asked for. It had reused
+/// `move_to_done`'s wording and said "move to Done", which reads as though the
+/// caller requested a different action than it did.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn refusing_a_merge_names_the_merge_and_the_way_out() {
+    let _data = redirect_data_dir();
+    let _config = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    init_repo_at(dir.path());
+    let mut app = make_test_app_at(dir.path());
+
+    // Running is the state this is actually reached from: `resume` puts a task
+    // back here, and a caller then tries to merge without returning to Review.
+    let mut task = Task::new("mid-flight", "claude", "p1");
+    task.status = TaskStatus::Running;
+    app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+
+    let req = TransitionRequest::new(&task.id, "move_to_done_and_merge");
+    let err = app.execute_transition_request(&req).unwrap_err().to_string();
+
+    assert!(err.contains("merge"), "names the action asked for: {err}");
+    assert!(err.contains("running"), "names the state it is in: {err}");
+    assert!(err.contains("Review first"), "names the way out: {err}");
+}
+
+/// An App whose git ops report a worktree as dirty or clean on demand.
+///
+/// `make_test_app_at` leaves `has_changes` unmocked, which is fine until a test
+/// exercises a path that asks it — every route to Done does.
+#[cfg(feature = "test-mocks")]
+fn make_test_app_with_dirty_worktree(project: &std::path::Path, dirty: bool) -> App {
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| false);
+
+    let mut mock_git = MockGitOperations::new();
+    mock_git.expect_has_changes().returning(move |_| dirty);
+
+    App::new_for_test(
+        Some(project.to_path_buf()),
+        Arc::new(mock_tmux),
+        Arc::new(mock_git),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(MockAgentRegistry::new()),
+    )
+    .unwrap()
+}
+
+/// Reaching Done deletes the worktree, and `has_changes` reads
+/// `git status --porcelain`, which counts **untracked** files. An agent that
+/// wrote its work and never committed has all of it there and nowhere else.
+///
+/// This fired for real: `move_to_done_and_merge` was added as a third route to
+/// Done and left out of the guard, so a task whose agent produced eleven files
+/// and committed none merged an empty branch, went to Done, and cleanup deleted
+/// every one of them.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn every_route_to_done_refuses_a_worktree_with_uncommitted_work() {
+    for action in ["move_to_done", "move_to_done_and_merge", "move_forward"] {
+        let _data = redirect_data_dir();
+        let _config = redirect_config_dir();
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_at(dir.path());
+
+        // Work the agent wrote and never committed — untracked, so only
+        // `git status` sees it.
+        std::fs::write(dir.path().join("uncommitted.js"), "the whole feature\n").unwrap();
+
+        // `has_changes` is the real guard's input; production reads
+        // `git status --porcelain`, which counts the untracked file above.
+        let mut app = make_test_app_with_dirty_worktree(dir.path(), true);
+        let mut task = Task::new("wrote but never committed", "claude", "p1");
+        task.status = TaskStatus::Review;
+        task.branch_name = Some("task/thing".to_string());
+        task.base_branch = Some("main".to_string());
+        task.worktree_path = Some(dir.path().to_string_lossy().to_string());
+        app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+
+        let req = TransitionRequest::new(&task.id, action);
+        let err = app
+            .execute_transition_request(&req)
+            .expect_err(&format!("{action} must refuse to destroy uncommitted work"))
+            .to_string();
+        assert!(err.contains("Uncommitted changes"), "{action}: {err}");
+
+        let stored = app
+            .state
+            .db
+            .as_ref()
+            .unwrap()
+            .get_task(&task.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskStatus::Review, "{action} left Review");
+        assert!(
+            dir.path().join("uncommitted.js").exists(),
+            "{action} destroyed the work"
+        );
+    }
+}
+
+/// Second layer, for when the tree is clean but the branch is empty: merging
+/// lands nothing, so Done would be reached on the strength of a merge that did
+/// not happen.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn merging_an_empty_branch_refuses_instead_of_reaching_done() {
+    let _data = redirect_data_dir();
+    let _config = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    init_repo_at(dir.path());
+    std::process::Command::new("git")
+        .current_dir(dir.path())
+        .args(["branch", "task/empty"])
+        .output()
+        .unwrap();
+
+    // Clean tree — the first layer passes, and the empty branch must still stop it.
+    let mut app = make_test_app_with_dirty_worktree(dir.path(), false);
+    let mut task = Task::new("produced nothing", "claude", "p1");
+    task.status = TaskStatus::Review;
+    task.branch_name = Some("task/empty".to_string());
+    task.base_branch = Some("main".to_string());
+    task.worktree_path = Some(dir.path().to_string_lossy().to_string());
+    app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+
+    let req = TransitionRequest::new(&task.id, "move_to_done_and_merge");
+    let err = app.execute_transition_request(&req).unwrap_err().to_string();
+
+    assert!(err.contains("no commits"), "{err}");
+    assert!(err.contains("uncommitted"), "says where the work would be: {err}");
+    let stored = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task(&task.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, TaskStatus::Review);
+}
+
+
+
+/// The parse behind `processes_for_task`. Split out because whether `ps` will
+/// expose another process's environment depends on the platform and on how the
+/// caller was launched — but a mis-parse here signals the wrong pids to kill,
+/// which is worth pinning regardless.
+///
+/// The format is `ps -Eww -o pid=,command=`: leading pid, then the command line
+/// with the environment appended.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn task_id_lookup_matches_only_the_task_that_owns_the_process() {
+    let out = "\
+  501 python3 -m http.server 8137 AGTX_TASK_ID=aaa AGTX_WORKTREE=/w/aaa
+  502 node server.js AGTX_TASK_ID=bbb AGTX_WORKTREE=/w/bbb
+  503 vim notes.md
+ 1234 python3 -m http.server 9000 AGTX_TASK_ID=aaa
+";
+    assert_eq!(pids_matching_env(out, "AGTX_TASK_ID=aaa"), vec![501, 1234]);
+    assert_eq!(pids_matching_env(out, "AGTX_TASK_ID=bbb"), vec![502]);
+    assert!(
+        pids_matching_env(out, "AGTX_TASK_ID=ccc").is_empty(),
+        "an unknown task owns nothing"
+    );
+}
+
+/// A task id that is a prefix of another must not sweep up its processes —
+/// killing a live task's server because its id starts the same way would be
+/// indistinguishable from the bug this replaces.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_task_id_prefix_does_not_match_a_longer_id() {
+    let out = "\
+  501 srv AGTX_TASK_ID=abc123
+  502 srv AGTX_TASK_ID=abc
+";
+    // The needle carries the `=`, so matching is on the full assignment; only a
+    // genuinely longer *value* can still collide, which is why ids are UUIDs.
+    assert_eq!(pids_matching_env(out, "AGTX_TASK_ID=abc123"), vec![501]);
+}
+
+/// Empty or unreadable `ps` output must yield nothing rather than panic — the
+/// reap runs on a cleanup thread where there is nothing useful to abort.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn task_id_lookup_survives_junk_input() {
+    assert!(pids_matching_env("", "AGTX_TASK_ID=x").is_empty());
+    assert!(pids_matching_env("not a ps line at all\n", "AGTX_TASK_ID=x").is_empty());
+    assert!(pids_matching_env("  AGTX_TASK_ID=x no pid here\n", "AGTX_TASK_ID=x").is_empty());
+}
+
+/// agtx's own writes must not read as the agent's uncommitted work. Without the
+/// exclude, `.agtx/` and the deployed agent configs show as untracked in every
+/// worktree, and `has_changes` — which the Done guard reads from
+/// `git status --porcelain` — counts untracked files. agtx's bookkeeping
+/// therefore tripped agtx's own guard on a project's first task.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn agtx_files_are_hidden_from_git_in_a_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@t.com"]);
+    git(repo, &["config", "user.name", "T"]);
+    git(repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(repo, &["worktree", "add", "-q", "wt", "-b", "feat"]);
+    let wt = repo.join("wt");
+
+    // What agtx deploys into a worktree.
+    std::fs::create_dir_all(wt.join(".agtx/status")).unwrap();
+    std::fs::write(wt.join(".agtx/status/t.json"), "{}").unwrap();
+    std::fs::write(wt.join(".mcp.json"), "{}").unwrap();
+
+    let dirty = |p: &std::path::Path| {
+        String::from_utf8_lossy(&git(p, &["status", "--porcelain"]).stdout).to_string()
+    };
+    assert!(!dirty(&wt).is_empty(), "precondition: agtx files show as noise");
+
+    exclude_agtx_files_from_git(&wt);
+
+    assert_eq!(dirty(&wt), "", "agtx's own files must be invisible to git");
+    // The agent's real work is untouched by the exclude.
+    std::fs::write(wt.join("feature.js"), "export const x = 1;\n").unwrap();
+    assert!(
+        dirty(&wt).contains("feature.js"),
+        "the agent's work must still be visible: {:?}",
+        dirty(&wt)
+    );
+}
+
+/// Writing it twice must not append twice — worktree setup runs again on an
+/// agent switch, and a file that grows a block per switch is its own bug.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_git_exclude_block_is_written_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::process::Command::new("git")
+        .current_dir(repo)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+
+    exclude_agtx_files_from_git(repo);
+    let after_first = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+    exclude_agtx_files_from_git(repo);
+    let after_second = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+
+    assert_eq!(after_first, after_second);
+    assert_eq!(after_second.matches(AGTX_EXCLUDE_MARKER).count(), 1);
+}
+
+/// A project that deliberately tracks one of these keeps tracking it: exclude
+/// patterns only affect untracked files. This is what makes writing to the
+/// user's shared `info/exclude` safe — measured against git 2.55.0, and the
+/// whole design rests on it.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_exclude_cannot_hide_a_file_the_project_tracks() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t.com"]);
+    git(&["config", "user.name", "T"]);
+    std::fs::write(repo.join(".mcp.json"), "{\"tracked\": true}").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "project tracks .mcp.json"]);
+
+    exclude_agtx_files_from_git(repo);
+    std::fs::write(repo.join(".mcp.json"), "{\"tracked\": true, \"edited\": 1}").unwrap();
+
+    let status = String::from_utf8_lossy(&git(&["status", "--porcelain"]).stdout).to_string();
+    assert!(
+        status.contains(".mcp.json"),
+        "a tracked file must still report its modification: {status:?}"
+    );
+}
+
+/// `ps` needs an explicit process selector. Without one it lists only the
+/// processes attached to the caller's own terminal — so a daemonized orphan,
+/// the entire reason `processes_for_task` exists, never appears. Verified
+/// against a real survivor: no selector found nothing, `-A` found it.
+///
+/// Asserted on the command rather than on live processes because whether `ps`
+/// exposes another process's environment depends on the platform and on how the
+/// caller was launched; the flag is what silently regresses.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn the_process_lookup_asks_ps_for_every_process() {
+    let src = include_str!("app.rs");
+    let call = src
+        .find("\"-AEww\"")
+        .map(|i| &src[i..(i + 40).min(src.len())]);
+    assert!(
+        call.is_some(),
+        "processes_for_task must pass -A; without it ps lists only this terminal's processes"
+    );
 }

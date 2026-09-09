@@ -672,6 +672,42 @@ impl Database {
         Ok(rows == 1)
     }
 
+    /// Release claims left behind by a TUI that is no longer running, so the
+    /// next one re-drains them.
+    ///
+    /// A claim is taken the moment a request is picked up, but a Backlog
+    /// transition is only *marked* once the serialized setup slot frees up and
+    /// it actually starts. Between those two points the request is claimed and
+    /// unprocessed, and [`get_pending_transition_requests`] filters claimed rows
+    /// out — so a TUI that exits while a setup is queued strands it. Nothing
+    /// re-runs it; `cleanup_old_transition_requests` eventually deletes it, an
+    /// hour later, having never executed the transition the caller asked for.
+    ///
+    /// Rows claimed by `this_instance` are left alone: this instance's own
+    /// in-memory queue still owns them.
+    ///
+    /// `older_than` keeps a *live* second instance's genuine backlog out of
+    /// reach. Reclaiming one anyway is safe rather than merely unlikely — the
+    /// drain re-validates each task before starting it, so the loser of the race
+    /// resolves its copy with an error instead of setting the worktree up twice.
+    pub fn reclaim_stale_transition_requests(
+        &self,
+        this_instance: &str,
+        older_than: chrono::Duration,
+    ) -> Result<usize> {
+        let cutoff = (chrono::Utc::now() - older_than).to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE transition_requests
+             SET claimed_by = NULL
+             WHERE processed_at IS NULL
+               AND claimed_by IS NOT NULL
+               AND claimed_by != ?1
+               AND requested_at < ?2",
+            params![this_instance, cutoff],
+        )?;
+        Ok(rows)
+    }
+
     pub fn cleanup_old_transition_requests(&self) -> Result<()> {
         let cutoff = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
         self.conn.execute(

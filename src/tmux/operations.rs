@@ -33,6 +33,13 @@ pub trait TmuxOperations: Send + Sync {
     /// This window's tmux pane id (`%7`), for matching `%output` notifications.
     fn pane_id(&self, target: &str) -> Option<String>;
 
+    /// The OS process id of the window's pane — the shell tmux started.
+    ///
+    /// The root for finding what a task spawned. Distinct from
+    /// [`pane_id`](Self::pane_id), which is tmux's own `%7` handle and means
+    /// nothing to the operating system.
+    fn pane_pid(&self, target: &str) -> Option<u32>;
+
     /// Every window on the server as `session:window`.
     ///
     /// One call answers [`window_exists`](Self::window_exists) for every task on
@@ -309,6 +316,18 @@ impl TmuxOperations for RealTmuxOps {
         }
         let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
         (!id.is_empty()).then_some(id)
+    }
+
+    fn pane_pid(&self, target: &str) -> Option<u32> {
+        let out = std::process::Command::new("tmux")
+            .args(["-L", super::AGENT_SERVER])
+            .args(["display", "-p", "-t", target, "#{pane_pid}"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
     }
 
     fn list_window_targets(&self) -> Result<Vec<String>> {

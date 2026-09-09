@@ -193,6 +193,14 @@ impl TmuxOperations for TestTmuxOps {
         let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
         (!id.is_empty()).then_some(id)
     }
+    fn pane_pid(&self, target: &str) -> Option<u32> {
+        let out = Command::new("tmux")
+            .args(["-L", &self.server])
+            .args(["display", "-p", "-t", target, "#{pane_pid}"])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
     fn list_window_targets(&self) -> Result<Vec<String>> {
         let out = Command::new("tmux")
             .args(["-L", &self.server])

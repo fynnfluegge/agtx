@@ -768,3 +768,48 @@ fn clearing_the_agents_section_removes_it_entirely() {
     assert!(!text.contains("[agents]"), "empty section lingered: {text}");
     assert!(ProjectConfig::load(dir.path()).unwrap().agents.is_none());
 }
+
+/// `auto_trust` is global-only, and that is a security boundary rather than an
+/// oversight: it decides whether agtx answers an agent's trust and
+/// bypass-permission dialogs on the user's behalf. If a project config could set
+/// it, any cloned repository could ship an `.agtx/config.toml` that grants
+/// itself trust — which is exactly what the trust system exists to prevent.
+///
+/// This is also why a driver has to read the *merged* config through
+/// `get_config` rather than a project file: there is no project-local way to
+/// turn it on, so the answer lives only in the global config, wherever
+/// `AGTX_CONFIG_DIR` puts it.
+#[test]
+fn auto_trust_comes_from_the_global_config_alone() {
+    let mut global = GlobalConfig::default();
+    global.auto_trust = true;
+
+    // A project config carries no `auto_trust` field to override it with.
+    let project = ProjectConfig::default();
+    let merged = MergedConfig::merge(&global, &project);
+    assert!(merged.auto_trust);
+
+    global.auto_trust = false;
+    let merged = MergedConfig::merge(&global, &ProjectConfig::default());
+    assert!(!merged.auto_trust);
+}
+
+/// The companion property: things a project *may* override still do override,
+/// so `get_config` has to report the merge rather than either file alone.
+#[test]
+fn a_project_config_overrides_the_global_default_agent() {
+    let global = GlobalConfig {
+        default_agent: "opencode".to_string(),
+        ..GlobalConfig::default()
+    };
+    let project = ProjectConfig {
+        default_agent: Some("claude".to_string()),
+        ..ProjectConfig::default()
+    };
+
+    assert_eq!(MergedConfig::merge(&global, &project).default_agent, "claude");
+    assert_eq!(
+        MergedConfig::merge(&global, &ProjectConfig::default()).default_agent,
+        "opencode"
+    );
+}

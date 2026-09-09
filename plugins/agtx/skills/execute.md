@@ -24,6 +24,14 @@ mcp__agtx__get_task(task_id: "<the id passed to this command>")
 2. Implement the changes
 3. Run relevant tests to verify your changes
 4. Fix any issues found during testing
+5. **Commit your work.** `git add -A`, then commit with a short imperative message
+   describing what you built. Verify with `git status --short` that the tree is clean.
+
+   This is not optional and not someone else's job. Your worktree is deleted when the
+   task completes, so **anything you have not committed is destroyed** — a task cannot
+   be merged, and the phase cannot complete, until its work is in a commit. agtx's own
+   files (`.agtx/`, agent configs) are already excluded from git, so `git add -A` picks
+   up your work and nothing else.
 
 ## Output
 

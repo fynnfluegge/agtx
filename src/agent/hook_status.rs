@@ -94,6 +94,11 @@ pub fn map_hook_event(kind: HookConfigKind, event: &str) -> Option<HookState> {
         // claude 2.1.247.
         ClaudeSettings => match event {
             "SessionStart" | "UserPromptSubmit" | "PreToolUse" => Some(HookState::Working),
+            // `Notification` counts as Blocked only because the registration
+            // pins `matcher: "permission_prompt"`; unscoped it also fires for
+            // `idle_prompt`. Same arrangement as grok's, and the scoping lives
+            // in [`hook_events`] rather than here because the payload never
+            // reaches this function.
             "PermissionRequest" | "Notification" => Some(HookState::Blocked),
             "Stop" | "StopFailure" => Some(HookState::Waiting),
             "SessionEnd" => Some(HookState::Ended),
@@ -181,7 +186,17 @@ pub fn hook_events(kind: HookConfigKind) -> &'static [(&'static str, Option<&'st
             ("PreToolUse", Some("*")),
             // Blocked: the agent is stopped waiting on a human.
             ("PermissionRequest", Some("*")),
-            ("Notification", None),
+            // Scoped for the same reason grok's is: `Notification` is not one
+            // event. Measured against Claude Code 2.1.263, it carries a
+            // `notification_type` — `permission_prompt` ("Claude needs your
+            // permission") and `idle_prompt` ("Claude is waiting for your
+            // input"), the latter fired ~66s after a turn simply ends.
+            // Unscoped, a healthy agent that finished its turn reported
+            // Blocked, and an agent-reported Blocked fires the stuck-task path
+            // *immediately*, with no settle window — so a driver interrupts an
+            // agent that is merely quiet. Verified that Claude honours the
+            // matcher here: with it, an idle turn produces no event at all.
+            ("Notification", Some("permission_prompt")),
             // Turn over / session over.
             ("Stop", None),
             ("StopFailure", None),

@@ -314,13 +314,92 @@ pub fn detect_main_branch(project_path: &Path) -> Result<String> {
         return Ok("master".to_string());
     }
 
-    // Fallback: get the current branch
+    // Fallback: get the current branch.
+    //
+    // The exit status matters here and reading stdout alone is not enough. On an
+    // unborn branch — a fresh `git init` with no commits, which is exactly how a
+    // greenfield project starts — this fails with 128 *and still prints the
+    // literal string* `HEAD`. That string then reached `git worktree add` as a
+    // base revision, which failed with `invalid reference: HEAD`, so every task
+    // died in setup behind an error naming neither the cause nor the fix.
     let output = Command::new("git")
         .current_dir(project_path)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .context("Failed to get current branch")?;
 
+    if !output.status.success() {
+        // Distinguish "no commits yet" from any other failure before acting: the
+        // recovery below writes to the user's repository, and it is only
+        // unambiguously safe on a repo that has no history to disturb.
+        if has_no_commits(project_path) {
+            create_initial_commit(project_path)?;
+            return current_branch_name(project_path);
+        }
+        anyhow::bail!(
+            "Could not determine the base branch: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Whether the repository has no commits at all (HEAD is unborn).
+fn has_no_commits(project_path: &Path) -> bool {
+    Command::new("git")
+        .current_dir(project_path)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(false)
+}
+
+/// Give an empty repository the one commit a worktree needs to branch from.
+///
+/// A worktree must be cut from a commit, so a repository with no history cannot
+/// host a task at all. Refusing would be defensible, but "run `git commit
+/// --allow-empty` and start again" is the only answer to that refusal, and
+/// making the user type it buys nothing: an empty commit on a repo with no
+/// history discards nothing and conflicts with nothing.
+///
+/// Deliberately narrow. This runs only when [`has_no_commits`] holds, so it can
+/// never rewrite, amend or displace work that already exists.
+fn create_initial_commit(project_path: &Path) -> Result<()> {
+    tracing::info!(
+        project = %project_path.display(),
+        "Repository has no commits; creating an empty initial commit so a worktree can be cut"
+    );
+    let output = Command::new("git")
+        .current_dir(project_path)
+        .args(["commit", "--allow-empty", "-m", "init"])
+        .output()
+        .context("Failed to create the initial commit")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "Repository has no commits and one could not be created: {}. \
+             Make a commit first, then retry.",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// The current branch name, after HEAD is known to exist.
+fn current_branch_name(project_path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(project_path)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .context("Failed to get current branch")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "Could not determine the current branch: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
