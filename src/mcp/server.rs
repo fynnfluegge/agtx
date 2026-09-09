@@ -517,7 +517,7 @@ impl AgtxMcpServer {
     ///
     /// Publishing is gated on a recent reader because a board nobody reads
     /// should cost no writes. An MCP client is such a reader — without this the
-    /// orchestrator and any driver session poll a table that is never written,
+    /// orchestrator and any oneshot session poll a table that is never written,
     /// and every task reports no phase status forever.
     ///
     /// Throttled on the same reasoning as the web server's copy: the question
@@ -726,7 +726,7 @@ impl AgtxMcpServer {
                 match tasks_result {
                     Ok(tasks) => {
                         // One query for the whole board rather than one per
-                        // task: this is the call a polling driver makes most,
+                        // task: this is the call a polling caller makes most,
                         // and it is the one that grows with the project.
                         let runtime = db.list_task_runtime().unwrap_or_default();
                         let summaries: Vec<TaskSummary> = tasks

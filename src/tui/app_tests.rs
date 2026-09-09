@@ -16130,7 +16130,7 @@ fn backlog_transitions_queue_behind_a_busy_setup_slot() {
 
         // Still claimed and unprocessed, so `get_transition_status` answers
         // `pending` — the task has not moved yet, and saying `completed` here
-        // would tell a driver that it had.
+        // would tell a caller that it had.
         let stored = app
             .state
             .db
@@ -16190,7 +16190,7 @@ fn each_queued_task_keeps_the_intent_it_was_queued_with() {
 }
 
 /// Queuing a task twice would set its worktree up twice. The duplicate's
-/// request is resolved rather than dropped, so a driver polling it is not left
+/// request is resolved rather than dropped, so a caller polling it is not left
 /// waiting on a row nothing will ever touch.
 #[test]
 #[cfg(feature = "test-mocks")]

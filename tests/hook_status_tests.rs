@@ -747,7 +747,7 @@ fn a_grok_payload_reaching_a_neighbours_registration() {
 ///
 /// Unscoped, a healthy agent that finished its turn reported Blocked — and an
 /// agent-reported Blocked fires the stuck-task path immediately, with no settle
-/// window, so a driver interrupts an agent that is merely quiet.
+/// window, so a caller interrupts an agent that is merely quiet.
 #[test]
 fn claude_only_subscribes_to_permission_notifications() {
     let matcher = agtx::agent::hook_status::hook_events(HookConfigKind::ClaudeSettings)

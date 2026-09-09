@@ -193,7 +193,7 @@ pub fn hook_events(kind: HookConfigKind) -> &'static [(&'static str, Option<&'st
             // input"), the latter fired ~66s after a turn simply ends.
             // Unscoped, a healthy agent that finished its turn reported
             // Blocked, and an agent-reported Blocked fires the stuck-task path
-            // *immediately*, with no settle window — so a driver interrupts an
+            // *immediately*, with no settle window — so a caller interrupts an
             // agent that is merely quiet. Verified that Claude honours the
             // matcher here: with it, an idle turn produces no event at all.
             ("Notification", Some("permission_prompt")),

@@ -775,7 +775,7 @@ fn clearing_the_agents_section_removes_it_entirely() {
 /// it, any cloned repository could ship an `.agtx/config.toml` that grants
 /// itself trust — which is exactly what the trust system exists to prevent.
 ///
-/// This is also why a driver has to read the *merged* config through
+/// This is also why a oneshot session has to read the *merged* config through
 /// `get_config` rather than a project file: there is no project-local way to
 /// turn it on, so the answer lives only in the global config, wherever
 /// `AGTX_CONFIG_DIR` puts it.

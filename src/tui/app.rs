@@ -477,7 +477,7 @@ struct QueuedSetup {
     /// The MCP transition request this came from, if any. It stays claimed and
     /// unprocessed — so `get_transition_status` reports `pending` — until the
     /// drain either starts the setup or gives up on it. Marking it completed at
-    /// enqueue time would tell a driver the task had moved while it was still
+    /// enqueue time would tell a caller the task had moved while it was still
     /// sitting in a queue.
     request_id: Option<String>,
 }
@@ -6991,7 +6991,7 @@ impl App {
     /// Deduplicated on the task rather than on the pair: a task queued twice
     /// with different intents is a caller changing its mind, and running the
     /// first one and then the second would set the worktree up twice. The
-    /// duplicate's request is resolved rather than dropped, so a driver polling
+    /// duplicate's request is resolved rather than dropped, so a caller polling
     /// it is not left waiting on a row nothing will ever touch.
     fn enqueue_setup(&mut self, task_id: &str, intent: SetupIntent, request_id: Option<String>) {
         if self.state.setup_queue.iter().any(|q| q.task_id == task_id) {
@@ -7026,7 +7026,7 @@ impl App {
             // Re-validate: the task may have changed status or deps since queuing.
             // A queued request outlives the state it was accepted against, so
             // each way of failing here has to resolve the request — dropping it
-            // silently leaves a driver polling `pending` forever.
+            // silently leaves a caller polling `pending` forever.
             let Some(db) = self.state.db.as_ref() else {
                 self.resolve_queued_request(&request_id, Some("No project database"));
                 continue;
@@ -7978,7 +7978,7 @@ impl App {
     /// Hand a conflicting Review task to its own agent, and mark the card.
     ///
     /// The escalation note is set whether or not the agent could be reached: a
-    /// conflict the driver cannot resolve is exactly what the user needs to see
+    /// conflict the caller cannot resolve is exactly what the user needs to see
     /// on the board, and a task whose session has already exited is the case
     /// where that matters most.
     fn send_to_conflict_resolution(
@@ -8785,7 +8785,7 @@ impl App {
     ///
     /// The MCP reader is why this is not gated on the `serve` feature. A
     /// default build has no web server, but it always has `agtx mcp-serve`, and
-    /// an orchestrator or driver session polling phase status is exactly the
+    /// an orchestrator or oneshot session polling phase status is exactly the
     /// out-of-process reader this table is for. Compiling the call out left
     /// every such client reading a table nothing ever wrote.
     ///

@@ -285,7 +285,7 @@ of `unsafe`.
 `has_changes` — which the Done guard reads from `git status --porcelain` — counts untracked files.
 So agtx's own bookkeeping tripped agtx's own guard on a project's first task, before any
 `.gitignore` existed. A guard that cries wolf first and means it second stops being believed, and a
-driver that works around it with a committed `.gitignore` is doing agtx's job.
+caller that works around it with a committed `.gitignore` is doing agtx's job.
 
 `exclude_agtx_files_from_git` writes `AGTX_WRITTEN_PATHS` into the repository's exclude file at
 worktree setup, once, inside a marked block.
@@ -309,7 +309,7 @@ This is what makes `git add -A` safe in the phase skills below.
 contradictory: Done requires a clean tree and merging requires commits, but nothing in research →
 plan → execute → review ever told the agent to commit, so an agent that followed the skills exactly
 produced a task that could not reach Done. Every success depended on the agent committing
-spontaneously or a driver noticing and instructing it — and when neither happened, the work sat
+spontaneously or a caller noticing and instructing it — and when neither happened, the work sat
 uncommitted in a worktree that Done deletes.
 
 #### A repository with no commits
@@ -835,7 +835,7 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
   already merged — what actually governs a run). It exists because there is no other way for a
   caller to learn `auto_trust`: the setting is global-only *by design*, since a project config that
   could grant itself trust defeats the trust system, and `AGTX_CONFIG_DIR` means the global file is
-  not reliably at `~/.config/agtx/config.toml`. A driver that read that path directly got a stale
+  not reliably at `~/.config/agtx/config.toml`. A caller that read that path directly got a stale
   answer and stopped to ask a question it already had. The response carries both file paths, so a
   caller can name the file to edit instead of guessing
 - Read: `list_tasks`, `get_task` (includes `allowed_actions`), `get_transition_status`, `check_conflicts`, `get_notifications`, `read_pane_content`. `list_tasks` and `get_task` also carry `phase_status` + `phase_age_secs` + `tui_connected` — see *Publishing phase status* below. `list_tasks` returns `{tui_connected, tasks: [...]}` rather than a bare array: `tui_connected` is one answer for the whole board, and a caller needs it on *every* poll — a separate tool is one a polling loop skips, and skipping it means reading frozen rows as live state
@@ -850,7 +850,7 @@ server on `list_tasks` / `get_task` (throttled to 30s, since `get_task` is calle
 once per task in a polling loop).
 
 **It is not gated on the `serve` feature.** A default build has no web server but
-always has `agtx mcp-serve`, and an orchestrator or driver polling phase status
+always has `agtx mcp-serve`, and an orchestrator or oneshot session polling phase status
 is exactly the out-of-process reader the table is for; compiling the publish call
 out left every such client reading a table nothing ever wrote.
 
@@ -1487,7 +1487,7 @@ writes one.
   `permission_prompt` ("Claude needs your permission") and `idle_prompt` ("Claude is waiting for
   your input"), the latter fired ~66s after a turn simply ends. Unscoped, a healthy agent that had
   finished its turn reported `Blocked` — and an agent-reported `Blocked` fires the stuck-task
-  notification *immediately*, with no settle window, so a driver interrupts an agent that is merely
+  notification *immediately*, with no settle window, so a caller interrupts an agent that is merely
   quiet. Verified that Claude honours a matcher on this event: with it, an idle turn produces no
   hook call at all. The scoping therefore lives in `hook_events`, not `map_hook_event` — the payload
   never reaches the mapper. A worktree deployed by an earlier binary keeps the unscoped

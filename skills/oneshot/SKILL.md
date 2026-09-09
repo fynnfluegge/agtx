@@ -4,9 +4,10 @@ description: "One-shot a whole project on an agtx board: decompose the goal, run
 disable-model-invocation: true
 ---
 
-# agtx — Driving the Board
+# agtx — One-Shotting a Project
 
-You are **driving** an agtx kanban board toward a goal too large for one session.
+You are **one-shotting** a project on an agtx kanban board: a goal too large for one
+session, run to completion unattended.
 Ordinarily a person sits at the board and does this. Here, you are that person.
 
 This is not the built-in orchestrator (`O`), which only advances Planning → Running →
@@ -105,7 +106,7 @@ means it will not happen.
 A goal this size cannot be enumerated up front, and trying wastes the run. Work in
 **waves**.
 
-1. Write a milestone spine first — 4–8 milestones, coarse, in `driver-state.md` (below).
+1. Write a milestone spine first — 4–8 milestones, coarse, in `oneshot-state.md` (below).
    Nothing goes on the board yet.
 2. Turn **only the current milestone** into tasks. One task = one reviewable,
    independently mergeable PR. `create_tasks_batch` takes up to 50 and wires
@@ -157,19 +158,19 @@ Each pass:
 6. Backlog: start everything whose dependencies are satisfied and that fits the
    concurrency budget — `move_to_planning`. They serialize on their own.
 7. Review: judge it (below).
-8. Append what changed to `driver-state.md`. Then sleep and repeat.
+8. Append what changed to `oneshot-state.md`. Then sleep and repeat.
 
 **Do not hold the board in your context.** Re-derive it from `list_tasks` every pass.
-The run will outlive your context window several times over, and a driver that has
+The run will outlive your context window several times over, and a session that has
 memorised a stale board makes confident wrong moves.
 
 ### Keeping durable state
 
-Maintain `driver-state.md` in the project root. It is what a fresh session reads to pick
+Maintain `oneshot-state.md` in the project root. It is what a fresh session reads to pick
 up the run:
 
 ```markdown
-# Driver state — <goal>
+# Oneshot state — <goal>
 Updated: <timestamp>
 
 ## Milestones
@@ -204,7 +205,7 @@ rather than on scheduling.
 2. If it is wrong, `resume` with a specific correction via `send_to_task`. Vague feedback
    produces another wrong attempt. **`resume` puts the task back in Running** — when the
    agent is done you must `move_forward` to Review again before you can merge. Trying to
-   merge straight after a resume is refused, correctly; it is the most common way a driver
+   merge straight after a resume is refused, correctly; it is the most common way a run
    wastes a cycle here.
 3. **Land it with `move_to_done_and_merge`.** This merges the branch into its base in the
    project checkout and then moves the task to Done. Plain `move_to_done` keeps the branch
@@ -244,7 +245,7 @@ or delete and rewrite the task with a better description.
 
 ## Rules
 
-- You never write feature code. You write tasks, and `driver-state.md`.
+- You never write feature code. You write tasks, and `oneshot-state.md`.
 - Re-derive the board from `list_tasks` every pass; never from memory.
 - Ignore `allowed_actions`; respect dependency refusals.
 - One task = one mergeable PR. Split anything with "and" in its title.
