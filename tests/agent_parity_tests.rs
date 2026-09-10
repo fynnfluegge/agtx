@@ -641,3 +641,112 @@ fn the_size_cap_is_counted_in_bytes_not_chars() {
     assert!(wide.len() > MAX_LAUNCH_PROMPT_BYTES);
     assert!(!can_launch_with_prompt(PromptInjection::Argv, &wide));
 }
+
+// =============================================================================
+// Launch dialogs — what agtx will answer, and on whose behalf
+// =============================================================================
+
+/// Every dialog agtx knows, pinned as a literal.
+///
+/// Written out rather than derived, like the rest of this file: a diff here has
+/// to mean somebody changed what agtx answers on a user's behalf. The answers
+/// are *positional* — `2` on codex's update menu is `Skip` only while the menu
+/// keeps that order — so the pin is what turns a silent change of meaning into
+/// a failing test.
+///
+/// It cannot detect the agent reordering its own menu; only a real run can, and
+/// `tests/smoke/` is where that belongs. This covers the half that is agtx's.
+fn dialog_table() -> Vec<(&'static str, &'static str, Vec<&'static str>, bool)> {
+    let mut rows = Vec::new();
+    for agent in AGENTS {
+        if let Some(spec) = agtx::agent::spec(agent) {
+            for d in spec.dialogs {
+                rows.push((
+                    *agent,
+                    d.patterns[0],
+                    d.answer.to_vec(),
+                    d.security,
+                ));
+            }
+        }
+    }
+    rows
+}
+
+#[test]
+fn dialog_answers_are_pinned() {
+    let expected: Vec<(&str, &str, Vec<&str>, bool)> = vec![
+        ("claude", "Yes, I trust this folder", vec!["1", "Enter"], true),
+        ("claude", "Yes, I accept", vec!["2", "Enter"], true),
+        (
+            "codex",
+            "Do you trust the contents of this directory?",
+            vec!["1", "Enter"],
+            true,
+        ),
+        // `Skip`. Never "Update now": agtx must not upgrade an agent binary
+        // behind the user's back.
+        ("codex", "Update now (runs", vec!["2", "Enter"], false),
+        // `Continue without trusting`. `2` would be "Trust all and continue",
+        // which lets the repo's hooks run *outside* codex's sandbox.
+        ("codex", "Hooks need review", vec!["3", "Enter"], false),
+        ("codex", "Allow the", vec!["3", "Enter"], false),
+        (
+            "gemini",
+            "Do you trust the files in this folder?",
+            vec!["1", "Enter"],
+            true,
+        ),
+        // The access key the dialog advertises, so it survives an option being
+        // added above the highlighted row.
+        ("cursor", "Workspace Trust Required", vec!["a"], true),
+        // Arrow-navigated with the safe option preselected — a digit would land
+        // in the composer it opens.
+        (
+            "antigravity",
+            "Do you trust the contents of this project?",
+            vec!["Enter"],
+            true,
+        ),
+    ];
+
+    assert_eq!(
+        dialog_table(),
+        expected,
+        "the set of dialogs agtx answers changed — confirm each answer still \
+         selects the option its comment claims before updating this table"
+    );
+}
+
+/// A dialog that decides whether the agent may be trusted, or may run
+/// unattended, is the user's call: `security: true` is what stops agtx answering
+/// it unless `auto_trust` is explicitly on.
+///
+/// The flag is hand-written per entry with nothing checking it, so a new trust
+/// prompt added with `security: false` would be answered unconditionally — the
+/// one mistake in this table that hands away a decision silently.
+#[test]
+fn trust_prompts_are_classified_as_security_decisions() {
+    let mut checked = 0;
+    for (agent, pattern, answer, security) in dialog_table() {
+        let looks_like_trust = pattern.to_lowercase().contains("trust")
+            || pattern.contains("I accept")
+            || pattern.contains("accept the risk");
+        if looks_like_trust {
+            checked += 1;
+            assert!(
+                security,
+                "{agent}: {pattern:?} answers {answer:?} and reads as a trust or \
+                 permission-bypass prompt, but is not marked `security` — it would \
+                 be answered with auto_trust off, which is the user's decision"
+            );
+        }
+    }
+    // Without this the test passes by matching nothing, which is how a guard
+    // quietly stops guarding.
+    assert!(
+        checked >= 6,
+        "only {checked} trust-shaped patterns matched; the heuristic has drifted \
+         away from the table it is meant to police"
+    );
+}
