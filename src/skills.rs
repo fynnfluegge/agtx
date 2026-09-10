@@ -546,4 +546,25 @@ mod tests {
         assert!(found[0].plugin.supports_agent("claude"));
         assert!(!found[0].plugin.supports_agent("codex"));
     }
+
+    #[test]
+    fn vcs_aware_prompts_do_not_embed_backend_commands() {
+        let terse_review = include_str!("../plugins/agtx-terse/skills/agtx-review/SKILL.md");
+        for (name, content) in [
+            ("review", REVIEW_SKILL),
+            ("merge-conflicts", MERGE_CONFLICTS_SKILL),
+            ("terse review", terse_review),
+        ] {
+            assert!(!content.contains("`git "), "{name} embeds a git command");
+            assert!(!content.contains("`jj "), "{name} embeds a jj command");
+            assert!(
+                content.contains("{{AGTX_BIN}} vcs"),
+                "{name} does not use the VCS-neutral wrapper"
+            );
+            assert!(
+                !content.contains("`agtx "),
+                "{name} assumes agtx is on PATH"
+            );
+        }
+    }
 }

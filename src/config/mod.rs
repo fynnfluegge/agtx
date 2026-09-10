@@ -249,6 +249,9 @@ fn default_true() -> bool {
 /// Project-specific configuration (stored in .agtx/config.toml)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectConfig {
+    /// Version-control backend for this project. Omitted means Git.
+    pub vcs: Option<crate::git::VcsKind>,
+
     /// Override default agent for this project
     pub default_agent: Option<String>,
 
@@ -486,6 +489,7 @@ const PROJECT_MANAGED: ManagedKeys = ManagedKeys {
         // `agents` is itself optional here, so clearing it must drop the whole
         // `[agents]` section rather than leaving an empty header behind.
         "agents",
+        "vcs",
         "default_agent",
         "base_branch",
         "github_url",
@@ -617,6 +621,7 @@ pub fn determine_first_run_action(
 /// Merged configuration (global + project)
 #[derive(Debug, Clone)]
 pub struct MergedConfig {
+    pub vcs: crate::git::VcsKind,
     pub default_agent: String,
     pub phase_agents: PhaseAgentsConfig,
     pub worktree_enabled: bool,
@@ -643,7 +648,9 @@ impl MergedConfig {
     /// Create merged config from global and project configs
     pub fn merge(global: &GlobalConfig, project: &ProjectConfig) -> Self {
         let project_agents = project.agents.clone().unwrap_or_default();
+        let vcs = project.vcs.unwrap_or_default();
         Self {
+            vcs,
             default_agent: project
                 .default_agent
                 .clone()
@@ -660,7 +667,10 @@ impl MergedConfig {
             base_branch: project
                 .base_branch
                 .clone()
-                .unwrap_or_else(|| global.worktree.base_branch.clone()),
+                .unwrap_or_else(|| match vcs {
+                    crate::git::VcsKind::Git => global.worktree.base_branch.clone(),
+                    crate::git::VcsKind::Jj => String::new(),
+                }),
             worktree_dir: project
                 .worktree_dir
                 .clone()
@@ -1041,6 +1051,7 @@ mod managed_keys_tests {
     #[test]
     fn project_managed_keys_covers_every_optional_field() {
         let config = ProjectConfig {
+            vcs: Some(crate::git::VcsKind::Git),
             default_agent: Some("claude".into()),
             agents: Some(PhaseAgentsConfig {
                 research: Some("claude".into()),

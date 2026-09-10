@@ -482,9 +482,10 @@ update_check = true          # Check GitHub daily for a new release (see Updatin
 
 ### Worktree Base Branch
 
-agtx creates a new git worktree for each task. By default it auto-detects the base branch in this
+For Git projects, agtx creates a new worktree for each task and auto-detects the base branch in this
 order: `main`, then `master`, then the current branch. You can override this to force a specific
-base branch (for example `dev` or `develop`).
+base branch (for example `dev` or `develop`). Jujutsu projects use the project setting described
+below.
 
 Global worktree defaults can be set here:
 
@@ -503,8 +504,11 @@ to `.agtx/worktrees` if not set.
 Per-project settings can be placed in `.agtx/config.toml` at the project root:
 
 ```toml
+# Version-control backend: "git" (default) or "jj"
+vcs = "jj"
+
 # Base branch used when creating new task worktrees (optional)
-base_branch = "dev"
+base_branch = "trunk()"
 
 # Directory where worktrees are created (optional, default: ".agtx/worktrees")
 worktree_dir = ".worktrees"
@@ -520,8 +524,18 @@ init_script = "scripts/init_worktree.sh"
 cleanup_script = "scripts/cleanup_worktree.sh"
 ```
 
-`base_branch` controls which branch new task worktrees are created from. If omitted or empty, agtx
-auto-detects `main`, `master`, or falls back to the current branch.
+The VCS is never inferred from repository metadata: an absent `vcs` setting means Git, including in
+a colocated Git/Jujutsu repository. Set `vcs = "jj"` to create Jujutsu workspaces instead. Both
+colocated and non-colocated Jujutsu repositories are supported.
+
+`base_branch` controls the revision used for new task workspaces. If omitted or empty, Git projects
+detect `main`, `master`, or the current branch; Jujutsu projects use `trunk()`.
+
+Agent prompts use `agtx vcs` commands for status, task diffs, checkpoints, logs, and base
+integration. These commands get the task identity, checkout, and project root from the environment
+agtx attaches to the task's tmux window, then validate all three against the project database. The
+same environment exposes `AGTX_BIN`, and deployed skills bake in that running binary's absolute
+path, so they do not depend on `agtx` being on `PATH`.
 
 ### Per-Phase Agent Configuration
 

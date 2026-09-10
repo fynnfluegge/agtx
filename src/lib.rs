@@ -8,6 +8,7 @@ pub mod skills;
 pub mod tmux;
 pub mod tui;
 pub mod update;
+pub mod vcs_cli;
 
 /// The HTTP + WebSocket server behind `agtx serve`.
 #[cfg(feature = "serve")]

@@ -876,6 +876,11 @@ async fn a_task_can_be_created_edited_and_deleted() {
     assert_eq!(created["title"], "From the phone");
     assert_eq!(created["status"], "backlog");
     let id = created["id"].as_str().unwrap().to_string();
+    let db = Database::open_project(&f.project_path).unwrap();
+    assert_eq!(
+        db.get_task(&id).unwrap().unwrap().vcs,
+        Some(agtx::git::VcsKind::Git)
+    );
 
     let (status, edited) = send(
         state_for(&f, ServeMode::Global),
@@ -896,7 +901,6 @@ async fn a_task_can_be_created_edited_and_deleted() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let db = Database::open_project(&f.project_path).unwrap();
     assert!(db.get_task(&id).unwrap().is_none());
 }
 

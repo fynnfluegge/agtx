@@ -316,6 +316,8 @@ fn test_create_pr_with_content_success() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        vcs: None,
+        workspace_name: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -415,6 +417,8 @@ fn test_create_pr_with_content_no_changes() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        vcs: None,
+        workspace_name: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -473,6 +477,8 @@ fn test_create_pr_with_content_push_failure() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        vcs: None,
+        workspace_name: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -537,6 +543,8 @@ fn test_push_changes_to_existing_pr_success() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        vcs: None,
+        workspace_name: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -592,6 +600,8 @@ fn test_push_changes_to_existing_pr_no_changes() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        vcs: None,
+        workspace_name: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -630,6 +640,8 @@ fn test_push_changes_to_existing_pr_no_url() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        vcs: None,
+        workspace_name: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -664,7 +676,13 @@ fn test_fuzzy_find_files_basic() {
         ]
     });
 
-    let results = fuzzy_find_files(Path::new("/project"), "app", 10, &mock_git);
+    let results = fuzzy_find_files(
+        Path::new("/project"),
+        "app",
+        10,
+        crate::git::VcsKind::Git,
+        &mock_git,
+    );
 
     assert!(!results.is_empty());
     assert!(results.contains(&"src/tui/app.rs".to_string()));
@@ -686,7 +704,13 @@ fn test_fuzzy_find_files_empty_pattern() {
         ]
     });
 
-    let results = fuzzy_find_files(Path::new("/project"), "", 3, &mock_git);
+    let results = fuzzy_find_files(
+        Path::new("/project"),
+        "",
+        3,
+        crate::git::VcsKind::Git,
+        &mock_git,
+    );
 
     assert_eq!(results.len(), 3);
     assert_eq!(results[0], "a.rs");
@@ -704,7 +728,13 @@ fn test_fuzzy_find_files_no_matches() {
         .expect_list_files()
         .returning(|_| vec!["main.rs".to_string(), "lib.rs".to_string()]);
 
-    let results = fuzzy_find_files(Path::new("/project"), "xyz123", 10, &mock_git);
+    let results = fuzzy_find_files(
+        Path::new("/project"),
+        "xyz123",
+        10,
+        crate::git::VcsKind::Git,
+        &mock_git,
+    );
 
     assert!(results.is_empty());
 }
@@ -717,7 +747,13 @@ fn test_fuzzy_find_files_empty_list() {
 
     mock_git.expect_list_files().returning(|_| vec![]);
 
-    let results = fuzzy_find_files(Path::new("/project"), "app", 10, &mock_git);
+    let results = fuzzy_find_files(
+        Path::new("/project"),
+        "app",
+        10,
+        crate::git::VcsKind::Git,
+        &mock_git,
+    );
 
     assert!(results.is_empty());
 }
@@ -738,7 +774,13 @@ fn test_fuzzy_find_files_max_results() {
         ]
     });
 
-    let results = fuzzy_find_files(Path::new("/project"), "app", 2, &mock_git);
+    let results = fuzzy_find_files(
+        Path::new("/project"),
+        "app",
+        2,
+        crate::git::VcsKind::Git,
+        &mock_git,
+    );
 
     assert_eq!(results.len(), 2);
 }
@@ -1050,7 +1092,10 @@ fn the_rate_limit_holds_against_a_paint_and_yields_to_a_keystroke() {
         typist.poke();
     });
     let start = Instant::now();
-    assert_eq!(watch.wait_out_rate_limit(Duration::from_secs(5)), Some(true));
+    assert_eq!(
+        watch.wait_out_rate_limit(Duration::from_secs(5)),
+        Some(true)
+    );
     assert!(
         start.elapsed() < Duration::from_secs(1),
         "a keystroke waited {:?}",
@@ -5514,6 +5559,7 @@ fn test_create_task_full_flow() {
         Some("Users report 500 error on the login page")
     );
     assert_eq!(task.status, TaskStatus::Backlog);
+    assert_eq!(task.vcs, Some(crate::git::VcsKind::Git));
 }
 
 #[test]
@@ -13089,6 +13135,12 @@ fn test_switch_to_project_reloads_config() {
 
     // Create a temp dir simulating a project with review = "codex"
     let project_dir = TempDir::new().unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(project_dir.path())
+        .output()
+        .unwrap();
+    assert!(init.status.success());
     let agtx_dir = project_dir.path().join(".agtx");
     fs::create_dir_all(&agtx_dir).unwrap();
     fs::write(
@@ -14003,6 +14055,34 @@ fn test_skip_worktree_tasks_share_one_task_agnostic_hook() {
 }
 
 // ── binary-path drift ────────────────────────────────────────────────────────
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn task_environment_carries_the_exact_agtx_binary() {
+    let env = agtx_task_env("task-id", "/tmp/worktree", Path::new("/tmp/project"));
+    let expected = std::env::current_exe()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(env.contains(&("AGTX_BIN".to_string(), expected)));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn deployed_vcs_skills_bake_in_the_exact_agtx_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_string_lossy().into_owned();
+    write_skills_to_worktree(&root, dir.path(), &None, &["claude"], false);
+
+    let review = std::fs::read_to_string(
+        dir.path()
+            .join(".agtx/skills/agtx-review/SKILL.md"),
+    )
+    .unwrap();
+    let executable = std::env::current_exe().unwrap();
+    assert!(review.contains(&shell_quote(&executable.to_string_lossy())));
+    assert!(!review.contains("{{AGTX_BIN}}"));
+}
 
 /// Deploying records which binary did it, so the startup check is O(1) per task
 /// instead of parsing seven config formats.

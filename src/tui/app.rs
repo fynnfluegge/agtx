@@ -502,6 +502,9 @@ struct SetupResult {
     new_status: Option<TaskStatus>,
     agent: String,
     plugin: Option<String>,
+    vcs: Option<git::VcsKind>,
+    workspace_name: Option<String>,
+    base_branch: Option<String>,
     error: Option<String>,
 }
 
@@ -511,6 +514,8 @@ struct ReferencedTaskInfo {
     slug: String,
     branch_name: Option<String>,
     worktree_path: Option<String>,
+    vcs: git::VcsKind,
+    base_branch: String,
 }
 
 /// The card / notification text for a task parked on a security prompt.
@@ -804,7 +809,16 @@ impl App {
                         .unwrap_or("unknown")
                         .to_string();
                     let tmux_name = tmux::safe_session_name(&name);
-                    let mut project_config = ProjectConfig::load(&canonical).unwrap_or_default();
+                    let mut project_config = ProjectConfig::load(&canonical)?;
+                    let vcs = project_config.vcs.unwrap_or_default();
+                    if !git::is_repo_for(&canonical, vcs) {
+                        anyhow::bail!(
+                            "project config selects {}, but '{}' is not a {} repository",
+                            vcs,
+                            canonical.display(),
+                            vcs
+                        );
+                    }
                     let db = Database::open_project(&canonical)?;
 
                     // Trust-on-first-use: suppress dangerous config fields from untrusted projects
@@ -1409,6 +1423,9 @@ impl App {
                             task.branch_name = Some(result.branch_name);
                             task.agent = result.agent;
                             task.plugin = result.plugin;
+                            task.vcs = result.vcs;
+                            task.workspace_name = result.workspace_name;
+                            task.base_branch = result.base_branch;
                             if let Some(status) = result.new_status {
                                 task.status = status;
                             }
@@ -4007,6 +4024,8 @@ impl App {
                 let worktree_path = task.worktree_path.clone();
                 let branch_name = task.branch_name.clone();
                 let agent = task.agent.clone();
+                let vcs = task.vcs.unwrap_or_default();
+                let workspace_name = task.workspace_name.clone();
 
                 // Update task status immediately
                 task.session_name = None;
@@ -4034,9 +4053,11 @@ impl App {
                     self.state.config.cleanup_script.clone()
                 };
                 std::thread::spawn(move || {
-                    cleanup_task_resources(
+                    cleanup_task_resources_for_vcs(
                         &task_id,
                         &agent,
+                        vcs,
+                        workspace_name.as_deref(),
                         &branch_name,
                         &session_name,
                         &worktree_path,
@@ -4056,6 +4077,8 @@ impl App {
             if let Some(task) = db.get_task(task_id)? {
                 let task_title = task.title.clone();
                 let worktree_path = task.worktree_path.clone();
+                let base_revision = task.base_branch.clone();
+                let vcs = task.vcs.unwrap_or_default();
 
                 // Show popup immediately with loading state
                 self.state.pr_confirm_popup = Some(PrConfirmPopup {
@@ -4078,10 +4101,11 @@ impl App {
                     .agent_registry
                     .get(&self.state.config.default_agent);
                 std::thread::spawn(move || {
-                    let (pr_title, pr_body) = generate_pr_description(
+                    let (pr_title, pr_body) = generate_pr_description_for_vcs(
                         &title_for_thread,
                         worktree_for_thread.as_deref(),
-                        None,
+                        base_revision.as_deref(),
+                        vcs,
                         git_ops.as_ref(),
                         agent_ops.as_ref(),
                     );
@@ -4578,7 +4602,8 @@ impl App {
                 }
                 KeyCode::Char('n') => {
                     let current_dir = std::env::current_dir()?;
-                    if crate::git::is_git_repo(&current_dir) {
+                    let vcs = ProjectConfig::load(&current_dir)?.vcs.unwrap_or_default();
+                    if crate::git::is_repo_for(&current_dir, vcs) {
                         let canonical = current_dir.canonicalize().unwrap_or(current_dir);
                         let name = canonical
                             .file_name()
@@ -5359,8 +5384,13 @@ impl App {
             (&mut self.state.file_search, &self.state.project_path)
         {
             let pattern = &search.pattern;
-            search.matches =
-                fuzzy_find_files(project_path, pattern, 10, self.state.git_ops.as_ref());
+            search.matches = fuzzy_find_files(
+                project_path,
+                pattern,
+                10,
+                self.state.config.vcs,
+                self.state.git_ops.as_ref(),
+            );
             search.selected = 0;
         }
     }
@@ -5445,6 +5475,7 @@ impl App {
                 task.description = description;
                 task.plugin = plugin;
                 task.referenced_tasks = refs;
+                task.vcs = Some(self.state.config.vcs);
                 // Task starts in Backlog without tmux window.
                 // No orchestrator notification — it only manages Planning/Running.
                 db.create_task(&task)?;
@@ -5737,8 +5768,9 @@ impl App {
                     plugin.map_or_else(Vec::new, |p| p.copy_dirs.clone());
                 let plugin_dir_refs: Vec<&str> = plugin_dirs.iter().map(|s| s.as_str()).collect();
                 exclude_prefixes.extend(plugin_dir_refs);
-                collect_task_diff(
+                collect_task_diff_for_vcs(
                     worktree_path,
+                    task.vcs.unwrap_or_default(),
                     self.state.git_ops.as_ref(),
                     &exclude_prefixes,
                 )
@@ -5993,6 +6025,7 @@ impl App {
             .base_branch
             .clone()
             .unwrap_or_else(|| self.state.config.base_branch.clone());
+        let vcs = task.vcs.unwrap_or_default();
         let worktree_dir = self.state.config.worktree_dir.clone();
         let branch_prefix = self.state.config.branch_prefix.clone();
         let copy_files = self.state.config.copy_files.clone();
@@ -6029,10 +6062,33 @@ impl App {
                             .db
                             .as_ref()
                             .and_then(|db| db.get_task(ref_id).ok().flatten())
-                            .map(|ref_task| ReferencedTaskInfo {
-                                slug: generate_task_slug(&ref_task.id, &ref_task.title),
-                                branch_name: ref_task.branch_name.clone(),
-                                worktree_path: ref_task.worktree_path.clone(),
+                            .map(|ref_task| {
+                                let vcs = ref_task.vcs.unwrap_or_default();
+                                let configured_base = self.state.config.base_branch.trim();
+                                let base_branch = ref_task
+                                    .base_branch
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|base| !base.is_empty())
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| match vcs {
+                                        git::VcsKind::Git if configured_base.is_empty() => {
+                                            git::detect_main_branch(&project_path)
+                                                .unwrap_or_else(|_| "main".to_string())
+                                        }
+                                        git::VcsKind::Git => configured_base.to_string(),
+                                        git::VcsKind::Jj if configured_base.is_empty() => {
+                                            "trunk()".to_string()
+                                        }
+                                        git::VcsKind::Jj => configured_base.to_string(),
+                                    });
+                                ReferencedTaskInfo {
+                                    slug: generate_task_slug(&ref_task.id, &ref_task.title),
+                                    branch_name: ref_task.branch_name.clone(),
+                                    worktree_path: ref_task.worktree_path.clone(),
+                                    vcs,
+                                    base_branch,
+                                }
                             })
                     })
                     .collect()
@@ -6048,11 +6104,12 @@ impl App {
             tmp_task.id = task_id.clone();
             tmp_task.plugin = plugin_name.clone();
 
-            let result = setup_task_worktree(
+            let result = setup_task_worktree_for_vcs(
                 &mut tmp_task,
                 &project_path,
                 &tmux_project_name,
                 &prompt,
+                vcs,
                 &base_branch,
                 &worktree_dir,
                 &branch_prefix,
@@ -6081,6 +6138,9 @@ impl App {
                         new_status: Some(TaskStatus::Planning),
                         agent: planning_agent_clone.clone(),
                         plugin: plugin_name,
+                        vcs: tmp_task.vcs,
+                        workspace_name: tmp_task.workspace_name,
+                        base_branch: tmp_task.base_branch,
                         error: None,
                     });
                     // Skip the whole send-after-ready dance when the agent was
@@ -6115,6 +6175,9 @@ impl App {
                         new_status: None,
                         agent: planning_agent_clone,
                         plugin: plugin_name,
+                        vcs: None,
+                        workspace_name: None,
+                        base_branch: None,
                         error: Some(format!("Planning setup failed: {}", e)),
                     });
                 }
@@ -6311,10 +6374,15 @@ impl App {
         }
 
         // No PR — check for uncommitted changes
+        let jj_ops = git::RealJjOps;
+        let task_ops: &dyn GitOperations = match task.vcs.unwrap_or_default() {
+            git::VcsKind::Git => self.state.git_ops.as_ref(),
+            git::VcsKind::Jj => &jj_ops,
+        };
         let has_uncommitted = task
             .worktree_path
             .as_ref()
-            .map_or(false, |wt| self.state.git_ops.has_changes(Path::new(wt)));
+            .map_or(false, |wt| task_ops.has_changes(Path::new(wt)));
         if has_uncommitted {
             self.state.done_confirm_popup = Some(DoneConfirmPopup {
                 task_id: task.id.clone(),
@@ -6329,6 +6397,8 @@ impl App {
         let worktree_path = task.worktree_path.clone();
         let branch_name = task.branch_name.clone();
         let agent = task.agent.clone();
+        let vcs = task.vcs.unwrap_or_default();
+        let workspace_name = task.workspace_name.clone();
         task.session_name = None;
         task.worktree_path = None;
 
@@ -6342,9 +6412,11 @@ impl App {
             self.state.config.cleanup_script.clone()
         };
         std::thread::spawn(move || {
-            cleanup_task_resources(
+            cleanup_task_resources_for_vcs(
                 &task_id_clone,
                 &agent,
+                vcs,
+                workspace_name.as_deref(),
                 &branch_name,
                 &session_name,
                 &worktree_path,
@@ -6415,6 +6487,7 @@ impl App {
             .base_branch
             .clone()
             .unwrap_or_else(|| self.state.config.base_branch.clone());
+        let vcs = task.vcs.unwrap_or_default();
         let worktree_dir = self.state.config.worktree_dir.clone();
         let branch_prefix = self.state.config.branch_prefix.clone();
         let copy_files = self.state.config.copy_files.clone();
@@ -6450,11 +6523,12 @@ impl App {
 
             // setup_task_worktree creates the worktree and copies files (including preresearch artifacts if they exist at root)
             // We pass an empty prompt here — the actual prompt is resolved after worktree creation
-            let result = setup_task_worktree(
+            let result = setup_task_worktree_for_vcs(
                 &mut tmp_task,
                 &project_path,
                 &tmux_project_name,
                 "",
+                vcs,
                 &base_branch,
                 &worktree_dir,
                 &branch_prefix,
@@ -6522,6 +6596,9 @@ impl App {
                         new_status: None, // stays in Backlog
                         agent: agent_name.clone(),
                         plugin: plugin_name,
+                        vcs: tmp_task.vcs,
+                        workspace_name: tmp_task.workspace_name,
+                        base_branch: tmp_task.base_branch,
                         error: None,
                     });
 
@@ -6555,6 +6632,9 @@ impl App {
                         new_status: None,
                         agent: agent_name,
                         plugin: plugin_name,
+                        vcs: None,
+                        workspace_name: None,
+                        base_branch: None,
                         error: Some(format!("Research setup failed: {}", e)),
                     });
                 }
@@ -7171,6 +7251,7 @@ impl App {
             .base_branch
             .clone()
             .unwrap_or_else(|| self.state.config.base_branch.clone());
+        let vcs = task.vcs.unwrap_or_default();
         let worktree_dir = self.state.config.worktree_dir.clone();
         let branch_prefix = self.state.config.branch_prefix.clone();
         let copy_files = self.state.config.copy_files.clone();
@@ -7198,11 +7279,12 @@ impl App {
             tmp_task.id = task_id.clone();
             tmp_task.plugin = plugin_name.clone();
 
-            let result = setup_task_worktree(
+            let result = setup_task_worktree_for_vcs(
                 &mut tmp_task,
                 &project_path,
                 &tmux_project_name,
                 &prompt,
+                vcs,
                 &base_branch,
                 &worktree_dir,
                 &branch_prefix,
@@ -7231,6 +7313,9 @@ impl App {
                         new_status: Some(TaskStatus::Running),
                         agent: running_agent_clone.clone(),
                         plugin: plugin_name,
+                        vcs: tmp_task.vcs,
+                        workspace_name: tmp_task.workspace_name,
+                        base_branch: tmp_task.base_branch,
                         error: None,
                     });
 
@@ -7266,6 +7351,9 @@ impl App {
                         new_status: None,
                         agent: running_agent_clone,
                         plugin: plugin_name,
+                        vcs: None,
+                        workspace_name: None,
+                        base_branch: None,
                         error: Some(format!("Running setup failed: {}", e)),
                     });
                 }
@@ -7278,7 +7366,7 @@ impl App {
     /// Move task from Review back to Running (only allowed transition backwards)
     /// The tmux window should still be open from when it was in Running state
     fn move_review_to_running(&mut self, task_id: &str) -> Result<()> {
-        if let (Some(db), Some(_project_path)) = (&self.state.db, &self.state.project_path) {
+        if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(mut task) = db.get_task(task_id)? {
                 if task.status != TaskStatus::Review {
                     return Ok(());
@@ -7296,6 +7384,7 @@ impl App {
                         let running_agent_clone = running_agent.clone();
                         let current_agent_clone = task.agent.clone();
                         let wt_path = task.worktree_path.clone();
+                        let project_path = project_path.clone();
                         std::thread::spawn(move || {
                             let agent_ops = agent_registry.get(&running_agent_clone);
                             ensure_window_or_recover(
@@ -7304,6 +7393,7 @@ impl App {
                                 agent_ops.as_ref(),
                                 wt_path.as_deref(),
                                 &hook_task_id,
+                                Some(&project_path),
                             );
                             let new_cmd = agent_ops.build_interactive_command("");
                             switch_agent_in_tmux(
@@ -7327,7 +7417,7 @@ impl App {
     }
 
     fn move_review_to_planning(&mut self, task_id: &str) -> Result<()> {
-        if let (Some(db), Some(_project_path)) = (&self.state.db, &self.state.project_path) {
+        if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(mut task) = db.get_task(task_id)? {
                 if task.status != TaskStatus::Review {
                     return Ok(());
@@ -7386,6 +7476,7 @@ impl App {
                         .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
                     let wt_path = task.worktree_path.clone();
                     let auto_trust = self.state.config.auto_trust;
+                    let project_path = project_path.clone();
                     std::thread::spawn(move || {
                         let agent_ops = agent_registry.get(&planning_agent_clone);
                         // Recover window if it was lost
@@ -7395,6 +7486,7 @@ impl App {
                             agent_ops.as_ref(),
                             wt_path.as_deref(),
                             &hook_task_id,
+                            Some(&project_path),
                         );
                         // An agent switch starts a *new process*, so it takes the
                         // opening message in argv exactly like a first launch —
@@ -7457,7 +7549,7 @@ impl App {
     }
 
     fn move_running_to_planning(&mut self, task_id: &str) -> Result<()> {
-        if let (Some(db), Some(_project_path)) = (&self.state.db, &self.state.project_path) {
+        if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(mut task) = db.get_task(task_id)? {
                 if task.status != TaskStatus::Running {
                     return Ok(());
@@ -7475,6 +7567,7 @@ impl App {
                         let planning_agent_clone = planning_agent.clone();
                         let current_agent_clone = task.agent.clone();
                         let wt_path = task.worktree_path.clone();
+                        let project_path = project_path.clone();
                         std::thread::spawn(move || {
                             let agent_ops = agent_registry.get(&planning_agent_clone);
                             ensure_window_or_recover(
@@ -7483,6 +7576,7 @@ impl App {
                                 agent_ops.as_ref(),
                                 wt_path.as_deref(),
                                 &hook_task_id,
+                                Some(&project_path),
                             );
                             let new_cmd = agent_ops.build_interactive_command("");
                             switch_agent_in_tmux(
@@ -8709,9 +8803,55 @@ impl App {
                             let wt = wt.clone();
                             let sn = sn.clone();
                             let agent_name = task_status.agent.clone();
+                            let configured_base = self.state.config.base_branch.clone();
+                            let (vcs, base) = self
+                                .state
+                                .board
+                                .tasks
+                                .iter()
+                                .find(|task| task.id == task_status.task_id)
+                                .map(|task| {
+                                    let vcs = task.vcs.unwrap_or_default();
+                                    let fallback = if configured_base.trim().is_empty()
+                                        && vcs == git::VcsKind::Jj
+                                    {
+                                        "trunk()".to_string()
+                                    } else {
+                                        configured_base.clone()
+                                    };
+                                    let base = task
+                                        .base_branch
+                                        .clone()
+                                        .filter(|base| !base.trim().is_empty())
+                                        .unwrap_or(fallback);
+                                    (vcs, base)
+                                })
+                                .unwrap_or((git::VcsKind::Git, String::new()));
 
                             std::thread::spawn(move || {
-                                match git_ops.fetch_and_check_conflicts(Path::new(&wt)) {
+                                let check = match vcs {
+                                    git::VcsKind::Git => {
+                                        git_ops.fetch_and_check_conflicts(Path::new(&wt))
+                                    }
+                                    git::VcsKind::Jj => {
+                                        let fetch = std::process::Command::new("jj")
+                                            .current_dir(&wt)
+                                            .args(["git", "fetch", "--remote", "origin"])
+                                            .output();
+                                        match fetch {
+                                            Ok(output) if output.status.success() => {
+                                                git::jj_conflict_probe(Path::new(&wt), "@", &base)
+                                                    .map(|result| result.0)
+                                            }
+                                            Ok(output) => Err(anyhow::anyhow!(
+                                                "jj git fetch failed: {}",
+                                                String::from_utf8_lossy(&output.stderr).trim()
+                                            )),
+                                            Err(error) => Err(error.into()),
+                                        }
+                                    }
+                                };
+                                match check {
                                     Ok(true) => {
                                         let skill_cmd = skills::transform_plugin_command(
                                             "/agtx:merge-conflicts",
@@ -8859,6 +8999,27 @@ impl App {
             // Skip non-existent projects silently
             return Ok(());
         }
+        let project_config = match ProjectConfig::load(&project_path) {
+            Ok(config) => config,
+            Err(error) => {
+                self.state.warning_message = Some((
+                    format!("Could not load project config: {error}"),
+                    Instant::now(),
+                ));
+                return Ok(());
+            }
+        };
+        let selected_vcs = project_config.vcs.unwrap_or_default();
+        if !git::is_repo_for(&project_path, selected_vcs) {
+            self.state.warning_message = Some((
+                format!(
+                    "Project selects {}, but the configured path is not a {} repository",
+                    selected_vcs, selected_vcs
+                ),
+                Instant::now(),
+            ));
+            return Ok(());
+        }
 
         // Update current project
         self.state.project_name = project.name.clone();
@@ -8898,7 +9059,6 @@ impl App {
 
         // Reload config for the new project so per-phase agent overrides are respected
         let global_config = GlobalConfig::load().unwrap_or_default();
-        let project_config = ProjectConfig::load(&project_path).unwrap_or_default();
         self.state.config = MergedConfig::merge(&global_config, &project_config);
         self.state.cached_plugin = Some(load_plugin_if_configured(
             &self.state.config,
@@ -9046,7 +9206,7 @@ fn recover_task_session(
         worktree_path,
         Some(resume_cmd),
         true,
-        &agtx_task_env(&task.id, worktree_path),
+        &agtx_task_env(&task.id, worktree_path, project_path),
     )?;
 
     Ok(target.clone())
@@ -9139,9 +9299,11 @@ fn run_cleanup_script_for_worktree(cleanup_script: Option<&str>, worktree_path: 
 
 /// Background-safe cleanup: archive artifacts, kill tmux window, run cleanup script, remove worktree.
 /// Takes owned/cloned values so it can run in a spawned thread.
-fn cleanup_task_resources(
+fn cleanup_task_resources_for_vcs(
     task_id: &str,
     agent: &str,
+    vcs: git::VcsKind,
+    workspace_name: Option<&str>,
     branch_name: &Option<String>,
     session_name: &Option<String>,
     worktree_path: &Option<String>,
@@ -9150,6 +9312,7 @@ fn cleanup_task_resources(
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
 ) {
+    let jj_ops = git::RealJjOps;
     // Drop this worktree from the agent's trust store, before it is removed —
     // `forget` resolves the path, which needs the directory to still exist.
     //
@@ -9189,10 +9352,44 @@ fn cleanup_task_resources(
     }
     if let Some(worktree) = worktree_path {
         run_cleanup_script_for_worktree(cleanup_script, Path::new(worktree));
-        if let Err(e) = git_ops.remove_worktree(project_path, worktree) {
+        let result = match vcs {
+            git::VcsKind::Git => git_ops.remove_worktree(project_path, worktree),
+            git::VcsKind::Jj => {
+                jj_ops.remove_workspace(project_path, Path::new(worktree), workspace_name)
+            }
+        };
+        if let Err(e) = result {
             tracing::warn!(worktree = %worktree, error = %e, "Failed to remove worktree");
         }
     }
+}
+
+#[cfg(feature = "test-mocks")]
+#[allow(dead_code)]
+fn cleanup_task_resources(
+    task_id: &str,
+    agent: &str,
+    branch_name: &Option<String>,
+    session_name: &Option<String>,
+    worktree_path: &Option<String>,
+    cleanup_script: Option<&str>,
+    project_path: &Path,
+    tmux_ops: &dyn TmuxOperations,
+    git_ops: &dyn GitOperations,
+) {
+    cleanup_task_resources_for_vcs(
+        task_id,
+        agent,
+        git::VcsKind::Git,
+        None,
+        branch_name,
+        session_name,
+        worktree_path,
+        cleanup_script,
+        project_path,
+        tmux_ops,
+        git_ops,
+    );
 }
 
 /// Set up a worktree and tmux window for a task.
@@ -9203,11 +9400,12 @@ fn cleanup_task_resources(
 /// `prompt` is used only for agents without native skill invocation (fallback).
 /// For agents with skill support, the agent starts with no prompt and the skill command
 /// is sent later via send_keys (see the acceptance thread in move_task_right).
-fn setup_task_worktree(
+fn setup_task_worktree_for_vcs(
     task: &mut Task,
     project_path: &Path,
     tmux_project_name: &str,
     prompt: &str,
+    vcs: git::VcsKind,
     base_branch: &str,
     worktree_dir: &str,
     branch_prefix: &str,
@@ -9231,14 +9429,27 @@ fn setup_task_worktree(
 
     // When skip_worktree is set, use the project root directly instead of creating a git worktree.
     // Useful for isolated environments (e.g. Docker) where the repo is already the working copy.
+    let jj_ops = git::RealJjOps;
+    let vcs_ops: &dyn GitOperations = match vcs {
+        git::VcsKind::Git => git_ops,
+        git::VcsKind::Jj => &jj_ops,
+    };
+    let effective_base = if base_branch.trim().is_empty() {
+        match vcs {
+            git::VcsKind::Git => git::detect_main_branch(project_path)?,
+            git::VcsKind::Jj => "trunk()".to_string(),
+        }
+    } else {
+        base_branch.trim().to_string()
+    };
     let worktree_path_str = if skip_worktree {
         project_path.to_string_lossy().to_string()
     } else {
         // Create git worktree from the configured base branch
-        match git_ops.create_worktree(
+        match vcs_ops.create_worktree(
             project_path,
             &unique_slug,
-            base_branch,
+            &effective_base,
             worktree_dir,
             branch_prefix,
         ) {
@@ -9278,7 +9489,7 @@ fn setup_task_worktree(
             Some(parts.join(","))
         }
     };
-    let init_warnings = git_ops.initialize_worktree(
+    let init_warnings = vcs_ops.initialize_worktree(
         project_path,
         worktree_path,
         merged_copy_files,
@@ -9303,18 +9514,42 @@ fn setup_task_worktree(
     if !referenced_tasks.is_empty() {
         let refs_dir = worktree_path.join(".agtx").join("references");
         for ref_info in referenced_tasks {
-            // 1. Git diff of referenced task's branch
-            if let Some(ref branch) = ref_info.branch_name {
-                if let Ok(output) = std::process::Command::new("git")
-                    .args(["diff", &format!("main..{}", branch)])
-                    .current_dir(project_path)
-                    .output()
-                {
-                    if output.status.success() && !output.stdout.is_empty() {
-                        let _ = std::fs::create_dir_all(&refs_dir);
-                        let diff_path = refs_dir.join(format!("{}.diff", ref_info.slug));
-                        let _ = std::fs::write(&diff_path, &output.stdout);
-                    }
+            // 1. VCS-neutral diff of the referenced task.
+            let diff = match ref_info.vcs {
+                git::VcsKind::Git => ref_info.branch_name.as_ref().and_then(|branch| {
+                    std::process::Command::new("git")
+                        .args(["diff", &format!("{}...{}", ref_info.base_branch, branch)])
+                        .current_dir(project_path)
+                        .output()
+                        .ok()
+                }),
+                git::VcsKind::Jj => {
+                    let target = ref_info
+                        .worktree_path
+                        .as_deref()
+                        .filter(|path| Path::new(path).exists())
+                        .map(|path| (Path::new(path), "@"))
+                        .or_else(|| {
+                            ref_info
+                                .branch_name
+                                .as_deref()
+                                .map(|branch| (project_path, branch))
+                    });
+                    target.and_then(|(repo, target)| {
+                        let fork = format!("fork_point(({}) | {target})", ref_info.base_branch);
+                        std::process::Command::new("jj")
+                            .args(["diff", "--git", "--from", &fork, "--to", target])
+                            .current_dir(repo)
+                            .output()
+                            .ok()
+                    })
+                }
+            };
+            if let Some(output) = diff {
+                if output.status.success() && !output.stdout.is_empty() {
+                    let _ = std::fs::create_dir_all(&refs_dir);
+                    let diff_path = refs_dir.join(format!("{}.diff", ref_info.slug));
+                    let _ = std::fs::write(&diff_path, &output.stdout);
                 }
             }
             // 2. Copy artifact files from referenced task's worktree (if it still exists)
@@ -9410,14 +9645,66 @@ fn setup_task_worktree(
         &worktree_path_str,
         Some(agent_cmd),
         true,
-        &agtx_task_env(&task.id, &worktree_path_str),
+        &agtx_task_env(&task.id, &worktree_path_str, project_path),
     )?;
 
     task.session_name = Some(target.clone());
     task.worktree_path = Some(worktree_path_str);
     task.branch_name = Some(format!("{}/{}", branch_prefix, unique_slug));
+    task.vcs = Some(vcs);
+    task.workspace_name = (vcs == git::VcsKind::Jj && !skip_worktree).then_some(unique_slug);
+    task.base_branch = Some(effective_base);
 
     Ok((target, launched_with_prompt))
+}
+
+#[cfg(feature = "test-mocks")]
+#[allow(clippy::too_many_arguments, dead_code)]
+fn setup_task_worktree(
+    task: &mut Task,
+    project_path: &Path,
+    tmux_project_name: &str,
+    prompt: &str,
+    base_branch: &str,
+    worktree_dir: &str,
+    branch_prefix: &str,
+    copy_files: Option<String>,
+    init_script: Option<String>,
+    plugin: &Option<WorkflowPlugin>,
+    agent_name: &str,
+    all_phase_agents: &[String],
+    tmux_ops: &dyn TmuxOperations,
+    git_ops: &dyn GitOperations,
+    agent_ops: &dyn AgentOperations,
+    referenced_tasks: &[ReferencedTaskInfo],
+    skip_init_scripts: bool,
+    skip_worktree: bool,
+    agent_hooks: bool,
+    skill_cmd: Option<&str>,
+) -> Result<(String, bool)> {
+    setup_task_worktree_for_vcs(
+        task,
+        project_path,
+        tmux_project_name,
+        prompt,
+        git::VcsKind::Git,
+        base_branch,
+        worktree_dir,
+        branch_prefix,
+        copy_files,
+        init_script,
+        plugin,
+        agent_name,
+        all_phase_agents,
+        tmux_ops,
+        git_ops,
+        agent_ops,
+        referenced_tasks,
+        skip_init_scripts,
+        skip_worktree,
+        agent_hooks,
+        skill_cmd,
+    )
 }
 
 /// Delete task resources: kill tmux window, run cleanup script, remove worktree, delete branch
@@ -9428,6 +9715,8 @@ fn delete_task_resources(
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
 ) {
+    let jj_ops = git::RealJjOps;
+    let vcs = task.vcs.unwrap_or_default();
     // Same prune as the Done path: a deleted task's worktree is just as gone.
     if let (Some(worktree), Some(home)) = (&task.worktree_path, agent_trust_home()) {
         let _ = agent::trust::forget(&task.agent, Path::new(worktree), &home);
@@ -9444,7 +9733,15 @@ fn delete_task_resources(
     // research session that never reached Planning.
     if let Some(ref worktree) = task.worktree_path {
         run_cleanup_script_for_worktree(cleanup_script, Path::new(worktree));
-        if let Err(e) = git_ops.remove_worktree(project_path, worktree) {
+        let result = match vcs {
+            git::VcsKind::Git => git_ops.remove_worktree(project_path, worktree),
+            git::VcsKind::Jj => jj_ops.remove_workspace(
+                project_path,
+                Path::new(worktree),
+                task.workspace_name.as_deref(),
+            ),
+        };
+        if let Err(e) = result {
             tracing::warn!(worktree = %worktree, error = %e, "Failed to remove worktree");
         }
 
@@ -9454,19 +9751,37 @@ fn delete_task_resources(
         // purpose — and `delete_branch` is `git branch -D`, so hoisting it would
         // silently force-delete work the user was told was preserved.
         if let Some(ref branch_name) = task.branch_name {
-            let _ = git_ops.delete_branch(project_path, branch_name);
+            let result = match vcs {
+                git::VcsKind::Git => git_ops.delete_branch(project_path, branch_name),
+                git::VcsKind::Jj => jj_ops.delete_branch(project_path, branch_name),
+            };
+            let _ = result;
         }
     }
 }
 
 /// Collect git diff content from a worktree
 /// Returns formatted diff sections (unstaged, staged, untracked)
-fn collect_task_diff(
+fn collect_task_diff_for_vcs(
     worktree_path: &str,
+    vcs: git::VcsKind,
     git_ops: &dyn GitOperations,
     exclude_prefixes: &[&str],
 ) -> String {
     let worktree = Path::new(worktree_path);
+    let jj_ops = git::RealJjOps;
+    if vcs == git::VcsKind::Jj {
+        let diff = jj_ops.diff_cached(worktree);
+        return if diff.trim().is_empty() {
+            format!("(no changes)\n\nWorkspace: {}", worktree_path)
+        } else {
+            format!("=== Changes ===\n\n{diff}")
+        };
+    }
+    let git_ops: &dyn GitOperations = match vcs {
+        git::VcsKind::Git => git_ops,
+        git::VcsKind::Jj => &jj_ops,
+    };
     let mut sections = Vec::new();
 
     // Unstaged changes (modified tracked files)
@@ -9514,6 +9829,16 @@ fn collect_task_diff(
     } else {
         sections.join("\n\n")
     }
+}
+
+#[cfg(feature = "test-mocks")]
+#[allow(dead_code)]
+fn collect_task_diff(
+    worktree_path: &str,
+    git_ops: &dyn GitOperations,
+    exclude_prefixes: &[&str],
+) -> String {
+    collect_task_diff_for_vcs(worktree_path, git::VcsKind::Git, git_ops, exclude_prefixes)
 }
 
 /// Helper function to create a centered rect
@@ -9710,13 +10035,19 @@ fn capture_pane_text(
 }
 
 /// Generate PR title and description using the configured agent
-pub(crate) fn generate_pr_description(
+pub(crate) fn generate_pr_description_for_vcs(
     task_title: &str,
     worktree_path: Option<&str>,
-    _branch_name: Option<&str>,
+    base_revision: Option<&str>,
+    vcs: git::VcsKind,
     git_ops: &dyn GitOperations,
     agent_ops: &dyn AgentOperations,
 ) -> (String, String) {
+    let jj_ops = git::RealJjOps;
+    let git_ops: &dyn GitOperations = match vcs {
+        git::VcsKind::Git => git_ops,
+        git::VcsKind::Jj => &jj_ops,
+    };
     // Default values
     let default_title = task_title.to_string();
     let mut default_body = String::new();
@@ -9724,8 +10055,21 @@ pub(crate) fn generate_pr_description(
     // Try to get git diff for context
     if let Some(worktree) = worktree_path {
         let worktree_path = Path::new(worktree);
-        // Get diff from main
-        let diff_stat = git_ops.diff_stat_from_main(worktree_path);
+        let diff_stat = if vcs == git::VcsKind::Jj {
+            let base = base_revision
+                .filter(|base| !base.trim().is_empty())
+                .unwrap_or("trunk()");
+            std::process::Command::new("jj")
+                .current_dir(worktree_path)
+                .args(["diff", "--stat", "--from", base, "--to", "@"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default()
+        } else {
+            git_ops.diff_stat_from_main(worktree_path)
+        };
 
         if !diff_stat.is_empty() {
             default_body.push_str("## Changes\n```\n");
@@ -9749,6 +10093,25 @@ pub(crate) fn generate_pr_description(
     (default_title, default_body)
 }
 
+#[cfg(feature = "test-mocks")]
+#[allow(dead_code)]
+pub(crate) fn generate_pr_description(
+    task_title: &str,
+    worktree_path: Option<&str>,
+    branch_name: Option<&str>,
+    git_ops: &dyn GitOperations,
+    agent_ops: &dyn AgentOperations,
+) -> (String, String) {
+    generate_pr_description_for_vcs(
+        task_title,
+        worktree_path,
+        branch_name,
+        git::VcsKind::Git,
+        git_ops,
+        agent_ops,
+    )
+}
+
 /// Create a PR with provided title and body, return (pr_number, pr_url)
 fn create_pr_with_content(
     task: &Task,
@@ -9761,6 +10124,11 @@ fn create_pr_with_content(
 ) -> Result<(i32, String)> {
     let worktree = task.worktree_path.as_deref().unwrap_or(".");
     let worktree_path = Path::new(worktree);
+    let jj_ops = git::RealJjOps;
+    let git_ops: &dyn GitOperations = match task.vcs.unwrap_or_default() {
+        git::VcsKind::Git => git_ops,
+        git::VcsKind::Jj => &jj_ops,
+    };
 
     // Stage all changes
     git_ops.add_all(worktree_path)?;
@@ -9784,12 +10152,30 @@ fn create_pr_with_content(
     }
 
     // Create PR (use base_branch for stacked PRs)
+    let provider_base = match task.vcs.unwrap_or_default() {
+        git::VcsKind::Git => task.base_branch.clone(),
+        git::VcsKind::Jj => task.base_branch.as_deref().and_then(|base| {
+            let base = base.trim();
+            if base.is_empty() || base == "trunk()" {
+                None
+            } else if let Some(bookmark) = base.strip_suffix("@origin") {
+                Some(bookmark.to_string())
+            } else if base
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.'))
+            {
+                Some(base.to_string())
+            } else {
+                None
+            }
+        }),
+    };
     git_provider_ops.create_pr(
         project_path,
         pr_title,
         pr_body,
         task.branch_name.as_deref().unwrap_or(""),
-        task.base_branch.clone(),
+        provider_base,
     )
 }
 
@@ -9801,6 +10187,11 @@ fn push_changes_to_existing_pr(
 ) -> Result<String> {
     let worktree = task.worktree_path.as_deref().unwrap_or(".");
     let worktree_path = Path::new(worktree);
+    let jj_ops = git::RealJjOps;
+    let git_ops: &dyn GitOperations = match task.vcs.unwrap_or_default() {
+        git::VcsKind::Git => git_ops,
+        git::VcsKind::Jj => &jj_ops,
+    };
 
     // Stage all changes
     git_ops.add_all(worktree_path)?;
@@ -11044,10 +11435,15 @@ fn fuzzy_find_files(
     project_path: &Path,
     pattern: &str,
     max_results: usize,
+    vcs: git::VcsKind,
     git_ops: &dyn GitOperations,
 ) -> Vec<String> {
-    // Use git ls-files to get tracked files (respects .gitignore)
-    let files = git_ops.list_files(project_path);
+    let jj_ops = git::RealJjOps;
+    let vcs_ops: &dyn GitOperations = match vcs {
+        git::VcsKind::Git => git_ops,
+        git::VcsKind::Jj => &jj_ops,
+    };
+    let files = vcs_ops.list_files(project_path);
 
     if files.is_empty() {
         return vec![];
@@ -11278,6 +11674,7 @@ fn spawn_send_to_agent(
                 agent_ops.as_ref(),
                 worktree_path.as_deref(),
                 &task_id,
+                Some(&project_path),
             );
         }
 
@@ -12149,6 +12546,7 @@ fn ensure_window_or_recover(
     agent_ops: &dyn AgentOperations,
     worktree_path: Option<&str>,
     task_id: &str,
+    project_path: Option<&Path>,
 ) {
     if !tmux_ops.window_exists(target).unwrap_or(true) {
         let Some(wt_path) = worktree_path else { return };
@@ -12168,7 +12566,11 @@ fn ensure_window_or_recover(
             wt_path,
             Some(resume_cmd),
             true,
-            &agtx_task_env(task_id, wt_path),
+            &agtx_task_env(
+                task_id,
+                wt_path,
+                project_path.unwrap_or_else(|| Path::new(wt_path)),
+            ),
         );
     }
 }
@@ -12919,11 +13321,22 @@ fn compose_launch_text(skill_cmd: Option<&str>, prompt: &str) -> String {
 /// inherits it. Agent hooks are registered once with a task-agnostic command and
 /// read these to know what they are reporting about, which is what lets several
 /// tasks share one `.claude/settings.local.json` under `skip_worktree`.
-fn agtx_task_env(task_id: &str, worktree: &str) -> Vec<(String, String)> {
-    vec![
+fn agtx_task_env(task_id: &str, worktree: &str, project_root: &Path) -> Vec<(String, String)> {
+    let mut env = vec![
         ("AGTX_TASK_ID".to_string(), task_id.to_string()),
         ("AGTX_WORKTREE".to_string(), worktree.to_string()),
-    ]
+        (
+            "AGTX_PROJECT_ROOT".to_string(),
+            project_root.to_string_lossy().into_owned(),
+        ),
+    ];
+    if let Ok(agtx_bin) = std::env::current_exe() {
+        env.push((
+            "AGTX_BIN".to_string(),
+            agtx_bin.to_string_lossy().into_owned(),
+        ));
+    }
+    env
 }
 
 /// Merge agtx's hook entries into an existing `hooks` object, preserving the
@@ -13040,36 +13453,16 @@ fn write_skills_to_worktree(
     let agtx_dir = Path::new(worktree_path).join(".agtx");
     let _ = std::fs::create_dir_all(&agtx_dir);
 
-    // Write canonical .agtx/skills/ directory
+    // Write canonical .agtx/skills/ directory. Resolve plugin overrides through
+    // the same path as native skills, then bake in the exact running binary so
+    // agents never depend on `agtx` being on PATH.
     let skills_dir = agtx_dir.join("skills");
-    if let Some(ref p) = plugin {
-        // Copy skills from plugin directory, falling back to built-in defaults
-        if let Some(plugin_dir) = WorkflowPlugin::plugin_dir(&p.name, Some(project_path)) {
-            for (skill_name, default_content) in skills::BUILTIN_SKILLS {
-                let src = plugin_dir.join(skill_name).join("SKILL.md");
-                let dst_dir = skills_dir.join(skill_name);
-                let _ = std::fs::create_dir_all(&dst_dir);
-                if src.exists() {
-                    let _ = std::fs::copy(&src, dst_dir.join("SKILL.md"));
-                } else {
-                    let _ = std::fs::write(dst_dir.join("SKILL.md"), default_content);
-                }
-            }
-        } else {
-            // Plugin dir not found, write defaults
-            for (skill_name, skill_content) in skills::BUILTIN_SKILLS {
-                let skill_dir = skills_dir.join(skill_name);
-                let _ = std::fs::create_dir_all(&skill_dir);
-                let _ = std::fs::write(skill_dir.join("SKILL.md"), skill_content);
-            }
-        }
-    } else {
-        // Write built-in default skills
-        for (skill_name, skill_content) in skills::BUILTIN_SKILLS {
-            let skill_dir = skills_dir.join(skill_name);
-            let _ = std::fs::create_dir_all(&skill_dir);
-            let _ = std::fs::write(skill_dir.join("SKILL.md"), skill_content);
-        }
+    for (skill_name, default_content) in skills::BUILTIN_SKILLS {
+        let content = resolve_skill_content(plugin, skill_name, project_path, default_content);
+        let content = materialize_skill_content(&content);
+        let skill_dir = skills_dir.join(skill_name);
+        let _ = std::fs::create_dir_all(&skill_dir);
+        let _ = std::fs::write(skill_dir.join("SKILL.md"), content);
     }
 
     // Write project-scoped MCP server config for each configured agent.
@@ -13110,6 +13503,7 @@ fn write_skills_to_worktree(
             for (skill_dir_name, default_content) in skills::BUILTIN_SKILLS {
                 let content =
                     resolve_skill_content(plugin, skill_dir_name, project_path, default_content);
+                let content = materialize_skill_content(&content);
                 write_skill_file(spec, skill_dir_name, &content, &native_dir);
             }
         }
@@ -13558,6 +13952,20 @@ fn write_mcp_config(
 /// and had already drifted: the latter treated Claude's format as its `_`
 /// fallback, so a future agent with a skill dir but no arm would silently get
 /// Claude's `.md` layout from one and nothing from the other.
+fn materialize_skill_content(content: &str) -> String {
+    if !content.contains("{{AGTX_BIN}}") {
+        return content.to_string();
+    }
+    let executable = std::env::current_exe()
+        .map(|path| shell_quote(&path.to_string_lossy()))
+        .unwrap_or_else(|_| "\"$AGTX_BIN\"".to_string());
+    content.replace("{{AGTX_BIN}}", &executable)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 fn write_skill_file(spec: &agent::AgentSpec, skill_name: &str, content: &str, native_dir: &Path) {
     match spec.skill_layout {
         agent::SkillLayout::CommandFile => {
@@ -13588,10 +13996,11 @@ fn write_skill_file(spec: &agent::AgentSpec, skill_name: &str, content: &str, na
 /// Deploy a single skill to a target directory for the given agent.
 /// Writes both the canonical `.agtx/skills/` copy and the agent-native discovery path.
 fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, agent_name: &str) {
+    let content = materialize_skill_content(content);
     // Write canonical copy
     let canonical_dir = target_dir.join(".agtx/skills").join(skill_name);
     let _ = std::fs::create_dir_all(&canonical_dir);
-    let _ = std::fs::write(canonical_dir.join("SKILL.md"), content);
+    let _ = std::fs::write(canonical_dir.join("SKILL.md"), &content);
 
     // Write to agent-native discovery path
     let Some(spec) = agent::spec(agent_name) else {
@@ -13604,7 +14013,7 @@ fn deploy_skill(target_dir: &Path, skill_name: &str, content: &str, agent_name: 
             target_dir.join(base_dir).join(namespace)
         };
         let _ = std::fs::create_dir_all(&native_dir);
-        write_skill_file(spec, skill_name, content, &native_dir);
+        write_skill_file(spec, skill_name, &content, &native_dir);
     }
 }
 

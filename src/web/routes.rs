@@ -370,10 +370,26 @@ fn resolve_base(
     project: &std::path::Path,
     worktree: &std::path::Path,
     recorded: Option<&str>,
+    vcs: crate::git::VcsKind,
 ) -> Option<String> {
+    let configured = crate::config::ProjectConfig::load(project)
+        .ok()
+        .and_then(|config| config.base_branch)
+        .filter(|base| !base.trim().is_empty());
+    if vcs == crate::git::VcsKind::Jj {
+        let base = recorded
+            .filter(|base| !base.trim().is_empty())
+            .map(str::to_string)
+            .or(configured)
+            .unwrap_or_else(|| "trunk()".to_string());
+        return crate::git::resolve_jj_revision(worktree, &base)
+            .ok()
+            .map(|_| base);
+    }
     recorded
         .filter(|b| !b.is_empty() && crate::git::ref_exists(worktree, b))
         .map(str::to_string)
+        .or_else(|| configured.filter(|base| crate::git::ref_exists(worktree, base)))
         .or_else(|| {
             crate::git::detect_main_branch(project)
                 .ok()
@@ -388,8 +404,15 @@ fn conflict_for(project: &std::path::Path, task: &Task) -> Option<ConflictState>
     if !worktree.exists() {
         return None;
     }
+    let vcs = task.vcs.unwrap_or_default();
+    let base = resolve_base(project, &worktree, task.base_branch.as_deref(), vcs)?;
+
+    if vcs == crate::git::VcsKind::Jj {
+        return crate::git::jj_conflict_probe(&worktree, "@", &base)
+            .ok()
+            .map(|(conflicted, files)| ConflictState { conflicted, files });
+    }
     let branch = task.branch_name.clone()?;
-    let base = resolve_base(project, &worktree, task.base_branch.as_deref())?;
 
     match crate::git::check_merge_conflicts(&worktree, &base, &branch) {
         Ok((conflicted, files)) => Some(ConflictState { conflicted, files }),
@@ -517,21 +540,50 @@ async fn task_diff(
         )));
     }
 
-    let base = resolve_base(&project, &worktree, t.base_branch.as_deref()).ok_or_else(|| {
-        ApiError::NotFound(format!(
-            "no base branch to diff against: task {tid} records {:?}, and neither it nor a \
+    let vcs = t.vcs.unwrap_or_default();
+    let base =
+        resolve_base(&project, &worktree, t.base_branch.as_deref(), vcs).ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "no base branch to diff against: task {tid} records {:?}, and neither it nor a \
                  detected default resolves in {}",
-            t.base_branch.as_deref().unwrap_or("none"),
-            worktree.display()
-        ))
-    })?;
+                t.base_branch.as_deref().unwrap_or("none"),
+                worktree.display()
+            ))
+        })?;
 
     // `HEAD` rather than the branch name: the branch is what the worktree has
     // checked out, and naming it would miss nothing but costs a lookup.
-    let stat = crate::git::diff_stat(&worktree, &base, "HEAD")
-        .map_err(|e| ApiError::Internal(format!("git diff --stat: {e}")))?;
-    let patch = crate::git::diff_full(&worktree, &base, "HEAD")
-        .map_err(|e| ApiError::Internal(format!("git diff: {e}")))?;
+    let (stat, patch) = match vcs {
+        crate::git::VcsKind::Git => (
+            crate::git::diff_stat(&worktree, &base, "HEAD")
+                .map_err(|e| ApiError::Internal(format!("git diff --stat: {e}")))?,
+            crate::git::diff_full(&worktree, &base, "HEAD")
+                .map_err(|e| ApiError::Internal(format!("git diff: {e}")))?,
+        ),
+        crate::git::VcsKind::Jj => {
+            let run = |stat: bool| -> Result<String, ApiError> {
+                let mut command = std::process::Command::new("jj");
+                command
+                    .current_dir(&worktree)
+                    .args(["diff", "--from", &base, "--to", "@"]);
+                if stat {
+                    command.arg("--stat");
+                } else {
+                    command.arg("--git");
+                }
+                let output = command
+                    .output()
+                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+                if !output.status.success() {
+                    return Err(ApiError::Internal(
+                        String::from_utf8_lossy(&output.stderr).into_owned(),
+                    ));
+                }
+                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            };
+            (run(true)?, run(false)?)
+        }
+    };
 
     // Computed here rather than read from the cache: this is the screen the
     // decision gets made on, and one git call is worth an honest answer.

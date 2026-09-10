@@ -75,12 +75,24 @@ pub async fn task_action(
     // The TUI checks again at execution time because the agent may keep writing.
     if body.action == "move_to_done" {
         if let Some(worktree) = task.worktree_path.clone() {
+            let vcs = task.vcs.unwrap_or_default();
             let dirty = tokio::task::spawn_blocking(move || {
-                let output = std::process::Command::new("git")
+                let mut command = match vcs {
+                    crate::git::VcsKind::Git => {
+                        let mut command = std::process::Command::new("git");
+                        command.args(["status", "--porcelain"]);
+                        command
+                    }
+                    crate::git::VcsKind::Jj => {
+                        let mut command = std::process::Command::new("jj");
+                        command.args(["diff", "--summary"]);
+                        command
+                    }
+                };
+                let output = command
                     .current_dir(&worktree)
-                    .args(["status", "--porcelain"])
                     .output()
-                    .map_err(|e| ApiError::Internal(format!("checking worktree: {e}")))?;
+                    .map_err(|e| ApiError::Internal(format!("checking workspace: {e}")))?;
                 if !output.status.success() {
                     return Err(ApiError::Conflict(
                         "Cannot verify that the worktree is clean; completion is blocked.".into(),
@@ -189,7 +201,7 @@ pub async fn create_task(
     // The project's own defaults, so a task created from a phone is the task
     // the desktop would have created — the agent in particular is what every
     // later phase reads.
-    let (agent, plugin) = defaults_for(&state, &pid);
+    let (agent, plugin, vcs) = defaults_for(&state, &pid)?;
     let project_name = project_name_for(&state, &pid);
 
     let mut task = Task::new(title, &agent, &project_name);
@@ -197,6 +209,7 @@ pub async fn create_task(
     task.plugin = body.plugin.or(plugin);
     task.referenced_tasks = body.referenced_tasks;
     task.base_branch = body.base_branch;
+    task.vcs = Some(vcs);
 
     db.create_task(&task)
         .map_err(|e| ApiError::Internal(format!("creating the task: {e}")))?;
@@ -342,16 +355,20 @@ fn validate_refs(db: &Database, refs: Option<&str>) -> ApiResult<()> {
 
 /// The project's configured default agent and plugin, merged over the global
 /// config exactly as the TUI does.
-fn defaults_for(state: &ServerState, pid: &str) -> (String, Option<String>) {
+fn defaults_for(
+    state: &ServerState,
+    pid: &str,
+) -> ApiResult<(String, Option<String>, crate::git::VcsKind)> {
     let global = crate::config::GlobalConfig::load().unwrap_or_default();
-    match state.project_path(pid) {
-        Ok(path) => {
-            let project = crate::config::ProjectConfig::load(&path).unwrap_or_default();
-            let merged = crate::config::MergedConfig::merge(&global, &project);
-            (merged.default_agent.clone(), merged.workflow_plugin.clone())
-        }
-        Err(_) => (global.default_agent.clone(), None),
-    }
+    let path = state.project_path(pid)?;
+    let project = crate::config::ProjectConfig::load(&path)
+        .map_err(|error| ApiError::Internal(format!("loading project config: {error}")))?;
+    let merged = crate::config::MergedConfig::merge(&global, &project);
+    Ok((
+        merged.default_agent.clone(),
+        merged.workflow_plugin.clone(),
+        merged.vcs,
+    ))
 }
 
 fn project_name_for(state: &ServerState, pid: &str) -> String {

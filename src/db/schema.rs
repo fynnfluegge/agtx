@@ -206,6 +206,12 @@ impl Database {
         let _ = self
             .conn
             .execute("ALTER TABLE tasks ADD COLUMN base_branch TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN vcs TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN workspace_name TEXT", []);
 
         // MCP transition request queue
         self.conn.execute_batch(
@@ -345,8 +351,8 @@ impl Database {
     pub fn create_task(&self, task: &Task) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, vcs, workspace_name, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             "#,
             params![
                 task.id,
@@ -365,6 +371,8 @@ impl Database {
                 task.referenced_tasks,
                 task.escalation_note,
                 task.base_branch,
+                task.vcs.map(|v| v.as_str()),
+                task.workspace_name,
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
             ],
@@ -377,8 +385,8 @@ impl Database {
         for task in tasks {
             tx.execute(
                 r#"
-                INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, vcs, workspace_name, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 "#,
                 params![
                     task.id,
@@ -397,6 +405,8 @@ impl Database {
                     task.referenced_tasks,
                     task.escalation_note,
                     task.base_branch,
+                    task.vcs.map(|v| v.as_str()),
+                    task.workspace_name,
                     task.created_at.to_rfc3339(),
                     task.updated_at.to_rfc3339(),
                 ],
@@ -424,7 +434,9 @@ impl Database {
                 referenced_tasks = ?13,
                 escalation_note = ?14,
                 base_branch = ?15,
-                updated_at = ?16
+                vcs = ?16,
+                workspace_name = ?17,
+                updated_at = ?18
             WHERE id = ?1
             "#,
             params![
@@ -443,6 +455,8 @@ impl Database {
                 task.referenced_tasks,
                 task.escalation_note,
                 task.base_branch,
+                task.vcs.map(|v| v.as_str()),
+                task.workspace_name,
                 task.updated_at.to_rfc3339(),
             ],
         )?;
@@ -474,6 +488,12 @@ impl Database {
             referenced_tasks: row.get("referenced_tasks").ok().flatten(),
             escalation_note: row.get("escalation_note").ok().flatten(),
             base_branch: row.get("base_branch").ok().flatten(),
+            vcs: row
+                .get::<_, Option<String>>("vcs")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok()),
+            workspace_name: row.get("workspace_name").ok().flatten(),
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>("created_at")?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),

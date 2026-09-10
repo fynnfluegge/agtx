@@ -62,6 +62,8 @@ fn test_task_new() {
     assert!(task.branch_name.is_none());
     assert!(task.pr_number.is_none());
     assert!(task.pr_url.is_none());
+    assert!(task.vcs.is_none());
+    assert!(task.workspace_name.is_none());
 }
 
 #[test]
@@ -166,6 +168,22 @@ fn test_in_memory_project_db_update_task() {
     let retrieved = db.get_task(&task.id).unwrap().unwrap();
     assert_eq!(retrieved.status, TaskStatus::Running);
     assert_eq!(retrieved.session_name.as_deref(), Some("session-1"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_task_vcs_identity_round_trips() {
+    let db = Database::open_in_memory_project().unwrap();
+    let mut task = Task::new("JJ task", "codex", "proj-1");
+    task.vcs = Some(agtx::git::VcsKind::Jj);
+    task.workspace_name = Some("task-jj-task".to_string());
+    task.base_branch = Some("trunk()".to_string());
+    db.create_task(&task).unwrap();
+
+    let retrieved = db.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(retrieved.vcs, Some(agtx::git::VcsKind::Jj));
+    assert_eq!(retrieved.workspace_name.as_deref(), Some("task-jj-task"));
+    assert_eq!(retrieved.base_branch.as_deref(), Some("trunk()"));
 }
 
 #[test]

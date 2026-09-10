@@ -74,6 +74,7 @@ fn test_worktree_config_default() {
 fn test_project_config_default() {
     let config = ProjectConfig::default();
 
+    assert!(config.vcs.is_none());
     assert!(config.default_agent.is_none());
     assert!(config.base_branch.is_none());
     assert!(config.github_url.is_none());
@@ -91,6 +92,7 @@ fn test_merged_config_uses_global_defaults() {
 
     let merged = MergedConfig::merge(&global, &project);
 
+    assert_eq!(merged.vcs, agtx::git::VcsKind::Git);
     assert_eq!(merged.default_agent, "claude");
     assert_eq!(merged.base_branch, "");
     assert!(merged.worktree_enabled);
@@ -101,9 +103,17 @@ fn test_merged_config_uses_global_defaults() {
 }
 
 #[test]
+fn project_config_rejects_unknown_vcs_instead_of_guessing() {
+    let dir = project_with_config("vcs = \"auto\"\n");
+    let error = ProjectConfig::load(dir.path()).unwrap_err().to_string();
+    assert!(error.contains("Failed to parse project config"), "{error}");
+}
+
+#[test]
 fn test_merged_config_project_overrides() {
     let global = GlobalConfig::default();
     let project = ProjectConfig {
+        vcs: Some(agtx::git::VcsKind::Jj),
         default_agent: Some("codex".to_string()),
         agents: None,
         base_branch: Some("develop".to_string()),
@@ -120,6 +130,7 @@ fn test_merged_config_project_overrides() {
     let merged = MergedConfig::merge(&global, &project);
 
     assert_eq!(merged.default_agent, "codex");
+    assert_eq!(merged.vcs, agtx::git::VcsKind::Jj);
     assert_eq!(merged.base_branch, "develop");
     assert_eq!(
         merged.github_url,
@@ -135,6 +146,20 @@ fn test_merged_config_project_overrides() {
         merged.cleanup_script,
         Some("scripts/cleanup.sh".to_string())
     );
+}
+
+#[test]
+fn jj_does_not_inherit_the_global_git_base() {
+    let mut global = GlobalConfig::default();
+    global.worktree.base_branch = "main".to_string();
+    let project = ProjectConfig {
+        vcs: Some(agtx::git::VcsKind::Jj),
+        ..Default::default()
+    };
+
+    let merged = MergedConfig::merge(&global, &project);
+    assert_eq!(merged.vcs, agtx::git::VcsKind::Jj);
+    assert!(merged.base_branch.is_empty());
 }
 
 #[test]

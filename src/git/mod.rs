@@ -1,9 +1,12 @@
+mod jj_operations;
 mod operations;
 mod provider;
+mod vcs;
 mod worktree;
 
 pub use operations::*;
 pub use provider::{GitProviderOperations, PullRequestState, RealGitHubOps};
+pub use vcs::VcsKind;
 pub use worktree::*;
 
 #[cfg(feature = "test-mocks")]
@@ -23,6 +26,39 @@ pub fn is_git_repo(path: &Path) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Check whether `path` is the root of a Jujutsu workspace. This validates an
+/// explicit `vcs = "jj"` selection; it is never used to choose a backend.
+///
+/// Comparing the reported root matters because `jj workspace root` walks up
+/// through ordinary subdirectories. A half-created task directory inside the
+/// project must not be mistaken for a registered workspace.
+pub fn is_jj_repo(path: &Path) -> bool {
+    let Ok(requested) = path.canonicalize() else {
+        return false;
+    };
+    let Ok(output) = Command::new("jj")
+        .current_dir(path)
+        .args(["workspace", "root"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    Path::new(String::from_utf8_lossy(&output.stdout).trim())
+        .canonicalize()
+        .map(|root| root == requested)
+        .unwrap_or(false)
+}
+
+pub fn is_repo_for(path: &Path, kind: VcsKind) -> bool {
+    match kind {
+        VcsKind::Git => is_git_repo(path),
+        VcsKind::Jj => is_jj_repo(path),
+    }
 }
 
 /// Get the root directory of the git repository
@@ -160,3 +196,6 @@ pub fn delete_branch(path: &Path, branch: &str, force: bool) -> Result<()> {
 
     Ok(())
 }
+pub use jj_operations::{
+    conflict_probe as jj_conflict_probe, resolve_revision as resolve_jj_revision, RealJjOps,
+};

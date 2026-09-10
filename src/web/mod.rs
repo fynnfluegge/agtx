@@ -112,8 +112,15 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
             let path = path
                 .canonicalize()
                 .with_context(|| format!("resolving {}", path.display()))?;
-            if !crate::git::is_git_repo(&path) {
-                bail!("serve requires a git project directory: {}", path.display());
+            let vcs = crate::config::ProjectConfig::load(&path)?
+                .vcs
+                .unwrap_or_default();
+            if !crate::git::is_repo_for(&path, vcs) {
+                bail!(
+                    "serve requires a configured {} project directory: {}",
+                    vcs,
+                    path.display()
+                );
             }
             ServeMode::Project(path)
         }

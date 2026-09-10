@@ -74,6 +74,11 @@ pub struct Task {
     pub referenced_tasks: Option<String>,
     pub escalation_note: Option<String>,
     pub base_branch: Option<String>,
+    /// Backend captured when the task checkout was created. `None` is a
+    /// pre-migration task and therefore means Git.
+    pub vcs: Option<crate::git::VcsKind>,
+    /// Jujutsu workspace name. Git worktrees do not need a separate identity.
+    pub workspace_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -103,6 +108,8 @@ impl Task {
             referenced_tasks: None,
             escalation_note: None,
             base_branch: None,
+            vcs: None,
+            workspace_name: None,
             created_at: now,
             updated_at: now,
         }

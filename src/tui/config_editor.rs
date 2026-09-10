@@ -42,6 +42,7 @@ pub enum FieldId {
     ColorPopupBorder,
     ColorPopupHeader,
     // Project overrides
+    ProjectVcs,
     ProjectDefaultAgent,
     ProjectWorkflowPlugin,
     ProjectBaseBranch,
@@ -306,6 +307,15 @@ impl ConfigEditor {
             sections.push(Section {
                 title: "Project",
                 fields: vec![
+                    Field {
+                        id: FieldId::ProjectVcs,
+                        label: "Version control",
+                        help: "Backend for new task workspaces. Git is the default.",
+                        kind: FieldKind::Choice(vec![
+                            Choice::new("git", "git (default)"),
+                            Choice::new("jj", "jj"),
+                        ]),
+                    },
                     Field {
                         id: FieldId::ProjectDefaultAgent,
                         label: "Default agent",
@@ -643,6 +653,11 @@ fn read(id: FieldId, global: &GlobalConfig, project: Option<&ProjectConfig>) -> 
         ColorPopupHeader => text(&global.theme.color_popup_header),
 
         ProjectDefaultAgent => opt(p.and_then(|c| c.default_agent.as_ref())),
+        ProjectVcs => FieldValue::Text(
+            p.and_then(|c| c.vcs)
+                .map(|v| v.as_str().to_string())
+                .unwrap_or_else(|| "git".to_string()),
+        ),
         ProjectWorkflowPlugin => opt(p.and_then(|c| c.workflow_plugin.as_ref())),
         ProjectBaseBranch => opt(p.and_then(|c| c.base_branch.as_ref())),
         ProjectWorktreeDir => opt(p.and_then(|c| c.worktree_dir.as_ref())),
@@ -698,7 +713,8 @@ fn write(
         ColorPopupBorder => global.theme.color_popup_border = string,
         ColorPopupHeader => global.theme.color_popup_header = string,
 
-        ProjectDefaultAgent
+        ProjectVcs
+        | ProjectDefaultAgent
         | ProjectWorkflowPlugin
         | ProjectBaseBranch
         | ProjectWorktreeDir
@@ -712,6 +728,9 @@ fn write(
             // only added to the form then.
             let Some(config) = project else { return };
             match id {
+                ProjectVcs => {
+                    config.vcs = string.parse().ok();
+                }
                 ProjectDefaultAgent => config.default_agent = some_unless_blank(string),
                 ProjectWorkflowPlugin => config.workflow_plugin = some_unless_blank(string),
                 ProjectBaseBranch => config.base_branch = some_unless_blank(string),

@@ -466,19 +466,16 @@ impl AgtxMcpServer {
     }
 
     /// Get the default agent and plugin from merged config.
-    fn config_defaults_for(&self, project_id: Option<&str>) -> (String, Option<String>) {
+    fn config_defaults_for(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<(String, Option<String>, crate::git::VcsKind), String> {
         let global = GlobalConfig::load().unwrap_or_default();
-        match self.resolve_project_path(project_id) {
-            Ok(path) => {
-                let project = ProjectConfig::load(&path).unwrap_or_default();
-                let agent = project
-                    .default_agent
-                    .unwrap_or_else(|| global.default_agent.clone());
-                let plugin = project.workflow_plugin.clone();
-                (agent, plugin)
-            }
-            Err(_) => (global.default_agent.clone(), None),
-        }
+        let path = self.resolve_project_path(project_id)?;
+        let project = ProjectConfig::load(&path)
+            .map_err(|error| format!("Failed to load project config: {error}"))?;
+        let merged = crate::config::MergedConfig::merge(&global, &project);
+        Ok((merged.default_agent, merged.workflow_plugin, merged.vcs))
     }
 
     /// Which `move_task` actions a task permits, as the orchestrator.
@@ -743,7 +740,7 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "Check if task branches have merge conflicts with the main branch. Pass a task_id to check one task, or omit it to check all Review tasks. Uses a read-only git check — no files are modified."
+        description = "Check whether task changes conflict with their configured base. Pass a task_id to check one task, or omit it to check all Review tasks. The check does not move or modify a working copy."
     )]
     fn check_conflicts(&self, Parameters(params): Parameters<CheckConflictsParams>) -> String {
         tracing::info!(tool = "check_conflicts", task_id = ?params.task_id, "MCP tool called");
@@ -751,10 +748,21 @@ impl AgtxMcpServer {
             Ok(p) => p,
             Err(e) => return e,
         };
-        let main_branch = match crate::git::detect_main_branch(&project_path) {
-            Ok(b) => b,
-            Err(e) => return format!("Failed to detect main branch: {}", e),
+        let project_config = match crate::config::ProjectConfig::load(&project_path) {
+            Ok(config) => config,
+            Err(error) => return format!("Failed to load project config: {error}"),
         };
+        let configured_base = project_config
+            .base_branch
+            .filter(|base| !base.trim().is_empty());
+        let main_branch = configured_base.clone().unwrap_or_else(|| {
+            if project_config.vcs.unwrap_or_default() == crate::git::VcsKind::Jj {
+                "trunk()".to_string()
+            } else {
+                crate::git::detect_main_branch(&project_path)
+                    .unwrap_or_else(|_| "(per-task default)".to_string())
+            }
+        });
 
         let tasks = match self.open_project_db_for(params.project_id.as_deref()) {
             Ok(db) => {
@@ -777,25 +785,51 @@ impl AgtxMcpServer {
         let results: Vec<ConflictCheckResult> = tasks
             .into_iter()
             .map(|t| {
-                let branch = match &t.branch_name {
-                    Some(b) => b.clone(),
-                    None => {
-                        return ConflictCheckResult {
-                            task_id: t.id,
-                            title: t.title,
-                            branch_name: None,
-                            has_conflicts: false,
-                            conflicting_files: vec![],
-                            error: Some("No branch name set for this task".to_string()),
-                        };
-                    }
+                let branch = t.branch_name.clone();
+                let vcs = t.vcs.unwrap_or_default();
+                let base = t
+                    .base_branch
+                    .clone()
+                    .filter(|base| !base.trim().is_empty())
+                    .or_else(|| configured_base.clone())
+                    .or_else(|| match vcs {
+                        crate::git::VcsKind::Git => {
+                            crate::git::detect_main_branch(&project_path).ok()
+                        }
+                        crate::git::VcsKind::Jj => Some("trunk()".to_string()),
+                    });
+                let Some(base) = base else {
+                    return ConflictCheckResult {
+                        task_id: t.id,
+                        title: t.title,
+                        branch_name: branch,
+                        has_conflicts: false,
+                        conflicting_files: vec![],
+                        error: Some("Could not resolve a base revision".to_string()),
+                    };
+                };
+                let check = match vcs {
+                    crate::git::VcsKind::Git => match branch.as_deref() {
+                        Some(branch) => {
+                            crate::git::check_merge_conflicts(&project_path, &base, branch)
+                        }
+                        None => Err(anyhow::anyhow!("No branch name set for this task")),
+                    },
+                    crate::git::VcsKind::Jj => match t.worktree_path.as_deref() {
+                        Some(worktree) => crate::git::jj_conflict_probe(
+                            std::path::Path::new(worktree),
+                            "@",
+                            &base,
+                        ),
+                        None => Err(anyhow::anyhow!("No workspace set for this task")),
+                    },
                 };
 
-                match crate::git::check_merge_conflicts(&project_path, &main_branch, &branch) {
+                match check {
                     Ok((has_conflicts, files)) => ConflictCheckResult {
                         task_id: t.id,
                         title: t.title,
-                        branch_name: Some(branch),
+                        branch_name: branch,
                         has_conflicts,
                         conflicting_files: files,
                         error: None,
@@ -803,7 +837,7 @@ impl AgtxMcpServer {
                     Err(e) => ConflictCheckResult {
                         task_id: t.id,
                         title: t.title,
-                        branch_name: Some(branch),
+                        branch_name: branch,
                         has_conflicts: false,
                         conflicting_files: vec![],
                         error: Some(format!("{}", e)),
@@ -989,8 +1023,11 @@ impl AgtxMcpServer {
             Err(e) => return e,
         };
 
-        let (default_agent, default_plugin) =
-            self.config_defaults_for(params.project_id.as_deref());
+        let (default_agent, default_plugin, vcs) =
+            match self.config_defaults_for(params.project_id.as_deref()) {
+                Ok(defaults) => defaults,
+                Err(error) => return error,
+            };
         let project_name = self.project_name_for(params.project_id.as_deref());
 
         // Validate referenced task IDs exist
@@ -1009,6 +1046,7 @@ impl AgtxMcpServer {
         task.plugin = params.plugin.or(default_plugin);
         task.referenced_tasks = params.referenced_tasks;
         task.base_branch = params.base_branch;
+        task.vcs = Some(vcs);
 
         match db.create_task(&task) {
             Ok(()) => {
@@ -1066,8 +1104,11 @@ impl AgtxMcpServer {
             Err(e) => return e,
         };
 
-        let (default_agent, default_plugin) =
-            self.config_defaults_for(params.project_id.as_deref());
+        let (default_agent, default_plugin, vcs) =
+            match self.config_defaults_for(params.project_id.as_deref()) {
+                Ok(defaults) => defaults,
+                Err(error) => return error,
+            };
         let project_name = self.project_name_for(params.project_id.as_deref());
 
         // Pass 2: Create all tasks, collect IDs
@@ -1077,6 +1118,7 @@ impl AgtxMcpServer {
             task.description = batch_task.description.clone();
             task.plugin = batch_task.plugin.clone().or_else(|| default_plugin.clone());
             task.base_branch = batch_task.base_branch.clone();
+            task.vcs = Some(vcs);
             created_tasks.push(task);
         }
 

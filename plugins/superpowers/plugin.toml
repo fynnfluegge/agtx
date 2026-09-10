@@ -7,7 +7,7 @@ init_script = "claude plugin install superpowers@claude-plugins-official --scope
 planning = "docs/superpowers/plans/*.md"
 
 [prompts]
-planning = "You are already in an isolated git worktree managed by agtx. Do NOT create additional worktrees or branches. Work directly in this directory.\n\nUse the brainstorming skill to explore and design this task. When the design is approved, use the writing-plans skill to produce an implementation plan.\n\nTask: {task}"
+planning = "You are already in an isolated VCS workspace managed by agtx. Do NOT create additional workspaces or branches. Work directly in this directory.\n\nUse the brainstorming skill to explore and design this task. When the design is approved, use the writing-plans skill to produce an implementation plan.\n\nTask: {task}"
 running = "Use the executing-plans skill (or subagent-driven-development if subagents are available) to implement the plan in docs/superpowers/plans/."
 review = "Use the requesting-code-review skill to review the completed work."
 

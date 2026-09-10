@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
         // match filters out every `--`-prefixed argument, so `--version` would
         // otherwise fall through and open the current directory as a project.
         match raw.get(1).map(String::as_str) {
+            Some("vcs") => return agtx::vcs_cli::run(&raw[2..]),
             Some("--version" | "-V" | "version") => {
                 println!("agtx {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
@@ -69,8 +70,9 @@ async fn main() -> Result<()> {
             let project_path = match project_path {
                 Some(p) => {
                     let p = p.canonicalize()?;
-                    if !git::is_git_repo(&p) {
-                        anyhow::bail!("mcp-serve requires a git project directory");
+                    let vcs = config::ProjectConfig::load(&p)?.vcs.unwrap_or_default();
+                    if !git::is_repo_for(&p, vcs) {
+                        anyhow::bail!("mcp-serve requires a configured {} project directory", vcs);
                     }
                     Some(p)
                 }
@@ -92,7 +94,10 @@ async fn main() -> Result<()> {
         None => {
             // Default: if in git repo, use project mode; otherwise dashboard
             let current_dir = std::env::current_dir()?;
-            if git::is_git_repo(&current_dir) {
+            let vcs = config::ProjectConfig::load(&current_dir)?
+                .vcs
+                .unwrap_or_default();
+            if git::is_repo_for(&current_dir, vcs) {
                 AppMode::Project(current_dir)
             } else {
                 AppMode::Dashboard
