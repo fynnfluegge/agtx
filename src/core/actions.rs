@@ -35,6 +35,24 @@ pub const ACTIONS: &[&str] = &[
     "escalate_to_user",
 ];
 
+/// Whether a task's agent can be sent a message through `send_to_task`.
+///
+/// Planning, Running and Review all have a live agent in their window. Review is
+/// included so feedback on a review can be delivered in place: without it the
+/// only way to hand a reviewer a one-line fix was to `resume` the task to Running
+/// first — a board transition made just to deliver a message, usually while the
+/// reviewer was still finishing its turn, and one that sent the task round a
+/// whole execute cycle for a change it could have made where it was. `resume` is
+/// for going back to implement more.
+///
+/// Backlog has no agent unless it is researching, and Done has none at all.
+pub fn accepts_task_input(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review
+    )
+}
+
 /// The longest a task title may be. Mirrors the wizard's own cap, so a task
 /// created from a phone cannot be one the desktop refuses to edit.
 pub const MAX_TASK_TITLE_CHARS: usize = 120;

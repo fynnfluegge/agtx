@@ -1123,7 +1123,7 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "Send a message to a task's agent pane (followed by Enter). Only works for tasks in Planning or Running status. Use this to nudge a stuck agent, answer a CLI prompt (e.g. 'y' for yes), or provide guidance."
+        description = "Send a message to a task's agent pane (followed by Enter). Works for tasks in Planning, Running or Review. Use this to nudge a stuck agent, answer a CLI prompt (e.g. 'y' for yes), or provide guidance. In Review it is how to give the reviewer a small fix to make in place, without moving the task back to Running — resume is for significant rework."
     )]
     fn send_to_task(&self, Parameters(params): Parameters<SendToTaskParams>) -> String {
         tracing::info!(tool = "send_to_task", task_id = %params.task_id, "MCP tool called");
@@ -1152,10 +1152,11 @@ impl AgtxMcpServer {
             Err(e) => return format!("Error getting task: {}", e),
         };
 
-        // Only allow sending to active phases
-        if !matches!(task.status, TaskStatus::Planning | TaskStatus::Running) {
+        // Review is included so a reviewer can be given a small fix in place;
+        // see `accepts_task_input`.
+        if !crate::core::actions::accepts_task_input(task.status) {
             return format!(
-                "Error: task is not in an active phase (current: {}). send_to_task only works for Planning or Running tasks.",
+                "Error: task has no agent to receive input (current: {}). send_to_task works for Planning, Running and Review tasks.",
                 task.status.as_str()
             );
         }

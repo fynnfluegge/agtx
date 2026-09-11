@@ -538,31 +538,17 @@ fn test_normal_messages_pass_validation() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_send_to_task_requires_active_phase() {
-    // Tasks in Backlog, Review, or Done should not accept send_to_task
-    let db = Database::open_in_memory_project().unwrap();
+    // The real rule, not a copy of it: the server calls this same function.
+    use agtx::core::actions::accepts_task_input;
 
-    for status in &[TaskStatus::Backlog, TaskStatus::Review, TaskStatus::Done] {
-        let mut task = Task::new("Test", "claude", "proj");
-        task.status = *status;
-        db.create_task(&task).unwrap();
-
-        // The server checks: !matches!(task.status, TaskStatus::Planning | TaskStatus::Running)
-        assert!(
-            !matches!(task.status, TaskStatus::Planning | TaskStatus::Running),
-            "Status {:?} should not be an active phase for send_to_task",
-            status
-        );
+    // No agent to receive it.
+    for status in [TaskStatus::Backlog, TaskStatus::Done] {
+        assert!(!accepts_task_input(status), "{status:?} must refuse input");
     }
-
-    // Planning and Running should be allowed
-    for status in &[TaskStatus::Planning, TaskStatus::Running] {
-        let mut task = Task::new("Test", "claude", "proj");
-        task.status = *status;
-        assert!(
-            matches!(task.status, TaskStatus::Planning | TaskStatus::Running),
-            "Status {:?} should be an active phase for send_to_task",
-            status
-        );
+    // Review is included so a reviewer can be handed a small fix in place,
+    // rather than the task being resumed to Running just to deliver a message.
+    for status in [TaskStatus::Planning, TaskStatus::Running, TaskStatus::Review] {
+        assert!(accepts_task_input(status), "{status:?} must accept input");
     }
 }
 

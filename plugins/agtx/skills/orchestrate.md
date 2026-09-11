@@ -26,7 +26,7 @@ You have access to these agtx MCP tools:
 - **read_pane_content(task_id, lines?)** — Read the last N lines of a task's agent pane
   (default 50). Use this to see what an agent is showing when a task is stuck.
 - **send_to_task(task_id, message)** — Send a message + Enter to a task's agent pane.
-  Only works for Planning or Running tasks. Use to answer CLI prompts or nudge stuck agents.
+  Works for Planning, Running and Review tasks. Use to answer CLI prompts or nudge stuck agents.
 ## How You Receive Updates
 
 Notifications are **pushed to you automatically** when you are idle (waiting for input).

@@ -202,11 +202,23 @@ rather than on scheduling.
 1. Read the diff (`git -C <worktree_path> diff <base>...HEAD`). Ask only: does this do
    what the task said, and does it break the milestone spine? You are not doing a
    line-level code review — the Review phase agent does that.
-2. If it is wrong, `resume` with a specific correction via `send_to_task`. Vague feedback
-   produces another wrong attempt. **`resume` puts the task back in Running** — when the
-   agent is done you must `move_forward` to Review again before you can merge. Trying to
-   merge straight after a resume is refused, correctly; it is the most common way a run
-   wastes a cycle here.
+2. **If it is wrong, decide how wrong before acting.** Small fixes go to the reviewer in
+   place; `resume` is only for real rework.
+   - **A small, contained change** — a wrong sentence, a missing guard, a rename, a test
+     to add — send it with `send_to_task` **while the task stays in Review**. Say exactly
+     what to change, and to commit and update `.agtx/review.md` when done. The reviewer
+     makes it where it is: no transition, no second execute cycle. Its turn restarts, so
+     `phase_status` reads `working` until it has finished; wait for `ready`, re-read the
+     diff, then merge.
+   - **Significant rework** — the approach is wrong, a requirement was missed, the work
+     needs replanning — `resume` the task, then `send_to_task` the correction. **`resume`
+     puts the task back in Running**, so when the agent is done you must `move_forward` to
+     Review again before you can merge; merging straight after a resume is refused.
+
+   Either way, act only once the agent has stopped. `ready` means that for an agent with
+   hooks; for one without, read the pane first. An agent writes `review.md` and keeps
+   working after it, and a message sent into a turn that has not ended lands in a busy
+   pane. Vague feedback produces another wrong attempt, in either lane.
 3. **Land it with `move_to_done_and_merge`.** This merges the branch into its base in the
    project checkout and then moves the task to Done. Plain `move_to_done` keeps the branch
    and merges nothing — use it only if you are integrating some other way, otherwise you
