@@ -256,6 +256,7 @@ async fn the_board_carries_actions_and_phase_status() {
     db.publish_task_runtime(&[TaskRuntime {
         task_id: planning.id.clone(),
         phase_status: agtx::db::PhaseStatus::Blocked,
+        status: None,
         pane_hash: None,
         pane_changed_at: None,
         updated_at: chrono::Utc::now(),

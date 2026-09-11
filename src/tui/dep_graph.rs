@@ -230,6 +230,7 @@ mod tests {
             referenced_tasks: refs.map(|s| s.to_string()),
             escalation_note: None,
             base_branch: None,
+            phase_entered_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

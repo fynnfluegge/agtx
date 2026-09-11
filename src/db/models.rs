@@ -74,6 +74,13 @@ pub struct Task {
     pub referenced_tasks: Option<String>,
     pub escalation_note: Option<String>,
     pub base_branch: Option<String>,
+    /// When the task last changed status. An artifact counts toward the phase it
+    /// is in only if it was written after this, so a previous cycle's
+    /// `execute.md` cannot make a resumed task read as done before it has run.
+    /// Stamped by `Database::update_task` on any status change. `None` for a task
+    /// stored before the column existed: unknown, so no freshness check applies,
+    /// rather than failing every artifact that predates the upgrade.
+    pub phase_entered_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -103,6 +110,7 @@ impl Task {
             referenced_tasks: None,
             escalation_note: None,
             base_branch: None,
+            phase_entered_at: Some(now),
             created_at: now,
             updated_at: now,
         }
@@ -344,6 +352,13 @@ impl PhaseStatus {
 pub struct TaskRuntime {
     pub task_id: String,
     pub phase_status: PhaseStatus,
+    /// The task status this verdict was computed for. A reader must not apply
+    /// it to a task that has since moved: the refresh snapshots tasks before it
+    /// runs, so a pass in flight across a transition returns the *previous*
+    /// phase's verdict stamped with a fresh `updated_at` — measured, a task read
+    /// `review:ready` two seconds after entering Review with no `review.md` on
+    /// disk. `None` for a row written before the column existed.
+    pub status: Option<TaskStatus>,
     /// Hash of the last pane capture, and when it last changed. Carried so a
     /// reader can distinguish "idle because the agent is quiet" from "idle
     /// because nothing has refreshed this row".

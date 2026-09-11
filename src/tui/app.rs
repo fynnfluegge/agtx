@@ -5888,7 +5888,7 @@ impl App {
         let Some(ref wt_path) = task.worktree_path else {
             return false;
         };
-        if phase_artifact_exists(wt_path, current_status, &plugin, task.cycle) {
+        if phase_artifact_fresh(wt_path, current_status, &plugin, task.cycle, task.phase_entered_at) {
             return false;
         }
         let agent_running = task.session_name.as_ref().map_or(false, |target| {
@@ -8538,6 +8538,7 @@ impl App {
                     t.cycle,
                     was_ready,
                     t.agent.clone(),
+                    t.phase_entered_at,
                 )
             })
             .collect();
@@ -8574,6 +8575,7 @@ impl App {
                 cycle,
                 was_ready,
                 agent,
+                phase_entered_at,
             ) in tasks_to_check
             {
                 let plugin =
@@ -8619,7 +8621,7 @@ impl App {
                         PhaseStatus::Working
                     }
                 } else if let Some(ref wt) = worktree_path {
-                    if phase_artifact_exists(wt, status, plugin, cycle) {
+                    if phase_artifact_fresh(wt, status, plugin, cycle, phase_entered_at) {
                         PhaseStatus::Ready
                     } else {
                         PhaseStatus::Working
@@ -8627,6 +8629,23 @@ impl App {
                 } else {
                     PhaseStatus::Working
                 };
+
+                // An artifact is written mid-turn; `Ready` waits for the turn to end
+                // (`gate_ready_on_turn`). Decided here, before the copy-back below
+                // acts on `Ready`, and the record is read once and reused for the
+                // `Working` path further down.
+                let window_alive = !window_is_gone(session_name.as_deref(), live_windows.as_ref());
+                let hook_record = if window_alive
+                    && matches!(phase_status, PhaseStatus::Working | PhaseStatus::Ready)
+                {
+                    worktree_path
+                        .as_ref()
+                        .and_then(|wt| hook_status::read_status(Path::new(wt), &task_id, now_secs))
+                } else {
+                    None
+                };
+                let phase_status =
+                    gate_ready_on_turn(phase_status, hook_record.as_ref().map(|h| h.state));
 
                 // Copy-back on Working → Ready transition
                 if phase_status == PhaseStatus::Ready && !was_ready {
@@ -8659,9 +8678,7 @@ impl App {
                 // The agent's own report of what it is doing, when it writes one.
                 // Authoritative over the pane heuristic below.
                 let hook_status = if phase_status == PhaseStatus::Working && !window_gone {
-                    worktree_path
-                        .as_ref()
-                        .and_then(|wt| hook_status::read_status(Path::new(wt), &task_id, now_secs))
+                    hook_record
                 } else {
                     None
                 };
@@ -8838,6 +8855,22 @@ impl App {
                 continue;
             }
 
+            // The pass snapshotted tasks before it ran, so a transition that
+            // landed meanwhile leaves this verdict describing the *previous*
+            // phase — measured, a task read `review:ready` two seconds after
+            // entering Review, with no `review.md` on disk, because the pass had
+            // found Running's `execute.md`. Dropped rather than applied; the next
+            // pass, two seconds on, computes it against the right phase.
+            if self
+                .state
+                .board
+                .tasks
+                .iter()
+                .any(|t| t.id == task_status.task_id && t.status != task_status.status)
+            {
+                continue;
+            }
+
             let mut phase = task_status.phase_status;
 
             // A trust prompt outranks every liveness signal below it. The agent is
@@ -8934,6 +8967,7 @@ impl App {
             runtime_rows.push(crate::db::TaskRuntime {
                 task_id: task_status.task_id.clone(),
                 phase_status: phase,
+                status: Some(task_status.status),
                 pane_hash: pane.map(|(h, _)| h.to_string()),
                 // `Instant` has no epoch, so the stored wall-clock time is
                 // derived from how long ago the change was.
@@ -12574,6 +12608,81 @@ fn determine_phase_variant(
 }
 
 /// Check if an artifact path exists, trying both zero-padded and non-padded {phase} substitution.
+/// Whether the current phase's artifact was written *during* this phase.
+///
+/// Existence alone is what `phase_artifact_exists` answers, and it is the wrong
+/// question after a resume: the previous cycle's `execute.md` is still on disk,
+/// so a task sent back to Running read `ready` the moment it arrived — measured,
+/// a resumed task was advanced to Review having done no execute work at all.
+/// The artifact counts only if its mtime is at or after `entered_at`.
+///
+/// `phase_artifact_exists` stays for its other callers, which ask whether a
+/// *prior* phase ever produced its artifact — a gating question, where any plan
+/// on disk is the right answer.
+///
+/// Two fallbacks, both to today's existence check: `entered_at` is `None` for a
+/// task stored before the column existed, and a glob template names a set of
+/// files rather than one, so it has no single mtime to compare.
+fn phase_artifact_fresh(
+    worktree_path: &str,
+    status: TaskStatus,
+    plugin: &Option<WorkflowPlugin>,
+    cycle: i32,
+    entered_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    let Some(entered_at) = entered_at else {
+        return phase_artifact_exists(worktree_path, status, plugin, cycle);
+    };
+    let rel_template = plugin.as_ref().and_then(|p| match status {
+        TaskStatus::Planning => p.artifacts.planning.as_deref(),
+        TaskStatus::Running => p.artifacts.running.as_deref(),
+        TaskStatus::Review => p.artifacts.review.as_deref(),
+        _ => None,
+    });
+    let Some(rel_template) = rel_template else {
+        return false;
+    };
+    if rel_template.contains('*') {
+        return artifact_path_exists(worktree_path, rel_template, cycle);
+    }
+    let entered_at = std::time::SystemTime::from(entered_at);
+    [format!("{:02}", cycle), cycle.to_string()].iter().any(|phase_str| {
+        let full = Path::new(worktree_path).join(rel_template.replace("{phase}", phase_str));
+        std::fs::metadata(&full)
+            .and_then(|m| m.modified())
+            .is_ok_and(|mtime| mtime >= entered_at)
+    })
+}
+
+/// `Ready` only once the agent's turn is over.
+///
+/// An agent writes its phase artifact mid-turn and keeps going — measured, a
+/// reviewer wrote `review.md`, then ran `git status` and printed a summary — so
+/// a fresh artifact under a live `working` report is not done yet, and a caller
+/// acting on it resumed an agent that had not stopped. `blocked` likewise: the
+/// artifact exists but the agent is now waiting on a person.
+///
+/// No timestamp comparison, deliberately. The status file holds only the latest
+/// event, and writing the artifact is itself a tool call whose `PreToolUse` sets
+/// `working` before the file exists, so a current `waiting`/`ended` can only have
+/// come after the write. Comparing times would be worse than redundant: hook
+/// `ts` is whole seconds against a sub-second mtime, and a `Stop` in the same
+/// second as the write would read as older and hold the task at `working`.
+///
+/// It cannot hold a task forever. A turn that ends reports `waiting`; an agent
+/// that exits leaves `ended` or a window that is gone; one that falls silent
+/// leaves a `working` record `read_status` stops trusting after
+/// `HOOK_STALE_SECS`, and `None` falls back to the artifact alone.
+fn gate_ready_on_turn(phase: PhaseStatus, hook: Option<hook_status::HookState>) -> PhaseStatus {
+    match (phase, hook) {
+        (
+            PhaseStatus::Ready,
+            Some(hook_status::HookState::Working | hook_status::HookState::Blocked),
+        ) => PhaseStatus::Working,
+        (phase, _) => phase,
+    }
+}
+
 fn artifact_path_exists(worktree_path: &str, rel_template: &str, cycle: i32) -> bool {
     // Try zero-padded first (e.g. "01"), then non-padded (e.g. "1")
     for phase_str in [format!("{:02}", cycle), cycle.to_string()] {
@@ -12771,7 +12880,7 @@ fn run_orchestrator_catchup(db: &Database, tasks: &[Task], project_path: Option<
         let Some(ref wt) = task.worktree_path else {
             continue;
         };
-        if !phase_artifact_exists(wt, task.status, &plugin, task.cycle) {
+        if !phase_artifact_fresh(wt, task.status, &plugin, task.cycle, task.phase_entered_at) {
             continue;
         }
         let short_id = if task.id.len() >= 8 {

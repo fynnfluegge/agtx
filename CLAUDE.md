@@ -839,7 +839,7 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
   answer and stopped to ask a question it already had. The response carries both file paths, so a
   caller can name the file to edit instead of guessing
 - Read: `list_tasks`, `get_task` (includes `allowed_actions`), `get_transition_status`, `check_conflicts`, `get_notifications`, `read_pane_content`. `list_tasks` and `get_task` also carry `phase_status` + `phase_age_secs` + `tui_connected` — see *Publishing phase status* below. `list_tasks` returns `{tui_connected, tasks: [...]}` rather than a bare array: `tui_connected` is one answer for the whole board, and a caller needs it on *every* poll — a separate tool is one a polling loop skips, and skipping it means reading frozen rows as live state
-- Write: `move_task` (queues a transition request; actions `research`, `move_forward`, `move_to_planning`, `move_to_running`, `move_to_review`, `move_to_done`, `move_to_done_and_merge`, `resume`, `escalate_to_user`), `send_to_task` (Planning/Running only, 4096-byte cap)
+- Write: `move_task` (queues a transition request; actions `research`, `move_forward`, `move_to_planning`, `move_to_running`, `move_to_review`, `move_to_done`, `move_to_done_and_merge`, `resume`, `escalate_to_user`), `send_to_task` (Planning/Running only, 4096-byte cap; delivered as a bracketed paste plus a watched submit — see *When a phase counts as done*)
 
 #### Publishing phase status
 
@@ -872,6 +872,52 @@ not a disconnect. Without it a caller can only *infer* a dead board from
 row reads as live state: a live run showed a task as `blocked` for minutes while
 its agent worked normally, because that was the last verdict published before
 the TUI exited. The answer was in `tui_heartbeat` the whole time.
+
+#### When a phase counts as done
+
+`ready` promises a caller that the phase is finished — safe to advance, merge or
+resume. Three separate bugs broke that promise in one unattended run, and a
+caller acting on `ready` advanced a task that had done no work, resumed a
+reviewer mid-turn, and read `review:ready` for a review nobody had run. Each rule
+below closes one.
+
+- **The artifact must be written during this phase.** `Task::phase_entered_at`
+  is stamped by `Database::update_task` whenever the status changes, in either
+  direction, by a SQL `CASE` against the stored row — one writer, so no route
+  that moves a task can forget it. `phase_artifact_fresh` counts an artifact only
+  if its mtime is at or after that stamp. Without it the previous cycle's
+  `execute.md` made a resumed task read `ready` the moment it arrived.
+  `phase_artifact_exists` stays for the gating callers, which ask whether a
+  *prior* phase ever produced its artifact. `None` (a row from before the column)
+  and glob templates fall back to existence. Research runs inside Backlog with no
+  status change, so it is not stamped; agtx refuses to start research on a task
+  that already has a session, which is the only way its artifact could be stale.
+- **A verdict applies only to the status it was computed for.** The refresh
+  snapshots tasks before its thread runs, so a transition that lands meanwhile
+  leaves the verdict describing the previous phase — measured, `review:ready`
+  two seconds after entering Review, from Running's `execute.md`.
+  `apply_session_refresh` drops such a verdict, and `TaskRuntime::status`
+  records what each published row was computed for so MCP and the phone API can
+  withhold a row that no longer matches. `phase_age_secs` cannot catch this: the
+  row's timestamp is fresh; it is the phase that is wrong.
+- **The agent's turn must be over.** An agent writes its artifact mid-turn and
+  keeps going, so `gate_ready_on_turn` holds a fresh artifact at `working` while
+  the hook reports `working` or `blocked`. There is deliberately no timestamp
+  comparison: the status file holds only the latest event, and writing the
+  artifact is itself a tool call whose `PreToolUse` sets `working` first, so a
+  current `waiting`/`ended` must post-date the write — while hook `ts` is whole
+  seconds against a sub-second mtime, so comparing them would hold a task whose
+  `Stop` landed in the same second. It cannot hold one forever: a finished turn
+  reports `waiting`, an exited agent leaves `ended` or a missing window, and a
+  silent one's `working` record stops being trusted after `HOOK_STALE_SECS`.
+
+`send_to_task` goes through `core::input::send_user_text` — a bracketed paste and
+a watched submit — not a raw `send-keys`. Measured against Claude Code 2.1.268: a
+1644-byte message typed with `send-keys` arrived as its last 622 bytes, the first
+1022 silently dropped, while the same bytes as a bracketed paste arrived whole. A
+raw-mode `cat` received every byte either way, so tmux and the pty are not the
+cause; the agent discards the head of a large typed burst, and then acts on the
+tail of an instruction with its premise gone.
 
 #### Serialized worktree setup
 
@@ -1495,8 +1541,8 @@ writes one.
 - **`src/agent/hook_status.rs`** is pure (no tmux/DB/TUI types): event mapping, atomic
   write-then-rename, staleness, and `merge_event`'s guard preventing a late `PreToolUse` from
   clearing a fresh `Blocked`
-- **Precedence** in the refresh thread: artifact → `Ready` > window gone → `Exited` > hook status >
-  pane-hash heuristic. Only *liveness* is replaced; artifact detection is untouched
+- **Precedence** in the refresh thread: fresh artifact with the turn over → `Ready` > window gone →
+  `Exited` > hook status > pane-hash heuristic (see *When a phase counts as done*). Only *liveness* is replaced; artifact detection is untouched
 - **Purely additive**: no status file means the pre-existing 15s pane-hash heuristic runs unchanged.
   A `working` record older than `HOOK_STALE_SECS` (300s) is distrusted and also falls back
 - The pane capture is skipped only on a **fresh `Working`** report — one fewer `capture-pane` per

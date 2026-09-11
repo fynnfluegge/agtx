@@ -709,6 +709,7 @@ fn runtime_for(task_id: &str, phase: PhaseStatus) -> TaskRuntime {
     TaskRuntime {
         task_id: task_id.to_string(),
         phase_status: phase,
+        status: None,
         pane_hash: Some("abc123".to_string()),
         pane_changed_at: Some(chrono::Utc::now()),
         updated_at: chrono::Utc::now(),
@@ -865,4 +866,64 @@ fn notification_kind_spellings_match_serde() {
         assert_eq!(json, format!("\"{}\"", kind.as_str()));
         assert_eq!(NotificationKind::from_str(kind.as_str()), Some(kind));
     }
+}
+
+// === phase_entered_at and the runtime row's status ===
+
+/// A status change restarts the phase; an edit that keeps the status does not.
+/// Backward moves count as much as forward ones — `resume` is exactly where a
+/// previous cycle's artifact made a task read as done.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_status_change_stamps_phase_entered_at_and_other_edits_do_not() {
+    use agtx::db::{Database, Task, TaskStatus};
+    let entered = |db: &Database, id: &str| db.get_task(id).unwrap().unwrap().phase_entered_at.unwrap();
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(15));
+
+    let db = Database::open_in_memory_project().unwrap();
+    let mut task = Task::new("t", "claude", "p");
+    db.create_task(&task).unwrap();
+    let created = entered(&db, &task.id);
+
+    pause();
+    task.title = "renamed".into();
+    db.update_task(&task).unwrap();
+    assert_eq!(entered(&db, &task.id), created, "an edit that keeps the status is not a new phase");
+
+    pause();
+    task.status = TaskStatus::Planning;
+    db.update_task(&task).unwrap();
+    let planning = entered(&db, &task.id);
+    assert!(planning > created);
+
+    task.status = TaskStatus::Review;
+    db.update_task(&task).unwrap();
+    let review = entered(&db, &task.id);
+    pause();
+    task.status = TaskStatus::Running; // resume
+    db.update_task(&task).unwrap();
+    assert!(entered(&db, &task.id) > review, "a backward move is a new phase too");
+}
+
+/// A published verdict remembers the status it was computed for, so a reader
+/// can refuse one that describes a phase the task has since left.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_runtime_row_remembers_the_status_it_was_computed_for() {
+    use agtx::db::{Database, PhaseStatus, Task, TaskRuntime, TaskStatus};
+    let db = Database::open_in_memory_project().unwrap();
+    let task = Task::new("t", "claude", "p");
+    db.create_task(&task).unwrap();
+    db.publish_task_runtime(&[TaskRuntime {
+        task_id: task.id.clone(),
+        phase_status: PhaseStatus::Ready,
+        status: Some(TaskStatus::Running),
+        pane_hash: None,
+        pane_changed_at: None,
+        updated_at: chrono::Utc::now(),
+    }])
+    .unwrap();
+    let row = db.get_task_runtime(&task.id).unwrap().unwrap();
+    assert_eq!(row.status, Some(TaskStatus::Running));
+    assert_eq!(row.phase_status, PhaseStatus::Ready);
 }

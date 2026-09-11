@@ -272,6 +272,9 @@ fn card(
     conflict: Option<ConflictState>,
 ) -> TaskCard {
     let deps_ok = db.deps_satisfied(&t);
+    // A verdict computed for a status the task has since left describes the
+    // previous phase; see `TaskRuntime::status`. Withheld, it reads as unknown.
+    let runtime = runtime.filter(|r| r.status.map_or(true, |s| s == t.status));
     TaskCard {
         conflicted: conflict.as_ref().map(|c| c.conflicted),
         conflicting_files: conflict.map(|c| c.files).unwrap_or_default(),

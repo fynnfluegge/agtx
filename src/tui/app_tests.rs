@@ -316,6 +316,7 @@ fn test_create_pr_with_content_success() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        phase_entered_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -415,6 +416,7 @@ fn test_create_pr_with_content_no_changes() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        phase_entered_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -473,6 +475,7 @@ fn test_create_pr_with_content_push_failure() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        phase_entered_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -537,6 +540,7 @@ fn test_push_changes_to_existing_pr_success() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        phase_entered_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -592,6 +596,7 @@ fn test_push_changes_to_existing_pr_no_changes() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        phase_entered_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -630,6 +635,7 @@ fn test_push_changes_to_existing_pr_no_url() {
         referenced_tasks: None,
         escalation_note: None,
         base_branch: None,
+        phase_entered_at: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -10476,6 +10482,9 @@ fn test_run_orchestrator_catchup_emits_for_planning_artifact() {
     let mut task = Task::new("compose release notes", "claude", "proj");
     task.id = "abcdef1234".to_string();
     task.status = TaskStatus::Planning;
+    // Entered Planning before the plan was written, as a real task does: an
+    // artifact that predates its phase counts for nothing (`phase_artifact_fresh`).
+    task.phase_entered_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
     task.worktree_path = Some(tmp.to_string_lossy().to_string());
     task.plugin = None; // None → bundled agtx plugin
     db.create_task(&task).unwrap();
@@ -10619,6 +10628,9 @@ fn test_detect_existing_orchestrator_runs_catchup() {
     let mut task = Task::new("compose release notes", "claude", "proj");
     task.id = "abcdef1234".to_string();
     task.status = TaskStatus::Planning;
+    // Entered Planning before the plan was written, as a real task does: an
+    // artifact that predates its phase counts for nothing (`phase_artifact_fresh`).
+    task.phase_entered_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
     task.worktree_path = Some(tmp.to_string_lossy().to_string());
     task.plugin = None;
     db.create_task(&task).unwrap();
@@ -16973,5 +16985,109 @@ fn the_process_lookup_asks_ps_for_every_process() {
     assert!(
         call.is_some(),
         "processes_for_task must pass -A; without it ps lists only this terminal's processes"
+    );
+}
+
+// =============================================================================
+// `ready` means the phase is done — not merely that a file exists
+// =============================================================================
+
+/// After a resume the previous cycle's artifact is still on disk. Counting it
+/// made a task sent back to Running read `ready` the moment it arrived, and it
+/// was advanced to Review having done no execute work at all.
+#[test]
+fn an_artifact_from_before_the_phase_began_does_not_count() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".agtx")).unwrap();
+    std::fs::write(dir.path().join(".agtx/execute.md"), "cycle one").unwrap();
+    let plugin = skills::load_bundled_plugin("agtx");
+    let wt = dir.path().to_str().unwrap();
+    let now = chrono::Utc::now();
+
+    assert!(
+        phase_artifact_fresh(wt, TaskStatus::Running, &plugin, 1, Some(now - chrono::Duration::seconds(60))),
+        "written after the phase began: counts"
+    );
+    assert!(
+        !phase_artifact_fresh(wt, TaskStatus::Running, &plugin, 1, Some(now + chrono::Duration::seconds(60))),
+        "written before the phase began — the previous cycle's — must not count"
+    );
+    assert!(
+        phase_artifact_fresh(wt, TaskStatus::Running, &plugin, 1, None),
+        "a task stored before the column existed falls back to existence"
+    );
+    assert!(
+        !phase_artifact_fresh(wt, TaskStatus::Review, &plugin, 1, None),
+        "and a phase with no artifact at all is still not ready"
+    );
+}
+
+/// An agent writes its artifact mid-turn and keeps going, so `ready` waits for
+/// the turn to end. A live report holds it back; a finished or absent one lets
+/// the artifact stand; and it never promotes a phase that was not ready.
+#[test]
+fn ready_waits_for_the_turn_to_end() {
+    use crate::agent::hook_status::HookState;
+    let gate = gate_ready_on_turn;
+    assert_eq!(gate(PhaseStatus::Ready, Some(HookState::Working)), PhaseStatus::Working);
+    assert_eq!(gate(PhaseStatus::Ready, Some(HookState::Blocked)), PhaseStatus::Working);
+    assert_eq!(gate(PhaseStatus::Ready, Some(HookState::Waiting)), PhaseStatus::Ready);
+    assert_eq!(gate(PhaseStatus::Ready, Some(HookState::Ended)), PhaseStatus::Ready);
+    assert_eq!(
+        gate(PhaseStatus::Ready, None),
+        PhaseStatus::Ready,
+        "no trustworthy record — no hooks, or a stale one — falls back to the artifact"
+    );
+    assert_eq!(gate(PhaseStatus::Working, Some(HookState::Waiting)), PhaseStatus::Working);
+}
+
+/// The refresh snapshots tasks before it runs, so a pass in flight across a
+/// transition returns the previous phase's verdict. Measured: a task read
+/// `review:ready` two seconds after entering Review, from Running's artifact.
+/// The same verdict for a task still in that status must apply — otherwise this
+/// test would pass by applying nothing.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn a_refresh_verdict_for_a_status_the_task_has_left_is_dropped() {
+    let _data = redirect_data_dir();
+    let _config = redirect_config_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = make_test_app_at(dir.path());
+
+    let verdict = |task: &Task, status: TaskStatus| SessionTaskStatus {
+        task_id: task.id.clone(),
+        phase_status: PhaseStatus::Ready,
+        content_hash: None,
+        status,
+        worktree_path: None,
+        session_name: None,
+        agent: "claude".into(),
+        was_ready: true,
+        hook_status: None,
+        awaiting_trust: None,
+    };
+
+    let mut moved_on = Task::new("moved on", "claude", "p1");
+    moved_on.status = TaskStatus::Review;
+    moved_on.session_name = Some("proj:task-moved".into());
+    let mut still_there = Task::new("still running", "claude", "p1");
+    still_there.status = TaskStatus::Running;
+    still_there.session_name = Some("proj:task-still".into());
+    app.state.board.tasks = vec![moved_on.clone(), still_there.clone()];
+
+    app.apply_session_refresh(SessionRefreshResult {
+        statuses: vec![
+            verdict(&moved_on, TaskStatus::Running),
+            verdict(&still_there, TaskStatus::Running),
+        ],
+    });
+
+    assert!(
+        !matches!(app.state.phase_status_cache.get(&moved_on.id), Some((PhaseStatus::Ready, _))),
+        "a Running verdict must not reach a task now in Review"
+    );
+    assert!(
+        matches!(app.state.phase_status_cache.get(&still_there.id), Some((PhaseStatus::Ready, _))),
+        "a verdict for the task's current status still applies"
     );
 }

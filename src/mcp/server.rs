@@ -561,7 +561,16 @@ impl AgtxMcpServer {
     }
 
     /// The published phase status for a task, as `(status, age_secs)`.
-    fn runtime_fields(rt: Option<&crate::db::TaskRuntime>) -> (Option<String>, Option<i64>) {
+    ///
+    /// A row computed for a status the task has since left is withheld: it
+    /// describes the previous phase, and its `updated_at` is fresh, so age alone
+    /// cannot catch it. Returning nothing reads as "not yet observed", which is
+    /// what it is.
+    fn runtime_fields(
+        rt: Option<&crate::db::TaskRuntime>,
+        current: TaskStatus,
+    ) -> (Option<String>, Option<i64>) {
+        let rt = rt.filter(|r| r.status.map_or(true, |s| s == current));
         (
             rt.map(|r| r.phase_status.as_str().to_string()),
             rt.map(|r| (chrono::Utc::now() - r.updated_at).num_seconds()),
@@ -735,6 +744,7 @@ impl AgtxMcpServer {
                                 let deps_satisfied = db.deps_satisfied(&t);
                                 let (phase_status, phase_age_secs) = Self::runtime_fields(
                                     runtime.iter().find(|r| r.task_id == t.id),
+                                    t.status,
                                 );
                                 TaskSummary {
                                     phase_status,
@@ -819,7 +829,7 @@ impl AgtxMcpServer {
                     });
                     let blocked_reason = hook.as_ref().and_then(|h| h.message.clone());
                     let runtime = db.get_task_runtime(&params.task_id).ok().flatten();
-                    let (phase_status, phase_age_secs) = Self::runtime_fields(runtime.as_ref());
+                    let (phase_status, phase_age_secs) = Self::runtime_fields(runtime.as_ref(), t.status);
 
                     let detail = TaskDetail {
                         phase_status,
@@ -1155,40 +1165,29 @@ impl AgtxMcpServer {
             None => return format!("Task {} has no active session", params.task_id),
         };
 
-        // Send the message text
-        let send_text = Command::new("tmux")
-            .args([
-                "-L",
-                "agtx",
-                "send-keys",
-                "-t",
-                &session_name,
-                &params.message,
-            ])
-            .output();
-
-        if let Err(e) = send_text {
-            return format!("Error sending message: {}", e);
+        // A bracketed paste, then a watched submit: the path agtx uses for every
+        // other whole message, via `core::input::send_user_text`.
+        //
+        // A raw `send-keys` of the text is what this replaces, and it lost the
+        // head of every long message. Measured against Claude Code 2.1.268: a
+        // 1644-byte message typed that way arrived as its last 622 bytes, the first
+        // 1022 silently dropped, while the same bytes as a bracketed paste arrived
+        // whole. tmux and the pty are not the cause — a raw-mode `cat` received
+        // every byte by both methods — the agent's input handling discards the
+        // start of a large typed burst. The agent then acts on the tail of an
+        // instruction with its premise gone, which is worse than receiving nothing.
+        let tmux_ops: Arc<dyn crate::tmux::TmuxOperations> = Arc::new(crate::tmux::RealTmuxOps);
+        if !crate::core::input::send_user_text(&tmux_ops, &session_name, &params.message, true) {
+            return format!("Error sending message to {}", session_name);
         }
-
-        // Send Enter
-        let send_enter = Command::new("tmux")
-            .args(["-L", "agtx", "send-keys", "-t", &session_name, "Enter"])
-            .output();
-
-        match send_enter {
-            Ok(_) => {
-                let response = SendToTaskResponse {
-                    task_id: params.task_id,
-                    session_name,
-                    success: true,
-                    message: format!("Message sent: {}", params.message),
-                };
-                serde_json::to_string_pretty(&response)
-                    .unwrap_or_else(|e| format!("Error serializing: {}", e))
-            }
-            Err(e) => format!("Error sending Enter: {}", e),
-        }
+        let response = SendToTaskResponse {
+            task_id: params.task_id,
+            session_name,
+            success: true,
+            message: format!("Message sent: {}", params.message),
+        };
+        serde_json::to_string_pretty(&response)
+            .unwrap_or_else(|e| format!("Error serializing: {}", e))
     }
 
     #[tool(
