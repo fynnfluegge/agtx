@@ -29,8 +29,7 @@
   <a href="#mcp-server">MCP Server</a> •
   <a href="#plugins">Plugins</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
-  <a href="#configuration">Configuration</a> •
-  <a href="#benchmark">Benchmark</a>
+  <a href="#configuration">Configuration</a>
 </p>
 
 ---
