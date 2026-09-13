@@ -25,6 +25,7 @@
   <a href="#usage">Usage</a> •
   <a href="#mobile">Mobile</a> •
   <a href="#brainstorm--sweep-skills">Skills</a> •
+  <a href="#oneshot-skill">Oneshot</a> •
   <a href="#mcp-server">MCP Server</a> •
   <a href="#plugins">Plugins</a> •
   <a href="#orchestrator-agent-experimental">Orchestrator</a> •
@@ -62,6 +63,7 @@
 - **Vim-native Keybindings**: Control the board and agent sessions with your Vim-powered muscle memory.
 - **Mobile support**: Press `W` and scan the QR for an installable web app with the board, task details, diffs and the agent's live terminal — including a keyboard, so you can answer a permission prompt without going back to your desk. Over your wifi, or from anywhere via your tailnet. See <a href="#mobile">Mobile</a>.
 - **Orchestrator agent (experimental)**: A dedicated agent that autonomously manages your kanban board via MCP — delegates to coding agents, advances phases, checks for merge conflicts.
+- **Oneshot skill**: Give a coding agent session a goal with `/agtx:oneshot` and it runs the whole board unattended — plans the work in milestone waves, starts tasks, unblocks the workers, judges Review, and merges each task. See <a href="#oneshot-skill">Oneshot Skill</a>.
 - **Brainstorm & Sweep skills**: Capture ideas and push them to the board from any coding agent session — `/agtx:brainstorm` to explore freely, `/agtx:sweep` to decompose and create tasks with one confirmation step.
 - **Spec-driven plugins**: Plug in [GSD](https://github.com/fynnfluegge/get-shit-done-cc), [Spec-kit](https://github.com/github/spec-kit), [OpenSpec](https://github.com/Fission-AI/OpenSpec), [BMAD](https://github.com/bmad-code-org/BMAD-METHOD), [Superpowers](https://github.com/obra/superpowers) and more — fully customizable. Ddefine your own workflow via a single TOML file. See <a href="#plugins">Plugins</a> how to create a plugin.
 
@@ -466,6 +468,87 @@ Register `agtx mcp-serve` as an MCP server, then copy `skills/sweep/SKILL.md` in
 > [!NOTE]
 > The project must have been opened in agtx at least once to appear in `list_projects`. Run `agtx` in your project directory first.
 
+## Oneshot Skill
+
+> Give it a goal, not a task list. It runs the board until the goal is built and merged.
+
+`/agtx:oneshot` turns a Claude Code session into the person sitting at the board. It breaks
+the goal into milestones, turns the current milestone into tasks, starts them, watches the
+workers, answers their questions, judges each Review, and merges the finished work into your
+base branch — then plans the next wave from what was actually built. The workers write the
+code; the oneshot session only writes tasks and its own state file.
+
+|  | Orchestrator (`O`) | Oneshot (`/agtx:oneshot`) |
+|--|--------------------|---------------------------|
+| Runs | Inside agtx, started with `O` | In a Claude Code session in the project |
+| Columns it drives | Planning → Running → Review | All five, Backlog to Done |
+| Creates tasks | No — you triage | Yes, one milestone at a time |
+| Merges | No — you do | Yes, into your local base branch |
+| Follows the board | Notifications pushed to its pane | `wait_for_board_change` over MCP |
+
+### Setup
+
+1. **Install the plugin** (the same one the sweep skill comes from):
+   ```bash
+   claude plugin marketplace add fynnfluegge/agtx
+   claude plugin install agtx@agtx-marketplace
+   ```
+2. **Register the MCP server for the project**, from the project root:
+   ```bash
+   claude mcp add-json agtx '{"type":"stdio","command":"agtx","args":["mcp-serve","'"$PWD"'"]}' --scope local
+   ```
+3. **Let agtx answer trust prompts.** Nobody is at the board to answer an agent's trust or
+   bypass-permissions dialog, so without this every task parks as blocked:
+   ```toml
+   # ~/.config/agtx/config.toml
+   auto_trust = true
+   ```
+4. **Open your coding agent once in the project root** and accept its trust prompt. Task
+   worktrees live inside the project, so they inherit that decision.
+5. **Start from a clean base branch.** An empty repository works too — `git init -b main` is
+   enough, and agtx makes the first commit.
+
+### Run
+
+```bash
+# Terminal 1 — the board. Nothing moves without it.
+cd your-project && agtx
+
+# Terminal 2 — the session that runs the board
+cd your-project && claude
+> /agtx:oneshot Build a CLI todo app in Rust with SQLite storage and tests
+```
+
+Then leave it. Follow along on the board, or on your phone with `W`.
+
+### What it does
+
+- **Plans in waves.** A spine of 4–8 milestones first, then tasks for the current milestone
+  only, with dependencies wired so a task waits for the ones it builds on. The next wave is
+  planned from what the workers built.
+- **Runs 3–6 tasks at once**, starting the next as its dependencies reach Review or Done.
+- **Waits instead of polling.** `wait_for_board_change` blocks until a task needs attention
+  and returns only what changed, so the session spends turns only when something happened.
+- **Unblocks the workers.** It answers a tool's yes/no prompt, or a question its milestone
+  plan already settles. Anything that would change the product goes to you under *Open
+  questions* in `oneshot-state.md`, while the rest of the board keeps moving.
+- **Judges Review.** A small fix goes to the reviewer in place with `send_to_task`; real
+  rework sends the task back to Running.
+- **Merges each task** with `move_to_done_and_merge`. On a conflict the task stays in Review
+  and its own agent resolves it with `/agtx:merge-conflicts`.
+- **Keeps a durable record** in `oneshot-state.md` — milestones, board, decisions and open
+  questions — so a fresh session can pick up the run.
+
+> [!IMPORTANT]
+> Oneshot merges into your **local** base branch, in your own checkout. Leave that checkout
+> on the base branch with no uncommitted changes to tracked files while it runs. Otherwise the
+> merge is refused and nothing is touched — agtx never switches your branch or stashes your
+> work. Nothing is pushed.
+
+> [!NOTE]
+> A full run takes hours and many turns of the session running the board. Start with a small
+> goal to see how it works on your project.
+
 ## Configuration
 
 Config file location: `~/.config/agtx/config.toml`
@@ -811,14 +894,14 @@ The sandbox:
 
 ## MCP Server
 
-The agtx MCP server (`agtx mcp-serve`) exposes the board to any coding agent session via the [Model Context Protocol](https://modelcontextprotocol.io). Used by the orchestrator agent and the brainstorm & sweep skills.
+The agtx MCP server (`agtx mcp-serve`) exposes the board to any coding agent session via the [Model Context Protocol](https://modelcontextprotocol.io). Used by the orchestrator agent, the oneshot skill, and the brainstorm & sweep skills.
 
 ### Modes
 
 | Mode | Command | Used by |
 |------|---------|---------|
 | **Global** | `agtx mcp-serve` | Sweep/brainstorm skills — works across all projects |
-| **Project-scoped** | `agtx mcp-serve <path>` | Orchestrator — bound to one project at startup |
+| **Project-scoped** | `agtx mcp-serve <path>` | Orchestrator and oneshot skill — bound to one project at startup |
 
 In global mode all tools require a `project_id` parameter. Call `list_projects` first to resolve it.
 
@@ -827,18 +910,20 @@ In global mode all tools require a `project_id` parameter. Call `list_projects` 
 | Tool | Description |
 |------|-------------|
 | `list_projects` | List all projects indexed in agtx |
-| `list_tasks` | List tasks, optionally filtered by status |
+| `get_config` | The project's effective config, global and project merged — e.g. whether `auto_trust` is on |
+| `list_tasks` | List tasks with their phase status, optionally filtered by status (descriptions on request) |
 | `get_task` | Get task details + `allowed_actions` for valid transitions |
+| `wait_for_board_change` | Block until a task needs attention, then return only what changed and the outcome of queued transitions |
 | `create_task` | Create a single backlog task |
 | `create_tasks_batch` | Batch-create tasks with index-based dependencies |
 | `update_task` | Modify a backlog task (title, description, deps) |
 | `delete_task` | Delete a backlog task |
-| `move_task` | Queue a phase transition |
+| `move_task` | Queue a phase transition, including `move_to_done_and_merge` |
 | `get_transition_status` | Check if a queued transition completed or errored |
 | `check_conflicts` | Non-destructive merge conflict check against default branch |
 | `get_notifications` | Fetch pending orchestrator notifications |
 | `read_pane_content` | Read the last N lines of a task's tmux pane |
-| `send_to_task` | Send a message to a task's agent pane |
+| `send_to_task` | Send a message to a task's agent (Planning, Running or Review) |
 
 ## Orchestrator Agent (Experimental)
 
@@ -857,7 +942,7 @@ agtx --experimental   # then press O
 - Detects stuck tasks (idle for 1+ minute without a phase artifact) and reads the agent pane to diagnose the cause
 - Nudges stuck agents, answers CLI prompts automatically, or escalates to you with a reason when human input is needed
 
-**You triage. It executes.** Move tasks from Backlog into Planning or Running — the orchestrator handles the rest. Merging is your call.
+**You triage. It executes.** Move tasks from Backlog into Planning or Running — the orchestrator handles the rest. Merging is your call. For a session that owns the whole board, from planning the work to merging it, see the [Oneshot Skill](#oneshot-skill).
 
 ### MCP Integration
 
