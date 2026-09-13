@@ -1,3 +1,4 @@
+pub mod board_watch;
 mod prehandshake;
 mod server;
 

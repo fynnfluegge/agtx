@@ -32,10 +32,9 @@ frozen for no visible reason.
    ```bash
    claude mcp add-json agtx '{"type":"stdio","command":"<abs path to agtx>","args":["mcp-serve","<abs path to project>"]}' --scope local
    ```
-2. Confirm with the user that `agtx` is open in another terminal on this project.
-3. Queue one cheap transition early and check `get_transition_status`. If it stays
-   `pending` for more than ~30s, the TUI is not draining — say so and stop. Do not
-   keep queueing into a dead board.
+2. Check `tui_connected` in that response. If it is `false`, no TUI is draining the
+   queue — ask the user to open `agtx` in another terminal on this project, and do not
+   queue anything into a dead board.
 
 Also confirm before a long unattended run:
 
@@ -59,8 +58,8 @@ for every Backlog task. **Ignore it.** `move_task` itself does not enforce it: `
 and `resume` all work from here. The only real gate is dependencies (below).
 
 **2. No notifications reach you.** `get_notifications` only fills when the built-in
-orchestrator is running. Assume it returns nothing and **poll instead** — that is your
-whole feedback loop (see *The loop*).
+orchestrator is running. Assume it returns nothing. `wait_for_board_change` is your whole
+feedback loop (see *The loop*).
 
 **3. Read `phase_status` against `phase_age_secs`, never alone.** `list_tasks` and
 `get_task` both carry the board's own verdict on each task:
@@ -73,8 +72,8 @@ whole feedback loop (see *The loop*).
 | `idle` | No output for 15s. A guess, not a report. |
 | `exited` | The tmux window is gone. |
 
-**`tui_connected` decides whether any of that is current.** `list_tasks` returns
-`{tui_connected, tasks: [...]}`. When it is `false`, nothing is executing transitions and
+**`tui_connected` decides whether any of that is current.** `list_tasks` and
+`wait_for_board_change` both carry it. When it is `false`, nothing is executing transitions and
 every `phase_status` is frozen at whatever was last observed — **stop and tell the user**;
 do not read those rows as task state. A live run once showed a task `blocked` for minutes
 while its agent worked normally, purely because the TUI had exited.
@@ -97,8 +96,9 @@ plugin, relative to `worktree_path`: `.agtx/research.md`, `.agtx/plan.md`,
 
 **4. Starting tasks is serialized, and that is fine.** Worktree setup runs one at a
 time. Queue as many `move_to_planning` calls as you like in one pass — they line up and
-drain in order. Each stays `pending` in `get_transition_status` until its turn comes,
-so `pending` on a start means "waiting for the slot", not "failed". Only an `error`
+drain in order. A start waiting for the slot has simply not resolved yet. You do not need
+to poll `get_transition_status`: `wait_for_board_change` reports the outcome of every
+move you queued in its `transitions` list, and wakes you if one fails. Only an `error`
 means it will not happen.
 
 ## Decomposition
@@ -140,29 +140,44 @@ and the machine starts thrashing on parallel agent sessions.
 
 ## The loop
 
-Poll on a **60–120 second** cadence. Faster buys nothing — the board's own phase status
-is cached and the workers take minutes per step.
+**Call `wait_for_board_change`, act on what it returns, and call it again.** It blocks
+inside the server until something needs you, then returns only the tasks that changed
+since you last looked. The first call returns the whole board.
 
-Each pass:
+Do not `sleep` and re-list instead. Every poll is a turn, and every turn re-reads your
+entire context — so a run's cost is set by how many turns it takes far more than by what
+any one call returns. A task starting to work does not wake the wait; you hear about a
+task when it needs you.
 
-1. `list_tasks` — the board's shape **and** every task's `phase_status`, in one call.
-   Check `tui_connected` first: if it is `false`, the TUI is gone and nothing below is
-   real. Stop and say so rather than acting on frozen rows.
-2. `ready` in Planning or Running → `move_task` with `move_forward`.
-3. `blocked` → `get_task` for `blocked_reason`. A permission or trust prompt is a config
-   problem (`auto_trust`), not something to answer by typing into the pane — surface it
-   to the user. A question: see *Answering questions* below.
-4. `idle` for more than a couple of passes → `read_pane_content`, then act on what you
-   see. `idle` is a guess from pane output, so confirm before nudging.
-5. `exited` → the session died. `resume` it, or investigate before restarting.
-6. Backlog: start everything whose dependencies are satisfied and that fits the
-   concurrency budget — `move_to_planning`. They serialize on their own.
-7. Review: judge it (below).
-8. Append what changed to `oneshot-state.md`. Then sleep and repeat.
+Each time it returns:
 
-**Do not hold the board in your context.** Re-derive it from `list_tasks` every pass.
-The run will outlive your context window several times over, and a session that has
-memorised a stale board makes confident wrong moves.
+1. `tui_connected: false` → the TUI is gone and every `phase_status` is frozen. Stop and
+   say so rather than acting on it.
+2. `transitions` → the outcome of each move you queued. An `error` is the one failure
+   nothing else on the board shows; read it and act on it (see *Review and merge* for
+   merge refusals and conflicts).
+3. For each task in `tasks`:
+   - `ready` in Planning or Running → `move_task` with `move_forward`.
+   - `ready` in Review → judge it (below).
+   - `blocked` → `get_task` for `blocked_reason`. A permission or trust prompt is a
+     config problem (`auto_trust`), not something to answer by typing into the pane —
+     surface it to the user. A question: see *Answering questions* below.
+   - `idle` → `read_pane_content`, then act on what you see. For an agent without hooks
+     `idle` is a guess from pane output, so confirm before nudging.
+   - `exited` → the session died. `resume` it, or investigate before restarting.
+   - `done` → record it; its dependents may now start.
+   - Backlog with `deps_satisfied` → start it if it fits the concurrency budget —
+     `move_to_planning`. Starts serialize on their own.
+4. Update `oneshot-state.md`, then wait again.
+
+`timed_out: true` means nothing needed you — wait again. It is not a reason to inspect
+every task.
+
+**Keep the board in `oneshot-state.md`, not in your head.** The wait tells you what
+changed; the state file is what you apply it to. When your context has been compacted,
+or you are picking up a run, call `list_tasks` once to re-sync — it leaves descriptions
+out, and `get_task` has the full task when you need one. A session that has memorised a
+stale board makes confident wrong moves.
 
 ### Keeping durable state
 
@@ -258,7 +273,8 @@ or delete and rewrite the task with a better description.
 ## Rules
 
 - You never write feature code. You write tasks, and `oneshot-state.md`.
-- Re-derive the board from `list_tasks` every pass; never from memory.
+- Drive the run with `wait_for_board_change`, never with `sleep`. Use `list_tasks` to
+  re-sync after a gap, never to poll.
 - Ignore `allowed_actions`; respect dependency refusals.
 - One task = one mergeable PR. Split anything with "and" in its title.
 - Cap concurrency at what you can actually supervise (3–6).

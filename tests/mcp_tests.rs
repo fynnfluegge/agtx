@@ -690,3 +690,196 @@ fn a_processed_request_is_not_reclaimed() {
     assert_eq!(n, 0);
     assert!(db.get_pending_transition_requests().unwrap().is_empty());
 }
+
+// === wait_for_board_change: what wakes a caller, and what it is shown ===
+
+use agtx::mcp::board_watch::{BoardView, TaskMark};
+
+fn mark(status: TaskStatus, phase: Option<&str>) -> TaskMark {
+    TaskMark {
+        status,
+        phase_status: phase.map(str::to_string),
+        turn_ts: None,
+        deps_satisfied: true,
+        escalation_note: None,
+    }
+}
+
+fn board(tasks: &[(&str, TaskMark)]) -> Vec<(String, TaskMark)> {
+    tasks
+        .iter()
+        .map(|(id, m)| (id.to_string(), m.clone()))
+        .collect()
+}
+
+/// A view whose caller has already been shown `tasks`.
+fn seen(tasks: &[(String, TaskMark)]) -> BoardView {
+    let mut view = BoardView::default();
+    view.mark_seen(tasks.iter().map(|(id, m)| (id.as_str(), m)), true);
+    view
+}
+
+#[test]
+fn a_first_wait_answers_at_once_with_the_whole_board() {
+    let b = board(&[
+        ("a", mark(TaskStatus::Running, Some("working"))),
+        ("b", mark(TaskStatus::Planning, Some("working"))),
+    ]);
+    let mut view = BoardView::default();
+
+    assert!(
+        view.poll(&b, true),
+        "nothing has been shown yet — that is news"
+    );
+    assert_eq!(view.report(&b, true).changed, vec!["a", "b"]);
+}
+
+#[test]
+fn a_task_starting_to_work_does_not_wake_but_is_reported_with_what_does() {
+    let before = board(&[
+        ("a", mark(TaskStatus::Planning, Some("ready"))),
+        ("b", mark(TaskStatus::Running, Some("working"))),
+    ]);
+    let mut view = seen(&before);
+
+    // The caller advanced `a`. Its status changed and its phase went through
+    // absent to working — the expected aftermath of its own move.
+    let moved = board(&[
+        ("a", mark(TaskStatus::Running, None)),
+        ("b", mark(TaskStatus::Running, Some("working"))),
+    ]);
+    assert!(!view.poll(&moved, true));
+    let working = board(&[
+        ("a", mark(TaskStatus::Running, Some("working"))),
+        ("b", mark(TaskStatus::Running, Some("working"))),
+    ]);
+    assert!(!view.poll(&working, true));
+
+    let done = board(&[
+        ("a", mark(TaskStatus::Running, Some("working"))),
+        ("b", mark(TaskStatus::Running, Some("ready"))),
+    ]);
+    assert!(view.poll(&done, true), "b finished its phase");
+    assert_eq!(view.report(&done, true).changed, vec!["a", "b"]);
+}
+
+#[test]
+fn a_state_already_reported_does_not_wake_again() {
+    let b = board(&[("a", mark(TaskStatus::Running, Some("blocked")))]);
+    let mut view = seen(&b);
+
+    // A caller that chose to leave a blocked task alone must not be woken for
+    // it on every poll — that is a busy loop, one turn per second.
+    assert!(!view.poll(&b, true));
+    assert!(!view.poll(&b, true));
+    assert!(view.report(&b, true).changed.is_empty());
+}
+
+#[test]
+fn a_return_to_the_same_state_inside_one_wait_wakes() {
+    let idle = board(&[("a", mark(TaskStatus::Running, Some("idle")))]);
+    let mut view = seen(&idle);
+
+    // Nudged: the agent works, then goes quiet again. An agent without hooks
+    // has no turn timestamp, so the only evidence is the working in between.
+    let working = board(&[("a", mark(TaskStatus::Running, Some("working")))]);
+    assert!(!view.poll(&working, true));
+    assert!(view.poll(&idle, true), "the nudge was answered");
+    assert_eq!(
+        view.report(&idle, true).changed,
+        vec!["a"],
+        "it matches what was reported, and must be shown anyway"
+    );
+}
+
+#[test]
+fn a_new_turn_end_wakes_even_with_the_phase_unchanged() {
+    let mut first = mark(TaskStatus::Review, Some("ready"));
+    first.turn_ts = Some(100);
+    let mut view = seen(&board(&[("a", first)]));
+
+    // A small fix sent in Review: the reviewer's turn ended again while the
+    // caller was busy between two waits, so no poll saw it working.
+    let mut second = mark(TaskStatus::Review, Some("ready"));
+    second.turn_ts = Some(160);
+    let b = board(&[("a", second)]);
+    assert!(view.poll(&b, true));
+    assert_eq!(view.report(&b, true).changed, vec!["a"]);
+}
+
+#[test]
+fn reaching_done_wakes_and_a_startable_backlog_task_wakes() {
+    let mut blocked_dep = mark(TaskStatus::Backlog, None);
+    blocked_dep.deps_satisfied = false;
+    let before = board(&[
+        ("a", mark(TaskStatus::Review, Some("ready"))),
+        ("b", blocked_dep),
+    ]);
+    let mut view = seen(&before);
+
+    let after = board(&[
+        ("a", mark(TaskStatus::Done, None)),
+        ("b", mark(TaskStatus::Backlog, None)),
+    ]);
+    assert!(view.poll(&after, true));
+    assert_eq!(view.report(&after, true).changed, vec!["a", "b"]);
+}
+
+#[test]
+fn a_blocked_dependency_alone_does_not_wake() {
+    let mut waiting = mark(TaskStatus::Backlog, None);
+    waiting.deps_satisfied = false;
+    let b = board(&[("a", waiting)]);
+    let mut view = seen(&b);
+
+    assert!(!view.poll(&b, true));
+}
+
+#[test]
+fn an_escalation_wakes() {
+    let b = board(&[("a", mark(TaskStatus::Review, Some("working")))]);
+    let mut view = seen(&b);
+
+    let mut escalated = mark(TaskStatus::Review, Some("working"));
+    escalated.escalation_note = Some("merge conflict in src/lib.rs".to_string());
+    assert!(view.poll(&board(&[("a", escalated)]), true));
+}
+
+#[test]
+fn a_deleted_task_wakes_and_is_listed_as_removed() {
+    let b = board(&[
+        ("a", mark(TaskStatus::Running, Some("working"))),
+        ("b", mark(TaskStatus::Backlog, None)),
+    ]);
+    let mut view = seen(&b);
+
+    let after = board(&[("a", mark(TaskStatus::Running, Some("working")))]);
+    assert!(view.poll(&after, true));
+    let diff = view.report(&after, true);
+    assert!(diff.changed.is_empty());
+    assert_eq!(diff.removed, vec!["b"]);
+
+    assert!(!view.poll(&after, true), "reported once, not again");
+}
+
+#[test]
+fn the_tui_going_away_wakes() {
+    let b = board(&[("a", mark(TaskStatus::Running, Some("working")))]);
+    let mut view = seen(&b);
+
+    assert!(!view.poll(&b, true));
+    assert!(
+        view.poll(&b, false),
+        "every phase status is frozen from here"
+    );
+    view.report(&b, false);
+    assert!(!view.poll(&b, false));
+}
+
+#[test]
+fn what_a_listing_showed_does_not_wake_the_next_wait() {
+    let b = board(&[("a", mark(TaskStatus::Running, Some("ready")))]);
+    let mut view = seen(&b);
+
+    assert!(!view.poll(&b, true), "list_tasks already showed a as ready");
+}

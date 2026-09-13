@@ -838,7 +838,7 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
   not reliably at `~/.config/agtx/config.toml`. A caller that read that path directly got a stale
   answer and stopped to ask a question it already had. The response carries both file paths, so a
   caller can name the file to edit instead of guessing
-- Read: `list_tasks`, `get_task` (includes `allowed_actions`), `get_transition_status`, `check_conflicts`, `get_notifications`, `read_pane_content`. `list_tasks` and `get_task` also carry `phase_status` + `phase_age_secs` + `tui_connected` — see *Publishing phase status* below. `list_tasks` returns `{tui_connected, tasks: [...]}` rather than a bare array: `tui_connected` is one answer for the whole board, and a caller needs it on *every* poll — a separate tool is one a polling loop skips, and skipping it means reading frozen rows as live state
+- Read: `list_tasks`, `get_task` (includes `allowed_actions`), `wait_for_board_change`, `get_transition_status`, `check_conflicts`, `get_notifications`, `read_pane_content`. `list_tasks` and `get_task` also carry `phase_status` + `phase_age_secs` + `tui_connected` — see *Publishing phase status* below. `list_tasks` returns `{tui_connected, tasks: [...]}` rather than a bare array: `tui_connected` is one answer for the whole board, and a caller needs it on *every* poll — a separate tool is one a polling loop skips, and skipping it means reading frozen rows as live state. `list_tasks` leaves descriptions out unless `include_description` is set, and omits empty optional fields — see *Waiting for the board to change*
 - Write: `move_task` (queues a transition request; actions `research`, `move_forward`, `move_to_planning`, `move_to_running`, `move_to_review`, `move_to_done`, `move_to_done_and_merge`, `resume`, `escalate_to_user`), `send_to_task` (Planning, Running and Review, 4096-byte cap; delivered as a bracketed paste plus a watched submit — see *When a phase counts as done*). Review is included (`accepts_task_input`) so a reviewer can be handed a small fix in place: without it the only way to deliver one was to `resume` the task to Running first — a transition made just to send a message, usually into a reviewer still finishing its turn, which then sent the task round a whole execute cycle. `resume` is for significant rework
 
 #### Publishing phase status
@@ -872,6 +872,50 @@ not a disconnect. Without it a caller can only *infer* a dead board from
 row reads as live state: a live run showed a task as `blocked` for minutes while
 its agent worked normally, because that was the last verdict published before
 the TUI exited. The answer was in `tui_heartbeat` the whole time.
+
+#### Waiting for the board to change
+
+A session supervising the board pays for every turn it takes, and a turn costs its whole
+context, re-read. Measured on a 14-task oneshot run: 336 turns, context grown to 839k
+tokens, 137M tokens of cache reads. Polling was two turns per pass — 73 `sleep` calls and
+96 `list_tasks` — and those listings were the largest share of every tool result the
+session re-read afterwards, 80% of their bytes task descriptions the caller had written
+itself.
+
+`wait_for_board_change` replaces the loop. It blocks **inside the server**, re-reading the
+board every `WAIT_POLL_INTERVAL`, and answers once — with only the tasks that differ from
+what this session was last shown by it, `list_tasks` or `get_task`. It also carries the
+outcome of every `move_task` the session queued, so `get_transition_status` needs no
+polling either. Timeout defaults to `DEFAULT_WAIT_SECS`, capped at `MAX_WAIT_SECS`; a
+timeout is an answer, not an error.
+
+- **What wakes it is narrower than what changed.** A task wakes the wait when it reaches a
+  state that needs the caller — `ready`/`idle`/`blocked`/`exited`, Done, a startable
+  Backlog task, an escalation — or appears or vanishes; also a failed transition and a
+  `tui_connected` flip. `working` and an absent phase status do not: they are what a task
+  looks like between the caller's move and its outcome, and waking on them costs a turn
+  per transition to learn nothing. Those moves are still *reported* the next time
+  something wakes. `TaskMark::needs_attention` is the rule.
+- **Per session, and held in the server.** Each client spawns its own `agtx mcp-serve`
+  over stdio, so `AgtxMcpServer::boards` lives exactly as long as the caller it
+  describes. The pure half — `src/mcp/board_watch.rs` — has no database or clock, and
+  `tests/mcp_tests.rs` drives it directly.
+- **Two maps, because each misses a case the other catches.** Against what was
+  *reported* alone, an agent nudged out of `idle` that works and stops again inside one
+  wait looks unchanged. Against the last *poll* alone, a task that went `ready` while the
+  caller was busy between two waits is already `ready` at the first poll and looks
+  unchanged too.
+- **`turn_ts` tells two `idle`s apart.** An agent with hooks stamps each turn boundary, so
+  a nudge answered while the caller was between waits — which no poll saw as `working` —
+  still reads as a new state. It is `None` while the agent reports `working`, since every
+  tool call bumps that timestamp.
+- **A state already reported does not wake again.** A caller that leaves a `blocked` task
+  for the user would otherwise be woken for it every second.
+- **It is `async`.** The sleep between polls is `tokio::time::sleep`, and each poll is a
+  synchronous helper that drops the database handle and the lock before it returns, so
+  nothing is held across an `await`.
+- **It keeps marking the board watched.** The TUI publishes phase status only while
+  someone has read it recently; a long wait is a reader for its whole length.
 
 #### When a phase counts as done
 
