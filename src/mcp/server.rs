@@ -1382,7 +1382,7 @@ impl AgtxMcpServer {
     }
 
     #[tool(
-        description = "Read the last N lines of a task's agent tmux pane. Use this to understand what the agent is showing — e.g., when a task has been idle for a while. Returns pane content as text."
+        description = "Read the last N lines of what a task's agent pane shows (default 50), blank rows at the bottom dropped. Use this to understand what the agent is showing — e.g., when a task has been idle for a while. An agent that draws full-screen, like Claude Code, keeps no history outside its visible screen, so nothing older than that screen can be read this way. Ask for only as many lines as you need: the answer stays in your context."
     )]
     fn read_pane_content(&self, Parameters(params): Parameters<ReadPaneParams>) -> String {
         tracing::info!(tool = "read_pane_content", task_id = %params.task_id, "MCP tool called");
@@ -1420,7 +1420,7 @@ impl AgtxMcpServer {
 
         match output {
             Ok(out) => {
-                let content = String::from_utf8_lossy(&out.stdout).to_string();
+                let content = pane_tail(&String::from_utf8_lossy(&out.stdout), lines as usize);
                 let response = ReadPaneResponse {
                     task_id: params.task_id,
                     session_name,
@@ -1798,6 +1798,25 @@ pub async fn serve(project_path: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The last `n` lines of a pane capture, after dropping the blank rows below
+/// the last line of output.
+///
+/// `capture-pane -S -N` is not a tail: it starts N lines back in the
+/// scrollback and runs to the bottom of the *visible* screen. An agent that
+/// draws full-screen keeps no tmux scrollback, so the capture is the whole
+/// screen whatever N is — measured, a request for 15 lines returned 49, and a
+/// caller that asked for less to save context got the full screen anyway.
+/// Trailing blank rows go first, so N counts lines of output rather than the
+/// empty rows under a short one.
+fn pane_tail(content: &str, n: usize) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    lines[end.saturating_sub(n)..end].join("\n")
+}
+
 /// Buffer size for the in-memory pipes bridging real stdio to rmcp.
 const PIPE_BUF: usize = 64 * 1024;
 
@@ -1874,4 +1893,30 @@ fn filtered_stdio() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
     });
 
     (rmcp_reader, rmcp_writer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pane_tail;
+
+    #[test]
+    fn a_pane_read_returns_only_the_lines_asked_for() {
+        let screen: String = (1..=49).map(|i| format!("line {i}\n")).collect();
+        let tail = pane_tail(&screen, 15);
+        assert_eq!(tail.lines().count(), 15);
+        assert!(tail.starts_with("line 35"));
+        assert!(tail.ends_with("line 49"));
+    }
+
+    #[test]
+    fn blank_rows_below_the_output_do_not_count() {
+        let screen = "prompt\n❯ working\n\n   \n\n";
+        assert_eq!(pane_tail(screen, 1), "❯ working");
+    }
+
+    #[test]
+    fn asking_for_more_than_there_is_returns_all_of_it() {
+        assert_eq!(pane_tail("a\nb\n", 50), "a\nb");
+        assert_eq!(pane_tail("\n\n", 5), "");
+    }
 }
