@@ -117,6 +117,27 @@ pub fn capture_pane(session_name: &str, lines: i32) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// The last `n` lines of a pane capture, after dropping the blank rows below
+/// the last line of output.
+///
+/// `capture-pane -p` emits one line per pane *row*, so the raw end of a capture
+/// is padding whenever the output has not filled the pane. Trailing blank rows
+/// go first, so `n` counts lines of output rather than the empty rows under a
+/// short one.
+///
+/// Nor is `capture-pane -S -N` a tail: it starts N lines back in the scrollback
+/// and runs to the bottom of the *visible* screen. An agent that draws
+/// full-screen keeps no tmux scrollback, so the capture is the whole screen
+/// whatever N is — measured, a request for 15 lines returns 49.
+pub fn pane_tail(content: &str, n: usize) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    lines[end.saturating_sub(n)..end].join("\n")
+}
+
 /// Send keys to a session
 pub fn send_keys(session_name: &str, keys: &str) -> Result<()> {
     Command::new("tmux")
@@ -195,5 +216,31 @@ impl SessionInfo {
     /// Parse project name from session name
     pub fn project_name(&self) -> Option<&str> {
         self.name.split("--").nth(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pane_tail;
+
+    #[test]
+    fn a_pane_read_returns_only_the_lines_asked_for() {
+        let screen: String = (1..=49).map(|i| format!("line {i}\n")).collect();
+        let tail = pane_tail(&screen, 15);
+        assert_eq!(tail.lines().count(), 15);
+        assert!(tail.starts_with("line 35"));
+        assert!(tail.ends_with("line 49"));
+    }
+
+    #[test]
+    fn blank_rows_below_the_output_do_not_count() {
+        let screen = "prompt\n❯ working\n\n   \n\n";
+        assert_eq!(pane_tail(screen, 1), "❯ working");
+    }
+
+    #[test]
+    fn asking_for_more_than_there_is_returns_all_of_it() {
+        assert_eq!(pane_tail("a\nb\n", 50), "a\nb");
+        assert_eq!(pane_tail("\n\n", 5), "");
     }
 }

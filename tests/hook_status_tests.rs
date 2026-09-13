@@ -745,9 +745,9 @@ fn a_grok_payload_reaching_a_neighbours_registration() {
 /// ends. Both map to the same `Notification` name, so only the registration
 /// matcher can separate them.
 ///
-/// Unscoped, a healthy agent that finished its turn reported Blocked — and an
-/// agent-reported Blocked fires the stuck-task path immediately, with no settle
-/// window, so a caller interrupts an agent that is merely quiet.
+/// Unscoped, an agent that has simply finished its turn would report Blocked —
+/// and an agent-reported Blocked fires the stuck-task path immediately, with no
+/// settle window, so a caller would interrupt an agent that is merely quiet.
 #[test]
 fn claude_only_subscribes_to_permission_notifications() {
     let matcher = agtx::agent::hook_status::hook_events(HookConfigKind::ClaudeSettings)
@@ -763,8 +763,8 @@ fn claude_only_subscribes_to_permission_notifications() {
     );
 }
 
-/// Grok reached the same conclusion first; the two must not drift, because the
-/// failure is silent in both directions — a wrong Blocked looks like a stuck
+/// Grok scopes it the same way; the two must not drift, because the failure is
+/// silent in both directions — a wrong Blocked looks like a stuck
 /// agent, and a missing one looks like a hung task nobody is told about.
 #[test]
 fn every_agent_that_subscribes_to_notification_scopes_it_to_permissions() {

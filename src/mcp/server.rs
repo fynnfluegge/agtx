@@ -819,9 +819,8 @@ impl AgtxMcpServer {
     ///
     /// Without this a caller can only *infer* a dead board from `phase_age_secs`
     /// climbing across every task at once — and until it does, a frozen row
-    /// reads as live state. A task showing `blocked` while its agent works
-    /// normally is what that looks like, and the answer was already in
-    /// `tui_heartbeat` the whole time.
+    /// reads as live state: a task shows `blocked` while its agent works
+    /// normally.
     fn tui_connected(&self, project_id: Option<&str>) -> bool {
         let Ok(path) = self.resolve_project_path(project_id) else {
             return false;
@@ -1420,7 +1419,8 @@ impl AgtxMcpServer {
 
         match output {
             Ok(out) => {
-                let content = pane_tail(&String::from_utf8_lossy(&out.stdout), lines as usize);
+                let content =
+                    crate::tmux::pane_tail(&String::from_utf8_lossy(&out.stdout), lines as usize);
                 let response = ReadPaneResponse {
                     task_id: params.task_id,
                     session_name,
@@ -1481,8 +1481,8 @@ impl AgtxMcpServer {
         // A bracketed paste, then a watched submit: the path agtx uses for every
         // other whole message, via `core::input::send_user_text`.
         //
-        // A raw `send-keys` of the text is what this replaces, and it lost the
-        // head of every long message. Measured against Claude Code 2.1.268: a
+        // Not a raw `send-keys` of the text, which loses the head of a long
+        // message. Measured against Claude Code 2.1.268: a
         // 1644-byte message typed that way arrived as its last 622 bytes, the first
         // 1022 silently dropped, while the same bytes as a bracketed paste arrived
         // whole. tmux and the pty are not the cause — a raw-mode `cat` received
@@ -1798,25 +1798,6 @@ pub async fn serve(project_path: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The last `n` lines of a pane capture, after dropping the blank rows below
-/// the last line of output.
-///
-/// `capture-pane -S -N` is not a tail: it starts N lines back in the
-/// scrollback and runs to the bottom of the *visible* screen. An agent that
-/// draws full-screen keeps no tmux scrollback, so the capture is the whole
-/// screen whatever N is — measured, a request for 15 lines returned 49, and a
-/// caller that asked for less to save context got the full screen anyway.
-/// Trailing blank rows go first, so N counts lines of output rather than the
-/// empty rows under a short one.
-fn pane_tail(content: &str, n: usize) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let end = lines
-        .iter()
-        .rposition(|l| !l.trim().is_empty())
-        .map_or(0, |i| i + 1);
-    lines[end.saturating_sub(n)..end].join("\n")
-}
-
 /// Buffer size for the in-memory pipes bridging real stdio to rmcp.
 const PIPE_BUF: usize = 64 * 1024;
 
@@ -1893,30 +1874,4 @@ fn filtered_stdio() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
     });
 
     (rmcp_reader, rmcp_writer)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::pane_tail;
-
-    #[test]
-    fn a_pane_read_returns_only_the_lines_asked_for() {
-        let screen: String = (1..=49).map(|i| format!("line {i}\n")).collect();
-        let tail = pane_tail(&screen, 15);
-        assert_eq!(tail.lines().count(), 15);
-        assert!(tail.starts_with("line 35"));
-        assert!(tail.ends_with("line 49"));
-    }
-
-    #[test]
-    fn blank_rows_below_the_output_do_not_count() {
-        let screen = "prompt\n❯ working\n\n   \n\n";
-        assert_eq!(pane_tail(screen, 1), "❯ working");
-    }
-
-    #[test]
-    fn asking_for_more_than_there_is_returns_all_of_it() {
-        assert_eq!(pane_tail("a\nb\n", 50), "a\nb");
-        assert_eq!(pane_tail("\n\n", 5), "");
-    }
 }

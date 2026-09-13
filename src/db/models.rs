@@ -355,9 +355,8 @@ pub struct TaskRuntime {
     /// The task status this verdict was computed for. A reader must not apply
     /// it to a task that has since moved: the refresh snapshots tasks before it
     /// runs, so a pass in flight across a transition returns the *previous*
-    /// phase's verdict stamped with a fresh `updated_at` — measured, a task read
-    /// `review:ready` two seconds after entering Review with no `review.md` on
-    /// disk. `None` for a row written before the column existed.
+    /// phase's verdict stamped with a fresh `updated_at`. `None` for a row
+    /// written before the column existed.
     pub status: Option<TaskStatus>,
     /// Hash of the last pane capture, and when it last changed. Carried so a
     /// reader can distinguish "idle because the agent is quiet" from "idle

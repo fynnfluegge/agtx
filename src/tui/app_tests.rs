@@ -16104,9 +16104,9 @@ fn occupy_setup_slot(app: &mut App) -> mpsc::Sender<SetupResult> {
 
 /// Worktree setup runs one at a time. A caller that asks for several Backlog
 /// transitions in one pass — the dependency overlay, or an MCP client moving a
-/// wave of tasks — must have them all queued: rejecting the ones that arrive
-/// while the slot is busy left those tasks in Backlog with nothing retrying
-/// them, and `move_task` had already answered `queued`.
+/// wave of tasks — must have them all queued: a task rejected for arriving
+/// while the slot is busy stays in Backlog with nothing retrying it, after
+/// `move_task` has already answered `queued`.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn backlog_transitions_queue_behind_a_busy_setup_slot() {
@@ -16490,7 +16490,7 @@ fn cleanup_reaps_pane_descendants_before_killing_the_window() {
 /// the entire machine. Reaping from there would kill the user's session, their
 /// editor, and agtx itself.
 ///
-/// The guard lives in `reap_pane_descendants` rather than in `descendants_of`,
+/// The guard lives in `pane_descendants` rather than in `descendants_of`,
 /// which is an honest tree walk and correct as written. This test pins the
 /// hazard so nobody moves the check or feeds it an unvalidated pid.
 #[test]
@@ -16604,10 +16604,10 @@ fn a_task_with_no_worktree_records_nothing() {
 }
 
 /// The marker is a commit, so a phase that leaves work uncommitted is not
-/// represented in it. That is why the review skill pairs `<marker>..HEAD` with a
-/// plain `git diff HEAD`: this test pins the property those two rely on — the
-/// marker never advances past uncommitted work, so such work cannot fall
-/// between the two halves and be reviewed by neither.
+/// represented in it. That is why the review skill pairs `<marker>..HEAD` with
+/// `git status --short`: this test pins the property those two rely on — the
+/// marker never advances past uncommitted work — and why the second half cannot
+/// be `git diff HEAD`, which does not show an untracked file at all.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn the_marker_never_covers_uncommitted_work() {
@@ -16671,9 +16671,8 @@ fn the_marker_never_covers_uncommitted_work() {
     assert!(status.contains("??"), "reported as untracked: {status}");
 }
 
-/// The refusal names the action that was asked for. It had reused
-/// `move_to_done`'s wording and said "move to Done", which reads as though the
-/// caller requested a different action than it did.
+/// The refusal names the action that was asked for, rather than reading as
+/// though the caller requested a different one.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn refusing_a_merge_names_the_merge_and_the_way_out() {
@@ -16722,12 +16721,8 @@ fn make_test_app_with_dirty_worktree(project: &std::path::Path, dirty: bool) -> 
 
 /// Reaching Done deletes the worktree, and `has_changes` reads
 /// `git status --porcelain`, which counts **untracked** files. An agent that
-/// wrote its work and never committed has all of it there and nowhere else.
-///
-/// This fired for real: `move_to_done_and_merge` was added as a third route to
-/// Done and left out of the guard, so a task whose agent produced eleven files
-/// and committed none merged an empty branch, went to Done, and cleanup deleted
-/// every one of them.
+/// wrote its work and never committed has all of it there and nowhere else, so
+/// a route to Done that skips the guard destroys it.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn every_route_to_done_refuses_a_worktree_with_uncommitted_work() {
@@ -16842,8 +16837,7 @@ fn task_id_lookup_matches_only_the_task_that_owns_the_process() {
 }
 
 /// A task id that is a prefix of another must not sweep up its processes —
-/// killing a live task's server because its id starts the same way would be
-/// indistinguishable from the bug this replaces.
+/// that would kill a live task's server because its id starts the same way.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn a_task_id_prefix_does_not_match_a_longer_id() {
@@ -16869,8 +16863,8 @@ fn task_id_lookup_survives_junk_input() {
 /// agtx's own writes must not read as the agent's uncommitted work. Without the
 /// exclude, `.agtx/` and the deployed agent configs show as untracked in every
 /// worktree, and `has_changes` — which the Done guard reads from
-/// `git status --porcelain` — counts untracked files. agtx's bookkeeping
-/// therefore tripped agtx's own guard on a project's first task.
+/// `git status --porcelain` — counts untracked files, so agtx's bookkeeping
+/// would trip agtx's own guard on a project's first task.
 #[test]
 #[cfg(feature = "test-mocks")]
 fn agtx_files_are_hidden_from_git_in_a_worktree() {
@@ -16993,8 +16987,8 @@ fn the_process_lookup_asks_ps_for_every_process() {
 // =============================================================================
 
 /// After a resume the previous cycle's artifact is still on disk. Counting it
-/// made a task sent back to Running read `ready` the moment it arrived, and it
-/// was advanced to Review having done no execute work at all.
+/// would make a task sent back to Running read `ready` the moment it arrives,
+/// before it has done any work.
 #[test]
 fn an_artifact_from_before_the_phase_began_does_not_count() {
     let dir = tempfile::tempdir().unwrap();
@@ -17042,9 +17036,8 @@ fn ready_waits_for_the_turn_to_end() {
 }
 
 /// The refresh snapshots tasks before it runs, so a pass in flight across a
-/// transition returns the previous phase's verdict. Measured: a task read
-/// `review:ready` two seconds after entering Review, from Running's artifact.
-/// The same verdict for a task still in that status must apply — otherwise this
+/// transition returns the previous phase's verdict — Running's artifact reads
+/// as `review:ready`. The same verdict for a task still in that status must apply — otherwise this
 /// test would pass by applying nothing.
 #[test]
 #[cfg(feature = "test-mocks")]

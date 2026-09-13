@@ -191,11 +191,11 @@ pub fn hook_events(kind: HookConfigKind) -> &'static [(&'static str, Option<&'st
             // `notification_type` — `permission_prompt` ("Claude needs your
             // permission") and `idle_prompt` ("Claude is waiting for your
             // input"), the latter fired ~66s after a turn simply ends.
-            // Unscoped, a healthy agent that finished its turn reported
+            // Unscoped, an agent that has simply finished its turn would report
             // Blocked, and an agent-reported Blocked fires the stuck-task path
-            // *immediately*, with no settle window — so a caller interrupts an
-            // agent that is merely quiet. Verified that Claude honours the
-            // matcher here: with it, an idle turn produces no event at all.
+            // *immediately*, with no settle window — so a caller would interrupt
+            // an agent that is merely quiet. Claude honours the matcher here
+            // (verified): with it, an idle turn produces no event at all.
             ("Notification", Some("permission_prompt")),
             // Turn over / session over.
             ("Stop", None),

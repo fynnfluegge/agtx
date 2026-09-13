@@ -49,7 +49,7 @@ Also confirm before a long unattended run:
   and an unattended run has nobody to answer it.
 - The project has a **base branch** and a clean tree.
 
-## Three things that differ from a normal agtx session
+## Four things that differ from a normal agtx session
 
 **1. `allowed_actions` is not written for you.** `get_task` computes that field for the
 built-in orchestrator, which is forbidden from triaging Backlog — so it comes back empty
@@ -67,7 +67,7 @@ feedback loop (see *The loop*).
 | `phase_status` | Meaning |
 |---|---|
 | `working` | The agent is producing output. Leave it alone. |
-| `ready` | The phase artifact exists — the phase is **complete**. Advance it. |
+| `ready` | The phase artifact was written this phase and the agent's turn is over — the phase is **complete**. Advance it. |
 | `blocked` | The agent reported it is waiting on a human. |
 | `idle` | No output for 15s. A guess, not a report. |
 | `exited` | The tmux window is gone. |
@@ -75,8 +75,8 @@ feedback loop (see *The loop*).
 **`tui_connected` decides whether any of that is current.** `list_tasks` and
 `wait_for_board_change` both carry it. When it is `false`, nothing is executing transitions and
 every `phase_status` is frozen at whatever was last observed — **stop and tell the user**;
-do not read those rows as task state. A live run once showed a task `blocked` for minutes
-while its agent worked normally, purely because the TUI had exited.
+do not read those rows as task state. A task can show `blocked` while its agent works
+normally, purely because the TUI has exited.
 
 `phase_age_secs` is the corroborating detail: the board republishes every live task on
 every pass, so a small age means "seen just now". Check `tui_connected` first — it is the

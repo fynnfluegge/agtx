@@ -28,7 +28,8 @@ use crate::git::{
 };
 use crate::skills;
 use crate::tmux::{
-    self, InputConfig, InputError, PaneInput, PaneInputSink, RealTmuxOps, TmuxOperations,
+    self, pane_tail, InputConfig, InputError, PaneInput, PaneInputSink, RealTmuxOps,
+    TmuxOperations,
 };
 use crate::AppMode;
 
@@ -7097,12 +7098,10 @@ impl App {
     /// Queue a Backlog task's setup and try to start it now.
     ///
     /// Every Backlog transition from MCP comes through here, whether or not the
-    /// setup slot is free, so the queue is the single ordering authority.
-    /// Rejecting when the slot was busy — which is what this replaces — meant a
-    /// caller that queued five tasks in one pass had four marked as errors and
-    /// four tasks left in Backlog, with nothing retrying them; and because
-    /// `move_task` had already answered `queued`, the failures were visible only
-    /// to a caller that polled each request individually.
+    /// setup slot is free, so the queue is the single ordering authority and no
+    /// transition is rejected for arriving while the slot is busy. A rejection
+    /// there would be invisible: `move_task` has already answered `queued`, and
+    /// nothing would retry the task.
     fn queue_backlog_setup(
         &mut self,
         req: &TransitionRequest,
@@ -7115,8 +7114,8 @@ impl App {
 
     /// Mark a queued request's transition row processed, if it came from one.
     ///
-    /// `Applied` deferred the marking to here, so this is the only place a
-    /// setup queued from MCP stops reporting `pending`.
+    /// `TransitionOutcome::Queued` defers the marking to here, so this is the
+    /// only place a setup queued from MCP stops reporting `pending`.
     fn resolve_queued_request(&self, request_id: &Option<String>, error: Option<&str>) {
         if let (Some(db), Some(rid)) = (&self.state.db, request_id) {
             let _ = db.mark_transition_processed(rid, error);
@@ -7731,12 +7730,10 @@ impl App {
         // reaching Done deletes the worktree and `has_changes` reads
         // `git status --porcelain`, which counts *untracked* files. An agent
         // that wrote its work and never ran `git commit` has all of it here and
-        // nowhere else. Measured, by omitting `move_to_done_and_merge` from
-        // this list: a task whose agent produced eleven files and committed
-        // none merged an empty branch, went to Done, and cleanup deleted every
-        // one of them. `move_forward` is listed for the same reason — a stale
-        // request must not be a way around it — and a new route to Done that
-        // forgets this line is a silent data-loss bug, not a missing check.
+        // nowhere else, so a route to Done missing from this list merges an
+        // empty branch and then deletes the work — a silent data-loss bug, not a
+        // missing check. `move_forward` is listed so a stale request cannot be a
+        // way around it.
         if task.status == TaskStatus::Review
             && matches!(
                 req.action.as_str(),
@@ -7910,7 +7907,6 @@ impl App {
         Ok(())
     }
 
-    /// MCP version of transition_to_review: sends review prompt but skips PR popup.
     /// Merge a Review task's branch into its base, then move it to Done.
     ///
     /// The two halves are one action because doing them separately loses the
@@ -8027,6 +8023,7 @@ impl App {
         self.refresh_tasks()
     }
 
+    /// MCP version of transition_to_review: sends review prompt but skips PR popup.
     fn mcp_transition_to_review(&mut self, task: &mut Task) -> Result<()> {
         let (review_agent, agent_switch) = needs_agent_switch(&self.state.config, task, "review");
         if let Some(session_name) = &task.session_name {
@@ -8803,8 +8800,8 @@ impl App {
     /// The MCP reader is why this is not gated on the `serve` feature. A
     /// default build has no web server, but it always has `agtx mcp-serve`, and
     /// an orchestrator or oneshot session polling phase status is exactly the
-    /// out-of-process reader this table is for. Compiling the call out left
-    /// every such client reading a table nothing ever wrote.
+    /// out-of-process reader this table is for. Compiling the call out would
+    /// leave every such client reading a table nothing ever writes.
     ///
     /// The window is generous because the board no longer polls: someone can
     /// read it for minutes without issuing a request, and going quiet mid-read
@@ -8857,10 +8854,9 @@ impl App {
 
             // The pass snapshotted tasks before it ran, so a transition that
             // landed meanwhile leaves this verdict describing the *previous*
-            // phase — measured, a task read `review:ready` two seconds after
-            // entering Review, with no `review.md` on disk, because the pass had
-            // found Running's `execute.md`. Dropped rather than applied; the next
-            // pass, two seconds on, computes it against the right phase.
+            // phase — Running's `execute.md` would read as `review:ready`.
+            // Dropped rather than applied; the next pass, two seconds on,
+            // computes it against the right phase.
             if self
                 .state
                 .board
@@ -9528,8 +9524,7 @@ fn cleanup_task_resources(
         // backgrounded into a group of its own — a dev server, a watcher, a
         // `python3 -m http.server`. Those survive, get reparented to init, and
         // keep holding their ports long after the task is Done and its worktree
-        // is gone. One such orphan served a deleted worktree for hours and made
-        // a later run debug code that was never wrong.
+        // is gone.
         //
         // Order matters and is the whole reason this is not simply a `pkill`
         // afterwards: once the window is killed the parent links are gone and
@@ -9585,9 +9580,9 @@ const AGTX_EXCLUDE_MARKER: &str = "# agtx: files agtx writes into worktrees";
 /// Without this, `.agtx/` and the per-agent config agtx deploys show as
 /// untracked in every worktree — and `has_changes`, which the Done guard reads
 /// from `git status --porcelain`, counts untracked files. agtx's own writes
-/// therefore tripped agtx's own guard on a project's first task, before any
-/// `.gitignore` existed. A guard that cries wolf first and means it second is
-/// how a safety check stops being believed.
+/// would trip agtx's own guard on a project's first task, before any
+/// `.gitignore` exists, and a guard that cries wolf first and means it second
+/// stops being believed.
 ///
 /// **There is exactly one place this can go.** Measured against git 2.55.0: a
 /// per-worktree `.git/worktrees/<name>/info/exclude` is *ignored*; only
@@ -9595,8 +9590,8 @@ const AGTX_EXCLUDE_MARKER: &str = "# agtx: files agtx writes into worktrees";
 /// checkout as well as every worktree.
 ///
 /// Sharing it with the user's own checkout is safe because **exclude patterns
-/// only affect untracked files** — also measured: a tracked
-/// `.claude/settings.json` still reports `M` with `.claude/` excluded. So a
+/// only affect untracked files** — also measured: a tracked `.mcp.json` still
+/// reports its modification with `.mcp.json` excluded. So a
 /// project that deliberately tracks any of these keeps tracking it, and nothing
 /// a user committed can be hidden. What this changes is only whether files agtx
 /// created show up as noise.
@@ -9709,18 +9704,16 @@ fn mark_reviewed_point(task: &Task) {
 ///
 /// - **By environment.** `create_window` sets `AGTX_TASK_ID` on the tmux window,
 ///   and a child inherits the environment at spawn and never loses it. This is
-///   what catches a *daemonized* process: measured on a real run, an agent's
-///   `python3 -m http.server` was reparented to init as soon as it was
-///   backgrounded and was still serving a deleted worktree hours later — but it
-///   still carried the task id. Attribution is exact, and enumerating costs
-///   ~0.1s.
+///   what catches a *daemonized* process: one reparented to init as soon as it
+///   was backgrounded still carries the task id. Attribution is exact, and
+///   enumerating costs ~0.1s.
 /// - **By descent from the pane.** The backstop for anything that never received
 ///   the environment.
 ///
-/// Walking the pane's descendants alone is not enough, and this is the correction
-/// to that: a process reparented to init *before* cleanup runs is no longer in
-/// the tree, so ordering the walk ahead of `kill-window` — necessary, since the
-/// links vanish with the window — still misses exactly the case that matters.
+/// Walking the pane's descendants alone is not enough: a process reparented to
+/// init *before* cleanup runs is no longer in the tree, so ordering the walk
+/// ahead of `kill-window` — necessary, since the links vanish with the window —
+/// still misses exactly the case that matters.
 ///
 /// The alternatives were measured and rejected. A cwd scan
 /// (`lsof -u <uid> -d cwd`) takes ~12s, and `lsof +D <worktree>` walks the tree
@@ -12607,20 +12600,18 @@ fn determine_phase_variant(
     }
 }
 
-/// Check if an artifact path exists, trying both zero-padded and non-padded {phase} substitution.
 /// Whether the current phase's artifact was written *during* this phase.
 ///
 /// Existence alone is what `phase_artifact_exists` answers, and it is the wrong
 /// question after a resume: the previous cycle's `execute.md` is still on disk,
-/// so a task sent back to Running read `ready` the moment it arrived — measured,
-/// a resumed task was advanced to Review having done no execute work at all.
-/// The artifact counts only if its mtime is at or after `entered_at`.
+/// so a task sent back to Running would read `ready` the moment it arrived,
+/// before doing any work. The artifact counts only if its mtime is at or after `entered_at`.
 ///
 /// `phase_artifact_exists` stays for its other callers, which ask whether a
 /// *prior* phase ever produced its artifact — a gating question, where any plan
 /// on disk is the right answer.
 ///
-/// Two fallbacks, both to today's existence check: `entered_at` is `None` for a
+/// Two fallbacks, both to the existence check: `entered_at` is `None` for a
 /// task stored before the column existed, and a glob template names a set of
 /// files rather than one, so it has no single mtime to compare.
 fn phase_artifact_fresh(
@@ -12659,7 +12650,7 @@ fn phase_artifact_fresh(
 /// An agent writes its phase artifact mid-turn and keeps going — measured, a
 /// reviewer wrote `review.md`, then ran `git status` and printed a summary — so
 /// a fresh artifact under a live `working` report is not done yet, and a caller
-/// acting on it resumed an agent that had not stopped. `blocked` likewise: the
+/// acting on it would resume an agent that has not stopped. `blocked` likewise: the
 /// artifact exists but the agent is now waiting on a person.
 ///
 /// No timestamp comparison, deliberately. The status file holds only the latest
@@ -12683,6 +12674,7 @@ fn gate_ready_on_turn(phase: PhaseStatus, hook: Option<hook_status::HookState>) 
     }
 }
 
+/// Check if an artifact path exists, trying both zero-padded and non-padded {phase} substitution.
 fn artifact_path_exists(worktree_path: &str, rel_template: &str, cycle: i32) -> bool {
     // Try zero-padded first (e.g. "01"), then non-padded (e.g. "1")
     for phase_str in [format!("{:02}", cycle), cycle.to_string()] {
@@ -13222,20 +13214,6 @@ fn scoped_indicators_for(agent_name: Option<&str>) -> &'static [&'static str] {
 
 /// How many lines from the bottom of a capture count as "live now".
 const PANE_TAIL_LINES: usize = 5;
-
-/// The bottom `n` lines of a captured pane, trailing blank rows dropped first.
-///
-/// `capture-pane -p` emits one line per pane *row*, so the raw end of a capture
-/// is padding whenever the agent's output has not filled the pane; anchoring the
-/// window there would look at nothing. Same reasoning as `composer_holds`.
-fn pane_tail(content: &str, n: usize) -> String {
-    let mut lines: Vec<&str> = content.lines().collect();
-    while lines.last().is_some_and(|l| l.trim().is_empty()) {
-        lines.pop();
-    }
-    let start = lines.len().saturating_sub(n);
-    lines[start..].join("\n")
-}
 
 /// Per-launch state for [`dismiss_launch_dialog`].
 #[derive(Default)]
@@ -13798,6 +13776,10 @@ fn write_skills_to_worktree(
     agent_names: &[&str],
     agent_hooks: bool,
 ) {
+    // Before anything else agtx writes here, so the files below are invisible to
+    // git the moment they appear.
+    exclude_agtx_files_from_git(Path::new(worktree_path));
+
     // Replay the project's existing trust onto this worktree, for the one agent
     // that needs it. Antigravity matches trusted paths **exactly** — no ancestor
     // inheritance at any depth — so a user who already trusted the project would
@@ -13810,10 +13792,6 @@ fn write_skills_to_worktree(
     // It never grants trust that does not already exist — `seed_from_project` is a
     // no-op unless the project root is in the agent's own store. See
     // `agent::trust`.
-    // Before anything else agtx writes here, so the files below are invisible to
-    // git the moment they appear.
-    exclude_agtx_files_from_git(Path::new(worktree_path));
-
     if let Some(home) = agent_trust_home() {
         for agent_name in agent_names {
             if !agent::trust::needs_seeding(agent_name) {

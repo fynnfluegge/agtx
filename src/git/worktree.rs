@@ -319,9 +319,8 @@ pub fn detect_main_branch(project_path: &Path) -> Result<String> {
     // The exit status matters here and reading stdout alone is not enough. On an
     // unborn branch — a fresh `git init` with no commits, which is exactly how a
     // greenfield project starts — this fails with 128 *and still prints the
-    // literal string* `HEAD`. That string then reached `git worktree add` as a
-    // base revision, which failed with `invalid reference: HEAD`, so every task
-    // died in setup behind an error naming neither the cause nor the fix.
+    // literal string* `HEAD`, which is not a revision a worktree can be cut from
+    // (`git worktree add` answers `invalid reference: HEAD`).
     let output = Command::new("git")
         .current_dir(project_path)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])

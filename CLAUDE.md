@@ -131,7 +131,7 @@ skills/                # Plugin skill files — auto-discovered as /agtx:* (Clau
 ├── sweep/SKILL.md     # Sweep skill — push any conversation to the board (/agtx:sweep)
 ├── brainstorm/SKILL.md # Brainstorm skill — free-form exploration (/agtx:brainstorm)
 └── oneshot/SKILL.md   # Oneshot skill — an outside session runs the board as the human,
-                       # all five columns, polling instead of notifications (/agtx:oneshot)
+                       # all five columns, driven by wait_for_board_change (/agtx:oneshot)
 
 .claude-plugin/        # Claude Code plugin manifest
 ├── plugin.json        # Plugin metadata + MCP server registration
@@ -239,9 +239,8 @@ task with a branch and no worktree is one that reached Done, whose branch the wo
 
 `kill-window` signals the pane's own process group, which misses anything the agent backgrounded
 into a group of its own — a dev server, a watcher, a `python3 -m http.server`. Those get reparented
-to init and keep holding their ports. Measured: a review agent's static server was still listening
-six hours after its task reached Done, serving a worktree that had been deleted, and a later agent
-loaded stale code from it and spent a turn debugging source that was never wrong.
+to init and keep holding their ports — a static server can go on serving a worktree that has been
+deleted, and a later agent loads stale code from it.
 
 `reap_task_processes` finds them **two ways, because neither alone is enough**:
 
@@ -252,8 +251,7 @@ loaded stale code from it and spent a turn debugging source that was never wrong
   This half runs before `kill_window`, since the parent links vanish with the window.
 
 **Descent alone is not sufficient, and ordering does not make it so.** A process reparented to init
-*before* cleanup runs is already out of the tree, which is precisely the case that matters — the
-orphan above survived a descendants-only reap for exactly this reason.
+*before* cleanup runs is already out of the tree, which is precisely the case that matters.
 
 **The alternatives were measured and rejected.** A cwd scan (`lsof -u <uid> -d cwd`) takes ~12s;
 `lsof +D <worktree>` walks the tree — 26s on a large checkout — and matches nothing once the
@@ -283,9 +281,9 @@ of `unsafe`.
 
 `.agtx/` and the per-agent configs agtx deploys show as untracked in every worktree, and
 `has_changes` — which the Done guard reads from `git status --porcelain` — counts untracked files.
-So agtx's own bookkeeping tripped agtx's own guard on a project's first task, before any
-`.gitignore` existed. A guard that cries wolf first and means it second stops being believed, and a
-caller that works around it with a committed `.gitignore` is doing agtx's job.
+Left visible, agtx's own bookkeeping would trip agtx's own guard on a project's first task, before
+any `.gitignore` exists. A guard that cries wolf first and means it second stops being believed, and
+a caller that works around it with a committed `.gitignore` is doing agtx's job.
 
 `exclude_agtx_files_from_git` writes `AGTX_WRITTEN_PATHS` into the repository's exclude file at
 worktree setup, once, inside a marked block.
@@ -305,21 +303,18 @@ This is what makes `git add -A` safe in the phase skills below.
 
 #### The phase skills commit
 
-`execute.md` and `review.md` end by committing. Without that the bundled workflow was internally
-contradictory: Done requires a clean tree and merging requires commits, but nothing in research →
-plan → execute → review ever told the agent to commit, so an agent that followed the skills exactly
-produced a task that could not reach Done. Every success depended on the agent committing
-spontaneously or a caller noticing and instructing it — and when neither happened, the work sat
-uncommitted in a worktree that Done deletes.
+`execute.md` and `review.md` end by committing. Done requires a clean tree and merging requires
+commits, so a phase that ends with its work uncommitted leaves a task that cannot reach Done — and
+the work sits in a worktree that Done deletes. Committing is the skill's job, not something left to
+the agent's initiative or a caller's instruction.
 
 #### A repository with no commits
 
 A worktree must be cut from a commit, so `git init` with no history — the starting state of any
-greenfield project — could not host a task at all. `detect_main_branch` now checks the exit status
+greenfield project — cannot host a task as it stands. `detect_main_branch` checks the exit status
 of its `git rev-parse --abbrev-ref HEAD` fallback: on an unborn branch that fails with 128 *and
-still prints the literal string* `HEAD`, which reached `git worktree add` as a base revision and
-failed with `invalid reference: HEAD`. Every task died in setup behind an error naming neither the
-cause nor the fix.
+still prints the literal string* `HEAD`, which is not a revision a worktree can be cut from
+(`git worktree add` answers `invalid reference: HEAD`).
 
 When `has_no_commits` confirms the repository is genuinely empty, `create_initial_commit` makes one
 (`git commit --allow-empty -m init`) and setup proceeds. Refusing would be defensible, but "run
@@ -835,11 +830,11 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
   already merged — what actually governs a run). It exists because there is no other way for a
   caller to learn `auto_trust`: the setting is global-only *by design*, since a project config that
   could grant itself trust defeats the trust system, and `AGTX_CONFIG_DIR` means the global file is
-  not reliably at `~/.config/agtx/config.toml`. A caller that read that path directly got a stale
-  answer and stopped to ask a question it already had. The response carries both file paths, so a
+  not reliably at `~/.config/agtx/config.toml`, so reading that path directly can give a stale
+  answer. The response carries both file paths, so a
   caller can name the file to edit instead of guessing
 - Read: `list_tasks`, `get_task` (includes `allowed_actions`), `wait_for_board_change`, `get_transition_status`, `check_conflicts`, `get_notifications`, `read_pane_content`. `list_tasks` and `get_task` also carry `phase_status` + `phase_age_secs` + `tui_connected` — see *Publishing phase status* below. `list_tasks` returns `{tui_connected, tasks: [...]}` rather than a bare array: `tui_connected` is one answer for the whole board, and a caller needs it on *every* poll — a separate tool is one a polling loop skips, and skipping it means reading frozen rows as live state. `list_tasks` leaves descriptions out unless `include_description` is set, and omits empty optional fields — see *Waiting for the board to change*. `read_pane_content` returns a real tail (`pane_tail`): `capture-pane -S -N` starts N lines back in the scrollback and runs to the bottom of the visible screen, and a full-screen agent keeps no scrollback, so without the trim every read is the whole screen — measured, 15 lines asked, 49 returned
-- Write: `move_task` (queues a transition request; actions `research`, `move_forward`, `move_to_planning`, `move_to_running`, `move_to_review`, `move_to_done`, `move_to_done_and_merge`, `resume`, `escalate_to_user`), `send_to_task` (Planning, Running and Review, 4096-byte cap; delivered as a bracketed paste plus a watched submit — see *When a phase counts as done*). Review is included (`accepts_task_input`) so a reviewer can be handed a small fix in place: without it the only way to deliver one was to `resume` the task to Running first — a transition made just to send a message, usually into a reviewer still finishing its turn, which then sent the task round a whole execute cycle. `resume` is for significant rework
+- Write: `move_task` (queues a transition request; actions `research`, `move_forward`, `move_to_planning`, `move_to_running`, `move_to_review`, `move_to_done`, `move_to_done_and_merge`, `resume`, `escalate_to_user`), `send_to_task` (Planning, Running and Review, 4096-byte cap; delivered as a bracketed paste plus a watched submit — see *When a phase counts as done*). Review is included (`accepts_task_input`) so a reviewer can be handed a small fix in place, with no transition made just to send a message; `resume` sends the task round a whole execute cycle and is for significant rework
 
 #### Publishing phase status
 
@@ -852,7 +847,7 @@ once per task in a polling loop).
 **It is not gated on the `serve` feature.** A default build has no web server but
 always has `agtx mcp-serve`, and an orchestrator or oneshot session polling phase status
 is exactly the out-of-process reader the table is for; compiling the publish call
-out left every such client reading a table nothing ever wrote.
+out would leave every such client reading a table nothing ever writes.
 
 Read `phase_status` against `phase_age_secs`, never alone. The refresh
 republishes every live task on every pass, so a small age means "seen just now"
@@ -869,9 +864,8 @@ say `ready` (the phase artifact exists) or `exited` (the window is gone).
 web API uses — three beats of `TRANSITION_POLL_INTERVAL`, so one missed tick is
 not a disconnect. Without it a caller can only *infer* a dead board from
 `phase_age_secs` climbing across every task at once, and until it does, a frozen
-row reads as live state: a live run showed a task as `blocked` for minutes while
-its agent worked normally, because that was the last verdict published before
-the TUI exited. The answer was in `tui_heartbeat` the whole time.
+row reads as live state: a task shows `blocked` while its agent works normally,
+because that was the last verdict published before the TUI exited.
 
 #### Waiting for the board to change
 
@@ -920,17 +914,16 @@ timeout is an answer, not an error.
 #### When a phase counts as done
 
 `ready` promises a caller that the phase is finished — safe to advance, merge or
-resume. Three separate bugs broke that promise in one unattended run, and a
-caller acting on `ready` advanced a task that had done no work, resumed a
-reviewer mid-turn, and read `review:ready` for a review nobody had run. Each rule
-below closes one.
+resume. Three rules keep it; without them a caller acting on `ready` would
+advance a task that has done no work, resume a reviewer mid-turn, and read
+`review:ready` for a review nobody has run.
 
 - **The artifact must be written during this phase.** `Task::phase_entered_at`
   is stamped by `Database::update_task` whenever the status changes, in either
   direction, by a SQL `CASE` against the stored row — one writer, so no route
   that moves a task can forget it. `phase_artifact_fresh` counts an artifact only
-  if its mtime is at or after that stamp. Without it the previous cycle's
-  `execute.md` made a resumed task read `ready` the moment it arrived.
+  if its mtime is at or after that stamp, so the previous cycle's
+  `execute.md` cannot make a resumed task read `ready` the moment it arrives.
   `phase_artifact_exists` stays for the gating callers, which ask whether a
   *prior* phase ever produced its artifact. `None` (a row from before the column)
   and glob templates fall back to existence. Research runs inside Backlog with no
@@ -938,8 +931,8 @@ below closes one.
   that already has a session, which is the only way its artifact could be stale.
 - **A verdict applies only to the status it was computed for.** The refresh
   snapshots tasks before its thread runs, so a transition that lands meanwhile
-  leaves the verdict describing the previous phase — measured, `review:ready`
-  two seconds after entering Review, from Running's `execute.md`.
+  leaves the verdict describing the previous phase — Running's `execute.md`
+  reads as `review:ready`.
   `apply_session_refresh` drops such a verdict, and `TaskRuntime::status`
   records what each published row was computed for so MCP and the phone API can
   withhold a row that no longer matches. `phase_age_secs` cannot catch this: the
@@ -980,17 +973,15 @@ way the drain can decline one (task gone, left Backlog, deps unsatisfied, the
 start itself failing) resolves the request with an error instead, because a
 dropped request leaves a caller polling `pending` forever.
 
-Rejecting instead of queuing is what this replaces: a caller that asked for five
-Backlog transitions in one pass had four marked as errors and four tasks left in
-Backlog with nothing retrying them — and since `move_task` had already answered
-`queued`, the failures were visible only to a caller that polled each request
-individually.
+A busy slot never rejects a transition. `move_task` has already answered
+`queued` by then, so a rejection would be visible only to a caller polling each
+request, and nothing would retry the task.
 
 **A claim outlives the instance holding it, so claims are reclaimed.** Deferring
 the mark opens a window where a request is claimed and unprocessed, and
 `get_pending_transition_requests` filters claimed rows out — so a TUI that exits
-with a setup queued strands it. Nothing re-ran it; `cleanup_old_transition_requests`
-deleted it an hour later having never executed it.
+with a setup queued strands it, until `cleanup_old_transition_requests` deletes it
+an hour later, never executed.
 `Database::reclaim_stale_transition_requests` releases claims held by another
 instance after `RECLAIM_CLAIMS_AFTER` (5 minutes), called at the top of each
 drain rather than only at startup — a TUI that dies mid-run should not wait for
@@ -1019,15 +1010,13 @@ working tree but git refuses it while `base` is checked out, which is the normal
 case here; `git update-ref` evades that check but leaves the user's index
 disagreeing with HEAD, so the working tree reads as "everything deleted".
 
-**Every route to Done must appear in the uncommitted-changes guard**, and this action is
-the worked example of what happens otherwise. Reaching Done deletes the worktree, and
-`GitOperations::has_changes` reads `git status --porcelain`, which counts **untracked**
-files — an agent that wrote its work and never ran `git commit` has all of it there and
-nowhere else. `move_to_done_and_merge` was added as a third route and left out of the
-`matches!` list beside `move_to_done` and `move_forward`: a task whose agent produced
-eleven files and committed none merged an empty branch, reached Done, and cleanup deleted
-every one of them. Only the `.md` artifacts survived, in `.agtx/archive/`. A new route to
-Done that forgets that line is a silent data-loss bug, not a missing check, and
+**Every route to Done must appear in the uncommitted-changes guard.** Reaching Done deletes
+the worktree, and `GitOperations::has_changes` reads `git status --porcelain`, which counts
+**untracked** files — an agent that wrote its work and never ran `git commit` has all of it
+there and nowhere else. A route missing from the `matches!` list beside `move_to_done` and
+`move_forward` merges an empty branch, reaches Done, and cleanup deletes the work; only the
+`.md` artifacts survive, in `.agtx/archive/`. A new route to Done that forgets that line is
+a silent data-loss bug, not a missing check, and
 `every_route_to_done_refuses_a_worktree_with_uncommitted_work` iterates all three.
 
 **An empty branch is refused rather than merged**, as the second layer. `git merge` exits
@@ -1056,11 +1045,11 @@ uses the local `check_merge_conflicts`, which needs no remote.
 Leaving Review for Running — the `resume` path — writes the worktree's current HEAD to
 `.agtx/reviewed-at` (`mark_reviewed_point`). The review skill reads it: present, it
 reviews `<marker>..HEAD` plus the prior `.agtx/review.md` and checks those points were
-addressed; absent, it reviews the whole branch as before.
+addressed; absent, it reviews the whole branch.
 
-Without this every resume cost a full re-review. `clear_context_on_advance` means the
-review agent starts with no memory of its own previous pass, so it re-read the entire
-branch each cycle to re-confirm what it had already approved.
+Without it every resume costs a full re-review: `clear_context_on_advance` means the
+review agent starts with no memory of its own previous pass, so it would re-read the
+entire branch each cycle to re-confirm what it had already approved.
 
 A file in the worktree rather than a column on `Task`: the only reader is the skill, which
 is already reading `.agtx/`, nothing queries it, and it is removed with the worktree it
@@ -1575,10 +1564,10 @@ writes one.
 - **Claude's `Notification` is scoped to `permission_prompt`**, like grok's, and for the same
   reason. Measured against Claude Code 2.1.263, the payload carries a `notification_type`:
   `permission_prompt` ("Claude needs your permission") and `idle_prompt` ("Claude is waiting for
-  your input"), the latter fired ~66s after a turn simply ends. Unscoped, a healthy agent that had
-  finished its turn reported `Blocked` — and an agent-reported `Blocked` fires the stuck-task
-  notification *immediately*, with no settle window, so a caller interrupts an agent that is merely
-  quiet. Verified that Claude honours a matcher on this event: with it, an idle turn produces no
+  your input"), the latter fired ~66s after a turn simply ends. Unscoped, an agent that has simply
+  finished its turn would report `Blocked` — and an agent-reported `Blocked` fires the stuck-task
+  notification *immediately*, with no settle window, so a caller would interrupt an agent that is
+  merely quiet. Verified that Claude honours a matcher on this event: with it, an idle turn produces no
   hook call at all. The scoping therefore lives in `hook_events`, not `map_hook_event` — the payload
   never reaches the mapper. A worktree deployed by an earlier binary keeps the unscoped
   registration until `refresh_stale_worktree_configs` re-deploys it

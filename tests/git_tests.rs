@@ -1000,9 +1000,9 @@ fn untracked_files_do_not_block_a_merge() {
 // =============================================================================
 
 /// A worktree must be cut from a commit, so a `git init` with no history — the
-/// starting state of any greenfield project — could not host a task at all.
+/// starting state of any greenfield project — gets one before setup proceeds.
 /// `git rev-parse --abbrev-ref HEAD` fails there *and still prints* the literal
-/// string `HEAD`, which reached `git worktree add` as a base revision.
+/// string `HEAD`, which is not a revision a worktree can be cut from.
 #[test]
 fn a_repo_with_no_commits_gets_one_so_a_worktree_can_be_cut() {
     let temp = TempDir::new().unwrap();
