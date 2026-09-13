@@ -28,10 +28,13 @@ a queue; the TUI drains it and performs the real work — worktree creation, age
 skill deployment. With no TUI, every transition sits pending forever and the board looks
 frozen for no visible reason.
 
-1. Call `list_tasks`. If the MCP server does not answer, tell the user to register it and stop:
+1. Call `list_projects` and take the `project_id` of this project; pass it to every other
+   agtx tool. If the MCP server does not answer, tell the user to register it and stop:
    ```bash
-   claude mcp add-json agtx '{"type":"stdio","command":"<abs path to agtx>","args":["mcp-serve","<abs path to project>"]}' --scope local
+   claude mcp add --scope user agtx -- agtx mcp-serve
    ```
+   If this project is not listed, it has never been opened in agtx — ask the user to run
+   `agtx` in the project root, which is needed anyway (below). Then call `list_tasks`.
 2. Check `tui_connected` in that response. If it is `false`, no TUI is draining the
    queue — ask the user to open `agtx` in another terminal on this project, and do not
    queue anything into a dead board.

@@ -1074,7 +1074,7 @@ Two modes, selected by whether a path argument is passed to `agtx mcp-serve`:
 | Mode | Command | Used by |
 |------|---------|---------|
 | **Project-scoped** | `agtx mcp-serve <path>` | Orchestrator (bound to one project) |
-| **Global** | `agtx mcp-serve` | Sweep skill, any ad-hoc session |
+| **Global** | `agtx mcp-serve` | Sweep and oneshot skills, any ad-hoc session |
 
 In global mode all CRUD tools (`list_tasks`, `create_task`, etc.) require a `project_id` parameter. The agent calls `list_projects` first to resolve it. In project-scoped mode `project_id` is ignored — the path is fixed at startup.
 
