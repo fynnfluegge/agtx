@@ -24,7 +24,7 @@
   <a href="#features">Features</a> •
   <a href="#usage">Usage</a> •
   <a href="#mobile">Mobile</a> •
-  <a href="#brainstorm--sweep-skills">Skills</a> •
+  <a href="#skills">Skills</a> •
   <a href="#oneshot-skill">Oneshot</a> •
   <a href="#mcp-server">MCP Server</a> •
   <a href="#plugins">Plugins</a> •
@@ -337,14 +337,15 @@ accepted and then wait — the board says so rather than pretending. Creating,
 editing and deleting Backlog tasks take effect immediately, since they need no
 agent. Starting the server with `W` keeps the two together by construction.
 
-## Brainstorm & Sweep Skills
+## Skills
 
-Two companion skills for capturing ideas in any coding agent session and turning them into tasks in the agtx board.
+Companion skills for any coding agent session: capture ideas, turn them into tasks on the agtx board, or hand a session the whole board.
 
 | Skill | Command | When to use |
 |-------|---------|-------------|
 | **Brainstorm** | `/agtx:brainstorm` | Explore a feature idea — discussion only, no planning or implementation |
 | **Sweep** | `/agtx:sweep` | Push conversation outcomes to the agtx board as tasks |
+| **Oneshot** | `/agtx:oneshot` | Give a goal and let the session run the whole board unattended — see [Oneshot Skill](#oneshot-skill) |
 
 **Typical flow:**
 ```
@@ -358,6 +359,8 @@ agtx board         ← tasks appear in Backlog, ready to advance
 The brainstorm skill keeps the agent in discussion mode — asking questions, surfacing trade-offs, no code or plans. When the conversation feels complete, run `/agtx:sweep` to decompose outcomes into feature-level tasks and push them to the board with a single confirmation step.
 
 ### Install
+
+The Claude Code plugin brings all three skills. Oneshot runs from Claude Code; the steps for the other agents install sweep.
 
 <details>
 <summary><strong>Claude Code</strong></summary>
@@ -478,34 +481,18 @@ workers, answers their questions, judges each Review, and merges the finished wo
 base branch — then plans the next wave from what was actually built. The workers write the
 code; the oneshot session only writes tasks and its own state file.
 
-|  | Orchestrator (`O`) | Oneshot (`/agtx:oneshot`) |
-|--|--------------------|---------------------------|
-| Runs | Inside agtx, started with `O` | In a Claude Code session in the project |
-| Columns it drives | Planning → Running → Review | All five, Backlog to Done |
-| Creates tasks | No — you triage | Yes, one milestone at a time |
-| Merges | No — you do | Yes, into your local base branch |
-| Follows the board | Notifications pushed to its pane | `wait_for_board_change` over MCP |
-
 ### Setup
 
-1. **Install the plugin** (the same one the sweep skill comes from):
-   ```bash
-   claude plugin marketplace add fynnfluegge/agtx
-   claude plugin install agtx@agtx-marketplace
-   ```
-2. **Register the MCP server for the project**, from the project root:
-   ```bash
-   claude mcp add-json agtx '{"type":"stdio","command":"agtx","args":["mcp-serve","'"$PWD"'"]}' --scope local
-   ```
-3. **Let agtx answer trust prompts.** Nobody is at the board to answer an agent's trust or
+1. **Install the plugin and MCP server for Claude Code** — see [Install](#install).
+2. **Let agtx answer trust prompts.** Nobody is at the board to answer an agent's trust or
    bypass-permissions dialog, so without this every task parks as blocked:
    ```toml
    # ~/.config/agtx/config.toml
    auto_trust = true
    ```
-4. **Open your coding agent once in the project root** and accept its trust prompt. Task
+3. **Open your coding agent once in the project root** and accept its trust prompt. Task
    worktrees live inside the project, so they inherit that decision.
-5. **Start from a clean base branch.** An empty repository works too — `git init -b main` is
+4. **Start from a clean base branch.** An empty repository works too — `git init -b main` is
    enough, and agtx makes the first commit.
 
 ### Run
@@ -900,8 +887,8 @@ The agtx MCP server (`agtx mcp-serve`) exposes the board to any coding agent ses
 
 | Mode | Command | Used by |
 |------|---------|---------|
-| **Global** | `agtx mcp-serve` | Sweep/brainstorm skills — works across all projects |
-| **Project-scoped** | `agtx mcp-serve <path>` | Orchestrator and oneshot skill — bound to one project at startup |
+| **Global** | `agtx mcp-serve` | Brainstorm, sweep and oneshot skills — works across all projects |
+| **Project-scoped** | `agtx mcp-serve <path>` | Orchestrator — bound to one project at startup |
 
 In global mode all tools require a `project_id` parameter. Call `list_projects` first to resolve it.
 
