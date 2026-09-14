@@ -305,6 +305,7 @@ fn test_create_pr_with_content_success() {
         description: None,
         status: TaskStatus::Running,
         agent: "claude".to_string(),
+        base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
         session_name: Some("test-session".to_string()),
         worktree_path: Some("/tmp/worktree".to_string()),
@@ -405,6 +406,7 @@ fn test_create_pr_with_content_no_changes() {
         description: None,
         status: TaskStatus::Running,
         agent: "claude".to_string(),
+        base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
         session_name: Some("test-session".to_string()),
         worktree_path: Some("/tmp/worktree".to_string()),
@@ -464,6 +466,7 @@ fn test_create_pr_with_content_push_failure() {
         description: None,
         status: TaskStatus::Running,
         agent: "claude".to_string(),
+        base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
         session_name: None,
         worktree_path: Some("/tmp/worktree".to_string()),
@@ -529,6 +532,7 @@ fn test_push_changes_to_existing_pr_success() {
         description: None,
         status: TaskStatus::Review,
         agent: "claude".to_string(),
+        base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
         session_name: Some("test-session".to_string()),
         worktree_path: Some("/tmp/worktree".to_string()),
@@ -585,6 +589,7 @@ fn test_push_changes_to_existing_pr_no_changes() {
         description: None,
         status: TaskStatus::Review,
         agent: "claude".to_string(),
+        base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
         session_name: None,
         worktree_path: Some("/tmp/worktree".to_string()),
@@ -624,6 +629,7 @@ fn test_push_changes_to_existing_pr_no_url() {
         description: None,
         status: TaskStatus::Review,
         agent: "claude".to_string(),
+        base_agent: Some("claude".to_string()),
         project_id: "proj-1".to_string(),
         session_name: None,
         worktree_path: Some("/tmp/worktree".to_string()),
@@ -3341,23 +3347,103 @@ fn test_needs_agent_switch_explicit_same_as_current() {
 }
 
 #[test]
-fn test_collect_phase_agents_all_same() {
+fn a_task_picked_to_run_on_another_agent_keeps_it() {
     use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
+    use crate::db::Task;
+
+    // Default agent is claude; the wizard picked gemini for this task.
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
+    let task = Task::new("Test", "gemini", "project-1");
+
+    for phase in ["research", "planning", "running", "review"] {
+        let (agent, switch) = needs_agent_switch(&config, &task, phase);
+        assert_eq!(agent, "gemini", "{phase}");
+        assert!(!switch, "{phase}");
+    }
+}
+
+#[test]
+fn a_phase_override_still_beats_the_task_pick() {
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
+    use crate::db::Task;
+
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let task = Task::new("Test", "gemini", "project-1");
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "running");
+    assert_eq!(agent, "codex");
+    assert!(switch);
+}
+
+#[test]
+fn a_phase_without_an_override_returns_to_the_task_pick() {
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
+    use crate::db::Task;
+
+    // Running was overridden to codex, which rewrote `agent`; review has no
+    // override, so it goes back to what the task was created with.
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let mut task = Task::new("Test", "gemini", "project-1");
+    task.agent = "codex".to_string();
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "review");
+    assert_eq!(agent, "gemini");
+    assert!(switch);
+}
+
+#[test]
+fn a_task_stored_without_a_base_agent_falls_back_to_the_default() {
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
+    use crate::db::Task;
 
     let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
-    let agents = collect_phase_agents(&config);
+    let mut task = Task::new("Test", "codex", "project-1");
+    task.base_agent = None;
+
+    let (agent, switch) = needs_agent_switch(&config, &task, "review");
+    assert_eq!(agent, "claude");
+    assert!(switch);
+}
+
+#[test]
+fn test_collect_phase_agents_all_same() {
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
+    use crate::db::Task;
+
+    let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
+    let task = Task::new("Test", "claude", "project-1");
+    let agents = collect_phase_agents(&config, &task);
     assert_eq!(agents, vec!["claude".to_string()]);
+}
+
+#[test]
+fn collect_phase_agents_deploys_for_the_task_pick_not_the_default() {
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
+    use crate::db::Task;
+
+    let mut global = GlobalConfig::default();
+    global.agents.running = Some("codex".to_string());
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    let task = Task::new("Test", "gemini", "project-1");
+    let agents = collect_phase_agents(&config, &task);
+    assert_eq!(agents, vec!["gemini".to_string(), "codex".to_string()]);
 }
 
 #[test]
 fn test_collect_phase_agents_mixed() {
     use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
+    use crate::db::Task;
 
     let mut global = GlobalConfig::default();
     global.agents.running = Some("codex".to_string());
     global.agents.review = Some("gemini".to_string());
     let config = MergedConfig::merge(&global, &ProjectConfig::default());
-    let agents = collect_phase_agents(&config);
+    let task = Task::new("Test", "claude", "project-1");
+    let agents = collect_phase_agents(&config, &task);
     assert_eq!(
         agents,
         vec![

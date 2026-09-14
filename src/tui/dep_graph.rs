@@ -219,6 +219,7 @@ mod tests {
             description: None,
             status,
             agent: "claude".to_string(),
+            base_agent: Some("claude".to_string()),
             project_id: "proj".to_string(),
             session_name: None,
             worktree_path: None,

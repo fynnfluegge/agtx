@@ -209,6 +209,17 @@ impl Database {
         let _ = self
             .conn
             .execute("ALTER TABLE tasks ADD COLUMN phase_entered_at TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN base_agent TEXT", []);
+        // A task that has never had a session has never been switched, so its
+        // `agent` is still the pick it was created with. Any other row's `agent`
+        // may be a per-phase override's, and is left to the configured default.
+        let _ = self.conn.execute(
+            "UPDATE tasks SET base_agent = agent
+             WHERE base_agent IS NULL AND status = 'backlog' AND session_name IS NULL",
+            [],
+        );
 
         // MCP transition request queue
         self.conn.execute_batch(
@@ -353,8 +364,8 @@ impl Database {
     pub fn create_task(&self, task: &Task) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at, base_agent)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             "#,
             params![
                 task.id,
@@ -376,6 +387,7 @@ impl Database {
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
                 task.phase_entered_at.map(|t| t.to_rfc3339()),
+                task.base_agent,
             ],
         )?;
         Ok(())
@@ -386,8 +398,8 @@ impl Database {
         for task in tasks {
             tx.execute(
                 r#"
-                INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                INSERT INTO tasks (id, title, description, status, agent, project_id, session_name, worktree_path, branch_name, pr_number, pr_url, plugin, cycle, referenced_tasks, escalation_note, base_branch, created_at, updated_at, phase_entered_at, base_agent)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 "#,
                 params![
                     task.id,
@@ -409,6 +421,7 @@ impl Database {
                     task.created_at.to_rfc3339(),
                     task.updated_at.to_rfc3339(),
                     task.phase_entered_at.map(|t| t.to_rfc3339()),
+                    task.base_agent,
                 ],
             )?;
         }
@@ -443,7 +456,8 @@ impl Database {
                 escalation_note = ?14,
                 base_branch = ?15,
                 updated_at = ?16,
-                phase_entered_at = CASE WHEN status != ?4 THEN ?17 ELSE phase_entered_at END
+                phase_entered_at = CASE WHEN status != ?4 THEN ?17 ELSE phase_entered_at END,
+                base_agent = ?18
             WHERE id = ?1
             "#,
             params![
@@ -464,6 +478,7 @@ impl Database {
                 task.base_branch,
                 task.updated_at.to_rfc3339(),
                 chrono::Utc::now().to_rfc3339(),
+                task.base_agent,
             ],
         )?;
         Ok(())
@@ -483,6 +498,7 @@ impl Database {
             status: TaskStatus::from_str(&row.get::<_, String>("status")?)
                 .unwrap_or(TaskStatus::Backlog),
             agent: row.get("agent")?,
+            base_agent: row.get("base_agent").ok().flatten(),
             project_id: row.get("project_id")?,
             session_name: row.get("session_name")?,
             worktree_path: row.get("worktree_path")?,

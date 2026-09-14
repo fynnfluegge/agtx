@@ -170,6 +170,27 @@ fn test_in_memory_project_db_update_task() {
 
 #[test]
 #[cfg(feature = "test-mocks")]
+fn a_phase_switch_does_not_overwrite_the_task_pick() {
+    let db = Database::open_in_memory_project().unwrap();
+    let mut task = Task::new("Picked gemini", "gemini", "proj-1");
+    db.create_task(&task).unwrap();
+    assert_eq!(
+        db.get_task(&task.id).unwrap().unwrap().base_agent.as_deref(),
+        Some("gemini")
+    );
+
+    // A per-phase override switches the running agent.
+    task.agent = "codex".to_string();
+    task.status = TaskStatus::Running;
+    db.update_task(&task).unwrap();
+
+    let retrieved = db.get_task(&task.id).unwrap().unwrap();
+    assert_eq!(retrieved.agent, "codex");
+    assert_eq!(retrieved.base_agent.as_deref(), Some("gemini"));
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
 fn test_in_memory_project_db_list_tasks() {
     let db = Database::open_in_memory_project().unwrap();
     let task1 = Task::new("Task 1", "claude", "proj-1");
@@ -547,6 +568,36 @@ fn test_open_project_same_path_returns_same_db() {
     let retrieved = db2.get_task(&task.id).unwrap();
     assert!(retrieved.is_some());
     assert_eq!(retrieved.unwrap().title, "Persistence test");
+}
+
+#[test]
+fn base_agent_is_backfilled_only_for_tasks_that_never_started() {
+    let (_data_dir, _guard) = redirect_data_dir();
+    let temp_dir = TempDir::new().unwrap();
+    let project_path = temp_dir.path();
+
+    // Rows as a binary without the column would have left them.
+    let db = Database::open_project(project_path).unwrap();
+    let mut fresh = Task::new("Never started", "gemini", "proj");
+    fresh.base_agent = None;
+    db.create_task(&fresh).unwrap();
+    let mut researched = Task::new("Has a session", "codex", "proj");
+    researched.base_agent = None;
+    researched.session_name = Some("proj:task-researched".to_string());
+    db.create_task(&researched).unwrap();
+    let mut running = Task::new("Running", "codex", "proj");
+    running.base_agent = None;
+    running.status = TaskStatus::Running;
+    db.create_task(&running).unwrap();
+    drop(db);
+
+    let db = Database::open_project(project_path).unwrap();
+    let base = |id: &str| db.get_task(id).unwrap().unwrap().base_agent;
+    // Its `agent` is still the pick it was created with.
+    assert_eq!(base(&fresh.id).as_deref(), Some("gemini"));
+    // These may be running a per-phase override's agent; not a pick.
+    assert_eq!(base(&researched.id), None);
+    assert_eq!(base(&running.id), None);
 }
 
 #[test]

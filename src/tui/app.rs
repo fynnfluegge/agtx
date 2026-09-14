@@ -1001,19 +1001,22 @@ impl App {
 
         // Re-deploy agent configs for worktrees set up by a different agtx binary.
         if let Some(ref project_path) = app.state.project_path {
-            let candidates: Vec<(String, Option<String>)> = app
+            let candidates: Vec<(String, Option<String>, Vec<String>)> = app
                 .state
                 .board
                 .tasks
                 .iter()
                 .filter(|t| t.status != TaskStatus::Done)
-                .filter_map(|t| t.worktree_path.clone().map(|wt| (wt, t.plugin.clone())))
+                .filter_map(|t| {
+                    t.worktree_path.clone().map(|wt| {
+                        (wt, t.plugin.clone(), collect_phase_agents(&app.state.config, t))
+                    })
+                })
                 .collect();
             if !candidates.is_empty() {
                 refresh_stale_worktree_configs(
                     candidates,
                     project_path.clone(),
-                    collect_phase_agents(&app.state.config),
                     app.state.config.agent_hooks,
                 );
             }
@@ -5319,10 +5322,20 @@ impl App {
                 let start_pos = self.prompt_mut().cursor;
                 self.prompt_mut().insert_char('/');
 
+                // In the syntax of the agent the task will run on, which the
+                // wizard's agent step may have changed.
+                let skill_agent = self
+                    .state
+                    .wizard
+                    .as_ref()
+                    .and_then(|w| w.agent_name())
+                    .unwrap_or(self.state.config.default_agent.as_str())
+                    .to_string();
+
                 // Start with bundled skills (always available, no filesystem needed)
                 let mut seen = std::collections::HashSet::new();
                 let mut all_skills: Vec<SkillEntry> =
-                    skills::enumerate_available_skills(&self.state.config.default_agent)
+                    skills::enumerate_available_skills(&skill_agent)
                         .into_iter()
                         .map(|(command, description)| {
                             seen.insert(command.clone());
@@ -5336,7 +5349,7 @@ impl App {
                 // Merge filesystem-discovered skills (project root), dedup by command
                 if let Some(ref project_path) = self.state.project_path {
                     for (command, description) in
-                        skills::scan_agent_skills(&self.state.config.default_agent, project_path)
+                        skills::scan_agent_skills(&skill_agent, project_path)
                     {
                         if seen.insert(command.clone()) {
                             all_skills.push(SkillEntry {
@@ -5440,7 +5453,8 @@ impl App {
             return Ok(());
         };
         // The agent step's pick when it offered one, else the configured
-        // default. `Task::agent` is what every later phase reads.
+        // default. Stored as `Task::base_agent`, which every later phase
+        // without its own `[agents]` entry resolves to.
         let agent = wizard
             .agent_name()
             .map(str::to_string)
@@ -5472,7 +5486,13 @@ impl App {
                 if let Some(mut task) = db.get_task(&task_id)? {
                     task.title = title;
                     task.description = description;
-                    task.agent = agent;
+                    task.base_agent = Some(agent.clone());
+                    // A research window keeps running the agent it was launched
+                    // with; `agent` must keep naming it, so the next phase sees the
+                    // difference and switches.
+                    if task.session_name.is_none() {
+                        task.agent = agent;
+                    }
                     task.plugin = plugin;
                     task.referenced_tasks = refs;
                     task.updated_at = chrono::Utc::now();
@@ -5565,7 +5585,7 @@ impl App {
                     .as_ref()
                     .and_then(|db| db.get_task(&id).ok().flatten())
             })
-            .map(|t| t.agent)
+            .map(|t| t.base_agent.unwrap_or(t.agent))
             .unwrap_or_else(|| default_agent.clone());
 
         let options: Vec<PickOption> = self
@@ -6026,7 +6046,7 @@ impl App {
             false,
         );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
-        let all_agents = collect_phase_agents(&self.state.config);
+        let all_agents = collect_phase_agents(&self.state.config, task);
         let project_name = self.state.project_name.clone();
         let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = task
@@ -6444,11 +6464,11 @@ impl App {
             return Ok(());
         }
 
-        let agent_name = self.state.config.agent_for_phase("research").to_string();
+        let agent_name = phase_agent(&self.state.config, &task, "research").to_string();
 
         let task_content = task.content_text();
 
-        let all_agents = collect_phase_agents(&self.state.config);
+        let all_agents = collect_phase_agents(&self.state.config, &task);
         let project_name = self.state.project_name.clone();
         let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = task
@@ -7229,8 +7249,8 @@ impl App {
 
         let plugin_name = task.plugin.clone();
         let plugin = self.load_task_plugin(&task);
-        let running_agent = self.state.config.agent_for_phase("running").to_string();
-        let all_agents = collect_phase_agents(&self.state.config);
+        let running_agent = phase_agent(&self.state.config, &task, "running").to_string();
+        let all_agents = collect_phase_agents(&self.state.config, &task);
         let prompt = resolve_prompt(&plugin, "running", &task_content, &task.id, task.cycle);
         let skill_cmd = resolve_skill_command(
             &plugin,
@@ -12735,23 +12755,39 @@ fn glob_path_exists(pattern: &str) -> bool {
     false
 }
 
-/// Check if a phase transition requires switching to a different agent.
-/// Returns (target_agent_name, needs_switch).
+/// The agent `task` runs in `phase`: the phase's own `[agents]` entry, else the
+/// task's own agent (`Task::base_agent`), else the configured default.
+///
+/// The task's agent stands exactly where `default_agent` would, so a per-phase
+/// override still wins, and a phase without one returns to the task's pick —
+/// not to the global default, and not to whichever override ran last, which is
+/// what `Task::agent` holds by then.
+fn phase_agent<'a>(config: &'a MergedConfig, task: &'a Task, phase: &str) -> &'a str {
+    config
+        .explicit_agent_for_phase(phase)
+        .or(task.base_agent.as_deref().filter(|a| !a.is_empty()))
+        .unwrap_or(&config.default_agent)
+}
+
 /// Determine the target agent for a phase and whether a switch is needed.
-/// Uses the phase-specific agent if configured, otherwise falls back to default_agent.
+/// Returns (target_agent_name, needs_switch). See `phase_agent` for the target.
 fn needs_agent_switch(config: &MergedConfig, task: &Task, phase: &str) -> (String, bool) {
-    let target = config.agent_for_phase(phase);
+    let target = phase_agent(config, task, phase);
     // Empty task.agent means agent not yet assigned (SetupResult pending) — no switch needed
     let switch = !task.agent.is_empty() && task.agent != target;
     (target.to_string(), switch)
 }
 
-/// Collect all unique agent names configured across phases.
-/// Used to deploy skills for all agents that might be used during a task's lifecycle.
-fn collect_phase_agents(config: &MergedConfig) -> Vec<String> {
-    let mut agents: Vec<String> = vec![config.default_agent.clone()];
+/// Every agent `task` can run on: the one in its window now, plus each phase's.
+/// Used to deploy skills for all of them at worktree setup, since a later phase
+/// switch finds the worktree already written.
+fn collect_phase_agents(config: &MergedConfig, task: &Task) -> Vec<String> {
+    let mut agents: Vec<String> = Vec::new();
+    if !task.agent.is_empty() {
+        agents.push(task.agent.clone());
+    }
     for phase in &["research", "planning", "running", "review"] {
-        let agent = config.agent_for_phase(phase).to_string();
+        let agent = phase_agent(config, task, phase).to_string();
         if !agents.contains(&agent) {
             agents.push(agent);
         }
@@ -13601,9 +13637,8 @@ fn claude_shaped_hooks(
 /// Runs on a background thread at startup and rewrites only worktrees whose
 /// marker disagrees with the running binary.
 fn refresh_stale_worktree_configs(
-    stale_candidates: Vec<(String, Option<String>)>,
+    stale_candidates: Vec<(String, Option<String>, Vec<String>)>,
     project_path: PathBuf,
-    agent_names: Vec<String>,
     agent_hooks: bool,
 ) {
     let Ok(current_bin) = std::env::current_exe() else {
@@ -13613,9 +13648,8 @@ fn refresh_stale_worktree_configs(
 
     std::thread::spawn(move || {
         let mut plugin_cache: HashMap<Option<String>, Option<WorkflowPlugin>> = HashMap::new();
-        let refs: Vec<&str> = agent_names.iter().map(|s| s.as_str()).collect();
 
-        for (worktree, plugin_name) in stale_candidates {
+        for (worktree, plugin_name, agent_names) in stale_candidates {
             let wt = Path::new(&worktree);
             if !wt.exists() {
                 continue;
@@ -13639,6 +13673,7 @@ fn refresh_stale_worktree_configs(
                 worktree = %worktree,
                 "Re-deploying agent configs: worktree was set up by a different agtx binary"
             );
+            let refs: Vec<&str> = agent_names.iter().map(|s| s.as_str()).collect();
             write_skills_to_worktree(&worktree, &project_path, &plugin, &refs, agent_hooks);
         }
     });

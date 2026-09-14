@@ -62,7 +62,16 @@ pub struct Task {
     pub title: String,
     pub description: Option<String>,
     pub status: TaskStatus,
+    /// The agent running in the task's window now. A phase with its own agent
+    /// in `[agents]` switches the task over and rewrites this, which is why it
+    /// cannot also carry the task's own pick — see `base_agent`.
     pub agent: String,
+    /// The agent this task runs on in any phase without a per-phase override:
+    /// the task wizard's pick, or the configured default at creation. Stands in
+    /// for `default_agent` when a phase's agent is resolved, so a task picked to
+    /// run on another agent stays on it. `None` for a task stored before the
+    /// column existed, which falls back to the configured default.
+    pub base_agent: Option<String>,
     pub project_id: String,
     pub session_name: Option<String>,
     pub worktree_path: Option<String>,
@@ -93,12 +102,14 @@ impl Task {
     ) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
+        let agent = agent.into();
         Self {
             id,
             title: title.into(),
             description: None,
             status: TaskStatus::Backlog,
-            agent: agent.into(),
+            base_agent: Some(agent.clone()),
+            agent,
             project_id: project_id.into(),
             session_name: None,
             worktree_path: None,
