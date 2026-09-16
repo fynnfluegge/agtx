@@ -44,7 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 
 # MCP server
-rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "2.0", features = ["server", "macros", "transport-io"] }
 
 # Web server for `agtx serve` (feature = "serve"). Optional not for binary size
 # — `tokio` above is unconditional with `features = ["full"]`, so the runtime is
