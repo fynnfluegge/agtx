@@ -39,151 +39,69 @@ cargo build --release
 ./target/release/agtx update [--check]
 ```
 
-Logs are written as JSON to `~/.config/agtx/logs/agtx.log` (daily rotation, `RUST_LOG` respected).
+Logs are JSON at `~/.config/agtx/logs/agtx.log` (daily rotation, `RUST_LOG` respected).
 
 ## Architecture
 
 ```
 src/
-├── main.rs           # Entry point, CLI arg parsing, AppMode enum, FeatureFlags
-├── lib.rs            # Module exports, AppMode, FeatureFlags
+├── main.rs           # Entry point, CLI arg parsing, AppMode, FeatureFlags
+├── lib.rs            # Module exports
 ├── skills.rs         # Skill constants, agent-native paths, plugin command translation
 ├── tui/
-│   ├── mod.rs        # Re-exports
 │   ├── app.rs        # Main App struct, event loop, rendering (largest file)
-│   ├── app_tests.rs  # Unit tests for app.rs (included via #[path])
 │   ├── board.rs      # BoardState - kanban column/row navigation
 │   ├── config_editor.rs # In-TUI config form: declared fields, two matches
-│   ├── config_editor_tests.rs # Unit tests for config_editor.rs (via #[path])
 │   ├── dep_graph.rs  # Pure dependency-graph model (topological levels, unblocked nodes)
-│   ├── help.rs       # The `?` overlay's binding table (declared, not open-coded)
-│   ├── help_tests.rs # Unit tests for help.rs (included via #[path])
-│   ├── input.rs      # InputMode enum for UI states
+│   ├── help.rs       # The `?` overlay's binding table (declared)
+│   ├── input.rs      # InputMode enum
 │   ├── serve_control.rs # The `W` overlay: run `agtx serve` as a child, manage devices
 │   ├── shell_popup.rs # Shell popup state, rendering, content trimming
 │   ├── text_input.rs # Shared line editor: buffer + byte caret, motion, deletion
-│   ├── text_input_tests.rs # Unit tests for text_input.rs (included via #[path])
-│   ├── wizard.rs     # Task create/edit wizard state: steps, fields, agent + plugin picks
-│   └── wizard_tests.rs # Unit tests for wizard.rs (included via #[path])
-├── db/
-│   ├── mod.rs        # Re-exports
-│   ├── schema.rs     # Database struct, SQLite operations
-│   └── models.rs     # Task, Project, TaskStatus, PhaseStatus, TransitionRequest,
-│                     # Notification, RunningAgent, AgentStatus
+│   ├── wizard.rs     # Task create/edit wizard state
+│   └── *_tests.rs    # Unit tests included via #[path]
+├── db/{schema.rs (SQLite ops), models.rs (Task, Project, TaskStatus, PhaseStatus, ...)}
 ├── tmux/
 │   ├── mod.rs        # Tmux server "agtx", session management
-│   ├── operations.rs # TmuxOperations trait (mockable for testing)
+│   ├── operations.rs # TmuxOperations trait (mockable)
 │   ├── input.rs      # PaneInput/PaneInputSink, the input broker, both backends
-│   ├── input_tests.rs # Coalescing, ordering, queue policy (included via #[path])
-│   ├── control.rs    # Persistent `tmux -C` client, frame parser, tmux command encoder
-│   └── control_tests.rs # Encoder fixtures + parser tests (included via #[path])
-├── git/
-│   ├── mod.rs        # is_git_repo, repo_root, current_branch, diff_stat/diff_full,
-│                     # merge_branch, check_merge_conflicts, delete_branch
-│   ├── worktree.rs   # Git worktree create/list, is_main_working_tree
-│   ├── operations.rs # GitOperations trait (mockable for testing)
-│   └── provider.rs   # GitProviderOperations trait (GitHub PR ops)
+│   └── control.rs    # Persistent `tmux -C` client, frame parser, command encoder
+├── git/{mod.rs (repo/branch/diff/merge/conflicts), worktree.rs, operations.rs, provider.rs}
 ├── agent/
-│   ├── mod.rs        # Agent struct, detection, command builders (all derived from spec.rs)
+│   ├── mod.rs        # Agent struct, detection, command builders (derived from spec.rs)
 │   ├── spec.rs       # AgentSpec table — one declarative record per agent + kind enums
-│   ├── hook_status.rs # Agent-reported liveness: per-agent event vocabularies,
-│                     # what agtx registers, atomic status writes, staleness
-│   ├── trust.rs      # Reads each agent's own workspace-trust store; seeds antigravity's
-│   ├── trust_tests.rs # Unit tests for trust.rs (included via #[path])
+│   ├── hook_status.rs # Agent-reported liveness: event vocabularies, atomic status writes
+│   ├── trust.rs      # Reads each agent's own workspace-trust store
 │   └── operations.rs # AgentOperations/CodingAgent traits (mockable)
-├── core/             # Domain logic with no terminal, HTTP or agent transport attached
-│   ├── actions.rs    # allowed_actions + CallerKind — what a task permits, and to whom
-│   └── input.rs      # Getting text and keys into a pane: submit_message, composer parking
-├── mcp/
-│   ├── mod.rs        # Re-exports
-│   └── server.rs     # MCP server (JSON-RPC over stdio) — global and project-scoped modes
+├── core/{actions.rs (allowed_actions + CallerKind), input.rs (submit_message, parking)}
+├── mcp/server.rs     # MCP server (JSON-RPC over stdio) — global and project-scoped modes
 ├── web/              # `agtx serve` — the board over HTTP (feature = "serve")
-│   ├── mod.rs        # ServeOptions, startup, the banner and its QR
-│   ├── routes.rs     # Router, read endpoints, the auth layer, the embedded-asset fallback
-│   ├── writes.rs     # Actions (queued, never executed), task CRUD, /input, /api/pair
-│   ├── ws.rs         # Live pane frames — snapshot frames, not a PTY
-│   ├── state.rs      # ServeMode, ApiError, rate limit, conflict cache
-│   ├── auth.rs       # Pairing codes and per-device tokens
-│   ├── assets.rs     # The PWA, embedded with include_bytes! (no bundler)
-│   ├── qr.rs         # Pairing QR: half-blocks for a terminal, grid for ratatui
-│   └── tunnel.rs     # tailscale serve / funnel / cloudflared — plan is pure, spawn is not
-├── update/
-│   ├── mod.rs        # check_for_update() — the whole background check
-│   ├── version.rs    # Semver-lite parse/compare + the prerelease policy (pure)
-│   ├── check.rs      # Cache TTL, should_check, available (pure but for the file)
-│   ├── github.rs     # releases/latest over curl
-│   ├── release.rs    # Repo slug + archive naming, shared with install.sh/release.yml
-│   └── install.rs    # Download, verify sha256, atomic in-place binary swap
-└── config/
-    └── mod.rs        # GlobalConfig, ProjectConfig, MergedConfig, PhaseAgentsConfig,
-                      # WorktreeConfig, ThemeConfig, WorkflowPlugin, TrustStore
+│   └── mod.rs, routes.rs, writes.rs, ws.rs, state.rs, auth.rs, assets.rs, qr.rs, tunnel.rs
+├── update/{mod.rs, version.rs, check.rs, github.rs, release.rs, install.rs}
+└── config/mod.rs     # GlobalConfig, ProjectConfig, MergedConfig, WorkflowPlugin, TrustStore
 
 web/                   # The mobile PWA — plain ES modules, no build step
-├── index.html         # Shell; app.js is the only entry point
-├── app.js             # Router, screens, action sheet, swipe, live terminal
-├── api.js             # API client, credential capture, key-chip vocabulary
-├── ansi.js            # SGR-to-HTML — capture-pane emits only `ESC[…m`, so no emulator
-├── app.css            # Theme tokens tracking the TUI's palette
-├── sw.js              # Offline shell, network-first (never caches /api)
-└── manifest.webmanifest, icon-{192,512}.png
+└── index.html, app.js, api.js, ansi.js, app.css, sw.js, manifest.webmanifest, icons
 
-skills/                # Plugin skill files — auto-discovered as /agtx:* (Claude) or @agtx:* (Codex)
-├── sweep/SKILL.md     # Sweep skill — push any conversation to the board (/agtx:sweep)
-├── brainstorm/SKILL.md # Brainstorm skill — free-form exploration (/agtx:brainstorm)
-└── oneshot/SKILL.md   # Oneshot skill — an outside session runs the board as the human,
-                       # all five columns, driven by wait_for_board_change (/agtx:oneshot)
+skills/                # Plugin skill files — /agtx:* (Claude) or @agtx:* (Codex)
+└── sweep/, brainstorm/, oneshot/ SKILL.md
 
-.claude-plugin/        # Claude Code plugin manifest
-├── plugin.json        # Plugin metadata + MCP server registration
-└── marketplace.json   # Makes repo discoverable via /plugin marketplace add
-
-.codex-plugin/         # Codex plugin manifest
-└── plugin.json        # Plugin metadata (skills + MCP via .mcp.json)
-
-.mcp.json              # Shared MCP server config (used by Codex plugin)
+.claude-plugin/, .codex-plugin/, .mcp.json   # Plugin manifests + shared MCP config
 
 plugins/               # Bundled plugin configs (embedded at compile time)
-├── agtx/
-│   ├── plugin.toml    # Default workflow with skills and prompts
-│   └── skills/        # Builtin skills embedded via include_str! in src/skills.rs:
-│       ├── research.md, plan.md, execute.md, review.md
-│       ├── orchestrate.md      # Orchestrator agent skill (experimental)
-│       └── merge-conflicts.md  # Auto merge-conflict resolution skill
-├── agtx-terse/
-│   ├── plugin.toml    # Token-efficient variant of agtx workflow
-│   └── skills/        # Terse skill overrides with brevity directive
-├── gsd/plugin.toml    # Get Shit Done workflow
-├── spec-kit/plugin.toml # GitHub spec-kit workflow
-├── openspec/plugin.toml # OpenSpec specification framework
-├── bmad/plugin.toml   # BMAD Method - AI-driven agile development
-├── superpowers/plugin.toml # Superpowers - brainstorming, plans, TDD, subagent-driven dev
-├── oh-my-claudecode/plugin.toml # oh-my-claudecode - multi-agent orchestration
-├── agent-skills/plugin.toml # Agent Skills - spec-to-ship engineering skills
-└── void/plugin.toml   # Plain agent session, no prompting
+├── agtx/ (plugin.toml + skills: research, plan, execute, review, orchestrate, merge-conflicts)
+└── agtx-terse/, gsd/, spec-kit/, openspec/, bmad/, superpowers/,
+    oh-my-claudecode/, agent-skills/, void/  (each plugin.toml)
 
 tests/
-├── db_tests.rs        # Database, model, and dependency-graph tests
-├── config_tests.rs    # Configuration tests
-├── board_tests.rs     # Board navigation tests
-├── git_tests.rs       # Git worktree tests
-├── agent_tests.rs     # Agent detection and spawn args tests
-├── agent_parity_tests.rs # Per-agent behaviour lock (launch/resume/skill paths/syntax)
-├── hook_status_tests.rs  # Agent lifecycle-hook status reporting
-├── mcp_tests.rs       # MCP server tests
-├── update_tests.rs    # Version policy, cache TTL, artifact naming parity, binary swap
-├── mock_infrastructure_tests.rs # Mock infrastructure tests
-├── shell_popup_tests.rs         # Shell popup logic tests
-├── tmux_control_tests.rs        # Real-tmux pane input: ordering, escaping, sizing,
-│                                # reconnect, latency — opt-in via AGTX_TMUX_IT=1
+├── db_, config_, board_, git_, agent_ tests.rs
+├── agent_parity_tests.rs  # Per-agent behaviour lock (launch/resume/skill paths/syntax)
+├── hook_status_, mcp_, update_, mock_infrastructure_, shell_popup_ tests.rs
+├── tmux_control_tests.rs  # Real-tmux pane input — opt-in via AGTX_TMUX_IT=1
 └── smoke/             # Per-agent smoke tests — real binaries, no mocks, opt-in
-    ├── agent_smoke.py      # The runner: scratch repo → TUI in tmux → phases over MCP
-    ├── test_agent_smoke.py # Deterministic tests for the harness itself (no tmux/auth)
-    ├── agent_matrix.rs     # Dumps AGENT_SPECS + BUNDLED_PLUGINS as JSON for the runner
-    │                       # (a [[example]] in Cargo.toml, so `cargo test` compiles it)
-    └── README.md           # What it asserts, its outcomes, and what it has found
+    └── agent_smoke.py, test_agent_smoke.py, agent_matrix.rs, README.md
 
-benchmark/             # SWE-bench harness
-docker/                # Container images for sandboxed runs
+benchmark/ (SWE-bench harness), docker/ (sandbox images)
 ```
 
 ## Key Concepts
@@ -191,175 +109,45 @@ docker/                # Container images for sandboxed runs
 ### Task Workflow
 ```
 Backlog → Planning → Running → Review → Done
-            ↓           ↓         ↓        ↓
-         worktree    agent      optional  cleanup
-         + agent     working    PR        (keep
-         planning              (resume)   branch)
 ```
 
-- **Backlog**: Task ideas, not started. Also hosts the optional **Research** phase (`R`) — the research session runs in place, so a Backlog task can already have a worktree and tmux window. There is no separate `Research` status: `TaskStatus` is `Backlog | Planning | Running | Review | Done`, and Backlog's display name is `backlog/research`.
-- **Planning**: Creates git worktree at `{worktree_dir}/{slug}` (default `.agtx/worktrees/{slug}`, configurable via `worktree_dir`), copies configured files, runs init script, deploys skills, starts agent in planning mode
-- **Running**: Agent is implementing (sends execute command/prompt)
-- **Review**: Optionally create PR. Tmux window stays open. Can resume to address feedback
-- **Done**: Cleanup worktree + tmux window (branch kept locally). Runs the project `cleanup_script` before removal
+- **Backlog**: Task ideas. Also hosts the optional **Research** phase (`R`), which runs in place. No separate `Research` status — `TaskStatus` is `Backlog | Planning | Running | Review | Done`; Backlog's display name is `backlog/research`.
+- **Planning**: Creates git worktree at `{worktree_dir}/{slug}` (default `.agtx/worktrees/{slug}`), copies files, runs init script, deploys skills, starts agent.
+- **Running**: Agent implementing. **Review**: optionally create PR; tmux window stays open; can resume. **Done**: cleanup worktree + tmux window (branch kept locally), runs `cleanup_script` first.
+- Backlog can skip to Running (`M`); Running can go back to Planning (`r`).
 
-Backlog tasks can also skip straight to Running (`M`), and Running can be sent back to Planning (`r`).
+**Removing a worktree** — `RealGitOps::remove_worktree` (`git/operations.rs`); all cleanup paths (Review→Done, force-move, delete `x`) go through it on a background thread. Refuses a main working tree (no-op `Ok`); `is_main_working_tree` checks the toplevel (`--show-toplevel`), not just the git dir. A failed removal prunes (`git worktree prune`) and returns `Err`. `delete_task_resources` removes the worktree independently of a branch; `delete_branch` (`git branch -D`) stays paired with having had a worktree.
 
-#### Removing a worktree
+**Reaping spawned processes** — `kill-window` misses processes backgrounded into their own group. `reap_task_processes` finds them by environment (`AGTX_TASK_ID` set on the window by `create_window`, inherited by children — catches daemons) and by descent from the pane (backstop, runs before `kill_window`). `processes_for_task` reads `/proc/<pid>/environ` else `ps`. A root pid (0/1) or agtx's own pid is refused. Children signalled before parents (TERM then KILL) via the `kill` command.
 
-`RealGitOps::remove_worktree` (`git/operations.rs`) is the only implementation any production path
-uses; all three cleanup paths — Review → Done, force-move to Done, and task delete (`x`) — go through
-it, and all three run on a background thread.
+**agtx's own files excluded from git** — `exclude_agtx_files_from_git` writes `AGTX_WRITTEN_PATHS` into `$GIT_COMMON_DIR/info/exclude` at worktree setup (per-worktree `info/exclude` is ignored by git). Exclude patterns affect untracked files only. Makes `git add -A` safe in the phase skills.
 
-Three properties, none of them incidental:
+**The phase skills commit** — `execute.md` and `review.md` end by committing (Done requires a clean tree; merging requires commits).
 
-- **A main working tree is refused, and the refusal is a no-op returning `Ok`.** Under
-  `skip_worktree` a task's `worktree_path` *is* the project root, so this is genuinely reachable with
-  the user's own checkout as the argument. git refuses it too, but that protection is inherited
-  rather than intended, and `fs::rename` — what a background trash directory would use instead — has
-  no concept of a main working tree at all.
-- **`is_main_working_tree` checks the toplevel, not just the git dir.** `--git-dir` ==
-  `--git-common-dir` alone is not enough: the default `worktree_dir` is `.agtx/worktrees`, *inside*
-  the project, so a worktree there that has lost its `.git` link makes git walk up and answer for the
-  main repository. Without the `--show-toplevel` half, exactly the half-deleted worktrees that most
-  need removing would be refused as if they were the user's checkout.
-- **A failed removal prunes and returns `Err`.** Measured against git 2.49: a *deleted* worktree
-  directory is handled by `git worktree remove` itself (exit 0), but a worktree whose `.git` link is
-  missing, or whose directory has been replaced by a file, fails with exit 128 and stays in
-  `git worktree list` — and `git worktree prune` is what clears it. A locked worktree fails and prune
-  does **not** clear it, which is why the error is propagated rather than only pruned away. Callers
-  log it; swallowing the exit status is what let a stale registration sit unnoticed.
-
-`delete_task_resources` removes the worktree independently of whether a branch exists — a task can
-have a worktree and no branch. Branch deletion stays paired with having had a worktree on purpose: a
-task with a branch and no worktree is one that reached Done, whose branch the workflow keeps, and
-`delete_branch` is `git branch -D`.
-
-#### Reaping what a task spawned
-
-`kill-window` signals the pane's own process group, which misses anything the agent backgrounded
-into a group of its own — a dev server, a watcher, a `python3 -m http.server`. Those get reparented
-to init and keep holding their ports — a static server can go on serving a worktree that has been
-deleted, and a later agent loads stale code from it.
-
-`reap_task_processes` finds them **two ways, because neither alone is enough**:
-
-- **By environment.** `create_window` sets `AGTX_TASK_ID` on the window, and a child inherits the
-  environment at spawn and never loses it. This is the one that catches a daemonized process, and
-  attribution is exact.
-- **By descent from the pane**, as the backstop for anything that never received the environment.
-  This half runs before `kill_window`, since the parent links vanish with the window.
-
-**Descent alone is not sufficient, and ordering does not make it so.** A process reparented to init
-*before* cleanup runs is already out of the tree, which is precisely the case that matters.
-
-**The alternatives were measured and rejected.** A cwd scan (`lsof -u <uid> -d cwd`) takes ~12s;
-`lsof +D <worktree>` walks the tree — 26s on a large checkout — and matches nothing once the
-directory is gone, which is the state cleanup leaves. Session id is not readable per-process from
-`ps` on macOS (`sess=` reports 0).
-
-Whether `ps -Eww` exposes another process's environment varies by platform and by how the caller was
-launched, so `processes_for_task` reads `/proc/<pid>/environ` where it exists and falls back to `ps`
-— Linux's `ps -E` means something else entirely, so the two cannot share one command. The parsing is
-split into `pids_matching_env` and tested against fixtures, because that is the half that can
-regress into signalling the wrong pids.
-
-**A root pid is refused, not reaped.** On macOS pid 0 is the ancestor of launchd, so
-`descendants_of(0)` returns *every process on the machine*. A pane can never legitimately be pid 0
-or 1, so a value that low means tmux answered with something that is not a pane pid, and the only
-safe response is to reap nothing. `a_root_pid_is_refused_rather_than_reaped` asserts both halves —
-that pid 0 really does own the whole tree, and that cleanup declines it. agtx's own pid is filtered
-for the same reason: it cannot currently match, and the cost of being wrong is killing the board.
-
-Children are signalled before parents so a supervisor cannot restart one on the way down, TERM then
-KILL. `descendants_of` builds the tree from one `ps -Ao pid=,ppid=` snapshot rather than walking
-`/proc`, which does not exist on macOS. The signals go through the `kill` command rather than a
-`libc` dependency: this file already reaches git and tmux the same way, and it keeps the path free
-of `unsafe`.
-
-#### agtx's own files are excluded from git
-
-`.agtx/` and the per-agent configs agtx deploys show as untracked in every worktree, and
-`has_changes` — which the Done guard reads from `git status --porcelain` — counts untracked files.
-Left visible, agtx's own bookkeeping would trip agtx's own guard on a project's first task, before
-any `.gitignore` exists. A guard that cries wolf first and means it second stops being believed, and
-a caller that works around it with a committed `.gitignore` is doing agtx's job.
-
-`exclude_agtx_files_from_git` writes `AGTX_WRITTEN_PATHS` into the repository's exclude file at
-worktree setup, once, inside a marked block.
-
-**There is exactly one place this can go.** Measured against git 2.55.0: a per-worktree
-`.git/worktrees/<name>/info/exclude` is *ignored*; only `$GIT_COMMON_DIR/info/exclude` takes effect,
-and it applies to the main checkout as well as every worktree.
-
-Sharing it with the user's own checkout is safe because **exclude patterns only affect untracked
-files** — also measured, and `the_exclude_cannot_hide_a_file_the_project_tracks` pins it: a tracked
-`.mcp.json` still reports its modification with `.mcp.json` excluded. So a project that deliberately
-tracks any of these keeps tracking it, and nothing a user committed can be hidden. The patterns are
-specific rather than whole dotdirs (`.claude/commands/agtx/`, not `.claude/`) because a project may
-keep its own content there, and only what agtx creates is agtx's to hide.
-
-This is what makes `git add -A` safe in the phase skills below.
-
-#### The phase skills commit
-
-`execute.md` and `review.md` end by committing. Done requires a clean tree and merging requires
-commits, so a phase that ends with its work uncommitted leaves a task that cannot reach Done — and
-the work sits in a worktree that Done deletes. Committing is the skill's job, not something left to
-the agent's initiative or a caller's instruction.
-
-#### A repository with no commits
-
-A worktree must be cut from a commit, so `git init` with no history — the starting state of any
-greenfield project — cannot host a task as it stands. `detect_main_branch` checks the exit status
-of its `git rev-parse --abbrev-ref HEAD` fallback: on an unborn branch that fails with 128 *and
-still prints the literal string* `HEAD`, which is not a revision a worktree can be cut from
-(`git worktree add` answers `invalid reference: HEAD`).
-
-When `has_no_commits` confirms the repository is genuinely empty, `create_initial_commit` makes one
-(`git commit --allow-empty -m init`) and setup proceeds. Refusing would be defensible, but "run
-`git commit --allow-empty` and start again" is the only answer to that refusal, and an empty commit
-on a repo with no history discards nothing and conflicts with nothing. The check is what keeps this
-narrow — a repository that has commits and fails for some other reason surfaces that error and never
-has history written into it.
+**A repository with no commits** — `has_no_commits` → `create_initial_commit` (`git commit --allow-empty -m init`), since a worktree must be cut from a commit. `detect_main_branch` checks the exit status of its `git rev-parse --abbrev-ref HEAD` fallback.
 
 ### Workflow Plugins
-Plugins customize the task lifecycle per phase. A plugin is a TOML file (`plugin.toml`) that defines:
-- **commands**: Slash commands sent to the agent at each phase (auto-translated per agent). Supports `preresearch` (one-time setup) and `research` (default research command).
-- **prompts**: Task content templates with `{task}`, `{task_id}`, and `{phase}` placeholders
-- **artifacts**: File paths that signal phase completion (supports `*` wildcards and `{phase}` placeholder)
-- **prompt_triggers**: Text patterns to wait for in tmux before sending prompts
-- **init_script**: Shell command run in worktree before agent starts (`{agent}` placeholder)
-- **copy_dirs**: Extra directories to copy from project root into worktrees
-- **copy_files**: Individual files to copy from project root into worktrees (merged with project-level `copy_files`)
-- **copy_back**: Files/dirs to copy from worktree back to project root when a phase completes
-- **cyclic**: When true, enables Review → Planning transition with incrementing phase counter (`p` on the board)
-- **clear_context_on_advance**: When true, send an agent-specific clear-context command before the phase skill/prompt on transitions. Honored for the agents whose `clear_context_command` is verified — Claude's `/clear` and pi's `/new` — and a no-op for the rest (issue #46). Delivery follows the agent's `send_strategy`: an Ink-class composer drops a combined text+Enter `send_keys`, and the parked text would then be concatenated with the skill+prompt into one unusable message, so those agents get the same paste-and-confirm path the message itself takes
-- **supported_agents**: Agent whitelist (empty = all supported)
-- **auto_dismiss**: Rules to auto-dismiss interactive prompts before sending the task prompt
+Plugins customize the lifecycle per phase. A plugin is `plugin.toml` defining: **commands** (slash commands sent per phase, auto-translated; supports `preresearch` + `research`), **prompts** (`{task}`/`{task_id}`/`{phase}` templates), **artifacts** (completion paths, `*` wildcards), **prompt_triggers** (text to wait for), **init_script** (`{agent}` placeholder), **copy_dirs**/**copy_files**/**copy_back**, **cyclic** (Review→Planning with incrementing phase, `p`), **clear_context_on_advance** (send a clear-context command before the phase skill; Claude `/clear`, pi `/new`, no-op for the rest), **supported_agents** (whitelist, empty = all), **auto_dismiss**.
 
-Phase gating is derived from the config: if a phase's command or prompt contains `{task}`, the phase can be entered directly from Backlog. Otherwise, it requires a prior phase artifact. If a phase has no command AND no prompt (e.g. void plugin), it is ungated and can be entered freely. There is no `research_required` flag: every gating decision is inferred from the plugin TOML.
+Phase gating is derived from config: a phase whose command/prompt contains `{task}` can be entered directly from Backlog; otherwise it needs a prior phase artifact. A phase with no command AND no prompt (void) is ungated. No `research_required` flag.
 
-Plugin resolution: project-local `.agtx/plugins/{name}/` → global `~/.config/agtx/plugins/{name}/` → bundled. `load_task_plugin` falls back to bundled plugins when disk load fails, so tasks always resolve their plugin correctly even if the on-disk copy is missing.
-
-Plugin discovery for pickers: `discover_custom_plugins` (in `src/skills.rs`) scans the global then project-local plugins directories and surfaces on-disk plugins alongside `BUNDLED_PLUGINS` in both the board selector (`P`) and the task creation wizard. Project-local plugins shadow global ones by name; names colliding with a bundled plugin are skipped (the bundled entry already represents them, and `load` resolves the on-disk copy). Both pickers filter discovered plugins by `supported_agents` against the default agent.
-
-Each task stores its plugin name explicitly in the database at creation time (e.g. `Some("agtx")`, `Some("gsd")`). Switching the project plugin only affects new tasks.
+Resolution: project-local `.agtx/plugins/{name}/` → global `~/.config/agtx/plugins/{name}/` → bundled (`load_task_plugin` falls back to bundled). `discover_custom_plugins` (`src/skills.rs`) surfaces on-disk plugins alongside `BUNDLED_PLUGINS` in the board selector (`P`) and wizard (project-local shadows global; bundled-name collisions skipped; filtered by `supported_agents`). Each task stores its plugin name explicitly; switching the project plugin only affects new tasks.
 
 ### Skill System
-Skills are markdown files with YAML frontmatter deployed to agent-native discovery paths in worktrees:
-- Claude: `.claude/commands/agtx/plan.md`
-- Gemini: `.gemini/commands/agtx/plan.toml` (converted to TOML format)
-- Codex: `.codex/skills/agtx-plan/SKILL.md`
-- Cursor: `.cursor/skills/agtx-plan/SKILL.md`
-- Grok: `.grok/skills/agtx-plan/SKILL.md`
-- Antigravity: `.agents/skills/agtx-plan/SKILL.md` (vendor-neutral tree, not an agent dotdir)
-- OpenCode: `.opencode/command/agtx-plan.md` (frontmatter stripped)
-- Copilot: `.github/agents/agtx/plan.md`
+Skills are markdown with YAML frontmatter deployed to agent-native paths in worktrees. Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
 
-Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
+| Agent | Skill path |
+|-------|-----------|
+| claude | `.claude/commands/agtx/plan.md` |
+| gemini | `.gemini/commands/agtx/plan.toml` (TOML) |
+| codex | `.codex/skills/agtx-plan/SKILL.md` |
+| cursor | `.cursor/skills/agtx-plan/SKILL.md` |
+| grok | `.grok/skills/agtx-plan/SKILL.md` |
+| antigravity | `.agents/skills/agtx-plan/SKILL.md` (vendor-neutral) |
+| opencode | `.opencode/command/agtx-plan.md` (frontmatter stripped) |
+| copilot | `.github/agents/agtx/plan.md` |
 
-`write_skills_to_worktree()` also drops a **per-agent MCP config** into the worktree so the task's agent can reach the project-scoped MCP server (`agtx mcp-serve <project>`). Both the filename and the format vary:
+`write_skills_to_worktree()` also drops a **per-agent MCP config** pointing at `agtx mcp-serve <project>`:
 
 | Agent | File | Format |
 |-------|------|--------|
@@ -372,722 +160,155 @@ Canonical copy always at `.agtx/skills/agtx-plan/SKILL.md`.
 | opencode | opencode config | JSON, `mcp` |
 | pi | `.pi/mcp.json` | JSON, `mcpServers` |
 
-Four writers **merge** instead of overwriting, because their file may already exist in the worktree — either tracked in the repo, or (for `.gemini`, `.grok` and `.agents`) copied in from the project root by `AGENT_CONFIG_DIRS`; `.pi` is not in that list, so only the tracked-in-the-repo half applies to it. Grok appends `[mcp_servers.agtx]` to any existing `.grok/config.toml`; antigravity parses `.agents/mcp_config.json` and inserts `mcpServers.agtx`, preserving other servers and top-level sibling keys (`.agents/` is vendor-neutral, so a project is more likely to ship one); gemini inserts into `.gemini/settings.json`, which otherwise loses the user's theme, model and any other `mcpServers`; pi's `.pi/mcp.json` is where the `pi-mcp-adapter` package persists its own per-server `disabled` flags, so clobbering it re-enables servers the user switched off. pi has no MCP client of its own — without that package the file is inert, not harmful. Claude's `settings.local.json` side-effect below merges for the same reason.
+Four writers (grok, antigravity, gemini, pi) **merge** instead of overwriting (their file may already exist — tracked, or copied from the project root by `AGENT_CONFIG_DIRS`). Claude's `settings.local.json` side-effect merges too and gets `enableAllProjectMcpServers: true` + `skipDangerousModePermissionPrompt: true` (avoids a first-open dialog). `write_skills_to_worktree` also seeds antigravity's `trustedWorkspaces` when the project root is trusted (`agent::trust`; home lookups via `agent_trust_home()` honouring `AGTX_AGENT_HOME`).
 
-Claude needs an extra side-effect to avoid an interactive dialog on first open: `.claude/settings.local.json` gets `enableAllProjectMcpServers: true` plus `skipDangerousModePermissionPrompt: true`, which is what actually preflights the bypass-permissions warning (see the dialog table).
+Commands are written once canonical (`/ns:command`) and auto-translated: Claude/Gemini `/ns:command`; OpenCode/Cursor/Grok/Antigravity `/ns-command`; Codex `$ns-command`; Copilot prompt-only.
 
-No `[projects."<worktree>"] trust_level = "trusted"` entry goes into the user's global `~/.codex/config.toml`. **Measured:** codex resolves trust to the *git repository root*, and a worktree under a trusted root both skips the dialog and loads its own `.codex/config.toml` — `/mcp` lists agtx with or without the entry. It buys nothing and accumulates one entry per worktree.
-
-`write_skills_to_worktree` also seeds antigravity's `trustedWorkspaces` for the new worktree, when the project root is already trusted there (`agent::trust`). It is the right call site for both worktree creation *and* an agent switch: with a per-phase agent config, the switched-in agent sees the worktree for the first time at switch time. Home-directory lookups go through `agent_trust_home()`, which honours `AGTX_AGENT_HOME` so the test suite never touches the real user's config.
-
-### MCP pre-handshake filter
-`agtx mcp-serve` does not hand raw stdio to rmcp. Antigravity probes every stdio server with a custom `server/discover` request *before* `initialize`, and rmcp treats a non-`initialize` first message as fatal (`ExpectedInitializeRequest`) and exits — so the follow-up `initialize` hits a closed pipe. `src/mcp/prehandshake.rs` answers pre-handshake requests with JSON-RPC `-32601` and keeps the connection open; once `initialize` is forwarded it is a pass-through. Two background tasks pump real stdin/stdout through in-memory duplex pipes (`filtered_stdio()` in `src/mcp/server.rs`).
-
-Commands are written once in canonical format (`/ns:command`) and auto-translated:
-- Claude/Gemini: `/ns:command` (unchanged)
-- OpenCode/Cursor/Grok/Antigravity: `/ns-command` (colon → hyphen, slash kept)
-- Codex: `$ns-command` (slash → dollar, colon → hyphen)
-- Copilot: no interactive skill invocation (prompt only, no commands sent)
+**MCP pre-handshake filter** — Antigravity probes stdio servers with `server/discover` before `initialize`, which rmcp treats as fatal. `src/mcp/prehandshake.rs` answers pre-handshake requests with JSON-RPC `-32601` and keeps the connection open; once `initialize` is forwarded it is a pass-through (`filtered_stdio()` in `src/mcp/server.rs`).
 
 ### Sending Skills & Prompts to Agents
-Prompt delivery has **two lanes**. Getting this wrong is the usual cause of "the agent started but never got the task".
+Two lanes.
 
-**Launch lane — the first message of a task's life.** The skill command and prompt are composed by `compose_launch_text()` and handed to the process in **argv**, so the agent starts with the task already in hand: no readiness polling, no window in which a keystroke can be dropped. Gated by `spec::can_launch_with_prompt()`, which requires both an agent whose launch form is *verified* (`AgentSpec::launch_prompt_verified` — all but copilot, which is unmeasured) and a prompt under `MAX_LAUNCH_PROMPT_BYTES` (128 KiB; `execve` counts bytes). Anything else falls through to the mid-session lane.
+**Launch lane** (first message of a task's life, and **an agent switch**): skill + prompt composed by `compose_launch_text()` and handed to the process in **argv**. Gated by `spec::can_launch_with_prompt()`: `AgentSpec::launch_prompt_verified` (all but copilot) and a prompt under `MAX_LAUNCH_PROMPT_BYTES` (128 KiB). A **same-agent** advance cannot use it (process already running → typed lane). `create_window` nests inside `sh -c '…'` so a prompt there is quoted twice (`single_quote()` in `src/tmux/operations.rs` is the second layer; the switch path types into a running shell — one level). `resolve_skill_command(collapse: false)` keeps `{task}` paragraphs; `spec::normalize_prompt()` strips control chars. `setup_task_worktree` returns `(target, launched_with_prompt)`; callers skip the send when true.
 
-**An agent switch takes this lane too.** The rule is *whenever agtx starts a new agent process and has a prompt for it, the prompt goes in argv* — a switch is the same act as a first launch, just into an existing window. `spawn_send_to_agent` and the cyclic Review→Planning path compose the launch text and skip the send when it lands; the two resume-style switches carry no prompt. A **same-agent** advance cannot use it: that process is already running, so the typed lane is correct there.
+**Mid-session lane** — `send_skill_and_prompt()`, three paths:
+1. **opencode** — its picker strips arguments typed all at once. Send bare command name → wait for picker → Enter → send args → Enter.
+2. **gemini / codex / cursor / antigravity / pi** — skill + prompt combined into a single message via **bracketed paste** (`paste_text`) + one Enter.
+3. **everything else** (claude, copilot, grok) — generic `match (skill_cmd, prompt_trigger)` using `send_keys`, waiting on `prompt_triggers`.
 
-One trap: `create_window` nests its command inside `sh -c '…'`, so a prompt going that way is quoted **twice** (`wrap_launch_command` + `compose_command`). The switch path types a command line into the window's *already-running* shell — **one** level. Adding `single_quote` again there would deliver visible backslashes into the composer. A multi-line launch text is sent with `paste_text` + `Enter` rather than `send_keys`, because a newline typed at a shell prompt submits the line. `setup_task_worktree` returns `(target, launched_with_prompt)` and its callers skip the send entirely when true.
+**Submitting** — a bare skill command (a phase with no `{task}`, i.e. `review`) opens the composer's picker on the paste, consuming the first Enter. `submit_message()` watches the composer (presses Enter until the text is gone from the bottom `COMPOSER_TAIL_LINES`, window 14, bounded by `SUBMIT_ATTEMPTS`). Paths 1 and 2 go through `deliver_message()` (resends while the pane is unchanged, 3 attempts × 2s, stops on redraw). `clear_context_on_advance` applies before all three, only for Claude.
 
-Two consequences worth knowing: `resolve_skill_command(collapse: false)` is used here, so `{task}` keeps its paragraphs and lists (the typed path must flatten them); and `spec::normalize_prompt()` strips NUL, `\r` and other control characters that cannot survive argv, keeping `\n` and `\t`.
-
-**The prompt is quoted twice, and both layers must escape.** `compose_command` single-quotes the prompt, then `create_window` nests the whole command inside `sh -c …`. Interpolating it raw ends the outer word at the first inner quote and the shell parses the prompt as code — verified against tmux 3.5a, claude received argv `["--dangerously-skip-permissions", "/agtx:plan"]` with the task id and entire task silently gone, and codex's `$agtx-plan` lost `$agtx` to expansion. `single_quote()` in `src/tmux/operations.rs` is the second layer; its tests run the wrapper through a real `sh` and assert the delivered argv, because a string-equality test would have passed on the broken version.
-
-**Mid-session lane — phase advances into an already-running agent.** `send_skill_and_prompt()`, three paths, because agent TUIs disagree about how a slash command plus arguments must arrive:
-
-1. **opencode** — its picker strips arguments if the whole string is typed at once. So: send the bare command name → wait for the picker → Enter (inserts it) → send the args → Enter. Still on the typed path: it is the one flow where the text has to arrive in two pieces by design
-2. **gemini / codex / cursor / antigravity / pi** — skill + prompt combined into a *single* message delivered by **bracketed paste** (`paste_text`), then one Enter. The paste is atomic, so nothing has to poll until it renders, and the `\n\n` joining command to prompt stays literal text instead of arriving as a real Enter that submits the message half-written. Gemini executes-and-loses a separately sent prompt; Codex's `$skill` mentions are inline references that do nothing when sent standalone; pi's composer takes a paste as literal text but leaves a combined text+Enter `send_keys` sitting unsent. **How many Enters this takes is not fixed** — see *Submitting is its own delivery problem* below
-3. **everything else** (claude, copilot, grok) — the generic `match (skill_cmd, prompt_trigger)` path using `send_keys`, waiting on `prompt_triggers` between the command and the prompt when configured
-
-**Submitting is its own delivery problem.** A message with a prompt after the command submits on the first Enter. A **bare skill command** — what a phase whose command carries no `{task}`/`{task_id}` sends, which is `review` — exactly matches a skill name, so the composer's command picker opens *on the paste*. That Enter is then consumed by the picker ("Press enter to insert"), which inserts the command and repaints, leaving it parked. Measured against codex-cli 0.144.5 and cursor-agent 2026.08.25: both open the picker on a pasted bare command, and both submit on the second Enter.
-
-So `submit_message()` counts nothing and watches the composer instead: it presses Enter until the text is **gone from the bottom `COMPOSER_TAIL_LINES` of the pane**, bounded by `SUBMIT_ATTEMPTS`. A repaint is not a submit: a picker opening is a repaint. The window is 14 lines because the picker draws its suggestions *below* the composer and cursor's footer wraps the worktree path, putting the text eight or more lines off the bottom; sizing it from the tidy pane left behind *after* a failure is how a too-narrow window looks correct. Erring wide costs one inert Enter into a submitted composer; erring narrow parks the command forever.
-
-**Atomic is not the same as delivered.** An agent TUI that has not attached its stdin reader yet discards what it is sent — bracketed paste included, because the discard happens in the application, not in the pty — and `wait_for_agent_ready` cannot prove otherwise. So paths 1 and 2 go through `deliver_message()`, which resends **while the pane is unchanged** (three attempts, 2s each) and stops the moment it redraws, on the same reasoning `dismiss_launch_dialog` uses: a redraw means it landed, and resending would double the message. Landing is judged by the pane changing rather than by finding the text, because a composer wraps, re-indents and box-draws what it echoes.
-
-`clear_context_on_advance` is applied before all three, and only for Claude (`/clear`, then poll until the pane stabilises).
-
-**tmux send primitives** — pick by what you are sending, they are not interchangeable:
+**tmux send primitives** (pick by what you send, not interchangeable):
 
 | Method | tmux | Use for |
 |---|---|---|
-| `paste_text` | `load-buffer` + `paste-buffer -p` | a whole message; bracketed, atomic, newlines stay literal |
+| `paste_text` | `load-buffer` + `paste-buffer -p` | a whole message; bracketed, atomic, newlines literal |
 | `send_text` | `send-keys -l --` | literal text; no key-name lookup |
-| `send_key` | `send-keys` (no `-l`) | **key names** — `Enter`, `C-c`, dialog answers |
+| `send_key` | `send-keys` (no `-l`) | key names — `Enter`, `C-c`, dialog answers |
 | `send_keys` | `send-keys` + `Enter` | text plus a submit, generic path |
 
-Without `-l`, tmux resolves an argument that matches a key name *as that key*: `"Space"` arrives as `0x20`, `"Escape"` as `ESC`, `"Up"` as `\033[A` (tmux 3.5a). So `send_key` must never carry task-derived text — that is what `send_text` is for.
+Without `-l`, tmux resolves an argument matching a key name as that key. `send_key` must never carry task-derived text.
 
 ### Typing into a Task Pane
-The two lanes above deliver a *task*. This is the third lane, and it is the only one a **human** is
-waiting on: the keys forwarded from an open task popup.
+The third lane — keys forwarded from an open task popup (the only lane a human waits on).
 
 ```text
-crossterm key event
-        │  popup_key_input()          — Char → Text, everything else → Key
-        ▼
- PaneInputSink::send                  — enqueue only, never waits for tmux
-   bounded channel (1024)
-        ▼
-   one broker thread                  — the single ordering authority
-        ├─ coalesces adjacent Text for the same target (only while more is queued)
-        ├─ flushes before every Key, Paste, target change, popup close, shutdown
-        ├─► control backend  `tmux -C attach-session`   (persistent, opt-in)
-        └─► subprocess backend  `tmux send-keys`        (default, and the fallback)
-
-  popup refresh thread ──► PaneInputSink::capture ──┘   same queue, same connection
-        │                    (flushes first, then `capture-pane` + `display -p`)
-        ▼
-   ShellPopup.cached_content                          — drawn on the next frame
+crossterm key event → popup_key_input() (Char → Text, else → Key)
+  → PaneInputSink::send (enqueue only, never waits for tmux; bounded channel 1024)
+  → one broker thread (the single ordering authority)
+      ├─ coalesces adjacent Text for the same target (only while more is queued)
+      ├─ flushes before every Key, Paste, target change, popup close, shutdown
+      ├─► control backend  `tmux -C attach-session`   (persistent, opt-in)
+      └─► subprocess backend  `tmux send-keys`         (default, and fallback)
+  popup refresh thread → PaneInputSink::capture (same queue: flush, then capture-pane + display -p)
+  → ShellPopup.cached_content (drawn next frame)
 ```
 
-`SHELL_REFRESH_INTERVAL` bounds how stale the pane on screen is, and it only became a real knob
-once the capture stopped costing a pair of `tmux` processes. Its cost is paid per capture rather
-than per wake-up, and on the far side: a capture makes the tmux server format the whole pane. The
-ANSI parse is done **once per change on the watcher thread**, not once per frame on the UI thread —
-`ShellPopup` carries `cached_lines` beside `cached_content`, set together by `set_content` so the
-bytes change detection compares and the lines the popup renders cannot drift.
-
-**No key is a process.** Enqueueing is effectively free and delivery rides a persistent control
-connection, which is the whole reason this lane exists: a `tmux` client started and waited for on
-the input thread, per keystroke, is what it avoids.
-
-- **`PaneInput` is typed, not a formatted command**, because the broker must be able to tell literal
-  text from a key name: text goes out with `send-keys -l` (no key-name lookup), a key without it.
-  An unmodified character is therefore **`Text`**, not a key: `send-keys -t x ";"` never arrives at
-  all, because a standalone semicolon is how tmux separates commands.
-- **Batching never delays a key.** Enter, Escape, arrows, and anything Ctrl/Alt-modified flush the
-  buffer first and go immediately. A delayed Enter is a visibly broken editor.
-- **Nor does it delay ordinary typing.** Buffered text is flushed as soon as the queue is empty, and
-  between two keystrokes a human makes it always is: waiting out `DEFAULT_BATCH_WINDOW` would have
-  taxed *every* character while coalescing nothing, since there was no successor to merge with. The window survives as the bound on a genuine backlog — a paste arriving as
-  keystrokes, a held key — which is the only case it was ever for. That also makes coalescing
-  opportunistic by nature, so `input_tests.rs` pre-queues input before starting the broker rather
-  than racing it: a test that sends three characters to a running broker is asserting how fast the
-  machine is.
-- **A target change flushes.** Queued characters belong to the pane they were typed into; the popup
-  close, popup open and fullscreen-toggle paths all flush so nothing can follow the target.
-- **The control connection is on, and there is no config field for it.** A connect that fails, and a
-  connection lost later, both fall back to the subprocess backend on their own (`maybe_connect` /
-  `drop_control`), so a persisted setting could only hold a staler copy of a decision the broker
-  already makes at runtime. `AGTX_TMUX_CONTROL=0` turns it off for one run, which is what a bug
-  report needs to bisect the two lanes; `AGTX_TMUX_PUSH=0` does the same for the two *capture*
-  lanes, leaving control mode on but forcing the watcher back onto its timer. The non-blocking broker is *not* conditional either way —
-  the backend choice only decides what the broker thread writes through, so the subprocess path gets
-  the same ordering and the same responsive input thread.
-- **`tmux -C` is attached with `-f ignore-size,no-output`.** `ignore-size` keeps it out of tmux's
-  client-size calculation, so it cannot resize the pane the popup sized by hand; `no-output` stops
-  every byte an agent paints from being mirrored down our stdout, which the popup does not read
-  (it captures panes instead). The session is an **attach point**, but only for targets that name
-  their own session: `send-keys -t "orchestrator"` is resolved *inside the attached session*, so one
-  client drives every window on the server **only** if every target is `session:window`. That is
-  what `pane_target` guarantees, and it is not a nicety — `orchestrator` is a window name every
-  project session has, so a bare target after a project switch delivered keystrokes to the previous
-  project's agent, while a bare `task-<slug>` drew `%error can't find pane` and was dropped in
-  silence. `set_session` re-points the *next* connect, for when the old session is killed.
-- **`tmux_quote` is not `single_quote`.** Control mode parses tmux's syntax, not the shell's: inside
-  double quotes tmux replaces `$VAR`, `#{format}`, a leading `~`, and backslash escapes, so all of
-  `\ " $ # ~` are escaped, LF/CR/tab become `\n`/`\r`/`\t`, and the rest of C0 becomes `\ooo`. A
-  raw newline is the one thing that cannot be sent: commands are newline-terminated, so it splits
-  the command and the tail is parsed as a second one.
-- **A failed control write is not replayed.** A write error is ambiguous — part of it may have
-  reached tmux — and a duplicated Enter is worse than a dropped one. The request is dropped, the
-  connection is marked dead, and the *next* one goes to the subprocess backend. A backend found
-  *dead before writing* is different: nothing was sent, so that request moves to the fallback in
-  place, keeping its order.
-- **A full queue warns rather than reordering.** Sending synchronously would put that key ahead of
-  everything already queued, so agtx keeps the prefix and tells the user.
-- **The popup's pane capture rides the same connection**, as a `Capture` request in the input queue.
-  A *read* in an input queue looks misplaced until you ask what it is ordered against: the capture
-  must show the keys typed before it, and the broker is the only thing that knows whether those have
-  been flushed. It is also where the popup's lag actually lived: two `tmux` processes
-  (`capture-pane` + `display -p`) against the same pair over the control connection. Process
-  *startup* was the whole cost, not the work — `display -p`, which reads four variables, cost the
-  same as capturing 500 lines.
-  - The broker **declines** rather than falling back: with no control connection the caller's own
-    `capture-pane` is the same two processes for the same price, and running them on the broker
-    thread would park the next keystroke behind that `fork`/`exec`. `capture_pane_for_popup` owns
-    that fallback, and a declined capture costs one frame at the fallback's speed.
-  - A failed capture **keeps** a healthy connection, unlike a failed write. A write error is
-    ambiguous and tears the connection down; a read error is not, and demoting every later keystroke
-    to the subprocess path over one failed read would trade the fix for the bug.
-  - Both commands go in **one round trip**, which is also what keeps them consistent — the cursor row
-    is an index *into* the content, so metrics fetched a frame later can trim off a line the user
-    just typed. `PANE_METRICS_FORMAT` and `parse_pane_metrics` are shared with the subprocess path so
-    the two cannot drift, and a real-tmux test asserts the captures are **byte-identical**: they
-    parse different things (a process's stdout against reassembled `%begin`/`%end` payload lines) and
-    the popup would happily draw a subtly wrong frame without failing.
-  - **The cursor's row is resolved at trim time, not at draw time.** `trim_content_to_cursor` cuts
-    the unused buffer below the cursor off the capture, so the last cached line is no longer the
-    pane's last row and `total_lines - pane_height` under-counts by however many rows it dropped.
-    It therefore returns the cursor's line index alongside the content and `ShellPopup::cursor_line`
-    carries it to the renderer. A pane with **no scrollback hides the error** — the subtraction
-    saturates at 0 — so this only ever showed as a drifting cursor under agents that stay on the
-    normal screen and accumulate history (codex), and never under one that lives on the alternate
-    screen (claude), which is what made it look agent-specific rather than arithmetic.
-  - The format literal is **single-quoted, not `tmux_quote`d**: tmux performs no replacements inside
-    single quotes, so `#{cursor_x}` reaches `display-message` intact instead of being escaped to a
-    literal `\#{cursor_x}`. Verified on 3.5a that `-t` is honoured for the expansion, so a client
-    attached to one session reports the *target* pane and not its own active one.
-  - Because a payload is now a whole pane capture, `FrameParser` closes a block only on an `%end`
-    whose command id matches the `%begin`'s. An agent that paints a line starting `%end ` would
-    otherwise end the block early, hand back half a capture, and leave `completed` permanently ahead
-    of the commands actually run — which every barrier and query counts on.
-- **A paste stays on `load-buffer`** (it needs a pipe, not a command argument) and is issued behind a
-  `ControlClient::barrier` — the two travel different sockets, and only the barrier keeps the paste
-  behind the text typed before it.
-- **A pane with no tmux scrollback delegates its scroll keys to the agent.** A
-  full-screen agent UI lives in the terminal's *alternate screen*, which
-  accumulates no scrollback: `history_size` is 0, `capture-pane -S -500` returns
-  exactly the visible rows, and the session's history belongs to the agent.
-  Scrolling agtx's one-screen buffer would move nothing while the footer printed
-  a line number to match — which is what made an empty buffer look like a broken
-  scrollbar. So `ShellPopup::has_scrollback()` (from `PaneMetrics::history_size`,
-  free in the `display -p` the refresh already runs) switches those keys over to
-  `handle_popup_scroll`; the footer shows only the available actions. Unknown
-  metrics count as *has* scrollback, so a failed query changes nothing.
-  Scroll chords are translated rather than passed through: `C-n/p` use the same
-  Page Down/Up translation, while `C-g` uses End. Measured against
-  Claude Code 2.1.251: in its `ctrl+o`
-  transcript view all four of `Up`/`Down`/`PageUp`/`PageDown` scroll, but in the
-  main view `Up` recalls a previous prompt **into the composer** — overwriting
-  what the user was typing — while `PageUp` is inert. A raw `C-d` would be an
-  EOF that ends the session and `C-u` would kill the composer line, which is why
-  nothing is forwarded verbatim. Claude takes the alternate screen shortly after startup and never
-  gives it back, so this is the normal case for a task pane, not an edge one.
-  `C-g` maps to `End`, measured the same way: it returns the transcript view to
-  the bottom, and in the main view it only moves the composer cursor to the end
-  of the line without altering the text. `C-n/p` use that same Page Up/Down
-  translation; `C-d/u` remain explicit page navigation.
-  Unrelated but worth knowing when a key "does nothing": a user's **own** tmux
-  can eat it before agtx sees it — `vim-tmux-navigator` binds `C-h/C-j/C-k/C-l`
-  in the root table and only forwards them to vim-like panes.
-- Logs carry lengths, targets, key categories and timings. **Pane input is never logged.**
-- The broker's ordering authority covers **popup input**. agtx's own writes to a pane — a dialog
-  answer from `dismiss_launch_dialog`, a phase advance from `send_skill_and_prompt` — still go
-  through `TmuxOperations` on their own threads, unordered with respect to it. That was equally true
-  when both were subprocesses, and they do not overlap in practice: a pane parked on a dialog is not
-  one the user is typing into.
+- **No key is a process** — enqueueing is free; delivery rides a persistent control connection. **`PaneInput` is typed** — text goes out with `send-keys -l`, a key without it. **Batching never delays a key** — Enter/Escape/arrows/modified flush and go immediately; buffered text flushes as soon as the queue is empty (`DEFAULT_BATCH_WINDOW` bounds a genuine backlog). A target change flushes.
+- **The control connection is on, no config field.** A failed connect / lost connection falls back to subprocess (`maybe_connect`/`drop_control`); `AGTX_TMUX_CONTROL=0` / `AGTX_TMUX_PUSH=0` turn off control / capture-push for one run. `tmux -C` attaches with `-f ignore-size,no-output`; targets must name their own session — `pane_target` guarantees `session:window`, or a bare target after a project switch hits the wrong session.
+- **`tmux_quote` is not `single_quote`** — control mode parses tmux syntax (inside double quotes tmux replaces `$VAR`, `#{format}`, leading `~`, backslashes; `\ " $ # ~` escaped; a raw newline cannot be sent). **A failed control write is not replayed** (ambiguous) — dropped, connection marked dead, next request → subprocess. A full queue warns rather than reordering.
+- **The popup's pane capture rides the same connection** (a `Capture` request, so it shows keys typed before it). The broker declines with no control connection (`capture_pane_for_popup` is the fallback); a failed capture keeps a healthy connection. Both commands in one round trip; `trim_content_to_cursor` returns the cursor's line index carried by `ShellPopup::cursor_line`; `FrameParser` closes a block only on a matching `%end` command id.
+- **A pane with no tmux scrollback delegates scroll keys to the agent** (full-screen agents live on the alternate screen, `history_size` 0). `ShellPopup::has_scrollback()` switches to `handle_popup_scroll`; chords translated (`C-n/p` → PageUp/Down, `C-g` → End). Claude takes the alternate screen shortly after startup.
+- **Pane input is never logged.** The broker's ordering authority covers popup input only; agtx's own writes go through `TmuxOperations` on their own threads.
 
 ### First-Launch Dialogs
-Agents gate a directory they have not seen behind an interactive dialog. `LAUNCH_DIALOGS`
-(`src/tui/app.rs`) is the table, derived from `AgentSpec::dialogs`; `dismiss_launch_dialog` answers
-what it is allowed to.
+Agents gate an unseen directory behind a dialog. `LAUNCH_DIALOGS` (`src/tui/app.rs`, from `AgentSpec::dialogs`); `dismiss_launch_dialog` answers what it is allowed to.
 
-**These mostly do not fire any more, and by default agtx does not answer the ones that do.**
-Measured per agent (see `src/agent/trust.rs` for the table and the versions):
-
-- **Trust is inherited from the project root** for claude, codex and gemini — the default
-  `worktree_dir` is inside the project, so a user who opened the agent there once never sees the
-  prompt again. cursor and grok are launched with `--trust`, and pi with `--approve`; opencode has no trust gate. pi's flag does double duty: it is also what lets it load the `.pi/skills/` agtx wrote into the worktree, since pi gates project-local skills on the same trust decision.
-- **antigravity is the exception**: it matches trusted paths *exactly*, at any depth. agtx seeds
-  each new worktree into its `trustedWorkspaces` — but only when the project root is already there,
-  so it replays a consent the user gave rather than creating one.
-- **`AgentDialog::security` splits the table.** Trust prompts and the bypass-permissions warning are
-  the user's decision: with `auto_trust = false` (the default) agtx *detects* them — that is what
-  turns the card `Blocked`, with the reason and the fix — and leaves them unanswered. Prompts that
-  decide nothing about safety (codex's update prompt, its MCP tool approval) are answered either
-  way, since leaving them up only wedges the pane.
-- **Nothing is lost by waiting.** An argv-delivered prompt is *queued behind* a dialog, not eaten by
-  it — verified for claude, cursor, gemini and antigravity. `wait_for_agent_ready` returns `None`
-  when parked on an unanswered security dialog, so the typed fallback never sends into a menu.
-- `auto_trust = true` restores the historical behaviour, and is set by `docker/entrypoint.sh` and
-  the benchmark, where the container is disposable and nobody is at the board.
-
-Dialogs are declared per agent on `AgentSpec::dialogs` and **matched against the running agent's own entries** — a stray digit typed into another agent's live composer is real corruption. An agent with no spec falls back to matching every known dialog, which beats leaving its pane blocked forever.
-
-`answer` is a **key sequence**, not one key, because menus differ in kind: a numbered menu needs the digit and then an Enter to confirm, while an arrow-navigated menu whose safe option is already highlighted needs only the Enter — and sending it a digit first would type a stray character into the composer it opens.
+Mostly these do not fire (see `src/agent/trust.rs`): trust is inherited from the project root for claude/codex/gemini; cursor/grok launch with `--trust`, pi with `--approve`; **antigravity** matches trusted paths exactly (agtx seeds each worktree into `trustedWorkspaces` when the root is trusted). **`AgentDialog::security` splits the table** — trust/bypass prompts are the user's decision: with `auto_trust = false` (default) agtx detects them (card → `Blocked` with reason + fix) and leaves them unanswered; non-safety prompts are answered. An argv prompt is queued behind a dialog, not eaten; `wait_for_agent_ready` returns `None` when parked on an unanswered security dialog. `auto_trust = true` restores historical behaviour (docker/benchmark). Dialogs are matched against the running agent's own entries; `answer` is a key *sequence*.
 
 | Agent | Dialog | Match | Answer | Scope |
 |---|---|---|---|---|
-| claude | workspace trust | `Yes, I trust this folder` | `1` `Enter` | Launch — `projects."<dir>".hasTrustDialogAccepted` in `~/.claude.json`, **inherited from a trusted ancestor**, so with the default in-project `worktree_dir` this does not fire once the project is trusted |
-| claude | bypass-permissions warning | `Yes, I accept` / `I accept the risk` | `2` `Enter` | Launch — suppressed by the `skipDangerousModePermissionPrompt` preflight; backstop only. Options are inverted (`1. No, exit`), so never a lone Enter |
-| codex | directory trust | `Do you trust the contents of this directory?` | `1` `Enter` | Launch — per directory. Worded unlike Claude's *and* Gemini's, so neither pattern catches it |
-| codex | update prompt | `Update now (runs` | `2` `Enter` (Skip) | Launch — never "Update now": agtx must not upgrade an agent binary behind the user's back |
-| codex | hook review | `Hooks need review` | `3` `Enter` (Continue without trusting) | Launch — fires when the project ships a `.codex/hooks.json` codex has not seen. Answered because option 3 *declines*; option 2 would trust every hook in the repo |
-| codex | MCP tool approval | `Allow the` + `MCP server to run tool` + `Always allow` | `3` `Enter` | **Session** — mid-session, matched only against a codex pane |
-| gemini | folder trust | `Do you trust the files in this folder?` | `1` `Enter` | Launch — answering it restarts the process |
-| cursor | workspace trust | `Workspace Trust Required` | `a` alone | Launch — its question line is *identical* to codex's, so it is matched on the heading. Answered with the access key the dialog advertises, which survives an option being added above the highlighted row |
-| antigravity | project trust | `Do you trust the contents of this project?` | `Enter` alone | Launch — arrow-navigated with "Yes, I trust this folder" preselected, so a digit would land in the composer. Its own wording, not Claude's; codex's differs by one word (`directory`) |
+| claude | workspace trust | `Yes, I trust this folder` | `1` `Enter` | Launch |
+| claude | bypass-permissions | `Yes, I accept` / `I accept the risk` | `2` `Enter` | Launch — backstop |
+| codex | directory trust | `Do you trust the contents of this directory?` | `1` `Enter` | Launch |
+| codex | update prompt | `Update now (runs` | `2` `Enter` (Skip) | Launch |
+| codex | hook review | `Hooks need review` | `3` `Enter` (Continue) | Launch |
+| codex | MCP tool approval | `Allow the` + `MCP server to run tool` + `Always allow` | `3` `Enter` | Session |
+| gemini | folder trust | `Do you trust the files in this folder?` | `1` `Enter` | Launch — answering restarts |
+| cursor | workspace trust | `Workspace Trust Required` | `a` alone | Launch — matched on heading |
+| antigravity | project trust | `Do you trust the contents of this project?` | `Enter` alone | Launch — preselected |
 
-`require_all` distinguishes alternatives (several wordings of one prompt) from conjunctions (a prompt identified only by a combination of phrases). `security` marks the rows agtx will not answer unless `auto_trust` is on.
-
-It runs in **both** `wait_for_agent_ready` loops *and* the session-refresh loop: the readiness
-budget expires after ~60s and a slow agent can render its dialog later than that. A retry only
-happens while the pane is **unchanged** — a redraw means the answer landed, and resending would
-type a stray digit into the agent's live composer.
-
-Missing an arm is silent and total: the task's prompt is delivered but never read, because the
-agent never reaches its composer. Antigravity and cursor are the worked examples — same bug, two
-agents, found within a day of each other by the same smoke run. Antigravity's is the fuller story. It was left unhandled on the
-reasoning that its wording matched Claude's and the choice belonged to the user — but "unhandled"
-was never neutral: agtx pasted the task into a menu that ignores text, and its follow-up Enter
-confirmed the dialog, so **every** antigravity task reached its composer empty with the prompt gone.
-Per-agent scoping is what made answering it safe, and the per-agent smoke run
-(`tests/smoke/agent_smoke.py`) is what found it. Cursor's was the same shape, and shows why the
-scoping matters: its question line is *character-identical* to codex's, whose answer (`1`) is not
-even an option in cursor's menu.
-
-Some prompts must stay unanswered, and that is a different thing from being undeclared. Gemini's
-first-run `Opening authentication page in your browser. Do you want to continue?` has `1. Yes`
-preselected — an Enter would start an OAuth flow and open a browser, which is not a side effect a
-phase transition gets to have. Same reasoning as never choosing codex's "Update now".
+`require_all` distinguishes alternatives (wordings of one prompt) from conjunctions (a combination). `security` marks rows agtx will not answer unless `auto_trust`. Runs in both `wait_for_agent_ready` loops and the session-refresh loop; a retry only happens while the pane is unchanged. Some prompts must stay unanswered but declared (gemini's OAuth continue).
 
 ### Session Persistence
-- Tmux window stays open when moving Running → Review
-- Resume from Review simply changes status back to Running (window already exists)
-- No special resume logic needed - the session just stays alive in tmux
+Tmux window stays open when moving Running → Review. Resume from Review changes status back to Running (window already exists) — no special resume logic.
 
 ### Self-Update
 agtx tells the user when a newer release exists and replaces its own binary on request.
 
 ```
-  startup ──► background thread ──► curl api.github.com/…/releases/latest
-                     │                        │
-                     │                  cache 24h  →  ~/.config/agtx/update.json
-                     ▼
-              mpsc::Receiver  ──► event loop try_recv ──► header: "⬆ 0.2.8 [u]"
-                                                                     │
-                                                             [u] popup ──► install_release()
+startup → background thread → curl api.github.com/…/releases/latest
+  → cache 24h → ~/.config/agtx/update.json
+  → mpsc → event loop try_recv → header "⬆ 0.2.8 [u]" → [u] popup → install_release()
 ```
 
-- **The binary must know its own version.** `env!("CARGO_PKG_VERSION")` is the only source, and
-  `release.yml`'s *Tag matches Cargo.toml* step fails the build when the pushed tag disagrees with
-  the manifest. Without that check the two drift — tags at `v0.2.7` against a manifest still saying
-  `0.1.0` — and a released binary cannot answer the question every part of this feature compares
-  against
-- `--version` / `-V` / `version` and `update` are handled in the **early fast path** in `main.rs`,
-  beside the `hook` arm, for two reasons: neither wants a daily log appender built for it, and the
-  `mode` match below filters out every `--`-prefixed argument, so `--version` would otherwise fall
-  through and open the current directory as a project
-- **The cache is not an optimisation.** Unauthenticated GitHub allows 60 requests/hour *per IP* and
-  agtx is launched dozens of times a day across project directories. 24h TTL; a stale cache is still
-  served when the network is down, because a week-old "0.2.8 is out" is still true
-- **Cache path gotcha:** built from `GlobalConfig::config_path()`'s parent, **not** `directories`'
-  `config_dir()` — see the config-path split under *Database Storage*. The latter would put it in
-  `~/Library/Application Support/` on macOS, away from the `config.toml` and `logs/` it belongs with
-- **`curl`, not an HTTP crate.** One GET per day does not justify adding a TLS stack to a binary
-  that has none; `curl` is already required by `install.sh`, and it honours `HTTPS_PROXY`/`NO_PROXY`
-  and the system CA store, which is what corporate networks need. `src/update/github.rs` is the only
-  file that would change if that stops being true
-- **Failure is always a missing notice**, never an error: no network, no `curl`, a rate-limit body,
-  an unparseable tag — all yield "no update". A version check must not be able to make the TUI shout
-- **The swap** is `rename(target, target.old)` → `rename(new, target)` → unlink, staged inside the
-  *target's own directory* so the rename is same-filesystem (`/tmp` often is not). Renaming over a
-  running binary is legal on Unix — `ETXTBSY` applies to writing into the busy inode, not to
-  replacing the directory entry. The `.old` step means a failure between the two renames leaves a
-  recoverable file rather than no `agtx` at all
-- **Replacing in place is what keeps worktrees valid.** The absolute `agtx` path is baked into every
-  worktree's hook command and MCP configs (*Binary-path drift* below); an in-place swap keeps that
-  path identical, so nothing needs re-deploying. Installing to a new location would invalidate every
-  existing worktree
-- **A package-managed binary is refused**, not overwritten: `/nix/store/…` and Homebrew prefixes get
-  the right command for that manager instead. Silently replacing a file a manager believes it owns
-  breaks the machine in a way that is hard to diagnose later
-- **Never automatic.** agtx already refuses to answer codex's "Update now" dialog on the principle
-  that it must not upgrade an agent binary behind the user's back; swapping its own would be
-  incoherent. Two opt-outs for the *check*: `update_check = false` and `AGTX_NO_UPDATE_CHECK=1`
-  (set in `docker/Dockerfile`, and what CI and the smoke runner should use)
-- **Three files must agree on artifact naming** — `src/update/release.rs`, `install.sh` and
-  `release.yml` — or `agtx update` 404s. `tests/update_tests.rs` greps the other two and asserts the
-  match, because the alternative is finding the drift in a user's failed update
-- `release.yml` publishes `<archive>.sha256` alongside each tarball. `install.sh` had fetched and
-  verified them since it was written, but none were ever published, so its verification had never
-  once run
+- The binary knows its own version via `env!("CARGO_PKG_VERSION")`; `release.yml`'s *Tag matches Cargo.toml* step fails the build on drift. `--version`/`-V`/`version` and `update` are in the early fast path in `main.rs`. Cache: 24h TTL, still served offline; path from `GlobalConfig::config_path()`'s parent. `curl`, not an HTTP crate (`src/update/github.rs`). Failure is always a missing notice, never an error.
+- **The swap**: `rename(target, target.old)` → `rename(new, target)` → unlink, staged inside the target's own directory (same-filesystem; renaming over a running binary is legal on Unix). Replacing in place keeps worktrees valid (the absolute `agtx` path is baked into every hook command + MCP config). A package-managed binary (`/nix/store/…`, Homebrew) is refused. Never automatic — opt out with `update_check = false` or `AGTX_NO_UPDATE_CHECK=1`.
+- **Three files must agree on artifact naming** — `src/update/release.rs`, `install.sh`, `release.yml`; `tests/update_tests.rs` greps and asserts. `release.yml` publishes `<archive>.sha256`; `install.sh` verifies it.
 
 ### Serving the Board to a Phone
-`agtx serve` (feature = `serve`) is **the MCP server re-exposed over HTTP with a PWA on top** — it talks
-to SQLite, tmux and git, never to `App`. `W` in the TUI runs it as a child and shows the pairing QR.
+`agtx serve` (feature = `serve`) is the MCP server re-exposed over HTTP with a PWA — talks to SQLite/tmux/git, never to `App`. `W` runs it as a child and shows the pairing QR.
 
-**Actions queue; they do not execute.** A tap writes to `transition_requests`, and only a running TUI
-drains it — the same contract the orchestrator lives under. So every action response says `queued`,
-carries `tui_connected` from the `tui_heartbeat` table, and the phone shows a banner when nothing is
-draining. `docs/planning/headless-engine.md` is the plan that removes this.
-
-**Loopback needs no credential; anything wider does.** Reaching `127.0.0.1` already means being on this
-machine, where the tmux socket and the databases are readable anyway. Off-loopback — including a tunnel,
-whose provider proxies into a loopback listener — requires a paired device. Reading only the bind address
-is how a tunnelled server ends up open, so `ServeOptions::is_loopback` reads the tunnel too.
-
-**Per-device tokens, hashed at rest** in `mobile_devices`, so one lost phone is revoked without cutting
-off the rest. Validation is a hash lookup per request, which makes `--revoke` immediate and
-cross-process.
-
-**Serving is per-session; the pairing is not.** `W` runs `agtx serve` as a *child* of the TUI, so it
-stops when agtx does and nothing ever opens a port on its own — while the paired device survives. The
-two lifetimes differing is the thing users trip on: the phone reconnects silently when the board is
-served again, and times out identically whether it was unpaired or simply nobody is serving. The
-README says so under **Mobile**; keep it said.
-
-**A pairing outlives the server that issued it**, by design: the device row is in the global
-`index.db` and the token is in the phone's `localStorage`, so a home-screen app reconnects without a
-new scan. Revocation is manual (`--revoke`, `--revoke-all`). Each device records the `session_id` of
-the serve session that paired it — provenance only, and the hook for a future expiry or
-forget-on-exit policy (`Database::revoke_session_devices` scopes a delete to one session, which is
-what makes such a policy safe: `mobile_devices` is **global**, so a second agtx serving another
-project must keep its own devices). Secrets reach the phone in the **URL fragment**, which browsers never transmit, so they
-stay out of every access log; `/ws` uses `Sec-WebSocket-Protocol` instead, the one field a browser can
-set on an upgrade. Auth lives in the router's middleware and not the socket handler: `WebSocketUpgrade`
-is an extractor, so a handler-side check runs only *after* the upgrade is accepted.
-
-**Two things about the PWA that look like shortcuts and are not.** There is **no bundler** — the app is
-plain ES modules embedded with `include_bytes!`, so a missing file is a compile error rather than a
-runtime 404, and nothing can be stale. And there is **no xterm.js**: measured against tmux 3.5a,
-`capture-pane -p -e` emits only `ESC[…m`, no cursor motion, because it is a snapshot of an
-already-rendered grid — a terminal emulator would have nothing to emulate. `web/ansi.js` builds a DOM
-fragment rather than an HTML string, so agent output containing `<script>` is text.
-
-Two traps worth knowing before touching either half:
-
-- **`include_bytes!` guarantees a *listed* file exists, not that every file is listed.** A module left
-  out of `assets.rs` 404s to the SPA shell, the ES import receives HTML, and the whole app renders
-  blank. `the_asset_table_covers_the_web_directory` closes that direction.
-- **ratatui does not interpret ANSI.** `qr::render` is for the CLI banner; the `W` overlay must use
-  `qr::grid` and build styled spans, or it draws literal escape bytes as an unscannable QR.
-
-**The board does not poll.** It is fetched when something happened — opened, pulled down, returned to,
-or changed by an action. The live pane is the exception and keeps its socket, which runs only while a
-subscriber is attached and sends only changed frames.
+- **Actions queue; they do not execute.** A tap writes to `transition_requests`; only a running TUI drains it. Every action response says `queued`, carries `tui_connected`, phone shows a banner when nothing drains.
+- **Loopback needs no credential; anything wider does** (off-loopback, including a tunnel, needs a paired device — `ServeOptions::is_loopback` reads the tunnel too). **Per-device tokens, hashed at rest** in `mobile_devices`; `--revoke` is immediate + cross-process.
+- **Serving is per-session; the pairing is not.** A pairing outlives the server (device row in global `index.db`, token in the phone's `localStorage`); revocation is manual. Secrets reach the phone in the URL fragment; `/ws` uses `Sec-WebSocket-Protocol`. Auth in the router middleware, not the socket handler.
+- **No bundler** (plain ES modules via `include_bytes!` — a missing file is a compile error). **No xterm.js** (`capture-pane -p -e` emits only `ESC[…m`; `web/ansi.js` builds a DOM fragment so `<script>` is text). **ratatui does not interpret ANSI** — the `W` overlay uses `qr::grid` + styled spans, `qr::render` is the CLI banner. **The board does not poll** — fetched when something happened; the live pane keeps its socket, sends only changed frames.
 
 ### Database Storage
-All databases stored centrally (not in project directories), in the platform data dir (`GlobalConfig::data_dir`, via the `directories` crate):
-- macOS: `~/Library/Application Support/agtx/`
-- Linux: `~/.local/share/agtx/`
-
-Config paths are split across two roots — watch out when adding new files:
-- `GlobalConfig::config_path()` / `WorkflowPlugin::global_plugins_dir()` build from `$HOME` directly, so `config.toml`, `plugins/`, and `logs/` are always at `$HOME/.config/agtx/` on **every** platform
-- `TrustStore::path()` uses `directories`' `config_dir()`, so `trusted_projects.toml` lands in `~/Library/Application Support/agtx/` on macOS and `~/.config/agtx/` on Linux
-
-On first run, a `config.toml` at the old `directories`-derived location is migrated to `$HOME/.config/agtx/` automatically.
-
-Structure:
-- `index.db` - Global project index
-- `projects/{hash}.db` - Per-project task database (hash of project path)
+Databases stored centrally in the platform data dir (`GlobalConfig::data_dir`, via `directories`): macOS `~/Library/Application Support/agtx/`, Linux `~/.local/share/agtx/`. Config paths split across two roots: `GlobalConfig::config_path()` builds from `$HOME`, so `config.toml`/`plugins/`/`logs/` are always at `$HOME/.config/agtx/`; `TrustStore::path()` uses `directories`' `config_dir()`, so `trusted_projects.toml` follows the platform. On first run a `config.toml` at the old location is migrated. Structure: `index.db` (global project index), `projects/{hash}.db` (per-project, hash of project path).
 
 ### Tmux Architecture
-```
-┌─────────────────────────────────────────────────────────┐
-│                 tmux server "agtx"                      │
-│  ┌────────────────────────────────────────────────────┐ │
-│  │ Session: "my-project"                              │ │
-│  │  ┌────────┐  ┌────────┐  ┌────────┐                │ │
-│  │  │Window: │  │Window: │  │Window: │                │ │
-│  │  │task2   │  │task3   │  │task4   │                │ │
-│  │  │(Claude)│  │(Claude)│  │(Claude)│                │ │
-│  │  └────────┘  └────────┘  └────────┘                │ │
-│  └────────────────────────────────────────────────────┘ │
-│  ┌────────────────────────────────────────────────────┐ │
-│  │ Session: "other-project"                           │ │
-│  │  ┌───────────────────┐                             │ │
-│  │  │ Window:           │                             │ │
-│  │  │ some_other_task   │                             │ │
-│  │  └───────────────────┘                             │ │
-│  └────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────┘
-```
-
-- **Server**: Dedicated tmux server named `agtx` (`tmux -L agtx`)
-- **Sessions**: Each project gets its own session (named after project)
-- **Windows**: Each task gets its own window within the project's session
-- Separate from user's regular tmux sessions
-- View sessions: `tmux -L agtx list-windows -a`
-- Attach: `tmux -L agtx attach`
+Dedicated tmux server named `agtx` (`tmux -L agtx`). Each project gets its own session (named after project); each task gets its own window in that session. Separate from the user's regular tmux. View: `tmux -L agtx list-windows -a`; attach: `tmux -L agtx attach`.
 
 ### Orchestrator Agent (Experimental)
-A dedicated Claude Code agent that autonomously manages the kanban board. Enabled with `--experimental`, toggled with `O`.
+A dedicated Claude Code agent that autonomously manages the board. Enabled with `--experimental`, toggled with `O`.
 
 ```
-┌─────────────┐     MCP (stdio)     ┌──────────────┐     SQLite     ┌─────┐
-│ Orchestrator │ ←──────────────────→ │  MCP Server  │ ←────────────→ │ DB  │
-│ (Claude Code)│                     │(agtx mcp-serve)│             └──┬──┘
-└──────┬───────┘                     └──────────────┘                  │
-       │  send_keys (push-when-idle)                                   │
-┌──────┴───────┐                                                       │
-│   TUI (agtx) │ ←────────────────────────────────────────────────────┘
-└──────────────┘
+Orchestrator (Claude Code) ←MCP stdio→ MCP Server (agtx mcp-serve) ←SQLite→ DB
+Orchestrator → TUI: transition_requests table.  TUI → Orchestrator: notifications (send_keys when idle)
 ```
 
-- **Orchestrator → TUI**: `transition_requests` DB table (commands like "move task X forward")
-- **TUI → Orchestrator**: `notifications` DB table, pushed via `send_keys` when orchestrator is idle
-- MCP registered per-session via `claude mcp add-json --scope local`, cleaned up on exit. It registers as **`agtx-orchestrator`**, not `agtx`, so it can't collide with an `agtx` server defined in another scope (the Claude Code plugin, `~/.claude.json`, or the repo's `.mcp.json`) — a same-named server with a different endpoint makes Claude Code report a config conflict and refuse to connect. A stale registration is removed first so `add-json` can't fail with "already exists" and short-circuit the `&&`
-- Only Claude implements `build_orchestrator_command()`; every other agent falls through to a plain interactive session with no MCP wiring
-- Orchestrator only manages Planning and Running phases; the user triages Backlog/Research manually and handles merging in Review/Done
-- Orchestrator is a coordinator, not a reviewer — it moves tasks forward immediately when phases complete, without inspecting output
-- Only "completed phase" notifications are sent (no "entered phase" notifications)
-- On startup, if an orchestrator tmux session already exists, it is detected and reconnected; catch-up notifications are created for tasks that completed phases while the TUI was down (deduplicated via `peek_notifications`)
+- MCP registered per-session via `claude mcp add-json --scope local` as **`agtx-orchestrator`** (not `agtx`, avoids config conflict), cleaned up on exit. Only Claude implements `build_orchestrator_command()`. Manages Planning/Running; the user triages Backlog/Research and handles merging. A coordinator, not a reviewer. Only "completed phase" notifications sent; on startup an existing session is reconnected with catch-up notifications (deduped via `peek_notifications`).
 
 **MCP tools**:
-- Discovery: `list_projects` (global mode only), `get_config` (the global and project configs
-  already merged — what actually governs a run). It exists because there is no other way for a
-  caller to learn `auto_trust`: the setting is global-only *by design*, since a project config that
-  could grant itself trust defeats the trust system, and `AGTX_CONFIG_DIR` means the global file is
-  not reliably at `~/.config/agtx/config.toml`, so reading that path directly can give a stale
-  answer. The response carries both file paths, so a
-  caller can name the file to edit instead of guessing
-- Read: `list_tasks`, `get_task` (includes `allowed_actions`), `wait_for_board_change`, `get_transition_status`, `check_conflicts`, `get_notifications`, `read_pane_content`. `list_tasks` and `get_task` also carry `phase_status` + `phase_age_secs` + `tui_connected` — see *Publishing phase status* below. `list_tasks` returns `{tui_connected, tasks: [...]}` rather than a bare array: `tui_connected` is one answer for the whole board, and a caller needs it on *every* poll — a separate tool is one a polling loop skips, and skipping it means reading frozen rows as live state. `list_tasks` leaves descriptions out unless `include_description` is set, and omits empty optional fields — see *Waiting for the board to change*. `read_pane_content` returns a real tail (`pane_tail`): `capture-pane -S -N` starts N lines back in the scrollback and runs to the bottom of the visible screen, and a full-screen agent keeps no scrollback, so without the trim every read is the whole screen — measured, 15 lines asked, 49 returned
-- Write: `move_task` (queues a transition request; actions `research`, `move_forward`, `move_to_planning`, `move_to_running`, `move_to_review`, `move_to_done`, `move_to_done_and_merge`, `resume`, `escalate_to_user`), `send_to_task` (Planning, Running and Review, 4096-byte cap; delivered as a bracketed paste plus a watched submit — see *When a phase counts as done*). Review is included (`accepts_task_input`) so a reviewer can be handed a small fix in place, with no transition made just to send a message; `resume` sends the task round a whole execute cycle and is for significant rework
+- Discovery: `list_projects` (global mode only), `get_config` (global + project merged — the only way a caller learns `auto_trust`; carries both file paths).
+- Read: `list_tasks`, `get_task` (includes `allowed_actions`), `wait_for_board_change`, `get_transition_status`, `check_conflicts`, `get_notifications`, `read_pane_content`. `list_tasks`/`get_task` carry `phase_status` + `phase_age_secs` + `tui_connected`. `list_tasks` returns `{tui_connected, tasks: [...]}`, omits descriptions unless `include_description` is set. `read_pane_content` returns a real tail (`pane_tail`) via `capture-pane -S -N`.
+- Write: `move_task` (queues a transition request; actions `research`, `move_forward`, `move_to_planning`, `move_to_running`, `move_to_review`, `move_to_done`, `move_to_done_and_merge`, `resume`, `escalate_to_user`), `send_to_task` (Planning/Running/Review, 4096-byte cap; bracketed paste + watched submit). `resume` runs the task round a whole execute cycle.
+- CRUD (Backlog only for update/delete): `create_task`, `create_tasks_batch` (max 50, index-based `depends_on`), `update_task`, `delete_task`.
 
-#### Publishing phase status
+**Phase status (`task_runtime`)** — how a non-TUI process learns a phase's status; published only while someone is reading (`board_watch`, 10-min window), marked by the web server on a board request and the MCP server on `list_tasks`/`get_task` (throttled 30s). Not gated on `serve`. Read `phase_status` against `phase_age_secs`, never alone (large age = nothing watching). `phase_status` is the TUI's verdict (all agents, the only signal that can say `ready`/`exited`); `agent_state` is the agent's own report (hooks, 5 of 8). `tui_connected` reads `tui_heartbeat` via `Database::tui_is_live` (6s window) — without it a frozen row reads as live.
 
-`task_runtime` is how a process that is not the TUI learns a phase's status, and
-the TUI publishes it only while someone is reading — `board_watch`, a 10-minute
-window. Two readers mark it: the web server on a board request, and the MCP
-server on `list_tasks` / `get_task` (throttled to 30s, since `get_task` is called
-once per task in a polling loop).
+**`wait_for_board_change`** replaces a poll loop: blocks inside the server, re-reading every `WAIT_POLL_INTERVAL`, answers once with only the tasks that differ from what this session was last shown, and carries the outcome of every queued `move_task`. Timeout defaults `DEFAULT_WAIT_SECS`, capped `MAX_WAIT_SECS` (a timeout is an answer). What wakes it is narrower than what changed — a state that needs the caller (`ready`/`idle`/`blocked`/`exited`, Done, a startable Backlog task, an escalation), appears/vanishes, a failed transition, a `tui_connected` flip (`TaskMark::needs_attention`); `working` and an absent phase status do not. Per session (`AgtxMcpServer::boards`; pure half `src/mcp/board_watch.rs`). Two maps (last reported + last poll); `turn_ts` tells two `idle`s apart. `async`.
 
-**It is not gated on the `serve` feature.** A default build has no web server but
-always has `agtx mcp-serve`, and an orchestrator or oneshot session polling phase status
-is exactly the out-of-process reader the table is for; compiling the publish call
-out would leave every such client reading a table nothing ever writes.
+**When a phase counts as done** (`ready` = safe to advance/merge/resume):
+- Artifact written during this phase — `Task::phase_entered_at` stamped by `Database::update_task` on any status change; `phase_artifact_fresh` counts an artifact only if mtime ≥ that stamp. `phase_artifact_exists` stays for gating callers.
+- A verdict applies only to the status it was computed for — `apply_session_refresh` drops one describing the previous phase; `TaskRuntime::status` records what each row was computed for.
+- The turn must be over — `gate_ready_on_turn` holds a fresh artifact at `working` while the hook reports `working`/`blocked` (a silent `working` stops being trusted after `HOOK_STALE_SECS`).
 
-Read `phase_status` against `phase_age_secs`, never alone. The refresh
-republishes every live task on every pass, so a small age means "seen just now"
-and a large one means nothing is watching this board — which needs the opposite
-response from a task that is genuinely idle.
+`send_to_task` goes through `core::input::send_user_text` (bracketed paste + watched submit), not raw `send-keys` (a large typed burst has its head silently dropped by the agent).
 
-`phase_status` is the TUI's verdict and `agent_state` is the agent's own report;
-they are not duplicates. `agent_state` needs hooks and covers five of eight
-agents, while `phase_status` covers all of them and is the only signal that can
-say `ready` (the phase artifact exists) or `exited` (the window is gone).
+**Serialized worktree setup** — one at a time (`setup_rx` is a single slot). Everything starting a Backlog task goes through `setup_queue` carrying a `SetupIntent` (the dependency overlay lets each plugin choose research vs planning via `PluginDefault`; an MCP request names one transition). A queued MCP request stays claimed + unprocessed (`get_transition_status` → `pending`) until the drain starts it; every way the drain declines resolves it with an error. Claims are reclaimed after `RECLAIM_CLAIMS_AFTER` (5 min, `Database::reclaim_stale_transition_requests`); `cleanup_old_transition_requests` deletes abandoned ones after an hour.
 
-**`tui_connected` is the one that says whether any of it is current.** It reads
-`tui_heartbeat` through `Database::tui_is_live`, on the same 6-second window the
-web API uses — three beats of `TRANSITION_POLL_INTERVAL`, so one missed tick is
-not a disconnect. Without it a caller can only *infer* a dead board from
-`phase_age_secs` climbing across every task at once, and until it does, a frozen
-row reads as live state: a task shows `blocked` while its agent works normally,
-because that was the last verdict published before the TUI exited.
+**`move_to_done_and_merge`** — merges the branch into its base in the project's own checkout, then Done (`allowed_actions` offers it to `Orchestrator`, not `Human`). `git::merge_task_branch` merges only when the checkout is on the base branch with no *tracked* modifications, else `Refused`. **Every route to Done must appear in the uncommitted-changes guard** (Done deletes the worktree; `has_changes` counts untracked; `every_route_to_done_refuses_a_worktree_with_uncommitted_work` iterates all three). An empty branch is refused (`commits_ahead` checked first; `MergeOutcome::NothingToMerge`). A conflict leaves the task in Review, sets `escalation_note`, sends `/agtx:merge-conflicts` (the virtual merge `check_merge_conflicts` runs first; `merge_branch` runs `git merge --abort` on failure).
 
-#### Waiting for the board to change
-
-A session supervising the board pays for every turn it takes, and a turn costs its whole
-context, re-read. Measured on a 14-task oneshot run: 336 turns, context grown to 839k
-tokens, 137M tokens of cache reads. Polling was two turns per pass — 73 `sleep` calls and
-96 `list_tasks` — and those listings were the largest share of every tool result the
-session re-read afterwards, 80% of their bytes task descriptions the caller had written
-itself.
-
-`wait_for_board_change` replaces the loop. It blocks **inside the server**, re-reading the
-board every `WAIT_POLL_INTERVAL`, and answers once — with only the tasks that differ from
-what this session was last shown by it, `list_tasks` or `get_task`. It also carries the
-outcome of every `move_task` the session queued, so `get_transition_status` needs no
-polling either. Timeout defaults to `DEFAULT_WAIT_SECS`, capped at `MAX_WAIT_SECS`; a
-timeout is an answer, not an error.
-
-- **What wakes it is narrower than what changed.** A task wakes the wait when it reaches a
-  state that needs the caller — `ready`/`idle`/`blocked`/`exited`, Done, a startable
-  Backlog task, an escalation — or appears or vanishes; also a failed transition and a
-  `tui_connected` flip. `working` and an absent phase status do not: they are what a task
-  looks like between the caller's move and its outcome, and waking on them costs a turn
-  per transition to learn nothing. Those moves are still *reported* the next time
-  something wakes. `TaskMark::needs_attention` is the rule.
-- **Per session, and held in the server.** Each client spawns its own `agtx mcp-serve`
-  over stdio, so `AgtxMcpServer::boards` lives exactly as long as the caller it
-  describes. The pure half — `src/mcp/board_watch.rs` — has no database or clock, and
-  `tests/mcp_tests.rs` drives it directly.
-- **Two maps, because each misses a case the other catches.** Against what was
-  *reported* alone, an agent nudged out of `idle` that works and stops again inside one
-  wait looks unchanged. Against the last *poll* alone, a task that went `ready` while the
-  caller was busy between two waits is already `ready` at the first poll and looks
-  unchanged too.
-- **`turn_ts` tells two `idle`s apart.** An agent with hooks stamps each turn boundary, so
-  a nudge answered while the caller was between waits — which no poll saw as `working` —
-  still reads as a new state. It is `None` while the agent reports `working`, since every
-  tool call bumps that timestamp.
-- **A state already reported does not wake again.** A caller that leaves a `blocked` task
-  for the user would otherwise be woken for it every second.
-- **It is `async`.** The sleep between polls is `tokio::time::sleep`, and each poll is a
-  synchronous helper that drops the database handle and the lock before it returns, so
-  nothing is held across an `await`.
-- **It keeps marking the board watched.** The TUI publishes phase status only while
-  someone has read it recently; a long wait is a reader for its whole length.
-
-#### When a phase counts as done
-
-`ready` promises a caller that the phase is finished — safe to advance, merge or
-resume. Three rules keep it; without them a caller acting on `ready` would
-advance a task that has done no work, resume a reviewer mid-turn, and read
-`review:ready` for a review nobody has run.
-
-- **The artifact must be written during this phase.** `Task::phase_entered_at`
-  is stamped by `Database::update_task` whenever the status changes, in either
-  direction, by a SQL `CASE` against the stored row — one writer, so no route
-  that moves a task can forget it. `phase_artifact_fresh` counts an artifact only
-  if its mtime is at or after that stamp, so the previous cycle's
-  `execute.md` cannot make a resumed task read `ready` the moment it arrives.
-  `phase_artifact_exists` stays for the gating callers, which ask whether a
-  *prior* phase ever produced its artifact. `None` (a row from before the column)
-  and glob templates fall back to existence. Research runs inside Backlog with no
-  status change, so it is not stamped; agtx refuses to start research on a task
-  that already has a session, which is the only way its artifact could be stale.
-- **A verdict applies only to the status it was computed for.** The refresh
-  snapshots tasks before its thread runs, so a transition that lands meanwhile
-  leaves the verdict describing the previous phase — Running's `execute.md`
-  reads as `review:ready`.
-  `apply_session_refresh` drops such a verdict, and `TaskRuntime::status`
-  records what each published row was computed for so MCP and the phone API can
-  withhold a row that no longer matches. `phase_age_secs` cannot catch this: the
-  row's timestamp is fresh; it is the phase that is wrong.
-- **The agent's turn must be over.** An agent writes its artifact mid-turn and
-  keeps going, so `gate_ready_on_turn` holds a fresh artifact at `working` while
-  the hook reports `working` or `blocked`. There is deliberately no timestamp
-  comparison: the status file holds only the latest event, and writing the
-  artifact is itself a tool call whose `PreToolUse` sets `working` first, so a
-  current `waiting`/`ended` must post-date the write — while hook `ts` is whole
-  seconds against a sub-second mtime, so comparing them would hold a task whose
-  `Stop` landed in the same second. It cannot hold one forever: a finished turn
-  reports `waiting`, an exited agent leaves `ended` or a missing window, and a
-  silent one's `working` record stops being trusted after `HOOK_STALE_SECS`.
-
-`send_to_task` goes through `core::input::send_user_text` — a bracketed paste and
-a watched submit — not a raw `send-keys`. Measured against Claude Code 2.1.268: a
-1644-byte message typed with `send-keys` arrived as its last 622 bytes, the first
-1022 silently dropped, while the same bytes as a bracketed paste arrived whole. A
-raw-mode `cat` received every byte either way, so tmux and the pty are not the
-cause; the agent discards the head of a large typed burst, and then acts on the
-tail of an instruction with its premise gone.
-
-#### Serialized worktree setup
-
-Worktree setup runs one at a time — `setup_rx` is a single slot — because it does
-`git worktree add`, file copies, an init script, a tmux window and an agent
-spawn. Everything that starts a Backlog task goes through `setup_queue`, which
-carries a `SetupIntent` alongside the task id: the dependency overlay's batch
-move lets each task's plugin choose between research and planning
-(`PluginDefault`), while an MCP request names one transition and must not be
-answered with a different one.
-
-A queued MCP request stays **claimed and unprocessed** — `get_transition_status`
-answers `pending` — until the drain starts it. Marking it completed at enqueue
-time would tell a caller the task had moved while it was still in a queue. Every
-way the drain can decline one (task gone, left Backlog, deps unsatisfied, the
-start itself failing) resolves the request with an error instead, because a
-dropped request leaves a caller polling `pending` forever.
-
-A busy slot never rejects a transition. `move_task` has already answered
-`queued` by then, so a rejection would be visible only to a caller polling each
-request, and nothing would retry the task.
-
-**A claim outlives the instance holding it, so claims are reclaimed.** Deferring
-the mark opens a window where a request is claimed and unprocessed, and
-`get_pending_transition_requests` filters claimed rows out — so a TUI that exits
-with a setup queued strands it, until `cleanup_old_transition_requests` deletes it
-an hour later, never executed.
-`Database::reclaim_stale_transition_requests` releases claims held by another
-instance after `RECLAIM_CLAIMS_AFTER` (5 minutes), called at the top of each
-drain rather than only at startup — a TUI that dies mid-run should not wait for
-the next launch. The age window keeps a *live* second instance's genuine backlog
-out of reach; reclaiming one anyway is safe rather than merely unlikely, since
-the drain re-validates each task and the loser resolves its copy with an error
-instead of setting the worktree up twice.
-
-#### `move_to_done_and_merge`
-
-Merges the task's branch into its base branch in the **project's own checkout**,
-then moves it to Done. It exists for a caller that integrates locally; a person
-lands the same work by merging the PR on the remote, which is why
-`allowed_actions` offers it to `Orchestrator` and not to `Human` — two ways to
-land one branch is worse than one.
-
-`git::merge_task_branch` is the primitive, and it is deliberately narrow: it
-merges only when the checkout is already on the base branch with no *tracked*
-modifications, and returns `Refused` otherwise rather than stashing, switching
-branches, or moving HEAD out from under the user. Untracked files are not part of
-the gate — the project root always has some, since worktrees live under `.agtx/`
-— and git refuses on its own if the merge would overwrite one.
-
-The alternatives are worse, and were measured: `git fetch . branch:base` needs no
-working tree but git refuses it while `base` is checked out, which is the normal
-case here; `git update-ref` evades that check but leaves the user's index
-disagreeing with HEAD, so the working tree reads as "everything deleted".
-
-**Every route to Done must appear in the uncommitted-changes guard.** Reaching Done deletes
-the worktree, and `GitOperations::has_changes` reads `git status --porcelain`, which counts
-**untracked** files — an agent that wrote its work and never ran `git commit` has all of it
-there and nowhere else. A route missing from the `matches!` list beside `move_to_done` and
-`move_forward` merges an empty branch, reaches Done, and cleanup deletes the work; only the
-`.md` artifacts survive, in `.agtx/archive/`. A new route to Done that forgets that line is
-a silent data-loss bug, not a missing check, and
-`every_route_to_done_refuses_a_worktree_with_uncommitted_work` iterates all three.
-
-**An empty branch is refused rather than merged**, as the second layer. `git merge` exits
-0 for a branch with no commits — "Already up to date" — so the exit status alone reports a
-success that landed nothing, and the caller then deletes the worktree on the strength of
-it. `commits_ahead` is checked first and `MergeOutcome::NothingToMerge` says so
-explicitly; the task stays in Review and the error names where the work would be. The two
-layers catch different states: the first, work that exists but is uncommitted; the second,
-a branch that is genuinely empty.
-
-**A conflict leaves the task in Review**, sets `escalation_note`, and sends
-`/agtx:merge-conflicts` to the task's own agent. That ordering is the whole point
-of doing both halves in one action: Done removes the worktree, and the worktree is
-where the agent that wrote the branch has to resolve it. The virtual merge
-(`check_merge_conflicts`) runs first so a conflict is *reported* rather than left
-half-applied in the user's checkout — and `merge_branch` runs `git merge --abort`
-on failure, since a stray `MERGE_HEAD` makes every later git command in the
-project root report a merge in progress.
-
-Note `fetch_and_check_conflicts` — used by the Review auto-conflict trigger — runs
-`git fetch origin` first and so is inert on a local-only repo. `merge_task_branch`
-uses the local `check_merge_conflicts`, which needs no remote.
-
-#### Incremental re-review
-
-Leaving Review for Running — the `resume` path — writes the worktree's current HEAD to
-`.agtx/reviewed-at` (`mark_reviewed_point`). The review skill reads it: present, it
-reviews `<marker>..HEAD` plus the prior `.agtx/review.md` and checks those points were
-addressed; absent, it reviews the whole branch.
-
-Without it every resume costs a full re-review: `clear_context_on_advance` means the
-review agent starts with no memory of its own previous pass, so it would re-read the
-entire branch each cycle to re-confirm what it had already approved.
-
-A file in the worktree rather than a column on `Task`: the only reader is the skill, which
-is already reading `.agtx/`, nothing queries it, and it is removed with the worktree it
-describes.
-
-**Two things about the marker's scope.** It is a commit, so it covers committed work only
-— which is why the skill pairs the range with a second command for what is not committed
-yet. The two can overlap, and that is the intended direction: work uncommitted when the
-marker was written and committed afterwards is reviewed twice, never zero times.
-
-And that second command is **`git status --short`, not `git diff HEAD`**: `git diff` does
-not show untracked files at all. A new file from the running phase is absent from the
-range diff (not committed) and absent from the working-tree diff (not tracked), so the
-obvious pairing would review it in neither. `??` lines are where the newest work usually
-is. `the_marker_never_covers_uncommitted_work` pins this.
-- CRUD (Backlog only for update/delete): `create_task`, `create_tasks_batch` (max 50, index-based `depends_on` wiring), `update_task`, `delete_task`
+**Incremental re-review** — the `resume` path writes HEAD to `.agtx/reviewed-at` (`mark_reviewed_point`). The review skill: present → `<marker>..HEAD` plus prior `.agtx/review.md`; absent → whole branch. The marker is a commit, so the skill pairs the range with **`git status --short`** (not `git diff HEAD`, which omits untracked files).
 
 ### MCP Server Modes
-
-Two modes, selected by whether a path argument is passed to `agtx mcp-serve`:
-
 | Mode | Command | Used by |
 |------|---------|---------|
-| **Project-scoped** | `agtx mcp-serve <path>` | Orchestrator (bound to one project) |
-| **Global** | `agtx mcp-serve` | Sweep and oneshot skills, any ad-hoc session |
+| Project-scoped | `agtx mcp-serve <path>` | Orchestrator (bound to one project) |
+| Global | `agtx mcp-serve` | Sweep and oneshot skills, ad-hoc sessions |
 
-In global mode all CRUD tools (`list_tasks`, `create_task`, etc.) require a `project_id` parameter. The agent calls `list_projects` first to resolve it. In project-scoped mode `project_id` is ignored — the path is fixed at startup.
-
-`ServerMode` enum in `src/mcp/server.rs`. Path resolution via `resolve_project_path(project_id)` helper.
+In global mode all CRUD tools require a `project_id` (call `list_projects` first); project-scoped ignores it. `ServerMode` enum in `src/mcp/server.rs`; resolution via `resolve_project_path(project_id)`.
 
 ### General Configuration
-Global config lives at `~/.config/agtx/config.toml` (`GlobalConfig`):
+Global config at `~/.config/agtx/config.toml` (`GlobalConfig`):
 ```toml
 default_agent = "claude"
-fullscreen_on_enter = false  # When true, Enter opens the task's tmux pane fullscreen inside agtx
-agent_hooks = true           # Write agent lifecycle-hook configs into worktrees (see Hook-Based Phase Status)
-auto_trust = false           # Answer agents' trust / bypass-permission prompts by reading the pane (see First-Launch Dialogs)
-update_check = true          # Daily GitHub release check + header notice (see Self-Update)
+fullscreen_on_enter = false  # Enter opens the task's tmux pane fullscreen inside agtx
+agent_hooks = true           # Write agent lifecycle-hook configs into worktrees
+auto_trust = false           # Answer agents' trust / bypass-permission prompts by reading the pane
+update_check = true          # Daily GitHub release check + header notice
 
 [agents]                     # Per-phase agent overrides (PhaseAgentsConfig)
 research = "claude"
@@ -1104,7 +325,7 @@ branch_prefix = "task"       # "task" → task/{slug}
 ```
 
 ### Project Configuration
-Per-project overrides live in `{project}/.agtx/config.toml` (`ProjectConfig`) and are merged over the global config via `MergedConfig::merge`:
+Per-project overrides at `{project}/.agtx/config.toml` (`ProjectConfig`), merged over global via `MergedConfig::merge`:
 
 | Field | Purpose |
 |-------|---------|
@@ -1112,46 +333,25 @@ Per-project overrides live in `{project}/.agtx/config.toml` (`ProjectConfig`) an
 | `base_branch` | Branch worktrees are cut from |
 | `github_url` | Repo URL for PR operations |
 | `worktree_dir` | Where worktrees are created |
-| `copy_files` | Comma-separated files copied from project root into worktrees |
-| `init_script` | Shell command run in the worktree after creation |
-| `cleanup_script` | Shell command run in the worktree before removal |
+| `copy_files` | Comma-separated files copied into worktrees |
+| `init_script` / `cleanup_script` | Shell commands run after creation / before removal |
 | `workflow_plugin` | Active plugin for new tasks |
 | `branch_prefix` | Branch name prefix |
-| `skip_worktree` | Work directly in the project root (e.g. already-isolated Docker repos) |
+| `skip_worktree` | Work directly in the project root |
 
 ### Project Trust
-Project config can execute shell commands (`init_script`, `cleanup_script`) and copy files, so those three fields are stripped from an untrusted project's config at startup (`App::new`), with a warning banner.
+`init_script`, `cleanup_script`, `copy_files` are stripped from an untrusted project's config at startup (`App::new`) with a warning banner. Trust is a **canonical path → SHA-256 of `.agtx/config.toml`** map in `TrustStore` (`trusted_projects.toml`); editing the config invalidates trust. A project with no `.agtx/config.toml` is trusted by default. An untrusted project also forces `flags.no_init_scripts = true`. Approve via the in-TUI popup (any key) or `agtx trust`.
 
-- Trust is a **canonical path → SHA-256 of `.agtx/config.toml`** map in `TrustStore` (`trusted_projects.toml`, see path note above). Editing the project config invalidates trust and re-prompts
-- A project with no `.agtx/config.toml` is trusted by default (nothing to distrust)
-- An untrusted project also forces `flags.no_init_scripts = true`, which additionally suppresses **plugin** `init_script`s
-- Approve via the in-TUI trust confirmation popup (any key) or `agtx trust` in the project directory
-- **agtx's own writes re-record trust.** Any write to `.agtx/config.toml` — picking a plugin with `P`, saving the config editor — changes the hash and so invalidates trust, costing the project its scripts on the next launch. `TrustStore::retrust_after_agtx_write` restores the *prior* decision, gated on the trust state read **before** the write: a project the user never approved must not become trusted because agtx touched its config, or an unvouched-for `init_script` starts running. Every in-TUI config writer goes through it
-- `TrustStore::path()` and `GlobalConfig::config_path()` honour `AGTX_CONFIG_DIR`, like `Database::data_root` honours `AGTX_DATA_DIR`, so the suite exercises these writers without touching the real user's files
-- `--no-init-scripts` suppresses `init_script` and `cleanup_script` execution regardless of trust
+**agtx's own writes re-record trust** — any write to `.agtx/config.toml` (`P`, config editor save) changes the hash. `TrustStore::retrust_after_agtx_write` restores the *prior* decision, gated on the trust state read **before** the write. `TrustStore::path()`/`GlobalConfig::config_path()` honour `AGTX_CONFIG_DIR`; `Database::data_root` honours `AGTX_DATA_DIR`. `--no-init-scripts` suppresses scripts regardless of trust.
 
 ### Help Overlay
-`?` opens `tui::help`'s table: every binding, grouped by where it applies, scrollable, and closed with `?`/`Esc`/`q`.
-
-**`HELP` is the complete list of bindings.** `build_footer_text` shows only the column-specific actions plus `[?] help` and `[q] quit`, because the footer is one line and gets truncated on a narrow terminal — `every_footer_fits_a_narrow_terminal` caps every variant at 120 characters. Several keys (`C-n/p` scrolling, `M`, `D`) are advertised nowhere else, and `the_keys_advertised_nowhere_else_are_listed` fails if one drops out of the table.
-
-The overlay swallows the keys it does not use, rather than letting them fall through to the board behind it.
-
-**It scrolls with the same chords as a task pane** — `C-d/u`, `C-n/p`, `PageUp/Down`, `C-g` — read from one `scroll_action_for` table, so `C-d` means the same thing everywhere. `the_scroll_chords_match_between_the_pane_and_the_overlay` fails if the two descriptions drift, and the overlay lists its own keys: a reference that does not say how to read past its first screen is not much of one.
-
-**Two columns where the terminal is wide enough**, which roughly halves the height and lets the whole reference fit a window without scrolling. `help::columns(n)` balances the sections by height but never splits one: a heading in one column with its keys in the next is worse than an uneven pair. A narrow terminal falls back to one column, and the footer drops its scroll hint when everything fits.
-
-**`help_max_scroll` is a `Cell` the renderer writes.** Only the renderer knows how many rows fit, and the handler clamps to that rather than to the table length — against the table length, `C-g` parks the offset past the last screenful and the next `C-u` moves nothing, reading as a dead key.
+`?` opens `tui::help`'s table: every binding, grouped, scrollable, closed with `?`/`Esc`/`q`. **`HELP` is the complete list**; `build_footer_text` shows only column-specific actions plus `[?] help`/`[q] quit` (one line; `every_footer_fits_a_narrow_terminal` caps every variant at 120 chars). Scrolls with the same chords as a task pane (`scroll_action_for` table). Two columns where wide enough (`help::columns(n)` balances but never splits a section). `help_max_scroll` is a `Cell` the renderer writes.
 
 ### First Run
-There is no separate first-run flow. `main.rs` writes the default config and sets `FeatureFlags::first_run`; the TUI opens the **config editor** focused on `Default agent` (`open_first_run_editor`), which is the only question first run has to ask.
-
-`new_for_test_with_flags` calls the same `open_first_run_editor`, so the test exercises the real path rather than a copy of it.
+No separate flow. `main.rs` writes the default config, sets `FeatureFlags::first_run`; the TUI opens the **config editor** focused on `Default agent` (`open_first_run_editor`). `new_for_test_with_flags` calls the same path.
 
 ### Config Editor
-`,` on the board opens `~/.config/agtx/config.toml` and the project's `.agtx/config.toml` as a form (`src/tui/config_editor.rs`). Sections across the top (General / Agents / Worktree / Theme, plus Project when one is open), fields below, the selected field's help line at the bottom.
-
-`config_editor_area` sizes the box to its **content** and centres it. It measures across *all* sections, and a choice field by its longest option rather than its current value, so neither tabbing between sections nor picking from a dropdown resizes the box under the cursor. Clamped to the terminal, so a small window still gets something that fits.
+`,` opens `~/.config/agtx/config.toml` and the project's `.agtx/config.toml` as a form (`src/tui/config_editor.rs`). Sections across the top (General / Agents / Worktree / Theme, plus Project), fields below. `config_editor_area` sizes the box to its content across all sections, clamped to the terminal.
 
 | Key | Action |
 |-----|--------|
@@ -1162,27 +362,10 @@ There is no separate first-run flow. `main.rs` writes the default config and set
 | `C-s` | Save |
 | `Esc` | Close (asks first if there are unsaved changes) |
 
-- **The fields are declared, not open-coded.** One `FieldId` per setting and exactly two matches over it — `read` and `write`. The alternative is an arm per field in the renderer, the key handler, the loader and the saver: four places to forget. `every_field_round_trips_through_read_and_write` walks the whole form and fails if a field is wired into one direction only, which is a setting that silently would not stick
-- **It opens on the files, not on `state.config`.** That is a *merged* view; writing it back would bake every global default into the project file as an explicit override
-- **`dirty` tracks what is stored, not what was asked for.** A write can normalise (a blank optional field becomes unset) or decline (a project field in dashboard mode), so `set` compares the stored value before and after. The discard prompt believes this flag
-- **A save re-records project trust.** Trust is a hash of `.agtx/config.toml`, so writing it invalidates trust — see `TrustStore::retrust_after_agtx_write`. Read the state *before* the write, always
-- **A bad colour is refused and the field stays open**, since accepting one makes the board unreadable on the next frame. Theme edits preview live: theme is global-only, so `state.config.theme` is replaced as the user types, and closing without saving reloads from disk to drop the experiment
-- Help lines say when a setting only affects **new** worktrees (`worktree_dir`, `branch_prefix`, `agent_hooks`)
+**Fields are declared, not open-coded** — one `FieldId`, exactly two matches (`read`/`write`); `every_field_round_trips_through_read_and_write` walks the form. Opens on the files, not on `state.config` (a merged view would bake global defaults into the project file). `dirty` tracks what is stored. A save re-records trust (read state before the write). A bad colour is refused and the field stays open; theme edits preview live (global-only), closing without saving reloads from disk.
 
 ### Config Writes Preserve Comments
-`GlobalConfig::save` and `ProjectConfig::save` go through `write_toml_preserving` (`src/config/mod.rs`), not `toml::to_string_pretty`.
-
-Serialising the struct alone emits a pristine document, dropping every comment and unrecognised key the user wrote — which matters because agtx offers to edit a file people maintain by hand.
-
-The rule: *agtx rewrites the values of keys it knows, never deletes a key it does not recognise, and removes a key it manages when that field becomes unset.*
-
-Four things that are not obvious:
-- **serde renders a nested struct as an inline table** (`worktree = { .. }`). Merged as-is that collapses a `[worktree]` section onto one line and takes its comments with it, and a fresh file does not match the documented format. `expand_inline_tables` normalises first
-- **A comment belongs to the *next* key's decor**, so removing the first key in a file would take the file's header comment with it. `remove_key_keeping_comments` moves it to the following key. Erring toward keeping the user's text leaves a comment that really was about the removed key slightly orphaned, which is visible and fixable where deletion is not
-- **`GLOBAL_MANAGED` / `PROJECT_MANAGED` name the keys a save may delete** — the optional ones, since a required key is always re-emitted. `managed_keys_tests` builds a fully-populated config with an **exhaustive struct literal**, so adding a field fails to compile there until someone has looked at the list. A field missing from it survives being cleared
-- An unparseable file is replaced rather than erroring: preserving is impossible, and refusing the save would leave the user unable to fix it from inside agtx
-
-`GlobalConfig::config_path()` and `TrustStore::path()` both honour `AGTX_CONFIG_DIR`, so the suite exercises the writer without touching the real user's config.
+`GlobalConfig::save` / `ProjectConfig::save` go through `write_toml_preserving` (`src/config/mod.rs`), not `toml::to_string_pretty` (which drops comments and unrecognised keys). Rule: *agtx rewrites the values of keys it knows, never deletes a key it does not recognise, removes a key it manages when unset.* `expand_inline_tables` normalises serde's inline `worktree = { .. }` to a `[worktree]` section; `remove_key_keeping_comments` moves a removed first key's comment to the next key; `GLOBAL_MANAGED`/`PROJECT_MANAGED` name the keys a save may delete (`managed_keys_tests` uses an exhaustive struct literal). An unparseable file is replaced rather than erroring.
 
 ### Theme Configuration
 Colors configurable via `~/.config/agtx/config.toml`:
@@ -1209,12 +392,12 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `o` | Create new task |
 | `Enter` | Open task popup (tmux view) / Edit task (backlog) |
 | `x` | Delete task (with confirmation) |
-| `Ctrl+f` | Open the task popup fullscreen; press again to return to windowed mode |
+| `Ctrl+f` | Open the task popup fullscreen; press again to return |
 | `d` | Show git diff for task |
 | `D` | Open dependency-graph overlay |
 | `m` | Move task forward (advance workflow) |
 | `M` | Move Backlog task straight to Running |
-| `R` | Start research for a Backlog task (in place, no column change) |
+| `R` | Start research for a Backlog task (in place) |
 | `r` | Resume: Review → Running, or Running → Planning |
 | `p` | Cyclic plugins only: Review → Planning (next phase) |
 | `/` | Search tasks (jumps to and opens task) |
@@ -1222,9 +405,9 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | `,` | Open the config editor |
 | `?` | Show every binding (help overlay) |
 | `u` | Update agtx (only bound when a newer release was found) |
-| `W` | Serve the board to a phone: QR, pairing, and paired devices |
+| `W` | Serve the board to a phone: QR, pairing, paired devices |
 | `O` | Toggle orchestrator agent (experimental) |
-| `e` | Toggle project sidebar (`h`/`Left` from the Backlog column focuses it) |
+| `e` | Toggle project sidebar |
 | `q` | Quit |
 
 ### Dashboard Mode (`agtx -g`, or launched outside a git repo)
@@ -1251,31 +434,24 @@ color_popup_header = "#69fae7"  # Popup headers (light cyan)
 | Key | Action |
 |-----|--------|
 | `Ctrl+d/u` or `PageDown/PageUp` | Page down/up — the pair the footer advertises |
-| `Ctrl+n/p` or `Ctrl+Down/Up` | Scroll down/up five lines — bound, but not named in the footer |
+| `Ctrl+n/p` or `Ctrl+Down/Up` | Scroll down/up five lines — bound, not named in the footer |
 | `Ctrl+g` | Jump to bottom |
-| `Ctrl+f` | Toggle the task popup between windowed and fullscreen modes |
+| `Ctrl+f` | Toggle windowed / fullscreen |
 | `Ctrl+q` | Close popup |
 | Other keys | Forwarded to tmux/agent (including `Esc`) |
 
-**All three scroll rows** are delegated to the agent when the pane has no tmux scrollback — see
-*Typing into a Task Pane*. There they are translated to `PageUp`/`PageDown`/`End` rather than passed
-through, so the five-line and twenty-line distinction disappears and both pairs page.
-
-The footer names only `C-d/u` because it has room for one pair, **not** because the other is
-unbound. Do not reconcile the two by unbinding `C-n/p`.
-
-When an escalation note is present, the first keypress only dismisses the banner and is not forwarded.
+All three scroll rows are delegated to the agent when the pane has no tmux scrollback (translated to `PageUp`/`PageDown`/`End`). When an escalation note is present, the first keypress only dismisses the banner.
 
 ### PR Creation Popup
 | Key | Action |
 |-----|--------|
 | `Tab` | Switch between title/description |
 | `Enter` | In title: move to description. In description: newline |
-| `Ctrl+s` | Create PR and move to Review (ignored while the description is still generating) |
+| `Ctrl+s` | Create PR and move to Review (ignored while generating) |
 | `Esc` | Cancel |
 
 ### Task Creation Wizard
-The flow is **Title → Agent → Plugin → Prompt**. Both middle steps are optional and drop out when there is nothing to choose — one installed agent, or one compatible plugin — so `steps()` is derived, never a fixed array.
+Flow: **Title → Agent → Plugin → Prompt**. Both middle steps are optional and drop out when there is nothing to choose (one installed agent, or one compatible plugin), so `steps()` is derived.
 
 | Key | Action |
 |-----|--------|
@@ -1286,46 +462,16 @@ The flow is **Title → Agent → Plugin → Prompt**. Both middle steps are opt
 | `Esc` | Cancel the wizard, from any step |
 | `S-Tab` / `C-b` | Step back one step |
 | `C-s` | Save from any step |
-| `\` + Enter (or `C-j`, `Alt+Enter`) | Newline in the prompt — see below |
+| `\` + Enter (or `C-j`, `Alt+Enter`) | Newline in the prompt |
 
-`WizardState` (`src/tui/wizard.rs`) is the whole flow as one value — the step, both text fields, both list picks, and the edited task's id. Holding every field at once is what makes back-navigation work: stepping back has to find the earlier answers still intact.
+`WizardState` (`src/tui/wizard.rs`) is the whole flow as one value (step, both text fields, both list picks, edited task id) — holding every field makes back-navigation work.
 
-**The agent step writes `Task::base_agent`**, which stands in for `default_agent` whenever a phase's agent is resolved (`phase_agent` in `app.rs`): a phase's own `[agents]` entry wins, else the task's pick, else the configured default. It is a column of its own, not `Task::agent`, because `agent` names what is running in the window *now* — a per-phase override rewrites it on every switch, so a pick stored there is gone the first time an override runs, and the next un-overridden phase would stay on the override's agent. Resolving against `config.agent_for_phase` instead ignores the pick entirely: every task created on a non-default agent is switched back to the default on its first transition. A row stored before the column is `NULL` and resolves to the configured default; the migration backfills `base_agent` from `agent` only for Backlog tasks with no session, the one case where `agent` is known to still be the pick. The plugin list is filtered by whatever the agent step settled on, so changing the agent rebuilds it (`reseed_plugins_for_agent`), keeping the pick when that plugin survives the new filter — switching agent is not a decision about the plugin. `try_save_wizard` rebuilds too, so saving straight from the agent step cannot store an incompatible plugin.
-
-**Both lists are seeded when the wizard opens**, not on the first `Enter`, so the breadcrumb shows the real flow from the first frame.
-
-**`ListPick` is one type for both list steps.** `selected` indexes `options`, not the filtered view, so a filter that narrows and widens again leaves the cursor on the same option. `settle()` moves it only when the filter excludes it outright, because an `Enter` on an invisible selection picks something the user cannot see. A filter belongs to the visit, not the step, so stepping away clears it.
-
-Three consequences, all tested:
-- **`Esc` cancels outright, from any step**; stepping back is `Shift+Tab` / `Ctrl+B`. One key that always means "get me out of here" beats one whose effect depends on where you are. Two things own `Esc` first — a dropdown on the prompt step, and an open list filter — because closing either must not take the whole task with it
-- **Each step seeds itself once** (`ListPick::take_seed` / `take_prompt_seed`). Re-entering a list step from the right must not rebuild it, or the user's pick resets to the default they chose against; re-entering the prompt step must not reload from the database over an unsaved edit. Back-navigation is what makes these necessary
-- **The step list is derived, not fixed.** `steps()` drops an optional step when there is nothing to choose, so the breadcrumb never advertises a step this run will not visit, and `step_index` is a position in *this* flow rather than a constant
-
-**`Enter` saves; a newline needs one of three escapes.** `\`+Enter is the documented one and the one the footer names. Two chords do the same, and neither needs anything from the terminal:
-
-- **`Ctrl+J`.** In raw mode crossterm parses `0x0A` as `Ctrl+J` rather than as `Enter` — its `b'\n'` arm is gated on `!is_raw_mode_enabled()` — so nothing has to be negotiated.
-- **`Alt+Enter`**, which arrives as ESC then CR on most terminals, though macOS Terminal and iTerm2 only send it once Option is configured as Meta.
-
-**`Shift+Enter` is deliberately not bound, and agtx does not ask for the Kitty keyboard protocol.** A terminal sends a bare CR for both `Enter` and `Shift+Enter` unless that protocol is negotiated, so the two are indistinguishable and no key handler can separate them. Two measurements argue against requesting it: `supports_keyboard_enhancement()` **blocks for up to two seconds** on any terminal that does not answer the query, which every launch pays; and even under tmux's `extended-keys always`, a real `S-Enter` still arrives as a bare CR — so the binding fires almost never and reads as *save* the rest of the time. Do not add it without re-measuring both.
-
-**`Ctrl+J` overlaps the pickers' down-arrow** (`C-j`/`C-n` in all three dropdowns) — deliberate: while a picker is open it navigates, and it only means newline once nothing has claimed it. It also collides with `vim-tmux-navigator`, which binds `C-h/C-j/C-k/C-l` in tmux's *root* table and would eat the key before agtx ever sees it (same hazard noted under *Typing into a Task Pane*); `\`+Enter is the way out there.
-
-**A chord is not text.** `TextInput::handle_edit_key` and all three dropdowns guard their `Char(c)` arm on `!ctrl && !alt`, so `Ctrl+X` does not type an `x`. Declining is also what lets a caller give a chord its own meaning and still receive the key.
-
-One consequence to remember when adding bindings: under that protocol **`Shift+Tab` arrives as `Tab` with `SHIFT`, not as `BackTab`**. Both spellings are accepted in the wizard and the config editor; a new binding on either has to do the same.
-
-**The wizard pads horizontally** (`WIZARD_PADDING`), and the literals in its render carry no leading spaces of their own: the block's padding is the only indent, so a wrapped line starts in the same column as the row it came from. The cursor anchor adds the same padding — changing one without the other drifts the caret off the text.
-
-`AppState.wizard: Option<WizardState>` **is** the input mode — there is no second flag that could disagree with it. `AppState::wizard_step()` is the one accessor anything outside the wizard uses.
-
-A refusal is never silent. `title_problem()` is the single source for both `Enter` on the title step and `C-s` from anywhere, so they refuse for the same reasons and say the same thing: empty, longer than `MAX_TASK_TITLE_CHARS`, or a duplicate of another task's title. A failure sets `validation`, walks the wizard back to the title step, and renders the reason inside the wizard body — drawn there rather than in the footer because the footer is also the background-warning channel, and an unrelated warning must not replace the message while the user is reading it.
-
-**The renderer is a real `Layout`** (`draw_wizard`): breadcrumb, the steps already behind you, the active step, a validation row. Each step sizes its own body — a title is one line, a prompt and a list want the room — and text fields draw inside their own bordered box, so the caret starts at column 0 of the inner area with no prefix to measure. List steps use ratatui's `List` and `Scrollbar`. The scrollbar track is inset by one row at each end; handed the whole area it draws over the block's corners.
-
-Agent defaults to `config.default_agent`; the agent step overrides it per task. The prompt step's `/` skill picker lists skills in the syntax of the agent the step settled on.
-Plugin defaults to the project's active plugin (set via `P` on the board).
-
-The prompt step's `#`/`@`, `/` and `!` dropdowns are each their own handler (`handle_file_search_key`, `handle_skill_search_key`, `handle_task_ref_search_key`), and each **takes its state out** for the duration: every arm needs the dropdown alongside the wizard's prompt field, and several call back into `self` to refresh the match list, which a held borrow would not allow. They return whether the key belonged to them, so the prompt handler keeps a fallback. All three commit and cancel through `splice_search_region` — only the replacement text differs.
+- **The agent step writes `Task::base_agent`**, which stands in for `default_agent` when a phase's agent is resolved (`phase_agent`: a phase's own `[agents]` entry wins, else the task's pick, else the default). It is a column of its own, not `Task::agent` (which names what runs now). A `NULL` row resolves to the configured default; the migration backfills only for Backlog tasks with no session. The plugin list is filtered by the settled agent (`reseed_plugins_for_agent`); `try_save_wizard` rebuilds too.
+- `ListPick` is one type for both list steps; `selected` indexes `options`, not the filtered view; `settle()` moves it only when the filter excludes it. A filter belongs to the visit, not the step. Each step seeds itself once (`take_seed`/`take_prompt_seed`). `steps()` is derived; `step_index` is a position in *this* flow.
+- **`Esc` cancels outright**; stepping back is `Shift+Tab`/`Ctrl+B`. Two things own `Esc` first — a prompt-step dropdown, and an open list filter.
+- **`Enter` saves; a newline needs an escape**: `\`+Enter (documented), `Ctrl+J` (crossterm parses `0x0A` as `Ctrl+J` in raw mode), `Alt+Enter`. **`Shift+Enter` is deliberately not bound and agtx does not request the Kitty protocol** (a terminal sends bare CR for both unless negotiated; `supports_keyboard_enhancement()` blocks up to 2s). `Ctrl+J` overlaps the pickers' down-arrow and collides with `vim-tmux-navigator`.
+- **A chord is not text** — `TextInput::handle_edit_key` and all three dropdowns guard `Char(c)` on `!ctrl && !alt`. Under the Kitty protocol `Shift+Tab` arrives as `Tab`+`SHIFT`, not `BackTab` (both accepted).
+- `AppState.wizard: Option<WizardState>` **is** the input mode; `wizard_step()` is the one accessor. A refusal is never silent — `title_problem()` is the single source for `Enter` on the title step and `C-s` (empty / too long / duplicate); a failure walks back to the title step and renders the reason in the wizard body. The renderer is a real `Layout` (`draw_wizard`). The prompt step's `#`/`@`, `/`, `!` dropdowns are each their own handler (`handle_file_search_key`/`handle_skill_search_key`/`handle_task_ref_search_key`), each takes its state out, all commit/cancel through `splice_search_region`.
 
 ### Task Edit (Description)
 | Key | Action |
@@ -1341,343 +487,95 @@ The prompt step's `#`/`@`, `/` and `!` dropdowns are each their own handler (`ha
 ## Code Patterns
 
 ### Comments and Docs
-**Describe the code as it is: keep the reasoning and the measurements, drop the chronology.** Say what a guard prevents, not what once went wrong; name the alternative, not the predecessor. Test names follow the same rule.
-
-`used to`, `no longer`, `previously` and `the old X` usually signal a lapse, but each also has a legitimate present-tense sense — read the line, don't grep the phrase.
+**Describe the code as it is: keep the reasoning and the measurements, drop the chronology.** Say what a guard prevents, not what once went wrong; name the alternative, not the predecessor. `used to`/`no longer`/`previously`/`the old X` usually signal a lapse (but each has a legitimate present-tense sense — read the line).
 
 ### Ratatui TUI
-- Uses `crossterm` backend
-- State separated from terminal for borrow checker: `App { terminal, state: AppState }`
-- Drawing functions are static: `fn draw_*(state: &AppState, frame: &mut Frame, area: Rect)`
-- Theme colors accessed via `state.config.theme.color_*`
-- **Every text field uses `tui::text_input::TextInput`** — the buffer and its caret as one value, with motion, deletion and word jumps behind `handle_edit_key`. One implementation, so a fix lands in every field at once; a new field must not open-code its own. `handle_edit_key` *reports* whether it consumed the key rather than swallowing it, so a field that gives `/` or `#` its own meaning matches those first and delegates the rest — a `/` mid-word then falls through and arrives as ordinary text. `Enter` and `Esc` are deliberately not handled there: submit, newline, step-back and cancel are the field's decision
-- The caret is a **byte** offset, so every motion goes through the boundary helpers in that module. A caret left mid-codepoint panics the next time anything slices the buffer, which is why `TextInput`'s fields are public but its motion is not open-coded
-- `wrapped_cursor_pos` stays in `app.rs` beside `wrap_spans` on purpose — the two share one wrap rule and the comment there says they must move together
+- `crossterm` backend. State separated from terminal for the borrow checker: `App { terminal, state: AppState }`. Drawing functions are static: `fn draw_*(state: &AppState, frame: &mut Frame, area: Rect)`. Theme colors via `state.config.theme.color_*`.
+- **Every text field uses `tui::text_input::TextInput`** (buffer + caret as one value; motion/deletion/word-jumps behind `handle_edit_key`, which *reports* whether it consumed the key rather than swallowing it). `Enter`/`Esc` are not handled there. The caret is a **byte** offset — every motion goes through the module's boundary helpers. `wrapped_cursor_pos` stays beside `wrap_spans` in `app.rs` (shared wrap rule).
 
 ### Error Handling
-- Use `anyhow::Result` for all fallible functions
-- Use `.context()` for adding context to errors
-- Gracefully handle missing tmux sessions/worktrees
+`anyhow::Result` for all fallible functions; `.context()` for context. Gracefully handle missing tmux sessions/worktrees.
 
 ### Database
-- SQLite via `rusqlite` with `bundled` feature
-- Migrations via `ALTER TABLE ... ADD COLUMN` (ignores errors if column exists)
-- DateTime stored as RFC3339 strings
+SQLite via `rusqlite` (`bundled`). Migrations via `ALTER TABLE ... ADD COLUMN` (ignores errors if column exists). DateTime as RFC3339 strings.
 
 ### The Event Loop
-`App::run` **blocks** on one `mpsc` channel that two threads feed, and draws only when something
-changed. Polling instead — `event::poll(interval)` waking on a timer whether or not anything
-happened — costs a full redraw, a pane re-parse and a SQLite query per wake-up.
+`App::run` **blocks** on one `mpsc` channel two threads feed, and draws only when something changed.
 
 ```text
-agtx-terminal-input ──┐                     blocking `event::read()`
-                      ├──► mpsc<Wake> ──► run(): recv_timeout(HOUSEKEEPING_TICK)
-agtx-pane-watch ──────┘                          │
-   captures the open popup's pane,               ├─ draw, if anything set `dirty`
-   sends only when it CHANGED                    └─ housekeeping, on its own tick
+agtx-terminal-input ─┐   blocking event::read()
+                     ├─► mpsc<Wake> ─► run(): recv_timeout(HOUSEKEEPING_TICK)
+agtx-pane-watch ─────┘        ├─ draw, if anything set `dirty`
+   captures the open popup's  └─ housekeeping, on its own tick
+   pane, sends only when CHANGED
 ```
 
-That one interval had been standing in for three unrelated things, and tuning it for any one of them
-priced the other two wrongly. They are now separate:
-
-- **Echo latency** is the pane watcher's cadence, and the watcher learns a pane painted in one of
-  two ways:
-  - **push** — a second control client attached **without** `no-output` (`OutputWatch`), open only
-    while a popup is, whose `%output` notifications say which pane painted. `SHELL_REFRESH_INTERVAL`
-    then stops being a poll period and becomes a **rate limit**: the signal removes the floor, the
-    interval keeps the ceiling, since a pane painting flat out notifies far faster than it is worth
-    capturing.
-  - **The ceiling has two heights, and that is load-bearing.** A capture makes the *tmux server*
-    format the whole pane, so capturing every frame is expensive where nobody is watching for one:
-    `PANE_OUTPUT_MIN_INTERVAL` paces the agent's output, `SHELL_REFRESH_INTERVAL` paces the user's
-    own echo, and `PANE_TYPING_WINDOW` keeps the fast one in force after a keystroke — because the
-    echo arrives as a *paint*, indistinguishable from the agent's output, so pacing paints without
-    the window would delay every character. One shared interval makes a pane painting flat out cost
-    more than polling would — polling is protected by its own slowness, since one `capture-pane`
-    process per capture is a low ceiling of its own.
-  - **poll** — the timer, when push is unavailable (`AGTX_TMUX_PUSH=0`, control mode off, or a pane
-    whose id cannot be read). Not a degraded copy: it is the whole design in that case.
-
-  Either way the watcher *compares* and wakes the loop only on a difference — far cheaper than the
-  capture that feeds it. `docs/planning/pane-output-push.md` has the design notes.
-- **Capture depth follows the scroll position.** At the bottom only the visible rows are rendered,
-  so `SHELL_POPUP_TAIL_LINES` (100) is asked for and `SHELL_POPUP_CAPTURE_LINES` (500) only once the
-  user scrolls up (`popup_capture_depth`); a scroll is not a target change but it does poke the
-  watcher, so the deeper capture arrives immediately rather than after the next paint. This is worth
-  nothing for the agents that matter — they take the alternate screen, where `history_size` is 0 and
-  every depth returns the same bytes — and a lot for a pane that accumulates history, where the
-  deeper capture is many times the size of the screen being rendered.
-- **Three things about `%output` shape that design.** It is scoped to the **attached session** and
-  no other, so the watch client attaches to the popup's own session. `no-output` is fixed at attach
-  time — it survives every `refresh-client` form on 3.5a — which is why this is a *second* client
-  rather than a flag flip on the input one, and why nothing is mirrored while no popup is open. And
-  it means *bytes reached the pty*, not that the rendered pane differs, so `PANE_PUSH_BACKSTOP`
-  stays as the net for a signal that never came.
-- **Housekeeping** — `maybe_spawn_session_refresh`, expiring warnings, the MCP transition queue —
-  runs on `HOUSEKEEPING_TICK`, not once per loop iteration — that would tie its rate to how fast the
-  user types, and it contains a SQLite query. That query has its own `TRANSITION_POLL_INTERVAL`: a
-  request to move a task between columns is acted on against a phase status that is itself only as
-  fresh as `PHASE_STATUS_CACHE_TTL`, so reading it faster buys nothing.
-- **Nothing on the board animates.** The `Working` indicator is a static `▶`, not a spinner. On an
-  otherwise idle board the spinner was the *only* thing forcing a redraw, and the card already said
-  the task was running. A future animated indicator brings that cost back, and
-  `nothing_on_the_board_animates` fails if one appears.
-- **A closing window is pushed, not polled.** tmux sends `%window-close` / `%unlinked-window-close`
-  to a `no-output` client — verified on 3.5a — so the connection agtx already holds for keystrokes
-  reports an agent exiting. It raises a flag (`InputConfig::window_events`); housekeeping ages out
-  the phase-status cache so the next refresh looks immediately. A flag rather than the window id,
-  because the id would have to be resolved to a task anyway and "look again" is the whole signal.
-  An `Exited` card then appears promptly instead of on the refresh's next tick.
-- **Drawing** happens when `dirty` was set: input, a changed capture, or a background result.
-  Nothing else asks for a frame, so an idle board and an idle popup both cost only the backstop.
-
-Two details worth keeping:
-
-- **`REDRAW_BACKSTOP` is a safety net, not the mechanism.** A missed `dirty` would leave a stale
-  screen until the next keystroke, which is far worse than one wasted frame a second. If it is ever
-  what makes the UI look right, something above it is wrong.
-- **The poll fallback backs off** to `PANE_IDLE_INTERVAL` after `PANE_IDLE_ROUNDS` still captures,
-  and a keystroke pokes it back to the fast cadence. The reset is the half that makes the back-off
-  safe: the capture a poke triggers runs *before* the key that caused it has reached the pane and
-  been echoed, so it sees nothing new — leaving the count alone made the first keystroke after a
-  pause wait out another whole idle interval. `pane_watch_rounds_after_wait` exists so a test can
-  pin that.
+- **Echo latency** is the pane watcher's cadence. It learns a pane painted two ways: **push** — a second control client attached without `no-output` (`OutputWatch`), open only while a popup is, whose `%output` says which pane painted (`SHELL_REFRESH_INTERVAL` becomes a rate limit; `PANE_OUTPUT_MIN_INTERVAL` paces agent output, `PANE_TYPING_WINDOW` keeps the fast cadence after a keystroke); **poll** — the timer when push is unavailable. Either way the watcher compares and wakes the loop only on a difference. Capture depth follows the scroll position — `SHELL_POPUP_TAIL_LINES` (100) at the bottom, `SHELL_POPUP_CAPTURE_LINES` (500) once scrolled up (`popup_capture_depth`). `PANE_PUSH_BACKSTOP` is the net.
+- **Housekeeping** (`maybe_spawn_session_refresh`, expiring warnings, the MCP transition queue) runs on `HOUSEKEEPING_TICK`; its SQLite query has its own `TRANSITION_POLL_INTERVAL` (phase status is only as fresh as `PHASE_STATUS_CACHE_TTL`). **Drawing** happens when `dirty` was set; `REDRAW_BACKSTOP` is a safety net, not the mechanism. **Nothing on the board animates** (`Working` is a static `▶`; `nothing_on_the_board_animates` fails if a spinner appears). A closing window is pushed, not polled (`%window-close` → `InputConfig::window_events`). The poll fallback backs off to `PANE_IDLE_INTERVAL` after `PANE_IDLE_ROUNDS`; a keystroke pokes it back.
 
 ### Background Operations
-- PR description generation runs in background thread
-- PR creation runs in background thread
-- Phase status polling runs in background thread (`maybe_spawn_session_refresh`)
-- Results come back over `mpsc` and are collected by `pump_background_results()` on each wake-up
-  (non-blocking `try_recv`), which reports whether anything it applied needs a redraw
-- Loading spinners shown during async operations
+PR description generation, PR creation, and phase status polling run in background threads. Results come back over `mpsc`, collected by `pump_background_results()` on each wake-up (non-blocking `try_recv`).
 
 ### Phase Status Polling
-- `maybe_spawn_session_refresh()` spawns a background thread with 2-second cache TTL per task, covering Planning/Running/Review tasks plus Backlog tasks with an active research session
-- **Its tmux work is per pass, not per task.** One `list-windows -a` answers `window_exists` for
-  every task (`live_window_targets`), and each task's pane is captured **once**, over the control
-  connection (`capture_pane_text` → `CaptureSpec::text()`), shared by the dialog scan and the content
-  hash. The old shape ran a `list-windows` process and up to two `capture-pane` processes *per
-  task*, every refresh, so its cost grew with the board
-- `CaptureSpec::text()` is deliberately **not** the popup's spec: no `-e`, so no SGR escapes land in
-  the middle of a dialog's wording, which is what the matcher and the hash have always been fed. A
-  real-tmux test asserts it is byte-identical to `TmuxOperations::capture_pane`
-- `live_window_targets` returns `Option`, and the `None` must not be flattened to an empty set: one
-  listing answers for the whole board, so "tmux could not be asked" read as "no windows" would mark
-  every running task `Exited` on a transient hiccup. `window_is_gone` fails safe, treating an
-  unreadable listing as unknown rather than gone
-- Overlap guard: only one refresh thread runs at a time (`session_refresh_rx.is_some()`)
-- Thread does all expensive work: plugin TOML loading, artifact file checks, `tmux capture-pane`, copy-back side effects
-- `apply_session_refresh()` applies results on main thread (non-blocking `try_recv`)
-- Idle detection (Working → Idle) handled on main thread using `pane_content_hashes` timestamps — **only for tasks with no hook report**, see below
-- Five states (`PhaseStatus` in `src/db/models.rs`): Working (spinner), Blocked (bold `?`, agent-reported only), Idle (pause icon, 15s no output), Ready (checkmark), Exited (no window)
-- Phase artifact paths come from the task's plugin or agtx defaults
-- Plugin instances cached per task in `HashMap<Option<String>, Option<WorkflowPlugin>>` to avoid repeated disk reads
+`maybe_spawn_session_refresh()` spawns a background thread (2s cache TTL per task) covering Planning/Running/Review plus Backlog tasks with an active research session. **Its tmux work is per pass, not per task** — one `list-windows -a` answers `window_exists` for every task (`live_window_targets`); each pane captured once over the control connection (`capture_pane_text` → `CaptureSpec::text()` — no `-e`, so no SGR escapes in a dialog's wording), shared by the dialog scan and content hash. `window_is_gone` fails safe (unreadable listing = unknown); overlap guard: one refresh thread at a time. `apply_session_refresh()` applies on the main thread; idle detection (Working → Idle) via `pane_content_hashes` timestamps, only for tasks with no hook report. Five states (`PhaseStatus`): Working, Blocked (agent-reported only), Idle (15s no output), Ready, Exited.
 
 ### Hook-Based Phase Status
-Agents that support lifecycle hooks report their own state instead of agtx guessing it from pane
-output.
+Agents that support lifecycle hooks report their own state instead of agtx guessing from pane output. `agtx hook --env <agent>` writes `{worktree}/.agtx/status/{task_id}.json`, read by the refresh thread.
 
-```
-agent ──hook──► agtx hook --env <agent> ──► {worktree}/.agtx/status/{task_id}.json
-                                                       │
-                            maybe_spawn_session_refresh ┘──► apply_session_refresh
-```
-
-**Five of eight agents report their own state.** Every one of them takes a **project-local** hook
-config, so agtx writes into the worktree and never into the user's global agent config; removing the
-worktree removes the registration, and there is nothing to uninstall. `write_hook_config()` is the
-writer, selected by `AgentSpec::hook_config` (`HookConfigKind`). `None` — no hooks, keep the
-pane-hash heuristic — is a supported state, not a degraded one.
+**Five of eight agents report their own state.** Every one takes a **project-local** hook config (removing the worktree removes the registration). `write_hook_config()` is the writer, selected by `AgentSpec::hook_config` (`HookConfigKind`); `None` (keep the pane-hash heuristic) is a supported state.
 
 | Agent | Config file | Handler shape | Payload event key | Can report `Blocked` |
 |---|---|---|---|---|
 | claude | `.claude/settings.local.json` | `{hooks:[{type,command}]}` | `hook_event_name`, PascalCase | yes — `PermissionRequest`, `Notification` |
 | gemini | `.gemini/settings.json` | same | `hook_event_name`, PascalCase | yes — `Notification` |
-| cursor | `.cursor/hooks.json` | **flat `{command}`** | `hook_event_name`, camelCase | no |
-| grok | `.grok/hooks/agtx.json` | `{hooks:[{type,command}]}` | `hookEventName`, **snake_case value** | yes — `Notification` scoped to `permission_prompt` |
-| antigravity | `.agents/hooks.json` | keyed by hook *name*, then event | **none** — passed as `--event` | no |
+| cursor | `.cursor/hooks.json` | flat `{command}` | `hook_event_name`, camelCase | no |
+| grok | `.grok/hooks/agtx.json` | `{hooks:[{type,command}]}` | `hookEventName`, snake_case value | yes — `Notification` scoped to `permission_prompt` |
+| antigravity | `.agents/hooks.json` | keyed by hook *name*, then event | none — passed as `--event` | no |
 | codex | `.codex/hooks.json` | `{description, hooks:{…}}` | `hook_event_name`, PascalCase | mapped, **not deployed** |
-| opencode, copilot, pi | — | — | — | no hooks; see `HookConfigKind` |
+| opencode, copilot, pi | — | — | — | no hooks |
 
-The formats are **not interchangeable**, and every mismatch below fails silently — a valid-looking
-config in the worktree and no status file ever written. This is why `tests/smoke/agent_smoke.py` is
-the gate: the unit suite cannot see "the agent ignored it".
+The formats are **not interchangeable**, and every mismatch fails silently (a valid-looking config, no status file written) — this is why `tests/smoke/agent_smoke.py` is the gate. Notes: cursor takes a flat list; grok reports `pre_tool_use` for `PreToolUse` (both map via `squash()`; camelCase keys need serde aliases); antigravity's `PreToolUse` is not subscribable (`PostToolUse` carries the heartbeat); codex's `hooks` key in `.codex/config.toml` is a table, not a path. **Codex is off, deliberately** — a project-local `.codex/hooks.json` triggers a startup review that would trust every hook the repo ships (the vocabulary is mapped and the writer exists — one field to enable).
 
-- **cursor** takes a flat `[{command}]` list; with Claude's `{hooks:[{type,command}]}` wrapper the
-  file parses, loads, and fires nothing
-- **grok** registers `PreToolUse` and reports `pre_tool_use`, so both spellings must map — that is
-  `squash()`. It also sends `hookEventName`/`sessionId`/`transcriptPath` in camelCase, hence the
-  serde aliases on `HookPayload`
-- **antigravity's `PreToolUse` is not subscribable.** Its `decision` output is *required* and
-  anything else reads as a refusal, so registering it blocks every tool call. Answering `"allow"`
-  would make a liveness reporter into a permission granter — the line agtx declines to cross with
-  trust dialogs. `PostToolUse` carries the heartbeat instead, and does include the tool name despite
-  its docs. Its two event shapes also differ: tool events group under a `matcher`, the rest are a
-  flat handler list, and the wrong shape is ignored
-- **codex's `hooks` key in `.codex/config.toml` is a table, not a path.** `hooks.json` is
-  auto-discovered; assigning a string to that key makes codex reject the whole config
-  (`invalid type: string, expected struct HooksToml`) and lose its MCP server with it
-
-**Codex is off, deliberately.** Its hooks work and speak Claude's schema, but a project-local
-`.codex/hooks.json` triggers a startup review — *"N hooks are new or changed. Hooks can run outside
-the sandbox after you trust them."* — whose only enabling answer trusts **every** hook the repo
-ships, as does `--dangerously-bypass-hook-trust`. Not agtx's decision, on the same reasoning as
-never choosing codex's "Update now". The vocabulary is mapped and the writer exists, so enabling it
-is one field if codex gains per-hook trust. The dialog is in `AgentSpec::dialogs` regardless
-(answered `3`, *Continue without trusting*, `security: false` because it declines rather than
-grants) — a project shipping its own hooks file parks every codex task there whether or not agtx
-writes one.
-
-- **Writers merge where the file is shared.** Claude's and Gemini's hooks live in the same file as
-  their MCP config, and `.claude`/`.gemini`/`.codex` are in `AGENT_CONFIG_DIRS`, so a project
-  shipping its own settings has them copied into every worktree. `merge_claude_hooks()` keeps user
-  entries on the same events and replaces only agtx's own, matched on the `" hook --env"` invocation
-  rather than the binary path, so redeploying is idempotent and a moved agtx still recognises its own
-  work. `write_hook_config` runs **after** `write_mcp_config` because both read-modify-write those
-  two files
-- **The hook command is task-agnostic**: `agtx hook --env <agent>`. The task comes from
-  `AGTX_TASK_ID` / `AGTX_WORKTREE`, set on the tmux **window** by `create_window` (tmux `-e`, so a
-  resumed or switched agent inherits them). Baking the task id in breaks `skip_worktree`, where every
-  task shares one settings file. The hook exits silently when those are absent, so a registration
-  stays inert outside agtx, and when `CLAUDE_JOB_DIR` is set, since a backgrounded task inherits its
-  parent's env
-- **`--event <Name>`** supplies the event for an agent whose payload carries none
-  (`HookEventSource::Argv`, antigravity only). The payload wins when it has one
-- **`hook_events(kind)` and `map_hook_event(kind, …)` are the two halves of one contract** and live
-  in the same file so a test can guard the drift. An event registered but unmapped fires and reports
-  nothing; an event mapped but unregistered pays a process spawn to decide nothing. Both directions
-  are asserted. The kind is a *parameter*, not a fallback chain: `Stop` means "turn over" to four
-  agents while Gemini's equivalent is `AfterAgent` and Cursor's is lowercase `stop`, so one shared
-  table would let a registration typo succeed against the wrong agent's arm
-- **Grok also scans `.claude/settings*.json` and `.cursor/hooks.json`** for vendor compatibility, so
-  in a multi-phase-agent worktree it fires agtx's Claude- and cursor-registered hooks too. Mostly
-  inert: the vocabulary is chosen by the agent named in the command agtx wrote, and grok's snake_case
-  payloads do not resolve against Claude's PascalCase arm. **Cursor's arm is the exception** — it is
-  lowercase and contains `stop`, which is exactly what grok reports, so a grok turn can write a
-  record labelled `agent: "cursor"`. The *state* is right either way (both map `stop` to `Waiting`)
-  and nothing reads that label, so this is a wrong name on a correct record rather than a wrong
-  status
-- **Claude's registered events** (verified against Claude Code 2.1.247): `SessionStart`,
-  `UserPromptSubmit`, `PreToolUse` (heartbeat) → `working`; `PermissionRequest`, `Notification` →
-  `blocked`; `Stop`, `StopFailure` → `waiting`; `SessionEnd` → `ended`. Unregistered names are
-  ignored by the agent
-- **Claude's `Notification` is scoped to `permission_prompt`**, like grok's, and for the same
-  reason. Measured against Claude Code 2.1.263, the payload carries a `notification_type`:
-  `permission_prompt` ("Claude needs your permission") and `idle_prompt` ("Claude is waiting for
-  your input"), the latter fired ~66s after a turn simply ends. Unscoped, an agent that has simply
-  finished its turn would report `Blocked` — and an agent-reported `Blocked` fires the stuck-task
-  notification *immediately*, with no settle window, so a caller would interrupt an agent that is
-  merely quiet. Verified that Claude honours a matcher on this event: with it, an idle turn produces no
-  hook call at all. The scoping therefore lives in `hook_events`, not `map_hook_event` — the payload
-  never reaches the mapper. A worktree deployed by an earlier binary keeps the unscoped
-  registration until `refresh_stale_worktree_configs` re-deploys it
-- **`src/agent/hook_status.rs`** is pure (no tmux/DB/TUI types): event mapping, atomic
-  write-then-rename, staleness, and `merge_event`'s guard preventing a late `PreToolUse` from
-  clearing a fresh `Blocked`
-- **Precedence** in the refresh thread: fresh artifact with the turn over → `Ready` > window gone →
-  `Exited` > hook status > pane-hash heuristic (see *When a phase counts as done*). Only *liveness* is replaced; artifact detection is untouched
-- **Purely additive**: no status file means the pre-existing 15s pane-hash heuristic runs unchanged.
-  A `working` record older than `HOOK_STALE_SECS` (300s) is distrusted and also falls back
-- The pane capture is skipped only on a **fresh `Working`** report — one fewer `capture-pane` per
-  task per refresh, and proof the pane is past whatever gated startup. A `waiting`/`ended` record
-  never expires, so letting one suppress the capture would hide a dialog rendered after a relaunch,
-  which is exactly the resume path. Codex's MCP approval auto-dismiss runs outside that branch so it
-  fires either way
-- **Consumers**: an agent-reported `Blocked` fires the orchestrator stuck-task notification
-  *immediately* (with the reason text from `blocked_reasons`), where `Idle` keeps its 60s settle
-  because it is still a guess. A **trust-blocked** task is excluded from that notification
-  altogether: the orchestrator's only remedies are a nudge — which would be typed into the dialog —
-  and escalation, and only the user can answer it. The merge-conflict trigger fires on `Ready` and
-  `Idle` only, so it never sends into a `Blocked` pane. MCP `get_task` exposes `agent_state` +
-  `blocked_reason`, read straight from the file — it works cross-process precisely because it is a
-  file, not TUI state
-- **Binary-path drift**: the absolute `agtx` path from `current_exe()` is baked into the hook command
-  *and* every MCP config a worktree gets, so moving or reinstalling agtx would silently break both
-  for worktrees created earlier. `write_skills_to_worktree` records the deploying binary in
-  `.agtx/deployed-by`; `refresh_stale_worktree_configs` re-deploys mismatched worktrees on a
-  background thread at startup. `is_agtx_hook_command` matches on the `" hook --env"` invocation
-  rather than the binary path so the merge still recognises its own entries across a move
-- **Not wired**: codex (hook-trust review, above); opencode, whose lifecycle callbacks are a
-  TypeScript plugin API rather than shell commands, so it would need agtx to ship a JS shim; and
-  copilot, whose hook support is *unknown* rather than absent — it is not installed on any machine
-  this was measured on, and that distinction is recorded in its spec so it is not filled in from
-  documentation
+- **Writers merge where the file is shared** — `merge_claude_hooks()` keeps user entries, replaces only agtx's own (matched on `" hook --env"`); `write_hook_config` runs **after** `write_mcp_config`. The hook command is task-agnostic; the task comes from `AGTX_TASK_ID`/`AGTX_WORKTREE` set on the tmux **window** by `create_window` (tmux `-e`); exits silently when absent. `--event <Name>` supplies the event for an agent whose payload carries none (antigravity).
+- **`hook_events(kind)` and `map_hook_event(kind, …)` are two halves of one contract** (same file, both directions asserted). `src/agent/hook_status.rs` is pure (event mapping, atomic write-then-rename, staleness, `merge_event`'s guard against a late `PreToolUse` clearing a fresh `Blocked`). Claude's `Notification` is scoped to `permission_prompt` (unscoped a finished turn would report Blocked immediately).
+- **Precedence** in the refresh thread: fresh artifact with the turn over → `Ready` > window gone → `Exited` > hook status > pane-hash heuristic. **Purely additive** — no status file → the 15s pane-hash heuristic runs unchanged; a `working` record older than `HOOK_STALE_SECS` (300s) is distrusted. **Consumers**: an agent-reported `Blocked` fires the orchestrator stuck-task notification *immediately*, `Idle` keeps its 60s settle; a trust-blocked task is excluded. The merge-conflict trigger fires on `Ready`/`Idle` only.
+- **Binary-path drift**: the absolute `agtx` path is baked into the hook command + every MCP config. `write_skills_to_worktree` records the deploying binary in `.agtx/deployed-by`; `refresh_stale_worktree_configs` re-deploys mismatched worktrees at startup. **Not wired**: codex, opencode (TypeScript plugin API), copilot (support *unknown*).
 
 ### Task References & Dependencies
-- In description input, type `!` (at start of line or after space) to search existing tasks
-- Selecting a task inserts `![task-title]` and tracks the reference ID
-- Referenced task IDs stored as comma-separated string in `task.referenced_tasks`
-- References double as **dependencies**: `Database::deps_satisfied` returns true only when every referenced task is in Review or Done. Starting research or moving a Backlog task forward is blocked until then (a warning is shown instead)
-- `src/tui/dep_graph.rs` builds a topologically-leveled `DepGraph` from `referenced_tasks` — level 0 = no in-graph deps, and a node is `unblocked` when it is in Backlog with satisfied deps. The `D` overlay renders it and can batch-move unblocked tasks. The module is free of ratatui/DB types (the caller passes a `deps_satisfied` closure), so it is unit-testable in isolation
-- MCP `create_tasks_batch` wires the same dependencies via 0-based `depends_on` indices
-- At worktree setup, referenced tasks' artifacts are copied to `.agtx/references/`:
-  - Git diffs (`{slug}.diff`) from `git diff main..{branch}`
-  - Worktree files (`.agtx/skills/`, `.planning/`) if the referenced worktree still exists
+- Type `!` in description input (start of line or after space) to search tasks; selecting inserts `![task-title]` and tracks the ID (stored comma-separated in `task.referenced_tasks`). References double as **dependencies** — `Database::deps_satisfied` returns true only when every referenced task is in Review or Done; starting research or moving a Backlog task forward is blocked until then.
+- `src/tui/dep_graph.rs` builds a topologically-leveled `DepGraph` (level 0 = no in-graph deps; a node is `unblocked` when in Backlog with satisfied deps). The `D` overlay renders it and can batch-move; free of ratatui/DB types (caller passes a `deps_satisfied` closure). MCP `create_tasks_batch` wires the same deps via 0-based `depends_on` indices.
+- At worktree setup, referenced tasks' artifacts are copied to `.agtx/references/` (git diffs `{slug}.diff`, worktree files `.agtx/skills/`/`.planning/` if the referenced worktree still exists).
 
 ### Auto Merge-Conflict Resolution
-- During `apply_session_refresh`, Review tasks are checked for merge conflicts with the default branch (main/master)
-- Uses `git merge-tree --write-tree` (Git 2.38+) for a non-destructive virtual merge check — does not modify the worktree
-- Triggers when a Review task becomes **newly Ready** or has been **Idle for 30+ seconds**
-- If conflicts detected, sends the `/agtx:merge-conflicts` skill + prompt to the agent's tmux session
-- One-shot per task: `merge_conflict_checked: HashSet<String>` guard ensures each task is only checked once
-- Works with all plugins — the merge-conflicts skill is a builtin skill deployed to every worktree
-- The skill instructs the agent to: commit current work → merge origin/main → resolve conflicts → review only conflicted files against both parents → run tests
+During `apply_session_refresh`, Review tasks are checked against the default branch using `git merge-tree --write-tree` (Git 2.38+, non-destructive). Triggers when a Review task becomes **newly Ready** or has been **Idle 30+ seconds**; sends `/agtx:merge-conflicts` skill + prompt to the agent. One-shot per task (`merge_conflict_checked: HashSet<String>`). Works with all plugins (the skill is a builtin deployed to every worktree). The skill: commit current work → merge origin/main → resolve conflicts → review only conflicted files against both parents → run tests.
 
 ### Agent Integration
-- Every per-agent value below is one field of that agent's `AgentSpec` in `src/agent/spec.rs`; the
-  functions here read the table rather than matching on the agent's name
-- Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`
-- Each agent has its own flags: Claude (`--dangerously-skip-permissions`), Codex (`--sandbox workspace-write`), Gemini (`GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`), Copilot (`--allow-all-tools`), Cursor (`agent --yolo`), Grok (`--yolo --trust`, where `--trust` also ungates the repo-local `.grok/config.toml` MCP server and suppresses the directory-trust dialog), Antigravity (`agy --dangerously-skip-permissions --mode accept-edits` — two orthogonal controls: the flag governs shell/MCP/URL approvals, `--mode` governs the file-edit diff review, and both are needed to run unattended)
-- `build_resume_command()` is the recovery variant used after a tmux/server restart — mostly `--continue` appended to the launch flags (`ResumeArgs::Append`), but Gemini uses `--resume` and Codex's `resume --last` *replaces* them (`ResumeArgs::Replace`: `codex resume` rejects `--sandbox`)
-- `tests/agent_parity_tests.rs` pins every one of these strings per agent. It is written against
-  behaviour, not derived from the table, so a diff there means something actually changed
-- Skills deployed to agent-native paths via `write_skills_to_worktree()` in app.rs
-- Commands resolved per-task via `resolve_skill_command()` (plugin command + agent transform)
-- Prompts resolved per-task via `resolve_prompt()` (pure template substitution, agent-agnostic)
+- Every per-agent value is one field of that agent's `AgentSpec` in `src/agent/spec.rs`; functions read the table rather than matching on the agent's name. Agents spawned via `build_interactive_command()` in `src/agent/mod.rs`. Flags: Claude `--dangerously-skip-permissions`, Codex `--sandbox workspace-write`, Gemini `GEMINI_TRUST_WORKSPACE=true` + `--approval-mode yolo`, Copilot `--allow-all-tools`, Cursor `agent --yolo`, Grok `--yolo --trust`, Antigravity `agy --dangerously-skip-permissions --mode accept-edits`.
+- `build_resume_command()` is the recovery variant after a restart — mostly `--continue` appended (`ResumeArgs::Append`), but Gemini uses `--resume` and Codex's `resume --last` *replaces* the flags (`ResumeArgs::Replace`).
+- `tests/agent_parity_tests.rs` pins every string per agent (written against behaviour). Commands resolved per-task via `resolve_skill_command()`; prompts via `resolve_prompt()` (pure template substitution).
 
 ## Building & Testing
 
 ```bash
-# Build
 cargo build --release
-
-# Run tests
 cargo test
-
-# Run tests with mock support
 cargo test --features test-mocks
 
-# Per-agent smoke tests — real binaries, real auth, real tokens (opt-in, never CI)
-tests/smoke/agent_smoke.py                    # installed agents x the agtx plugin
-python3 tests/smoke/test_agent_smoke.py       # tests for the harness itself
+# Per-agent smoke tests — real binaries, real auth (opt-in, never CI)
+tests/smoke/agent_smoke.py
+python3 tests/smoke/test_agent_smoke.py
 
 # Real-tmux pane input: ordering, escaping, pane sizing, reconnect, latency (opt-in)
 AGTX_TMUX_IT=1 cargo test --test tmux_control_tests -- --nocapture
 ```
 
-`tmux_control_tests.rs` starts throwaway tmux servers and asserts on the **bytes a program in the
-pane received**, not on rendered output — a redraw hides a reordering that a byte comparison
-catches. Skipped tests name their reason instead of passing quietly. It has only been run on macOS
-(tmux 3.5a); run it on Linux too.
+`tmux_control_tests.rs` starts throwaway tmux servers and asserts on the **bytes a program in the pane received**, not rendered output. Run on Linux too (only macOS / tmux 3.5a so far).
 
-The smoke runner answers the one question the Rust suite cannot: **does a real agent binary actually
-receive its work?** Unit tests mock `TmuxOperations` and `agent_parity_tests.rs` pins the strings
-agtx builds, so neither can see "the agent ignored it" — the gap where every silent-hang bug so far
-has lived. Per phase it asserts the command was *submitted* (not parked in a composer), that a marker
-file carries the **task id** that was passed in, that the artifact appeared and the phase advanced,
-and that the session is still usable (process alive, no dialog on screen). Dialogs are never
-pre-answered — they are the thing under test. Details: `tests/smoke/README.md`.
+The smoke runner answers the one question the Rust suite cannot: **does a real agent binary actually receive its work?** Per phase it asserts the command was *submitted* (not parked in a composer), a marker file carries the **task id** passed in, the artifact appeared and the phase advanced, and the session is still usable. Dialogs are never pre-answered. See `tests/smoke/README.md`.
 
-`cargo run --example agent_matrix` (source in `tests/smoke/`) dumps `AGENT_SPECS` +
-`BUNDLED_PLUGINS` as JSON. The smoke runner reads it instead of keeping its own copy of the agent
-table, and `cargo test` compiles it, so a new spec field breaks the build rather than drifting.
+`cargo run --example agent_matrix` dumps `AGENT_SPECS` + `BUNDLED_PLUGINS` as JSON; the smoke runner reads it and `cargo test` compiles it (a new spec field breaks the build rather than drifting).
 
-Dependencies require:
-- A recent stable Rust (CI builds on `stable`; no MSRV is pinned in `Cargo.toml`)
-- SQLite (bundled via rusqlite)
-- tmux (runtime dependency)
-- git (runtime dependency)
-- gh CLI (for PR operations)
+Dependencies: recent stable Rust (CI on `stable`, no MSRV pinned), SQLite (bundled), tmux, git, gh CLI (PR operations).
 
 ## Common Tasks
 
@@ -1693,39 +591,23 @@ Dependencies require:
 3. Use `hex_to_color(&state.config.theme.color_*)` in app.rs
 
 ### Adding a new agent
-Half of this is now one table entry; the other half is still per-agent match arms in `app.rs`.
-
 **`src/agent/spec.rs`** — the declarative half
-1. Add one `AgentSpec` entry to `AGENT_SPECS`: identity (name, binary, description, git co-author),
-   launching (`env`, `base_args`, `prompt_form`, `resume`, `headless_args`), and skills
-   (`skill_dir`, `skill_layout`, `skill_scan_dir`, `command_syntax`). Everything in
-   `src/agent/mod.rs`, `src/agent/operations.rs` and `src/skills.rs` is derived from it —
-   `known_agents`, both command builders, the headless invocation, the skill paths, the
-   command syntax, and skill discovery
-2. Declare `prompt_form` (how the CLI takes a prompt: `Argv` or `Flag("-i")`) but leave
-   `launch_prompt_verified: false` until that form is checked against the real binary. A
-   `-p`-style flag that runs headless and exits swallows the task text silently; flipping the bool
-   is what opts the agent into the launch lane
-3. If no existing `SkillLayout` / `CommandSyntax` variant fits, add **one** variant plus the arm in
-   the single function that reads it — never a new match on the agent's name
+1. Add one `AgentSpec` entry to `AGENT_SPECS`: identity (name, binary, description, git co-author), launching (`env`, `base_args`, `prompt_form`, `resume`, `headless_args`), skills (`skill_dir`, `skill_layout`, `skill_scan_dir`, `command_syntax`). Everything in `mod.rs`, `operations.rs`, `skills.rs` is derived from it.
+2. Declare `prompt_form` (`Argv` or `Flag("-i")`) but leave `launch_prompt_verified: false` until checked against the real binary.
+3. If no existing `SkillLayout`/`CommandSyntax` variant fits, add **one** variant plus the arm in the single function that reads it — never a new match on the agent's name.
 
 **`tests/agent_parity_tests.rs`**
-4. Extend every parity table with the new agent (`parity_covers_every_known_agent` fails until you
-   do). These are literals on purpose: a diff there means behaviour changed
+4. Extend every parity table (`parity_covers_every_known_agent` fails until you do).
 
-**`src/tui/app.rs`** — still per-agent, until stage E
+**`src/tui/app.rs`** — still per-agent
 5. Add the binary to `AGENT_COMMANDS` (pane process detection)
-6. Add an activity indicator to `AGENT_ACTIVE_INDICATORS` if the agent is an Ink/Node TUI (runs inside bash)
+6. Add an activity indicator to `AGENT_ACTIVE_INDICATORS` if it is an Ink/Node TUI (runs inside bash)
 7. Add exit command handling in `switch_agent_in_tmux()` (graceful exit cmd or Ctrl+C)
-8. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()` (e.g. `"codex" | "cursor" | "grok"` for SKILL.md subdirectories)
-9. Add the per-agent MCP config writer in `write_skills_to_worktree()` — note the format varies (JSON vs TOML, `mcpServers` vs `mcp_servers`)
-9b. Set `hook_config` / `hook_event_source` on the spec if the agent supports lifecycle hooks, add
-   its `HookConfigKind` arm to `write_hook_config`, `hook_events` and `map_hook_event`, and extend
-   `vocabulary()` in `tests/hook_status_tests.rs`. Leave `hook_config: None` until a real run writes
-   a `.agtx/status/*.json`: a wrong handler shape or event spelling fails silently (see
-   *Hook-Based Phase Status*), and `None` is a supported state, not a failure
+8. Add the skill-deploy branch in **both** `write_skills_to_worktree()` and `deploy_skill()`
+9. Add the per-agent MCP config writer in `write_skills_to_worktree()` (format varies)
+9b. Set `hook_config`/`hook_event_source` on the spec if it supports hooks; add its `HookConfigKind` arm to `write_hook_config`, `hook_events`, `map_hook_event`, and extend `vocabulary()` in `tests/hook_status_tests.rs`. Leave `hook_config: None` until a real run writes a `.agtx/status/*.json`.
 10. Add an agent label color in the task-card footer `match task.agent.as_str()`
-11. If Ink/Node TUI: add to the combined-send branch `matches!(agent_name, "gemini" | "codex" | ...)` in `send_skill_and_prompt()`; add double-Enter handling if the agent has a command picker popup
+11. If Ink/Node TUI: add to the combined-send branch in `send_skill_and_prompt()`; add double-Enter handling if it has a command picker popup
 
 **Plugins**
 12. Add the agent to `supported_agents` in any `plugins/*/plugin.toml` that whitelists agents
@@ -1733,16 +615,15 @@ Half of this is now one table entry; the other half is still per-agent match arm
 ### Adding a keyboard shortcut
 1. Find the appropriate `handle_*_key` function in `src/tui/app.rs`
 2. Add match arm for the new key
-3. Add it to the `HELP` table in `src/tui/help.rs` — that overlay is the complete list, and a binding missing from it is undiscoverable
-4. Only add it to `build_footer_text` if it belongs to the five things you reach for constantly; the footer is a summary, and `every_footer_fits_a_narrow_terminal` caps it
+3. Add it to the `HELP` table in `src/tui/help.rs` (that overlay is the complete list)
+4. Only add it to `build_footer_text` if it belongs to the five things you reach for constantly
 
 ### Adding a new popup
-1. Add state struct (e.g., `MyPopup`) in app.rs
-2. Add `Option<MyPopup>` field to `AppState`
-3. Initialize to `None` in `App::new()`
-4. Add rendering in `draw_board()` function
-5. Add key handler function `handle_my_popup_key()`
-6. Add check in `handle_key()` to route to handler
+1. Add state struct (e.g. `MyPopup`) in app.rs
+2. Add `Option<MyPopup>` field to `AppState`, initialize to `None` in `App::new()`
+3. Add rendering in `draw_board()`
+4. Add key handler function `handle_my_popup_key()`
+5. Add check in `handle_key()` to route to handler
 
 ### Adding a new bundled plugin
 1. Create `plugins/<name>/plugin.toml` with commands, prompts, artifacts
@@ -1750,9 +631,8 @@ Half of this is now one table entry; the other half is still per-agent match arm
 3. Optionally add `supported_agents` to restrict agent compatibility
 
 ### Adding custom skills to a plugin
-1. Create `plugins/<name>/skills/agtx-{phase}/SKILL.md` files
-2. Skills use YAML frontmatter: `name: agtx-{phase}`, `description: ...`
-3. Skills are auto-deployed to agent-native paths during worktree setup
+1. Create `plugins/<name>/skills/agtx-{phase}/SKILL.md` files (YAML frontmatter: `name: agtx-{phase}`, `description: ...`)
+2. Auto-deployed to agent-native paths during worktree setup
 
 ## Supported Agents
 
@@ -1768,8 +648,6 @@ Detected automatically via `known_agents()` in order of preference:
 
 ## Future Enhancements
 - Reopen Done tasks (recreate worktree from preserved branch)
-- Orchestrator: support non-Claude agents as orchestrator
-- Orchestrator: task deletion notifications
-- Orchestrator: multi-project support
+- Orchestrator: support non-Claude agents; task deletion notifications; multi-project support
 
 Design notes for in-flight work live in `docs/planning/` (untracked).
