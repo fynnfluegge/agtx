@@ -43,7 +43,8 @@ RUN userdel -r ubuntu 2>/dev/null || true && \
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Group-writable, not user-owned: the build can't setuid to huge host UIDs
+# Create agtx dirs so named volume mounts inherit correct ownership.
+# Group-writable, not user-owned: rootless builds can't setuid to huge host UIDs.
 RUN mkdir -p /home/sandbox/.config/agtx /home/sandbox/.local/share/agtx /home/sandbox/.claude && \
     chgrp -R "${GID}" /home/sandbox && chmod -R g+w /home/sandbox
 
