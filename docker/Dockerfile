@@ -35,22 +35,23 @@ ARG GID=1000
 # Reuse whatever group already owns the GID instead — the point is only that
 # bind-mounted files come out owned by the host user, and the group's *name* is
 # irrelevant to that.
+# Can't RUN as the sandbox user here: rootless podman can't setuid to a huge
+# host UID at build time (LDAP/HPC). The dirs are created as root with
+# group-write for the sandbox GID (which is mapped), so named volumes inherit
+# ownership the sandbox user can write to.
 RUN userdel -r ubuntu 2>/dev/null || true && \
     groupdel ubuntu 2>/dev/null || true && \
     groupadd -g "${GID}" sandbox 2>/dev/null || true && \
-    useradd -m -u "${UID}" -g "${GID}" -s /bin/bash sandbox
+    useradd -m -u "${UID}" -g "${GID}" -s /bin/bash sandbox && \
+    mkdir -p /home/sandbox/.config/agtx /home/sandbox/.local/share/agtx /home/sandbox/.claude && \
+    chgrp -R "${GID}" /home/sandbox && \
+    chmod -R g+w /home/sandbox
 
 COPY --chown=root:root entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 USER sandbox
 WORKDIR /home/sandbox
-
-# Create agtx dirs as sandbox user so named volume mounts inherit correct ownership
-RUN mkdir -p \
-    /home/sandbox/.config/agtx \
-    /home/sandbox/.local/share/agtx \
-    /home/sandbox/.claude
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["agtx"]
