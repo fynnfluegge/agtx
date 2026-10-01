@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# agtx Docker sandbox
+# agtx sandbox
 # Usage: ./docker/sandbox.sh [path/to/project]  (defaults to current directory)
 
 DOCKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,34 +23,13 @@ resolve_path() {
     cd "$1" && pwd -P
 }
 
-# Container runtime: AGTX_CONTAINER_RUNTIME overrides; otherwise use docker
-# when installed, falling back to podman. Both CLIs accept the same
-# build/run/exec/attach flags used below.
-CR="${AGTX_CONTAINER_RUNTIME:-}"
-if [ -z "$CR" ]; then
-    if command -v docker &>/dev/null; then
-        CR=docker
-    elif command -v podman &>/dev/null; then
-        CR=podman
-    else
-        error "no container runtime found — install Docker (Desktop on macOS/Windows, Engine on Linux) or Podman"
-    fi
-elif ! command -v "$CR" &>/dev/null; then
-    error "AGTX_CONTAINER_RUNTIME=$CR not found on PATH"
-fi
+# Container runtime: docker when installed, else podman (AGTX_CONTAINER_RUNTIME overrides)
+CR="${AGTX_CONTAINER_RUNTIME:-docker}"
+command -v "$CR" &>/dev/null || CR=podman
+command -v "$CR" &>/dev/null || error "no container runtime found — install docker or podman"
 
-if ! "$CR" info &>/dev/null; then
-    error "$CR is installed but not responding — is the daemon (docker) or machine (podman) running?"
-fi
-
-# Rootless podman remaps UIDs, so files the sandbox user creates on the
-# bind-mounted project would land owned by a subuid instead of the host user.
-# --userns=keep-id maps the host UID 1:1, matching the UID/GID the image was
-# built with. Rootful docker/podman need no adjustment.
-USERNS=()
-if [ "$CR" = "podman" ] && [ "$(id -u)" -ne 0 ]; then
-    USERNS=(--userns=keep-id)
-fi
+# Rootless podman remaps UIDs; keep-id preserves host ownership on bind mounts
+USERNS=""; [ "$CR" = "podman" ] && [ "$(id -u)" -ne 0 ] && USERNS="--userns=keep-id"
 
 RAW_PROJECT="${1:-$(pwd)}"
 
@@ -116,7 +95,7 @@ fi
 # then attached so the TUI behaves exactly as before. `--rm` still cleans up on
 # exit, and `attach` returns the container's exit code.
 CID=$("$CR" run -d -it --rm \
-    "${USERNS[@]}" \
+    $USERNS \
     --security-opt no-new-privileges:true \
     --cap-drop ALL \
     --cap-add CHOWN \
