@@ -1,6 +1,10 @@
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+# Ubuntu's OpenSSL auto-enables its FIPS provider when the host kernel is in
+# FIPS mode, but this image ships no FIPS provider module, so every digest
+# fails there (e.g. the ca-certificates postinst). No-op on non-FIPS hosts.
+ENV OPENSSL_FORCE_FIPS_MODE=0
 
 ARG NODE_MAJOR=22
 
