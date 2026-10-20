@@ -1,2 +1,2 @@
-datasets>=2.18.0
+datasets>=5.0.1
 tqdm>=4.66.0
