@@ -871,8 +871,9 @@ Run agtx in an isolated container (Docker or Podman, including rootless Podman) 
 The sandbox:
 - Mounts only the target project as writable; everything else on the host is inaccessible
 - Copies `~/.claude` credentials read-only at startup so they are never written back to the host
+- Copies your global agtx settings (`~/.config/agtx/config.toml` and `~/.config/agtx/plugins/`) read-only at startup, so the sandbox uses your configuration without ever modifying it
 - Runs as a non-root user whose UID/GID matches your host user (files created inside the container appear correctly owned on the host)
-- Stores agtx state in named container volumes (persists across runs, isolated from your host's agtx data)
+- Persists agtx state (trust store, project databases) in a container volume across runs, isolated from your host's agtx data
 - Pre-accepts the bypass permissions prompt, which is appropriate in an isolated container
 
 > [!NOTE]

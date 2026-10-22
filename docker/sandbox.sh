@@ -75,6 +75,13 @@ if [ -f "${HOME}/.claude.json" ]; then
     CLAUDE_JSON_MOUNT="-v ${HOME}/.claude.json:/claude-host.json:ro"
 fi
 
+# The agtx-data volume holds the sandbox's state (trust store, project DBs)
+# across runs. Host settings are staged read-only below and copied in at
+# startup, so the volume never sees your host's state files.
+AGTX_CONFIG_MOUNT="-v agtx-data:/home/sandbox/.config/agtx"
+[ -f "${HOME}/.config/agtx/config.toml" ] && AGTX_CONFIG_MOUNT="$AGTX_CONFIG_MOUNT -v ${HOME}/.config/agtx/config.toml:/agtx-host-config.toml:ro"
+[ -d "${HOME}/.config/agtx/plugins" ] && AGTX_CONFIG_MOUNT="$AGTX_CONFIG_MOUNT -v ${HOME}/.config/agtx/plugins:/agtx-host-plugins:ro"
+
 # On macOS the Claude OAuth token lives in the Keychain, not in `~/.claude`, so
 # copying that directory leaves the container on "Not logged in · Please run
 # /login". Materialise the same `.credentials.json` Claude Code writes on Linux.
@@ -103,8 +110,7 @@ CID=$("$CR" run -d -it --rm \
     --cap-add SETUID \
     --cap-add SETGID \
     -v "${PROJECT}:/home/sandbox/workspace" \
-    -v agtx-data:/home/sandbox/.local/share/agtx \
-    -v agtx-config:/home/sandbox/.config/agtx \
+    ${AGTX_CONFIG_MOUNT} \
     -v "${HOME}/.claude:/claude-host:ro" \
     ${CLAUDE_JSON_MOUNT} \
     -w /home/sandbox/workspace \
