@@ -210,10 +210,12 @@ pub enum HookConfigKind {
     /// `.agents/hooks.json`, keyed by hook *name* first and event second. The
     /// payload carries no event name, so the event is passed in argv.
     AntigravityHooksJson,
-    /// `.opencode/plugins/agtx-status.ts`, a v2 `Plugin.define` plugin that agtx
-    /// owns outright (write or remove — there is no `hooks` key to merge).
-    /// Auto-discovered, so no `opencode.jsonc` change. The plugin's hook
-    /// callbacks carry no event name, so the event is passed in argv.
+    /// `.opencode/plugins/agtx-status.ts`, a v2 plugin whose default export is a
+    /// plain `{ id, setup }` object (the shape opencode's plugin-module schema
+    /// validates) — no named `@opencode/plugin` export required. agtx owns the
+    /// file outright (write or remove — there is no `hooks` key to merge).
+    /// Auto-discovered, so no `opencode.jsonc` change. Its hook callbacks carry
+    /// no event name, so the event is passed in argv.
     OpenCodePlugin,
 }
 
