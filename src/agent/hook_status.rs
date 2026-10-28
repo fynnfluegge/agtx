@@ -159,6 +159,15 @@ pub fn map_hook_event(kind: HookConfigKind, event: &str) -> Option<HookState> {
             "Stop" => Some(HookState::Waiting),
             _ => None,
         },
+        // opencode v2. Two events, both passed in argv: `prompt` fires when the
+        // user submits a message (turn start → Working); `permission.evaluate`
+        // when a permission is asked (→ Blocked). There is no turn-end hook, so
+        // a `Working` record simply ages out via [`HOOK_STALE_SECS`].
+        OpenCodePlugin => match event {
+            "prompt" => Some(HookState::Working),
+            "permission.evaluate" => Some(HookState::Blocked),
+            _ => None,
+        },
     }
 }
 
@@ -250,6 +259,13 @@ pub fn hook_events(kind: HookConfigKind) -> &'static [(&'static str, Option<&'st
             ("PostInvocation", None),
             ("PostToolUse", Some("*")),
             ("Stop", None),
+        ],
+        // `prompt` (the user submitted a message) and `permission.evaluate`
+        // (a permission was asked); the event is passed in argv, never in a
+        // payload, so both are unscoped.
+        OpenCodePlugin => &[
+            ("prompt", None),
+            ("permission.evaluate", None),
         ],
     }
 }
@@ -384,8 +400,34 @@ struct ToolCall {
 pub const ENV_TASK_ID: &str = "AGTX_TASK_ID";
 pub const ENV_WORKTREE: &str = "AGTX_WORKTREE";
 
-/// Entry point for `agtx hook --env <agent> [--event <Name>]` (preferred) or the
-/// legacy `agtx hook <task-id> <worktree> [agent]`.
+/// Derive the project root from a worktree path: `<project>/.agtx/worktrees/<slug>`
+/// maps to `<project>` (the prefix before the last `.agtx` component). Under
+/// `skip_worktree` the "worktree" *is* the project root, so a path with no `.agtx`
+/// marker is returned unchanged.
+fn project_from_worktree(worktree: &Path) -> PathBuf {
+    let comps: Vec<_> = worktree.components().collect();
+    match comps.iter().rposition(|c| c.as_os_str() == std::ffi::OsStr::new(".agtx")) {
+        Some(pos) => {
+            let mut prefix = PathBuf::new();
+            for c in &comps[..pos] {
+                prefix.push(c.as_os_str());
+            }
+            prefix
+        }
+        None => worktree.to_path_buf(),
+    }
+}
+
+/// Resolve a worktree to its task id by asking the project's database. The DB is
+/// a parameter so this is testable against an in-memory database.
+fn resolve_task_id(db: &crate::db::Database, worktree: &str) -> Option<String> {
+    db.get_task_by_worktree(worktree).ok()?.map(|t| t.id)
+}
+
+/// Entry point for `agtx hook --env <agent> [--event <Name>]` (preferred), the
+/// legacy `agtx hook <task-id> <worktree> [agent]`, or the worktree form
+/// `agtx hook --worktree <dir> [agent]` (opencode) which resolves the task from
+/// the worktree.
 ///
 /// `--env` reads the task from the process environment, so one registered command
 /// serves every task — necessary under `skip_worktree`, where all of them share
@@ -416,6 +458,7 @@ pub fn run_hook_cli(args: &[String]) -> Result<()> {
     let args = &args[..];
 
     let from_env = args.first().map(String::as_str) == Some("--env");
+    let from_worktree = args.first().map(String::as_str) == Some("--worktree");
     let (task_id, worktree, agent);
     if from_env {
         // A backgrounded agent task runs in a worker that inherited the pane's
@@ -432,6 +475,26 @@ pub fn run_hook_cli(args: &[String]) -> Result<()> {
         task_id = t;
         worktree = w;
         agent = args.get(1).cloned().unwrap_or_else(|| "claude".to_string());
+    } else if from_worktree {
+        // `--worktree <dir> [agent]`: the identity is the worktree, resolved to a
+        // task through the project database. opencode's shared service runs with
+        // a different task's env, so the window-env bridge above is unreliable
+        // for it; the worktree is the stable identity.
+        let Some(worktree_arg) = args.get(1) else {
+            return Ok(());
+        };
+        worktree = worktree_arg.clone();
+        let project = project_from_worktree(Path::new(&worktree));
+        let Some(db) = crate::db::Database::open_project(&project).ok() else {
+            return Ok(());
+        };
+        // A hook must never break the agent's turn, so an unresolvable task is a
+        // silent no-op, not an error.
+        let Some(resolved) = resolve_task_id(&db, &worktree) else {
+            return Ok(());
+        };
+        task_id = resolved;
+        agent = args.get(2).cloned().unwrap_or_else(|| "claude".to_string());
     } else {
         let (Some(t), Some(w)) = (args.first(), args.get(1)) else {
             return Ok(());
@@ -499,5 +562,63 @@ pub fn record_hook_event(
         payload.tool_name.or(payload.tool_call.and_then(|t| t.name)),
     ) {
         let _ = write_status(worktree, task_id, &next);
+    }
+}
+
+#[cfg(test)]
+mod worktree_identity_tests {
+    use super::*;
+
+    #[test]
+    fn project_from_worktree_strips_the_agtx_tail() {
+        assert_eq!(
+            project_from_worktree(Path::new("/Users/me/proj/.agtx/worktrees/abc-123")),
+            PathBuf::from("/Users/me/proj")
+        );
+    }
+
+    #[test]
+    fn project_from_worktree_uses_the_last_agtx_marker() {
+        assert_eq!(
+            project_from_worktree(Path::new("/Users/me/.agtx/team/proj/.agtx/worktrees/slug")),
+            PathBuf::from("/Users/me/.agtx/team/proj")
+        );
+    }
+
+    #[test]
+    fn project_from_worktree_keeps_an_unmarked_path() {
+        // skip_worktree: the "worktree" is the project root, so there is nothing to strip.
+        assert_eq!(
+            project_from_worktree(Path::new("/Users/me/skip_worktree_proj")),
+            PathBuf::from("/Users/me/skip_worktree_proj")
+        );
+    }
+
+    #[cfg(feature = "test-mocks")]
+    #[test]
+    fn resolve_task_id_finds_the_task_by_worktree() {
+        let db = crate::db::Database::open_in_memory_project().unwrap();
+        let mut task = crate::db::Task::new("t", "opencode", "p1");
+        task.worktree_path = Some("/Users/me/proj/.agtx/worktrees/abc-123".to_string());
+        db.create_task(&task).unwrap();
+
+        assert_eq!(
+            resolve_task_id(&db, "/Users/me/proj/.agtx/worktrees/abc-123"),
+            Some(task.id.clone())
+        );
+    }
+
+    #[cfg(feature = "test-mocks")]
+    #[test]
+    fn resolve_task_id_is_none_for_an_unknown_worktree() {
+        let db = crate::db::Database::open_in_memory_project().unwrap();
+        let mut task = crate::db::Task::new("t", "opencode", "p1");
+        task.worktree_path = Some("/Users/me/proj/.agtx/worktrees/abc-123".to_string());
+        db.create_task(&task).unwrap();
+
+        assert_eq!(
+            resolve_task_id(&db, "/Users/me/other/.agtx/worktrees/nope"),
+            None
+        );
     }
 }

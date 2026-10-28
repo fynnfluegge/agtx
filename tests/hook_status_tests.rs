@@ -406,6 +406,7 @@ const ALL_KINDS: &[HookConfigKind] = &[
     HookConfigKind::CursorHooksJson,
     HookConfigKind::GrokHooksJson,
     HookConfigKind::AntigravityHooksJson,
+    HookConfigKind::OpenCodePlugin,
 ];
 
 /// Registering an event agtx cannot act on is dead weight in the agent's turn:
@@ -521,6 +522,10 @@ fn vocabulary(kind: HookConfigKind) -> &'static [&'static str] {
             "PostToolUse",
             "Stop",
         ],
+        // opencode v2.1.3 — the two lifecycle events agtx reports on. opencode
+        // has no turn-end/idle hook, so a `Working` record ages out via
+        // staleness rather than a terminal event.
+        HookConfigKind::OpenCodePlugin => &["prompt", "permission.evaluate"],
     }
 }
 
@@ -550,10 +555,15 @@ fn vocabularies_do_not_leak_across_agents() {
 
 /// The two states that drive a feature rather than an icon: `Blocked` fires the
 /// orchestrator's immediate stuck-task notification, and `Waiting` is what makes
-/// a finished turn distinguishable from a stalled one.
+/// a finished turn distinguishable from a stalled one. opencode is the one
+/// deliberate exception: v2 dropped the turn-end hook, so it reports `Working`
+/// and relies on the staleness timer to return a card to Ready.
 #[test]
 fn turn_end_is_expressible_for_every_agent() {
     for kind in ALL_KINDS {
+        if *kind == HookConfigKind::OpenCodePlugin {
+            continue;
+        }
         let ends: Vec<&str> = agtx::agent::hook_status::hook_events(*kind)
             .iter()
             .map(|(e, _)| *e)
@@ -566,10 +576,23 @@ fn turn_end_is_expressible_for_every_agent() {
             kind
         );
     }
+
+    // Pin the gap: opencode has no turn-end hook, so it must not report Waiting.
+    assert!(
+        agtx::agent::hook_status::hook_events(HookConfigKind::OpenCodePlugin)
+            .iter()
+            .all(|(e, _)| {
+                map_hook_event(HookConfigKind::OpenCodePlugin, e) != Some(HookState::Waiting)
+            }),
+        "opencode has no turn-end hook, so it must not report Waiting"
+    );
 }
 
-/// Cursor and Antigravity have no human-blocking event to subscribe to. Pinned
-/// so the gap is not closed later with a wrong mapping.
+/// Which agents can report `Blocked`. Pinned so the set is not widened or
+/// narrowed later with a wrong mapping: opencode's `permission.evaluate` does
+/// block, while Cursor exposes only policy gates that decide
+/// (`beforeShellExecution`) and Antigravity's five events contain no permission
+/// prompt.
 #[test]
 fn only_agents_with_a_permission_event_report_blocked() {
     let can_block: Vec<HookConfigKind> = ALL_KINDS
@@ -588,6 +611,7 @@ fn only_agents_with_a_permission_event_report_blocked() {
             HookConfigKind::CodexHooksJson,
             HookConfigKind::GeminiSettings,
             HookConfigKind::GrokHooksJson,
+            HookConfigKind::OpenCodePlugin,
         ],
         "Cursor exposes only policy gates that decide (beforeShellExecution), and \
          Antigravity's five events contain no permission prompt"
@@ -642,26 +666,70 @@ fn antigravity_payload_round_trips_through_the_cli() {
 
 /// An agent with `hook_config: None` writes nothing even when the CLI is invoked
 /// in its name, so a registration left behind by an older agtx cannot keep
-/// reporting under a vocabulary that no longer exists.
+/// reporting under a vocabulary that no longer exists. copilot is such an agent;
+/// opencode now reports, and is covered by the round-trip just below.
 #[test]
 fn an_agent_without_hooks_writes_nothing() {
     let dir = TempDir::new().unwrap();
-    std::env::set_var("AGTX_TASK_ID", "t-oc");
+    std::env::set_var("AGTX_TASK_ID", "t-cp");
     std::env::set_var("AGTX_WORKTREE", dir.path());
 
     let wt = dir.path().to_string_lossy().to_string();
     let payload = br#"{"hook_event_name":"SessionStart"}"#;
 
-    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "opencode", None, payload);
-    let a = read_status(dir.path(), "t-oc", 0);
+    agtx::agent::hook_status::record_hook_event("t-cp", &wt, "copilot", None, payload);
+    let a = read_status(dir.path(), "t-cp", 0);
 
-    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "not-an-agent", None, payload);
-    let b = read_status(dir.path(), "t-oc", 0);
+    agtx::agent::hook_status::record_hook_event("t-cp", &wt, "not-an-agent", None, payload);
+    let b = read_status(dir.path(), "t-cp", 0);
 
     std::env::remove_var("AGTX_TASK_ID");
     std::env::remove_var("AGTX_WORKTREE");
-    assert!(a.is_none(), "opencode has no hook support");
+    assert!(a.is_none(), "a hook-less agent must not report");
     assert!(b.is_none(), "an unknown agent must not borrow a vocabulary");
+}
+
+/// opencode now reports through its plugin: `prompt` (the user submitted a
+/// message) maps to Working, `permission.evaluate` to Blocked — both passed in
+/// argv, exactly how the plugin sends them — and a foreign event it does not own
+/// is ignored.
+#[test]
+fn opencode_reports_via_its_plugin_events() {
+    let dir = TempDir::new().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "opencode", Some("prompt"), b"");
+    assert_eq!(
+        read_status(dir.path(), "t-oc", 0).expect("a prompt must report Working").state,
+        HookState::Working
+    );
+
+    agtx::agent::hook_status::record_hook_event(
+        "t-oc",
+        &wt,
+        "opencode",
+        Some("permission.evaluate"),
+        b"",
+    );
+    assert_eq!(
+        read_status(dir.path(), "t-oc", 0).expect("a permission must report Blocked").state,
+        HookState::Blocked
+    );
+
+    // A claude event is not borrowed by opencode's vocabulary.
+    let dir2 = TempDir::new().unwrap();
+    let wt2 = dir2.path().to_string_lossy().to_string();
+    agtx::agent::hook_status::record_hook_event(
+        "t-oc",
+        &wt2,
+        "opencode",
+        Some("SessionStart"),
+        b"",
+    );
+    assert!(
+        read_status(dir2.path(), "t-oc", 0).is_none(),
+        "opencode must not borrow claude's vocabulary"
+    );
 }
 
 /// Grok registers `PreToolUse` and reports `pre_tool_use`. Matching only the

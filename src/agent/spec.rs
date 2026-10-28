@@ -188,7 +188,7 @@ pub enum McpConfigKind {
 /// the worktree and never into the user's global agent config. Removing the
 /// worktree removes the registration.
 ///
-/// `hook_config: None` — opencode, copilot — keeps the pane-hash heuristic,
+/// `hook_config: None` — codex, copilot, pi — keeps the pane-hash heuristic,
 /// which is a supported state, not a degraded one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookConfigKind {
@@ -210,6 +210,11 @@ pub enum HookConfigKind {
     /// `.agents/hooks.json`, keyed by hook *name* first and event second. The
     /// payload carries no event name, so the event is passed in argv.
     AntigravityHooksJson,
+    /// `.opencode/plugins/agtx-status.ts`, a v2 `Plugin.define` plugin that agtx
+    /// owns outright (write or remove — there is no `hooks` key to merge).
+    /// Auto-discovered, so no `opencode.jsonc` change. The plugin's hook
+    /// callbacks carry no event name, so the event is passed in argv.
+    OpenCodePlugin,
 }
 
 /// How the firing event reaches `agtx hook`.
@@ -647,11 +652,12 @@ pub const AGENT_SPECS: &[AgentSpec] = &[
         skill_scan_dir: Some(".config/opencode/command"),
         command_syntax: CommandSyntax::Hyphen,
         mcp_config: Some(McpConfigKind::OpenCode),
-        // OpenCode's lifecycle callbacks are a TypeScript plugin API
-        // (`.opencode/plugin/*.ts`), not shell commands in a config file — there
-        // is no `hooks` key to write. opencode 1.18.20.
-        hook_config: None,
-        hook_event_source: HookEventSource::Payload,
+        // OpenCode's lifecycle callbacks are a v2 TypeScript plugin
+        // (`.opencode/plugins/*.ts`) that agtx owns outright — there is no
+        // `hooks` key in a config file. The plugin's hook callbacks carry no
+        // event name, so the event is passed in argv (`--event`).
+        hook_config: Some(HookConfigKind::OpenCodePlugin),
+        hook_event_source: HookEventSource::Argv,
         process_names: &["opencode"],
         active_indicators: &["Ask anything"],
         scoped_indicators: &[],

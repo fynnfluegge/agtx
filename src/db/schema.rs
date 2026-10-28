@@ -533,6 +533,17 @@ impl Database {
         Ok(task)
     }
 
+    /// A worktree's task, by its absolute worktree path. Used by the
+    /// `agtx hook --worktree` identity form (opencode), which knows the worktree
+    /// but not the task.
+    pub fn get_task_by_worktree(&self, worktree_path: &str) -> Result<Option<Task>> {
+        let mut stmt = self.conn.prepare("SELECT * FROM tasks WHERE worktree_path = ?1")?;
+
+        let task = stmt.query_row(params![worktree_path], Self::task_from_row).ok();
+
+        Ok(task)
+    }
+
     pub fn get_tasks_by_status(&self, status: TaskStatus) -> Result<Vec<Task>> {
         let mut stmt = self
             .conn

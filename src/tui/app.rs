@@ -14049,6 +14049,23 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
             }
             write_json(&path, &serde_json::Value::Object(root));
         }
+        // opencode auto-discovers `.opencode/plugins/`, so agtx owns one `.ts`
+        // file in it and writes or removes it outright — there is no `hooks` key
+        // to merge. `ours` (the Claude-shaped JSON computed above) is unused here:
+        // this arm speaks TypeScript, not JSON (the same way the antigravity arm
+        // ignores it). The plugin reports through `agtx hook --worktree`, because
+        // the shared service's env is not the task's.
+        agent::HookConfigKind::OpenCodePlugin => {
+            let dir = wt.join(".opencode").join("plugins");
+            let path = dir.join("agtx-status.ts");
+            if enabled {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(&path, opencode_plugin(agtx_bin));
+            } else {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_dir(&dir);
+            }
+        }
     }
 }
 
@@ -14094,6 +14111,43 @@ fn antigravity_hook_spec(
         out.insert((*event).to_string(), entry);
     }
     serde_json::Value::Object(out)
+}
+
+/// The opencode v2 plugin agtx writes: a submitted prompt reports `Working`, a
+/// permission prompt reports `Blocked`.
+///
+/// The default export must be the plain object `{ id, setup }` — that is exactly
+/// the shape opencode's plugin-module schema validates (`{ id, setup: function }`),
+/// so this does not depend on any named `@opencode/plugin` export existing. It is
+/// also fully guarded: a failure here must never break opencode's turn, so every
+/// access is optional-chained and every error is swallowed. The absolute `agtx`
+/// path is baked in, like every other agent's hook command.
+fn opencode_plugin(agtx_bin: &str) -> String {
+    const TEMPLATE: &str = r#"import { spawn } from "node:child_process"
+
+const AGTX = "__AGTX_BIN__"
+
+function report(event, dir) {
+  try {
+    const c = spawn(AGTX, ["hook", "--worktree", dir, "opencode", "--event", event],
+                    { stdio: "ignore", detached: true })
+    c.on("error", () => {})
+    c.unref()
+  } catch {}
+}
+
+export default {
+  id: "agtx.status",
+  setup(ctx) {
+    try {
+      const dir = ctx?.location?.directory ?? process.cwd()
+      ctx?.session?.hook("prompt", () => report("prompt", dir))
+      ctx?.permission?.hook("evaluate", () => report("permission.evaluate", dir))
+    } catch {}
+  },
+}
+"#;
+    TEMPLATE.replace("__AGTX_BIN__", agtx_bin)
 }
 
 /// Read a JSON file as an object, or an empty one if it is missing or not an
