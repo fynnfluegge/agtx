@@ -732,6 +732,45 @@ fn opencode_reports_via_its_plugin_events() {
     );
 }
 
+/// Full loop for the opencode `--worktree` form: a task stored under the worktree
+/// is resolved from the worktree (not the env) and reports `Working`, with the
+/// record written under the worktree. Uses `AGTX_DATA_DIR` so it never touches
+/// the user's real agtx data. Run as a single test (it sets a process-global
+/// env var), with stdin from /dev/null (the hook reads an optional payload).
+#[test]
+fn opencode_worktree_form_resolves_and_reports() {
+    let dir = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let project = dir.path().join("proj");
+    let worktree = project.join(".agtx").join("worktrees").join("slug-1234");
+    std::fs::create_dir_all(&worktree).unwrap();
+
+    std::env::set_var("AGTX_DATA_DIR", data.path());
+
+    let db = agtx::db::Database::open_project(&project).unwrap();
+    let mut task = agtx::db::Task::new("t", "opencode", "p1");
+    task.worktree_path = Some(worktree.to_string_lossy().to_string());
+    db.create_task(&task).unwrap();
+    let task_id = task.id.clone();
+
+    // The exact argv the plugin spawns (verified live against opencode v2.1.3).
+    let args = vec![
+        "--worktree".to_string(),
+        worktree.to_string_lossy().to_string(),
+        "opencode".to_string(),
+        "--event".to_string(),
+        "prompt".to_string(),
+    ];
+    let result = agtx::agent::hook_status::run_hook_cli(&args);
+    std::env::remove_var("AGTX_DATA_DIR");
+
+    result.expect("the --worktree form must not error");
+    let got = read_status(&worktree, &task_id, 0)
+        .expect("the --worktree form must resolve the task and write a Working record");
+    assert_eq!(got.state, HookState::Working);
+    assert_eq!(got.agent, "opencode");
+}
+
 /// Grok registers `PreToolUse` and reports `pre_tool_use`. Matching only the
 /// registered spelling is a silent no-op: the hook fires, the payload parses, and
 /// no state is written.
