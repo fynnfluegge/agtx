@@ -18,6 +18,9 @@ RUN apt-get update && apt-get install -y \
 # Install Claude Code globally
 RUN npm install -g @anthropic-ai/claude-code
 
+# Install OpenCode
+RUN npm install -g opencode-ai
+
 # Install agtx
 RUN curl -fsSL https://raw.githubusercontent.com/fynnfluegge/agtx/main/install.sh \
     | AGTX_INSTALL_DIR=/usr/local/bin bash
