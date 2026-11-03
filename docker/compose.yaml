@@ -34,6 +34,11 @@ services:
     # TUI: needs a live TTY and stdin.
     stdin_open: true
     tty: true
+    environment:
+      # Tells the entrypoint to pre-configure a disposable copy of the config
+      # (trust, settings, auto_trust). compose.runtime.yaml sets AGTX_MODE=runtime
+      # so the entrypoint leaves the host's real config untouched instead.
+      - AGTX_MODE=sandbox
     # Least privilege, matching the previous `docker run` flags.
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID]

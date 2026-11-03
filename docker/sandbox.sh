@@ -3,18 +3,33 @@ set -e
 
 # agtx sandbox
 #
-# Launches the container defined in compose.yaml (in this directory) via the
-# Compose tool for the available container runtime — docker when present, else
-# podman (override with AGTX_CONTAINER_RUNTIME). The container definition lives
-# in compose.yaml; this script only does what cannot be a compose value:
+# Launches the container defined in docker/compose*.yaml (in this directory) via
+# the Compose tool for the available container runtime — docker when present,
+# else podman (override with AGTX_CONTAINER_RUNTIME). Two modes share the
+# launcher:
+#
+#   sandbox (default)  compose.yaml — agtx's state is isolated in a named volume
+#                    and your host settings are staged read-only; nothing the
+#                    agent does can reach the host.
+#   runtime (AGTX_RUNTIME=1)  compose.runtime.yaml — your host's real config and
+#                    state are mounted writable, so agtx writes config/status/
+#                    updates straight to the host. The in-container equivalent of
+#                    installing agtx: another way to run it, not a jail.
+#
+# The container definition lives in the compose file; this script only does what
+# cannot be a compose value:
 #
 #   * pick the runtime (docker / podman),
+#   * pick the mode (sandbox vs runtime) and its base compose file,
 #   * select the optional compose.<asset>.yaml fragments whose host assets exist,
 #   * plant the macOS Keychain credential (Darwin only) before the agent starts,
 #   * attach the caller's terminal — compose `up` attaches logs, not stdin,
 #   * capture the container's exit code and tear the container down.
 #
-# Usage: ./docker/sandbox.sh [path/to/project]  (defaults to current directory)
+# Usage:
+#   ./docker/sandbox.sh [path/to/project]            # sandbox mode (default)
+#   AGTX_RUNTIME=1 ./docker/sandbox.sh [path/to/project]   # runtime mode
+#   (defaults to current directory)
 
 # Remember where the script was invoked: the project argument (and the default
 # when none is given) is relative to the caller, not to this script's directory.
@@ -44,6 +59,14 @@ CR="${AGTX_CONTAINER_RUNTIME:-docker}"
 command -v "$CR" &>/dev/null || CR=podman
 command -v "$CR" &>/dev/null || error "no container runtime found — install docker or podman"
 
+# Mode + the base compose file it uses. AGTX_RUNTIME=1 selects runtime mode
+# (host config/state mounted writable); anything else is sandbox mode (default).
+if [ "${AGTX_RUNTIME:-0}" = "1" ]; then
+    MODE=runtime; BASE=compose.runtime.yaml
+else
+    MODE=sandbox; BASE=compose.yaml
+fi
+
 RAW_PROJECT="${1:-$CALLER_PWD}"
 
 # We are already in docker/ for compose, so resolve a relative project path
@@ -66,6 +89,7 @@ echo "  ╰───────────────────────
 echo ""
 
 info "Project : $PROJECT"
+info "Mode    : $MODE"
 info "User    : sandbox (non-root, uid=$(id -u))"
 info "Runtime : $CR (compose)"
 
@@ -84,17 +108,24 @@ export AGTX_BUILD_GID="$(id -g)"
 
 # Build image with host UID/GID so files created in the container are owned correctly
 info "Building image..."
-"$CR" compose -f compose.yaml build
+"$CR" compose -f "$BASE" build
 success "Image ready"
 echo ""
 
-# Select the optional fragments. Each is included only when the host asset it
-# mounts exists, so an absent path is never bind-mounted (which would create a
-# root-owned directory on the host).
-F="-f compose.yaml"
-[ -f  "${HOME}/.claude.json" ]            && F="$F -f compose.claude-json.yaml"
-[ -f  "${HOME}/.config/agtx/config.toml" ] && F="$F -f compose.agtx-config.yaml"
-[ -d  "${HOME}/.config/agtx/plugins" ]     && F="$F -f compose.agtx-plugins.yaml"
+# Select the base file and the fragments that apply.
+#   sandbox : the host-asset fragments, each included only when the asset it
+#             mounts exists, so an absent path is never bind-mounted (which
+#             would create a root-owned directory on the host).
+#   runtime : your real config/state are already mounted writable in the base
+#             file, so there are no staging assets to select.
+if [ "$MODE" = runtime ]; then
+    F="-f compose.runtime.yaml"
+else
+    F="-f compose.yaml"
+    [ -f  "${HOME}/.claude.json" ]            && F="$F -f compose.claude-json.yaml"
+    [ -f  "${HOME}/.config/agtx/config.toml" ] && F="$F -f compose.agtx-config.yaml"
+    [ -d  "${HOME}/.config/agtx/plugins" ]     && F="$F -f compose.agtx-plugins.yaml"
+fi
 # Rootless Podman remaps UIDs; keep-id preserves host ownership on bind mounts.
 [ "$CR" = "podman" ] && [ "$(id -u)" -ne 0 ] && F="$F -f compose.keepid.yaml"
 
@@ -120,8 +151,9 @@ if [ "$(uname -s)" = "Darwin" ] && [ ! -f "${HOME}/.claude/.credentials.json" ];
     fi
 fi
 
-# Best-effort: drop any stale container from a previous run (keeps the named
-# volume, so state persists) so the fixed container_name never conflicts.
+# Best-effort: drop any stale container from a previous run so the fixed
+# container_name never conflicts. In sandbox mode this keeps the named state
+# volume; in runtime mode there is no volume (state lives on the host).
 "$CR" compose $F down >/dev/null 2>&1 || true
 
 # Start detached, then attach this terminal. `compose up` in the foreground

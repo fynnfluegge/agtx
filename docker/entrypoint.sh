@@ -1,6 +1,17 @@
 #!/bin/bash
 set -e
 
+# Runtime mode (AGTX_MODE=runtime) means the container's config IS the host's
+# real config, mounted writable (see compose.runtime.yaml). There is no
+# disposable copy to pre-configure, and we must not rewrite the host's real
+# settings — so skip every block below and just run agtx like a normal local
+# install. Sandbox mode (the default) falls through to the pre-configuration.
+if [ "${AGTX_MODE:-sandbox}" = "runtime" ]; then
+    exec "$@"
+fi
+
+# --- Sandbox mode only: stage a disposable copy and pre-configure it. ---
+
 # Copy host ~/.claude credentials into the writable sandbox home at startup.
 # The host directory is mounted read-only at /claude-host so Claude Code can
 # read credentials without the container ever writing back to the host.

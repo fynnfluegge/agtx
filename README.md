@@ -886,7 +886,19 @@ The sandbox:
 > [!NOTE]
 > Requires [Docker Engine](https://docs.docker.com/engine/install/) (Linux), [Docker Desktop](https://docs.docker.com/desktop/) (macOS/Windows), or [Podman](https://podman.io/docs/installation) (rootful or rootless). The image is built automatically on first run and cached for subsequent runs. Set `AGTX_CONTAINER_RUNTIME=podman` (or `=docker`) to pick a runtime explicitly when both are installed.
 
-## MCP Server
+### Runtime mode (no sandbox)
+
+By default the container is a sandbox: agtx's state is isolated in a named volume and your host settings are staged read-only, so nothing the agent does can reach the host. If you just want a container to *run* agtx in — the in-container equivalent of installing it, where agtx writes its config, status, and updates straight back to your host — use runtime mode:
+
+```bash
+# Run agtx on a project, writing config/state back to the host
+AGTX_RUNTIME=1 ./docker/sandbox.sh path/to/your-project
+
+# Or launch the runtime definition directly
+PROJECT=/path/to/project docker compose -f docker/compose.runtime.yaml up
+```
+
+Runtime mode mounts your real `~/.config/agtx`, `~/.claude`, and `~/.claude.json` **writable** at their normal locations (instead of a named volume + read-only copies), so agtx persists to the host exactly as a local install would. It is still a container with the same least-privilege caps — it is another way to run agtx, not a jail.
 
 The agtx MCP server (`agtx mcp-serve`) exposes the board to any coding agent session via the [Model Context Protocol](https://modelcontextprotocol.io). Used by the orchestrator agent, the oneshot skill, and the brainstorm & sweep skills.
 
