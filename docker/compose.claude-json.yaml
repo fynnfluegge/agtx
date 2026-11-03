@@ -1,0 +1,7 @@
+# Optional: the host's `~/.claude.json` (onboarding state + per-directory trust
+# map). Mounted read-only; entrypoint.sh copies it in at startup. Included only
+# when the file exists (sandbox.sh), so an absent one is never bind-mounted.
+services:
+  sandbox:
+    volumes:
+      - ${HOME}/.claude.json:/claude-host.json:ro

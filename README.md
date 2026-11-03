@@ -868,6 +868,12 @@ Run agtx in an isolated container (Docker or Podman, including rootless Podman) 
 ./docker/sandbox.sh
 ```
 
+The container is defined in `docker/compose.yaml`, with small `docker/compose.<asset>.yaml` fragments for the optional host-asset mounts and the Podman-only user namespace. `sandbox.sh` is a thin wrapper that picks the runtime and selects whichever fragments apply; for a quick run you can also launch the base directly:
+
+```bash
+PROJECT=/path/to/project docker compose -f docker/compose.yaml up    # or: podman compose ...
+```
+
 The sandbox:
 - Mounts only the target project as writable; everything else on the host is inaccessible
 - Copies `~/.claude` credentials read-only at startup so they are never written back to the host

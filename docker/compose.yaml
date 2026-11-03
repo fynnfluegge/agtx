@@ -1,0 +1,55 @@
+# agtx sandbox — the container definition.
+#
+# This file is the single readable source of truth for the container. Launch it
+# with sandbox.sh (which selects the optional fragments below and handles the
+# runtime), or directly:
+#
+#   PROJECT=/path/to/project <runtime> compose -f compose.yaml [-f <fragment> ...] up
+#
+# The base file carries everything that is always the same. The conditional
+# host-asset mounts (which must exist on the host) and the Podman-only user
+# namespace tweak live in the compose.<asset>.yaml fragments alongside it —
+# compose concatenates their volumes onto the base, so a fragment only ever
+# adds its mount and never re-lists the base ones. sandbox.sh includes each
+# fragment only when the asset it mounts is actually present, so we never
+# bind-mount a host path that does not exist (which would create a root-owned
+# directory on the host).
+
+services:
+  sandbox:
+    image: agtx-sandbox
+    build:
+      context: .
+      args:
+        # Host UID/GID so bind-mounted files come out owned by the host user.
+        # sandbox.sh exports AGTX_BUILD_UID/AGTX_BUILD_GID (defaults shown).
+        UID: ${AGTX_BUILD_UID:-1000}
+        GID: ${AGTX_BUILD_GID:-1000}
+    # Fixed name: lets sandbox.sh read the container's exit code via
+    # `<runtime> inspect` (Podman's `compose up` reports 0 regardless).
+    container_name: agtx-sandbox
+    user: sandbox
+    working_dir: /home/sandbox/workspace
+    command: ["agtx", "/home/sandbox/workspace"]
+    # TUI: needs a live TTY and stdin.
+    stdin_open: true
+    tty: true
+    # Least privilege, matching the previous `docker run` flags.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      # The project, writable — the only host path the agent can touch.
+      - ${PROJECT}:/home/sandbox/workspace
+      # agtx state (trust store, project DBs) persists here across runs; host
+      # settings are staged read-only by fragments and copied in at startup, so
+      # this volume never sees the host's state files.
+      - agtx-data:/home/sandbox/.config/agtx
+      # Claude credentials, read-only (copied into the writable home at startup).
+      - ${HOME}/.claude:/claude-host:ro
+
+volumes:
+  # Declared at top level so the bind above is a named volume, not a
+  # bind-mount of a path literally named "agtx-data".
+  agtx-data:
