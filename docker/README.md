@@ -27,6 +27,10 @@ updates straight to the host, like a local install. Same least-privilege caps.
 AGTX_RUNTIME=1 ./docker/sandbox.sh path/to/your-project
 ```
 
+The container is named `agtx-runtime` in this mode (sandbox mode uses
+`agtx-sandbox`), so `docker inspect` / `podman inspect` and `stop` address the
+right one.
+
 ## Details
 
 - **Runtime:** docker when installed, else podman. Set `AGTX_CONTAINER_RUNTIME=docker|podman` to force one. The image builds on first run, then is cached.

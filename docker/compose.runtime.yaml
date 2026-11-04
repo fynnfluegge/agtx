@@ -24,8 +24,10 @@ services:
         UID: ${AGTX_BUILD_UID:-1000}
         GID: ${AGTX_BUILD_GID:-1000}
     # Fixed name: lets sandbox.sh read the container's exit code via
-    # `<runtime> inspect` (Podman's `compose up` reports 0 regardless).
-    container_name: agtx-sandbox
+    # `<runtime> inspect` (Podman's `compose up` reports 0 regardless). Runtime
+    # mode is not a jail, so it gets its own name to tell its container apart
+    # from the sandbox (compose.yaml) when both are on the host.
+    container_name: agtx-runtime
     user: sandbox
     working_dir: /home/sandbox/workspace
     command: ["agtx", "/home/sandbox/workspace"]

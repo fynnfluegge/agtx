@@ -62,9 +62,9 @@ command -v "$CR" &>/dev/null || error "no container runtime found — install do
 # Mode + the base compose file it uses. AGTX_RUNTIME=1 selects runtime mode
 # (host config/state mounted writable); anything else is sandbox mode (default).
 if [ "${AGTX_RUNTIME:-0}" = "1" ]; then
-    MODE=runtime; BASE=compose.runtime.yaml
+    MODE=runtime; BASE=compose.runtime.yaml; CONTAINER=agtx-runtime
 else
-    MODE=sandbox; BASE=compose.yaml
+    MODE=sandbox; BASE=compose.yaml; CONTAINER=agtx-sandbox
 fi
 
 RAW_PROJECT="${1:-$CALLER_PWD}"
@@ -182,16 +182,16 @@ if [ "$EXIT" -eq 0 ]; then
     else
         # podman-compose has no `attach`; the fixed container_name lets the
         # runtime-native command do it.
-        "$CR" attach agtx-sandbox || ATTACHED=$?
+        "$CR" attach "$CONTAINER" || ATTACHED=$?
     fi
 
     # Prefer the container's own exit status: attach can fail because the
     # container already stopped, which says nothing about why agtx exited. If
     # the container is still running (e.g. the user detached), keep attach's
     # status instead of the running container's placeholder 0.
-    container_code=$("$CR" inspect --format '{{.State.ExitCode}}' agtx-sandbox 2>/dev/null || true)
+    container_code=$("$CR" inspect --format '{{.State.ExitCode}}' "$CONTAINER" 2>/dev/null || true)
     if [ -n "$container_code" ]; then
-        container_running=$("$CR" inspect --format '{{.State.Running}}' agtx-sandbox 2>/dev/null || true)
+        container_running=$("$CR" inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)
         if [ "$container_running" = "true" ]; then
             EXIT=$ATTACHED
         else
