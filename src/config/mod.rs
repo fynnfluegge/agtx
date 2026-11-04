@@ -552,7 +552,7 @@ impl GlobalConfig {
         }
         let dirs = directories::ProjectDirs::from("", "", "agtx")
             .context("Could not determine data directory")?;
-        Ok(dirs.data_dir().to_path_buf())
+        Ok(dirs.config_dir().to_path_buf())
     }
 }
 

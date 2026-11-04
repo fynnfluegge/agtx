@@ -1,0 +1,7 @@
+# Optional: the host's global agtx plugins directory. Mounted read-only;
+# entrypoint.sh copies it into the writable sandbox home. Guarded so we never
+# bind-mount (and thereby create) a plugins directory that does not exist.
+services:
+  sandbox:
+    volumes:
+      - ${HOME}/.config/agtx/plugins:/agtx-host-plugins:ro

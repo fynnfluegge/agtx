@@ -1,0 +1,6 @@
+# Podman-only: rootless Podman remaps UIDs, so keep-id preserves host ownership
+# on the bind mounts. Docker does not need (or, pre-25, accept) this, so it is
+# added as a fragment and included only when running rootless Podman.
+services:
+  sandbox:
+    userns_mode: keep-id
