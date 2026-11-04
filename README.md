@@ -900,7 +900,7 @@ AGTX_RUNTIME=1 ./docker/sandbox.sh path/to/your-project
 PROJECT=/path/to/project docker compose -f docker/compose.runtime.yaml up
 ```
 
-Runtime mode mounts your real `~/.config/agtx`, `~/.claude`, and `~/.claude.json` **writable** at their normal locations (instead of a named volume + read-only copies), so agtx persists to the host exactly as a local install would. It is still a container with the same least-privilege caps — it is another way to run agtx, not a jail.
+Runtime mode mounts your real `~/.config/agtx`, `~/.config/opencode`, `~/.claude`, and `~/.claude.json` **writable** at their normal locations (instead of a named volume + read-only copies), so agtx persists to the host exactly as a local install would. The OpenCode config carries its provider/model selection, so the container starts with the same model setup as the host. It is still a container with the same least-privilege caps — it is another way to run agtx, not a jail.
 
 The agtx MCP server (`agtx mcp-serve`) exposes the board to any coding agent session via the [Model Context Protocol](https://modelcontextprotocol.io). Used by the orchestrator agent, the oneshot skill, and the brainstorm & sweep skills.
 

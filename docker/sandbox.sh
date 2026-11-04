@@ -82,6 +82,14 @@ fi
 
 PROJECT="$(resolve_path "$RAW_PROJECT")"
 
+# Runtime mode bind-mounts the host's config directories directly (see
+# compose.runtime.yaml). Create them as the host user first so an absent path is
+# never created root-owned by the container runtime. Sandbox mode selects its
+# fragments conditionally instead, so it needs no such guard.
+if [ "$MODE" = runtime ]; then
+    mkdir -p "${HOME}/.config/opencode"
+fi
+
 echo ""
 echo "  ╭──────────────────────────────────────────╮"
 echo "  │               agtx sandbox               │"

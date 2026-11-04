@@ -18,9 +18,10 @@ read-only, so nothing the agent does can reach the host.
 
 ## Runtime (no sandbox)
 
-Not a jail — a way to *run* agtx. Your real `~/.config/agtx`, `~/.claude`, and
-`~/.claude.json` are mounted **writable**, so agtx writes config, status, and
-updates straight to the host, like a local install. Same least-privilege caps.
+Not a jail — a way to *run* agtx. Your real `~/.config/agtx`, `~/.config/opencode`,
+`~/.claude`, and `~/.claude.json` are mounted **writable**, so agtx writes config,
+status, and updates straight to the host, like a local install. The OpenCode
+config supplies its provider/model selection. Same least-privilege caps.
 
 ```bash
 # On a project, writing config/state back to the host
