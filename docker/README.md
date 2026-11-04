@@ -29,9 +29,9 @@ AGTX_RUNTIME=1 ./docker/sandbox.sh path/to/your-project
 ```
 
 Runtime mode mounts the project under its own directory name inside the container
-(`/home/sandbox/<project>`), so agtx derives the real project name and the AGTX
-board shows it rather than the sandbox's generic `workspace`. Sandbox mode keeps
-the generic name because its state is isolated.
+(`/home/sandbox/workspaces/<project>`), so agtx derives the real project name and
+the AGTX board shows it rather than the sandbox's generic `workspace`. Sandbox
+mode keeps the generic name because its state is isolated.
 
 The container is named `agtx-runtime` in this mode (sandbox mode uses
 `agtx-sandbox`), so `docker inspect` / `podman inspect` and `stop` address the
