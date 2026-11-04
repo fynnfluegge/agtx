@@ -868,17 +868,44 @@ Run agtx in an isolated container (Docker or Podman, including rootless Podman) 
 ./docker/sandbox.sh
 ```
 
+The container is defined in `docker/compose.yaml`, with small `docker/compose.<asset>.yaml` fragments for the optional host-asset mounts and the Podman-only user namespace. `sandbox.sh` is a thin wrapper that picks the runtime and selects whichever fragments apply; for a quick run you can also launch the base directly. Start detached and then attach — `compose up` forwards logs but not keyboard input, so the TUI needs the attach:
+
+```bash
+PROJECT=/path/to/project docker compose -f docker/compose.yaml up -d
+PROJECT=/path/to/project docker compose -f docker/compose.yaml attach sandbox
+```
+
+See **[docker/README.md](docker/README.md)** for both modes (sandbox and runtime), the runtime-mode toggle, and the full set of files.
+
 The sandbox:
 - Mounts only the target project as writable; everything else on the host is inaccessible
 - Copies `~/.claude` credentials read-only at startup so they are never written back to the host
+- Copies your global agtx settings (`~/.config/agtx/config.toml` and `~/.config/agtx/plugins/`) read-only at startup, so the sandbox uses your configuration without ever modifying it
 - Runs as a non-root user whose UID/GID matches your host user (files created inside the container appear correctly owned on the host)
-- Stores agtx state in named container volumes (persists across runs, isolated from your host's agtx data)
+- Persists agtx state (trust store, project databases) in a container volume across runs, isolated from your host's agtx data
 - Pre-accepts the bypass permissions prompt, which is appropriate in an isolated container
 
 > [!NOTE]
 > Requires [Docker Engine](https://docs.docker.com/engine/install/) (Linux), [Docker Desktop](https://docs.docker.com/desktop/) (macOS/Windows), or [Podman](https://podman.io/docs/installation) (rootful or rootless). The image is built automatically on first run and cached for subsequent runs. Set `AGTX_CONTAINER_RUNTIME=podman` (or `=docker`) to pick a runtime explicitly when both are installed.
 
-## MCP Server
+### Runtime mode (no sandbox)
+
+By default the container is a sandbox: agtx's state is isolated in a named volume and your host settings are staged read-only, so nothing the agent does can reach the host. If you just want a container to *run* agtx in — the in-container equivalent of installing it, where agtx writes its config, status, and updates straight back to your host — use runtime mode:
+
+```bash
+# Run agtx on a project, writing config/state back to the host
+AGTX_RUNTIME=1 ./docker/sandbox.sh path/to/your-project
+
+# Or launch the runtime definition directly
+PROJECT=/path/to/project PROJECT_NAME=$(basename /path/to/project) \
+  docker compose -f docker/compose.runtime.yaml up -d
+PROJECT=/path/to/project PROJECT_NAME=$(basename /path/to/project) \
+  docker compose -f docker/compose.runtime.yaml attach sandbox
+```
+
+Runtime mode mounts the project under its own directory name inside the container, so agtx derives the real project name and the AGTX board reflects it instead of the sandbox's generic `workspace` (sandbox mode keeps the generic name because its state is isolated).
+
+Runtime mode mounts your real `~/.config/agtx`, `~/.config/opencode`, `~/.claude`, and `~/.claude.json` **writable** at their normal locations (instead of a named volume + read-only copies), so agtx persists to the host exactly as a local install would. The OpenCode config carries its provider/model selection, so the container starts with the same model setup as the host. It is still a container with the same least-privilege caps — it is another way to run agtx, not a jail.
 
 The agtx MCP server (`agtx mcp-serve`) exposes the board to any coding agent session via the [Model Context Protocol](https://modelcontextprotocol.io). Used by the orchestrator agent, the oneshot skill, and the brainstorm & sweep skills.
 

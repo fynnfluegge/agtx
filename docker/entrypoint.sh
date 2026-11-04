@@ -1,6 +1,17 @@
 #!/bin/bash
 set -e
 
+# Runtime mode (AGTX_MODE=runtime) means the container's config IS the host's
+# real config, mounted writable (see compose.runtime.yaml). There is no
+# disposable copy to pre-configure, and we must not rewrite the host's real
+# settings — so skip every block below and just run agtx like a normal local
+# install. Sandbox mode (the default) falls through to the pre-configuration.
+if [ "${AGTX_MODE:-sandbox}" = "runtime" ]; then
+    exec "$@"
+fi
+
+# --- Sandbox mode only: stage a disposable copy and pre-configure it. ---
+
 # Copy host ~/.claude credentials into the writable sandbox home at startup.
 # The host directory is mounted read-only at /claude-host so Claude Code can
 # read credentials without the container ever writing back to the host.
@@ -70,16 +81,24 @@ else
     echo '{"skipDangerousModePermissionPrompt":true}' > "$settings"
 fi
 
-# agtx no longer answers trust prompts by reading the pane (`auto_trust`, default
-# off), so inside the sandbox it is turned on explicitly. Same reasoning as the
-# bypass pre-accept above: the container is disposable, holds nothing but the
-# project, and there is no human at the board to answer a prompt.
-mkdir -p /home/sandbox/.config/agtx
-agtx_config=/home/sandbox/.config/agtx/config.toml
-if [ -f "$agtx_config" ]; then
-    grep -q '^auto_trust' "$agtx_config" || echo 'auto_trust = true' >> "$agtx_config"
-else
-    echo 'auto_trust = true' > "$agtx_config"
+# Copy the host's global agtx settings into the writable sandbox home.
+# Mounted read-only so the container never writes back to the host.
+[ -f /agtx-host-config.toml ] && cp -f /agtx-host-config.toml /home/sandbox/.config/agtx/config.toml 2>/dev/null || true
+if [ -d /agtx-host-plugins ]; then
+    rm -rf /home/sandbox/.config/agtx/plugins
+    cp -r /agtx-host-plugins /home/sandbox/.config/agtx/plugins 2>/dev/null || true
+fi
+
+# Turn on auto_trust inside the sandbox (no human at the board to answer trust
+# prompts). Skipped when the config dir isn't writable.
+if [ -w /home/sandbox/.config/agtx ]; then
+    mkdir -p /home/sandbox/.config/agtx
+    agtx_config=/home/sandbox/.config/agtx/config.toml
+    if [ -f "$agtx_config" ]; then
+        grep -q '^auto_trust' "$agtx_config" || echo 'auto_trust = true' >> "$agtx_config"
+    else
+        echo 'auto_trust = true' > "$agtx_config"
+    fi
 fi
 
 exec "$@"

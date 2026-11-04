@@ -1,0 +1,7 @@
+# Optional: the host's global agtx settings file. Mounted read-only; entrypoint.sh
+# copies it into the writable sandbox home, so the sandbox uses your config
+# without ever writing back to the host. Included only when the file exists.
+services:
+  sandbox:
+    volumes:
+      - ${HOME}/.config/agtx/config.toml:/agtx-host-config.toml:ro
