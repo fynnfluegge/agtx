@@ -81,6 +81,9 @@ if [ ! -d "$RAW_PROJECT" ]; then
 fi
 
 PROJECT="$(resolve_path "$RAW_PROJECT")"
+# Runtime mode mounts the project under its own directory name, so agtx derives
+# the real project name (and a path-keyed DB) instead of the generic "workspace".
+PROJECT_NAME="$(basename "$PROJECT")"
 
 # Runtime mode bind-mounts the host's config directories directly (see
 # compose.runtime.yaml). Create them as the host user first so an absent path is
@@ -100,6 +103,7 @@ info "Project : $PROJECT"
 info "Mode    : $MODE"
 info "User    : sandbox (non-root, uid=$(id -u))"
 info "Runtime : $CR (compose)"
+[ "$MODE" = runtime ] && info "Workspace : $PROJECT_NAME"
 
 if [ ! -d "$PROJECT/.git" ]; then
     warn "$PROJECT is not a git repository"
@@ -111,6 +115,7 @@ fi
 # Expose the host identity to compose: the image build uses the UID/GID, and the
 # base + fragment mounts reference the resolved project and home paths.
 export PROJECT
+export PROJECT_NAME
 export AGTX_BUILD_UID="$(id -u)"
 export AGTX_BUILD_GID="$(id -g)"
 

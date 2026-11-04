@@ -897,8 +897,11 @@ By default the container is a sandbox: agtx's state is isolated in a named volum
 AGTX_RUNTIME=1 ./docker/sandbox.sh path/to/your-project
 
 # Or launch the runtime definition directly
-PROJECT=/path/to/project docker compose -f docker/compose.runtime.yaml up
+PROJECT=/path/to/project PROJECT_NAME=$(basename /path/to/project) \
+  docker compose -f docker/compose.runtime.yaml up
 ```
+
+Runtime mode mounts the project under its own directory name inside the container, so agtx derives the real project name and the AGTX board reflects it instead of the sandbox's generic `workspace` (sandbox mode keeps the generic name because its state is isolated).
 
 Runtime mode mounts your real `~/.config/agtx`, `~/.config/opencode`, `~/.claude`, and `~/.claude.json` **writable** at their normal locations (instead of a named volume + read-only copies), so agtx persists to the host exactly as a local install would. The OpenCode config carries its provider/model selection, so the container starts with the same model setup as the host. It is still a container with the same least-privilege caps — it is another way to run agtx, not a jail.
 

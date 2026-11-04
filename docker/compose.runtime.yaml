@@ -9,7 +9,11 @@
 # another way to run agtx, not a jail. It is still a container with the same
 # least-privilege caps.
 #
-#   PROJECT=/path/to/project docker compose -f compose.runtime.yaml up
+# The project is mounted at /home/sandbox/$PROJECT_NAME so agtx derives the real
+# project name for the board instead of the generic sandbox name "workspace".
+#
+#   PROJECT=/path/to/project PROJECT_NAME=$(basename /path/to/project) \
+#       docker compose -f compose.runtime.yaml up
 #
 # or via the launcher (AGTX_RUNTIME=1 selects this file):
 #
@@ -30,8 +34,12 @@ services:
     # from the sandbox (compose.yaml) when both are on the host.
     container_name: agtx-runtime
     user: sandbox
-    working_dir: /home/sandbox/workspace
-    command: ["agtx", "/home/sandbox/workspace"]
+    # Mounted under the project's own directory name, not the sandbox's generic
+    # "workspace": agtx derives the project name (and its path-keyed project DB)
+    # from this basename, so the board reflects the real project. PROJECT_NAME is
+    # exported by sandbox.sh; the fallback covers a direct compose launch.
+    working_dir: /home/sandbox/${PROJECT_NAME:-workspace}
+    command: ["agtx", "/home/sandbox/${PROJECT_NAME:-workspace}"]
     # TUI: needs a live TTY and stdin.
     stdin_open: true
     tty: true
@@ -45,8 +53,10 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      # The project, writable — the path agtx works on.
-      - ${PROJECT}:/home/sandbox/workspace
+      # The project, writable — the path agtx works on. Mounted under its own
+      # name so the board shows the real project and each project gets its own
+      # path-keyed database.
+      - ${PROJECT}:/home/sandbox/${PROJECT_NAME:-workspace}
       # Your real agtx config AND state, WRITABLE, at the normal location. This
       # is what "writes config/status/updates back to the host" means: config.toml,
       # plugins/, the trust store, and the project databases all live here.

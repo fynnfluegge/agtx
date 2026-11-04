@@ -28,6 +28,11 @@ config supplies its provider/model selection. Same least-privilege caps.
 AGTX_RUNTIME=1 ./docker/sandbox.sh path/to/your-project
 ```
 
+Runtime mode mounts the project under its own directory name inside the container
+(`/home/sandbox/<project>`), so agtx derives the real project name and the AGTX
+board shows it rather than the sandbox's generic `workspace`. Sandbox mode keeps
+the generic name because its state is isolated.
+
 The container is named `agtx-runtime` in this mode (sandbox mode uses
 `agtx-sandbox`), so `docker inspect` / `podman inspect` and `stop` address the
 right one.
@@ -38,6 +43,7 @@ right one.
 - **Launch a definition directly** (skip `sandbox.sh`):
   ```bash
   PROJECT=/path/to/project docker compose -f docker/compose.yaml up            # sandbox
-  PROJECT=/path/to/project docker compose -f docker/compose.runtime.yaml up    # runtime
+  PROJECT=/path/to/project PROJECT_NAME=$(basename /path/to/project) \
+    docker compose -f docker/compose.runtime.yaml up                          # runtime
   ```
 - **Files:** `compose.yaml` (sandbox) + `compose.<asset>.yaml` fragments (optional host-asset mounts, Podman `keep-id`); `compose.runtime.yaml` (runtime); `sandbox.sh` (launcher); `entrypoint.sh` (startup config); `Dockerfile`.
