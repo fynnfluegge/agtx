@@ -868,10 +868,11 @@ Run agtx in an isolated container (Docker or Podman, including rootless Podman) 
 ./docker/sandbox.sh
 ```
 
-The container is defined in `docker/compose.yaml`, with small `docker/compose.<asset>.yaml` fragments for the optional host-asset mounts and the Podman-only user namespace. `sandbox.sh` is a thin wrapper that picks the runtime and selects whichever fragments apply; for a quick run you can also launch the base directly:
+The container is defined in `docker/compose.yaml`, with small `docker/compose.<asset>.yaml` fragments for the optional host-asset mounts and the Podman-only user namespace. `sandbox.sh` is a thin wrapper that picks the runtime and selects whichever fragments apply; for a quick run you can also launch the base directly. Start detached and then attach — `compose up` forwards logs but not keyboard input, so the TUI needs the attach:
 
 ```bash
-PROJECT=/path/to/project docker compose -f docker/compose.yaml up    # or: podman compose ...
+PROJECT=/path/to/project docker compose -f docker/compose.yaml up -d
+PROJECT=/path/to/project docker compose -f docker/compose.yaml attach sandbox
 ```
 
 The sandbox:

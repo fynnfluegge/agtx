@@ -11,6 +11,7 @@ set -e
 #   * pick the runtime (docker / podman),
 #   * select the optional compose.<asset>.yaml fragments whose host assets exist,
 #   * plant the macOS Keychain credential (Darwin only) before the agent starts,
+#   * attach the caller's terminal — compose `up` attaches logs, not stdin,
 #   * capture the container's exit code and tear the container down.
 #
 # Usage: ./docker/sandbox.sh [path/to/project]  (defaults to current directory)
@@ -123,19 +124,50 @@ fi
 # volume, so state persists) so the fixed container_name never conflicts.
 "$CR" compose $F down >/dev/null 2>&1 || true
 
-# Launch and capture the container's exit code. A non-zero code means agtx
-# crashed, so it must not trip `set -e` — capture it explicitly.
+# Start detached, then attach this terminal. `compose up` in the foreground
+# attaches stdout/logs but not stdin, and the agtx TUI needs both — plain `up`
+# leaves it running with no keyboard input. Detaching first also lets the macOS
+# Keychain credential land before any agent starts.
+#
+# A non-zero code means agtx crashed, so failures must not trip `set -e` —
+# capture them explicitly.
 EXIT=0
-if [ -n "$CLAUDE_CREDS" ] && [ "$CR" = "docker" ]; then
-    "$CR" compose $F up -d
+"$CR" compose $F up -d || EXIT=$?
+
+if [ "$EXIT" -eq 0 ] && [ -n "$CLAUDE_CREDS" ] && [ "$CR" = "docker" ]; then
     printf '%s' "$CLAUDE_CREDS" | "$CR" compose $F exec -T sandbox \
         /bin/bash -c 'umask 077 && cat > /home/sandbox/.claude/.credentials.json'
     unset CLAUDE_CREDS
-    "$CR" compose $F attach sandbox || EXIT=$?
-else
-    "$CR" compose $F up || EXIT=$?
-    # podman-compose reports 0 from `up`; recover the real exit code.
-    [ "$CR" = "podman" ] && EXIT=$("$CR" inspect --format '{{.State.ExitCode}}' agtx-sandbox 2>/dev/null || echo "$EXIT")
+fi
+
+ATTACHED=0
+if [ "$EXIT" -eq 0 ]; then
+    if [ ! -t 0 ]; then
+        warn "stdin is not a TTY — the agtx TUI needs an interactive terminal"
+    fi
+    if [ "$CR" = "docker" ]; then
+        "$CR" compose $F attach sandbox || ATTACHED=$?
+    else
+        # podman-compose has no `attach`; the fixed container_name lets the
+        # runtime-native command do it.
+        "$CR" attach agtx-sandbox || ATTACHED=$?
+    fi
+
+    # Prefer the container's own exit status: attach can fail because the
+    # container already stopped, which says nothing about why agtx exited. If
+    # the container is still running (e.g. the user detached), keep attach's
+    # status instead of the running container's placeholder 0.
+    container_code=$("$CR" inspect --format '{{.State.ExitCode}}' agtx-sandbox 2>/dev/null || true)
+    if [ -n "$container_code" ]; then
+        container_running=$("$CR" inspect --format '{{.State.Running}}' agtx-sandbox 2>/dev/null || true)
+        if [ "$container_running" = "true" ]; then
+            EXIT=$ATTACHED
+        else
+            EXIT=$container_code
+        fi
+    else
+        EXIT=$ATTACHED
+    fi
 fi
 
 "$CR" compose $F down >/dev/null 2>&1 || true
