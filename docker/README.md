@@ -42,8 +42,17 @@ right one.
 - **Runtime:** docker when installed, else podman. Set `AGTX_CONTAINER_RUNTIME=docker|podman` to force one. The image builds on first run, then is cached.
 - **Launch a definition directly** (skip `sandbox.sh`):
   ```bash
-  PROJECT=/path/to/project docker compose -f docker/compose.yaml up            # sandbox
+  # sandbox
+  PROJECT=/path/to/project docker compose -f docker/compose.yaml up -d
+  PROJECT=/path/to/project docker compose -f docker/compose.yaml attach sandbox
+
+  # runtime
   PROJECT=/path/to/project PROJECT_NAME=$(basename /path/to/project) \
-    docker compose -f docker/compose.runtime.yaml up                          # runtime
+    docker compose -f docker/compose.runtime.yaml up -d
+  PROJECT=/path/to/project PROJECT_NAME=$(basename /path/to/project) \
+    docker compose -f docker/compose.runtime.yaml attach sandbox
+
+  # tear down afterwards
+  PROJECT=/path/to/project docker compose -f docker/compose.yaml down
   ```
 - **Files:** `compose.yaml` (sandbox) + `compose.<asset>.yaml` fragments (optional host-asset mounts, Podman `keep-id`); `compose.runtime.yaml` (runtime); `sandbox.sh` (launcher); `entrypoint.sh` (startup config); `Dockerfile`.

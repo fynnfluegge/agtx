@@ -898,7 +898,9 @@ AGTX_RUNTIME=1 ./docker/sandbox.sh path/to/your-project
 
 # Or launch the runtime definition directly
 PROJECT=/path/to/project PROJECT_NAME=$(basename /path/to/project) \
-  docker compose -f docker/compose.runtime.yaml up
+  docker compose -f docker/compose.runtime.yaml up -d
+PROJECT=/path/to/project PROJECT_NAME=$(basename /path/to/project) \
+  docker compose -f docker/compose.runtime.yaml attach sandbox
 ```
 
 Runtime mode mounts the project under its own directory name inside the container, so agtx derives the real project name and the AGTX board reflects it instead of the sandbox's generic `workspace` (sandbox mode keeps the generic name because its state is isolated).
