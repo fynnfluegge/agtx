@@ -14146,6 +14146,17 @@ export default {
       ctx?.permission?.hook("evaluate", (event) => report(event?.effect === "ask" ? "permission.ask" : "working", dir))
       ctx?.tool?.hook("execute.before", (event) => { if (event?.tool === "question") report("permission.ask", dir) })
       ctx?.tool?.hook("execute.after", (event) => { if (event?.tool === "question") report("working", dir) })
+      const ctrl = new AbortController()
+      void (async () => {
+        try {
+          const stream = ctx.event.subscribe({
+            types: ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"],
+            signal: ctrl.signal
+          })
+          for await (const _ of stream) report("waiting", dir)
+        } catch {}
+      })()
+      return () => ctrl.abort()
     } catch {}
   },
 }

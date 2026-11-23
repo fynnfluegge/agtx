@@ -522,12 +522,12 @@ fn vocabulary(kind: HookConfigKind) -> &'static [&'static str] {
             "PostToolUse",
             "Stop",
         ],
-        // opencode v2.1.3 — the three lifecycle events agtx reports on.
+        // opencode v2.1.3 — the four lifecycle events agtx reports on.
         // `working` and `permission.ask` both come from the single
         // `permission.evaluate` hook; the plugin reads `event.effect` to
-        // distinguish them. opencode has no turn-end/idle hook, so a
-        // `Working` record ages out via staleness rather than a terminal event.
-        HookConfigKind::OpenCodePlugin => &["prompt", "working", "permission.ask"],
+        // distinguish them. `waiting` is reported when the turn ends (via
+        // `session.execution.*` events in the event stream).
+        HookConfigKind::OpenCodePlugin => &["prompt", "working", "permission.ask", "waiting"],
     }
 }
 
@@ -557,15 +557,11 @@ fn vocabularies_do_not_leak_across_agents() {
 
 /// The two states that drive a feature rather than an icon: `Blocked` fires the
 /// orchestrator's immediate stuck-task notification, and `Waiting` is what makes
-/// a finished turn distinguishable from a stalled one. opencode is the one
-/// deliberate exception: v2 dropped the turn-end hook, so it reports `Working`
-/// and relies on the staleness timer to return a card to Ready.
+/// a finished turn distinguishable from a stalled one. Every agent must be able
+/// to report `Waiting`, including opencode (via `session.execution.*` events).
 #[test]
 fn turn_end_is_expressible_for_every_agent() {
     for kind in ALL_KINDS {
-        if *kind == HookConfigKind::OpenCodePlugin {
-            continue;
-        }
         let ends: Vec<&str> = agtx::agent::hook_status::hook_events(*kind)
             .iter()
             .map(|(e, _)| *e)
@@ -578,16 +574,6 @@ fn turn_end_is_expressible_for_every_agent() {
             kind
         );
     }
-
-    // Pin the gap: opencode has no turn-end hook, so it must not report Waiting.
-    assert!(
-        agtx::agent::hook_status::hook_events(HookConfigKind::OpenCodePlugin)
-            .iter()
-            .all(|(e, _)| {
-                map_hook_event(HookConfigKind::OpenCodePlugin, e) != Some(HookState::Waiting)
-            }),
-        "opencode has no turn-end hook, so it must not report Waiting"
-    );
 }
 
 /// Which agents can report `Blocked`. Pinned so the set is not widened or
@@ -694,8 +680,9 @@ fn an_agent_without_hooks_writes_nothing() {
 /// opencode now reports through its plugin: `prompt` (the user submitted a
 /// message) and `working` (an auto-approved permission) both map to Working;
 /// `permission.ask` (a permission genuinely waiting on a human) maps to
-/// Blocked — all passed in argv, exactly how the plugin sends them — and a
-/// foreign event it does not own is ignored.
+/// Blocked; `waiting` (the turn ended) maps to Waiting — all passed in argv,
+/// exactly how the plugin sends them — and a foreign event it does not own
+/// is ignored.
 #[test]
 fn opencode_reports_via_its_plugin_events() {
     let dir = TempDir::new().unwrap();
@@ -717,6 +704,12 @@ fn opencode_reports_via_its_plugin_events() {
     assert_eq!(
         read_status(dir.path(), "t-oc", 0).expect("a permission.ask must report Blocked").state,
         HookState::Blocked
+    );
+
+    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "opencode", Some("waiting"), b"");
+    assert_eq!(
+        read_status(dir.path(), "t-oc", 0).expect("a waiting event must report Waiting").state,
+        HookState::Waiting
     );
 
     // A claude event is not borrowed by opencode's vocabulary.

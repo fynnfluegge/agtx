@@ -159,17 +159,19 @@ pub fn map_hook_event(kind: HookConfigKind, event: &str) -> Option<HookState> {
             "Stop" => Some(HookState::Waiting),
             _ => None,
         },
-        // opencode v2. Three events, all passed in argv. `prompt` fires when the
+        // opencode v2. Four events, all passed in argv. `prompt` fires when the
         // user submits a message (turn start → Working). `working` and
         // `permission.ask` come from the `permission.evaluate` hook, which
         // fires for *every* permission check; the plugin reads `event.effect`
         // to distinguish the two: `allow` (auto-approved, agent continues)
         // reports `working` → Working, and `ask` (genuinely pending, waiting
-        // on a human) reports `permission.ask` → Blocked. There is no turn-end
-        // hook, so a `Working` record simply ages out via [`HOOK_STALE_SECS`].
+        // on a human) reports `permission.ask` → Blocked. `waiting` is
+        // reported when the turn ends (via `session.execution.*` events in
+        // the event stream) → Waiting/Idle.
         OpenCodePlugin => match event {
             "prompt" | "working" => Some(HookState::Working),
             "permission.ask" => Some(HookState::Blocked),
+            "waiting" => Some(HookState::Waiting),
             _ => None,
         },
     }
@@ -265,13 +267,14 @@ pub fn hook_events(kind: HookConfigKind) -> &'static [(&'static str, Option<&'st
             ("Stop", None),
         ],
         // `prompt` (the user submitted a message), `working` (an auto-approved
-        // permission; the agent continues), and `permission.ask` (a permission
-        // genuinely waiting on a human). All are passed in argv, never in a
-        // payload, so all are unscoped.
+        // permission; the agent continues), `permission.ask` (a permission
+        // genuinely waiting on a human), and `waiting` (the turn ended).
+        // All are passed in argv, never in a payload, so all are unscoped.
         OpenCodePlugin => &[
             ("prompt", None),
             ("working", None),
             ("permission.ask", None),
+            ("waiting", None),
         ],
     }
 }
