@@ -592,11 +592,13 @@ mod tests {
     fn the_orchestrator_command_reaches_claude_with_its_json_intact() {
         let agent = crate::agent::Agent::new("claude", "claude", "", "");
         let ops = crate::agent::CodingAgent::new(agent);
-        let json = r#"{"type":"stdio","command":"/bin/agtx","args":["mcp-serve","/tmp/repo"]}"#;
         let cmd =
-            crate::agent::AgentOperations::build_orchestrator_command(&ops, json, "/bin/agtx");
+            crate::agent::AgentOperations::build_orchestrator_command(&ops, "/bin/agtx", "/tmp/repo");
         let (ok, seen) = argv_seen_by_fake_claude(&cmd);
         assert!(ok, "the wrapped orchestrator command must run: {seen}");
+        // The JSON is built from (agtx_bin, project_path); serde_json's Map is
+        // a BTreeMap, so keys serialize alphabetically.
+        let json = r#"{"args":["mcp-serve","/tmp/repo"],"command":"/bin/agtx","type":"stdio"}"#;
         assert!(
             seen.lines().any(|l| l == json),
             "claude must receive the JSON as one intact argument; got:\n{seen}"
@@ -604,21 +606,75 @@ mod tests {
     }
 
     /// ...and a project path containing an apostrophe still arrives intact,
-    /// because the caller escapes it for the single-quoted word it lands in.
+    /// because the impl escapes it for the single-quoted word it lands in.
     #[cfg(unix)]
     #[test]
     fn an_apostrophe_in_the_mcp_json_survives_both_layers() {
         let agent = crate::agent::Agent::new("claude", "claude", "", "");
         let ops = crate::agent::CodingAgent::new(agent);
-        let raw = r#"{"args":["mcp-serve","/tmp/it's a repo"]}"#;
-        let escaped = raw.replace('\'', "'\"'\"'");
-        let cmd =
-            crate::agent::AgentOperations::build_orchestrator_command(&ops, &escaped, "/bin/agtx");
+        let cmd = crate::agent::AgentOperations::build_orchestrator_command(
+            &ops,
+            "/bin/agtx",
+            "/tmp/it's a repo",
+        );
         let (ok, seen) = argv_seen_by_fake_claude(&cmd);
         assert!(ok, "the wrapped orchestrator command must run: {seen}");
+        let raw = r#"{"args":["mcp-serve","/tmp/it's a repo"],"command":"/bin/agtx","type":"stdio"}"#;
         assert!(
             seen.lines().any(|l| l == raw),
             "claude must receive the unescaped JSON; got:\n{seen}"
+        );
+    }
+
+    /// The file-based orchestrator command is `<agent>; <cleanup>`, and the
+    /// cleanup — not the launch — is the part the quoting layers could break:
+    /// prove it actually runs, with an apostrophe in the project path so both
+    /// layers have to work. The user's pre-existing config must be back
+    /// byte-for-byte once the (fake) agent exits.
+    #[cfg(unix)]
+    #[test]
+    fn the_file_based_cleanup_survives_both_layers() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        let project = root.path().join("it's a repo");
+        std::fs::create_dir_all(&project).expect("mkdir");
+        let user_cfg = r#"{"theme":"dark"}"#;
+        std::fs::write(project.join("opencode.json"), user_cfg).expect("seed config");
+
+        let agent = crate::agent::Agent::new("opencode", "opencode", "", "");
+        let ops = crate::agent::CodingAgent::new(agent);
+        let cmd = crate::agent::AgentOperations::build_orchestrator_command(
+            &ops,
+            "/bin/agtx",
+            project.to_string_lossy().as_ref(),
+        );
+        let merged = std::fs::read_to_string(project.join("opencode.json")).expect("read merged");
+        assert!(merged.contains("agtx"), "precondition: the entry was merged in: {merged}");
+
+        let fake_dir = tempfile::tempdir().expect("tempdir");
+        let fake = fake_dir.path().join("opencode");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").expect("write fake");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = format!(
+            "{}:{}",
+            fake_dir.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(wrap_launch_command(&cmd, false))
+            .env("PATH", path)
+            .output()
+            .expect("sh should run");
+        assert!(
+            out.status.success(),
+            "the wrapped orchestrator command must run: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.join("opencode.json")).expect("read after"),
+            user_cfg,
+            "cleanup must restore the user's config byte-for-byte"
         );
     }
 

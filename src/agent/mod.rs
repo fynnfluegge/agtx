@@ -1,4 +1,5 @@
 pub mod hook_status;
+pub(crate) mod mcp;
 mod operations;
 pub mod spec;
 pub mod trust;

@@ -1067,8 +1067,11 @@ impl App {
             let tmux_ops = Arc::clone(&app.state.tmux_ops);
             let ready_flag = Arc::clone(&app.state.orchestrator_ready);
             let auto_trust = app.state.config.auto_trust;
+            // The orchestrator runs the project's default agent, not claude —
+            // pass its name so readiness detection uses its real indicators.
+            let agent_name = app.state.config.default_agent.clone();
             std::thread::spawn(move || {
-                if wait_for_agent_ready(&tmux_ops, &orch_target, Some("claude"), auto_trust)
+                if wait_for_agent_ready(&tmux_ops, &orch_target, Some(agent_name.as_str()), auto_trust)
                     .is_some()
                 {
                     ready_flag.store(true, Ordering::Release);
@@ -8141,8 +8144,12 @@ impl App {
                 let ready_flag = Arc::clone(&self.state.orchestrator_ready);
                 let target = orch_target.clone();
                 let auto_trust = self.state.config.auto_trust;
+                // The orchestrator runs the project's default agent, not
+                // claude — pass its name so readiness detection uses its real
+                // indicators.
+                let agent_name = self.state.config.default_agent.clone();
                 std::thread::spawn(move || {
-                    if wait_for_agent_ready(&tmux_ops, &target, Some("claude"), auto_trust)
+                    if wait_for_agent_ready(&tmux_ops, &target, Some(agent_name.as_str()), auto_trust)
                         .is_some()
                     {
                         ready_flag.store(true, Ordering::Release);
@@ -8193,30 +8200,31 @@ impl App {
         let agent = self.state.agent_registry.get(&default_agent);
         let project_path_str = project_path.to_string_lossy().to_string();
 
-        // Build MCP registration JSON for the agtx server
         let agtx_bin = std::env::current_exe()
             .unwrap_or_else(|_| PathBuf::from("agtx"))
             .to_string_lossy()
             .to_string();
-        let mcp_json = serde_json::json!({
-            "type": "stdio",
-            "command": agtx_bin,
-            "args": ["mcp-serve", &project_path_str]
-        });
-        // Escaped for the single-quoted word it becomes inside the orchestrator
-        // command (`add-json … '<json>'`). Only reachable when the project path
-        // contains an apostrophe. The *outer* `sh -c` layer is handled by
-        // `single_quote` in create_window — pre-escaping for it here would
-        // double-escape and break the command.
-        let mcp_json_str = mcp_json.to_string().replace('\'', "'\"'\"'");
-
-        let agent_cmd = agent.build_orchestrator_command(&mcp_json_str, &agtx_bin);
+        // MCP registration is agent-appropriate and self-cleaning: Claude
+        // registers via `claude mcp add-json` inside the returned command
+        // string; file-based agents get the entry merged into their config
+        // file at the project root (this window's working directory) with the
+        // restore chained after the launch. Both clean up on exit.
+        let agent_cmd = agent.build_orchestrator_command(&agtx_bin, &project_path_str);
 
         // Ensure project tmux session exists
         ensure_project_tmux_session(
             &tmux_project_name,
             &project_path,
             self.state.tmux_ops.as_ref(),
+        );
+
+        // Deploy the orchestrate skill before the agent starts so the first
+        // launch on a fresh project sees it too.
+        deploy_skill(
+            &project_path,
+            "agtx-orchestrate",
+            skills::ORCHESTRATE_SKILL,
+            &default_agent,
         );
 
         // Create orchestrator tmux window in the project root (no worktree)
@@ -8255,14 +8263,6 @@ impl App {
         popup.metrics = metrics;
         let _ = self.state.input_sink.flush();
         self.state.shell_popup = Some(popup);
-
-        // Deploy orchestrate skill to project root so the agent can discover it
-        deploy_skill(
-            &project_path,
-            "agtx-orchestrate",
-            skills::ORCHESTRATE_SKILL,
-            &default_agent,
-        );
 
         if let Some(ref db) = self.state.db {
             run_orchestrator_catchup(
@@ -9584,6 +9584,7 @@ const AGTX_WRITTEN_PATHS: &[&str] = &[
     ".agents/mcp_config.json",
     ".agents/hooks.json",
     ".agents/skills/agtx-*/",
+    "opencode.json",
     ".opencode/command/agtx-*.md",
     ".github/agents/agtx/",
     ".pi/mcp.json",
@@ -14132,25 +14133,27 @@ fn merge_hooks_into_json_settings(path: &Path, ours: serde_json::Value) {
 /// top-level keys — have to survive. A missing or unparseable file starts from an
 /// empty object rather than failing, on the same best-effort footing as the rest
 /// of worktree setup.
-fn merge_mcp_servers_json(dir: &Path, filename: &str, agtx_bin: &str, project_path_str: &str) {
-    let _ = std::fs::create_dir_all(dir);
-    let path = dir.join(filename);
-    let mut root = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .filter(|v| v.is_object())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if !root["mcpServers"].is_object() {
-        root["mcpServers"] = serde_json::json!({});
-    }
-    root["mcpServers"]["agtx"] = serde_json::json!({
-        "command": agtx_bin,
-        "args": ["mcp-serve", project_path_str]
-    });
-    let _ = std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&root).unwrap_or_default(),
-    );
+/// Write (or merge) the agtx entry into a JSON config file in the worktree.
+/// The shape comes from `agent::mcp::entry_json` — the same source of truth
+/// the orchestrator's root registration uses — so the two paths cannot drift
+/// apart.
+fn write_mcp_entry_json(
+    path: &Path,
+    kind: agent::McpConfigKind,
+    agtx_bin: &str,
+    project_path_str: &str,
+) {
+    let Some((key, entry)) = agent::mcp::entry_json(kind, agtx_bin, project_path_str) else {
+        return;
+    };
+    let mut root = read_json_object(path);
+    let mut servers = root
+        .get(key)
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    servers.insert("agtx".to_string(), entry);
+    root.insert(key.to_string(), serde_json::Value::Object(servers));
+    write_json(path, &serde_json::Value::Object(root));
 }
 
 /// Write the project-scoped MCP server config for one agent into its worktree.
@@ -14225,10 +14228,14 @@ fn write_mcp_config(
             );
         }
         agent::McpConfigKind::CodexToml => {
-            let toml = format!(
-                "[mcp_servers.agtx]\ncommand = \"{}\"\nargs = [\"mcp-serve\", \"{}\"]\n",
-                agtx_bin, project_path_str
-            );
+            // Shared shape with the orchestrator's root registration — which
+            // also carries the double-quote escaping this arm was missing.
+            let toml = agent::mcp::entry_toml(
+                agent::McpConfigKind::CodexToml,
+                agtx_bin,
+                project_path_str,
+            )
+            .unwrap_or_default();
             let dir = Path::new(worktree_path).join(".codex");
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(dir.join("config.toml"), toml);
@@ -14254,45 +14261,32 @@ fn write_mcp_config(
             // `mcpServers` besides agtx. Same rule as the Claude writer above.
             let dir = Path::new(worktree_path).join(".gemini");
             let _ = std::fs::create_dir_all(&dir);
-            let path = dir.join("settings.json");
-            let mut settings = read_json_object(&path);
-            let mut servers = settings
-                .get("mcpServers")
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default();
-            servers.insert(
-                "agtx".to_string(),
-                serde_json::json!({
-                    "command": agtx_bin,
-                    "args": ["mcp-serve", &project_path_str],
-                    "trust": true
-                }),
+            write_mcp_entry_json(
+                &dir.join("settings.json"),
+                agent::McpConfigKind::GeminiJson,
+                agtx_bin,
+                project_path_str,
             );
-            settings.insert("mcpServers".to_string(), serde_json::Value::Object(servers));
-            write_json(&path, &serde_json::Value::Object(settings));
         }
         agent::McpConfigKind::CursorJson => {
-            let cfg = serde_json::json!({
-                "mcpServers": {
-                    "agtx": { "command": agtx_bin, "args": ["mcp-serve", &project_path_str] }
-                }
-            });
             let dir = Path::new(worktree_path).join(".cursor");
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(
-                dir.join("mcp.json"),
-                serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+            write_mcp_entry_json(
+                &dir.join("mcp.json"),
+                agent::McpConfigKind::CursorJson,
+                agtx_bin,
+                project_path_str,
             );
         }
         agent::McpConfigKind::GrokTomlMerge => {
             // Grok reads project-scoped MCP servers from .grok/config.toml (TOML, not JSON),
             // walking from the worktree up to the git root.
-            let esc = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
-            let cfg = format!(
-                "[mcp_servers.agtx]\ncommand = \"{}\"\nargs = [\"mcp-serve\", \"{}\"]\n",
-                esc(&agtx_bin),
-                esc(&project_path_str)
-            );
+            let cfg = agent::mcp::entry_toml(
+                agent::McpConfigKind::GrokTomlMerge,
+                agtx_bin,
+                project_path_str,
+            )
+            .unwrap_or_default();
             let dir = Path::new(worktree_path).join(".grok");
             let _ = std::fs::create_dir_all(&dir);
             // A repo may already ship a .grok/config.toml — append the agtx table
@@ -14313,11 +14307,13 @@ fn write_mcp_config(
             // (JSON, `mcpServers`). `.agents/` is vendor-neutral and may already be
             // tracked in the repo, so merge the agtx entry into any existing file
             // instead of clobbering the project's own servers.
-            merge_mcp_servers_json(
-                &Path::new(worktree_path).join(".agents"),
-                "mcp_config.json",
-                &agtx_bin,
-                &project_path_str,
+            let dir = Path::new(worktree_path).join(".agents");
+            let _ = std::fs::create_dir_all(&dir);
+            write_mcp_entry_json(
+                &dir.join("mcp_config.json"),
+                agent::McpConfigKind::AntigravityJsonMerge,
+                agtx_bin,
+                project_path_str,
             );
         }
         agent::McpConfigKind::PiJsonMerge => {
@@ -14326,25 +14322,21 @@ fn write_mcp_config(
             // layer, in the standard `mcpServers` shape. Merged rather than
             // overwritten because the adapter also persists its own per-server
             // `disabled` flags into this file.
-            merge_mcp_servers_json(
-                &Path::new(worktree_path).join(".pi"),
-                "mcp.json",
-                &agtx_bin,
-                &project_path_str,
+            let dir = Path::new(worktree_path).join(".pi");
+            let _ = std::fs::create_dir_all(&dir);
+            write_mcp_entry_json(
+                &dir.join("mcp.json"),
+                agent::McpConfigKind::PiJsonMerge,
+                agtx_bin,
+                project_path_str,
             );
         }
         agent::McpConfigKind::OpenCode => {
-            let cfg = serde_json::json!({
-                "mcp": {
-                    "agtx": {
-                        "type": "local",
-                        "command": [&agtx_bin, "mcp-serve", &project_path_str]
-                    }
-                }
-            });
-            let _ = std::fs::write(
-                Path::new(worktree_path).join("opencode.json"),
-                serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+            write_mcp_entry_json(
+                &Path::new(worktree_path).join("opencode.json"),
+                agent::McpConfigKind::OpenCode,
+                agtx_bin,
+                project_path_str,
             );
         }
     }

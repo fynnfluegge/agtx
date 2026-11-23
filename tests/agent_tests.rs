@@ -188,7 +188,7 @@ fn test_build_orchestrator_command_claude_is_idempotent() {
     let agents = known_agents();
     let claude = agents.iter().find(|a| a.name == "claude").unwrap().clone();
     let ops = CodingAgent::new(claude);
-    let cmd = ops.build_orchestrator_command("{\"type\":\"stdio\"}", "/usr/bin/agtx");
+    let cmd = ops.build_orchestrator_command("/usr/bin/agtx", "/tmp/repo");
 
     let pre_remove_idx = cmd
         .find("claude mcp remove agtx-orchestrator")
@@ -220,8 +220,13 @@ fn test_build_orchestrator_command_claude_is_idempotent() {
         !cmd.contains(r"'\''"),
         "JSON quotes must not be pre-escaped; the tmux wrapper quotes this command:\n{cmd}"
     );
+
+    // The JSON is built here from (agtx_bin, project_path); serde_json's Map is
+    // a BTreeMap, so keys serialize alphabetically.
+    let expected_json =
+        r#"{"args":["mcp-serve","/tmp/repo"],"command":"/usr/bin/agtx","type":"stdio"}"#;
     assert!(
-        cmd.contains(r#"add-json agtx-orchestrator '{"type":"stdio"}'"#),
+        cmd.contains(&format!("add-json agtx-orchestrator '{expected_json}'")),
         "JSON must be a plainly single-quoted word:\n{cmd}"
     );
 
@@ -234,6 +239,161 @@ fn test_build_orchestrator_command_claude_is_idempotent() {
         cmd.contains("&& claude"),
         "&& must gate interactive claude:\n{cmd}"
     );
+}
+
+#[test]
+fn test_build_orchestrator_command_opencode_registers_project_root() {
+    let agents = known_agents();
+    let opencode = agents.iter().find(|a| a.name == "opencode").unwrap().clone();
+    let ops = CodingAgent::new(opencode);
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().to_string_lossy().to_string();
+
+    let cmd = ops.build_orchestrator_command("/usr/bin/agtx", &project);
+
+    // Launches the agent, then cleans up after it exits.
+    assert!(
+        cmd.starts_with("opencode; "),
+        "orchestrator must launch the agent:\n{cmd}"
+    );
+
+    // The project-root config carries the agtx server in OpenCode's shape.
+    let cfg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("opencode.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cfg["mcp"]["agtx"]["type"], "local");
+    assert_eq!(cfg["mcp"]["agtx"]["command"][0], "/usr/bin/agtx");
+    assert_eq!(cfg["mcp"]["agtx"]["command"][1], "mcp-serve");
+    assert_eq!(cfg["mcp"]["agtx"]["command"][2], project);
+
+    // Fresh file → cleanup removes it.
+    assert!(
+        cmd.ends_with(&format!("rm -f '{}'", dir.path().join("opencode.json").display())),
+        "cleanup must remove the file it created:\n{cmd}"
+    );
+}
+
+#[test]
+fn test_build_orchestrator_command_opencode_preserves_existing_config() {
+    let agents = known_agents();
+    let opencode = agents.iter().find(|a| a.name == "opencode").unwrap().clone();
+    let ops = CodingAgent::new(opencode);
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().to_string_lossy().to_string();
+    let cfg_path = dir.path().join("opencode.json");
+
+    // The user's own project config, with a server of its own.
+    let user_cfg = serde_json::json!({
+        "theme": "dark",
+        "mcp": { "other": { "type": "local", "command": ["x"] } }
+    });
+    std::fs::write(&cfg_path, user_cfg.to_string()).unwrap();
+
+    let cmd = ops.build_orchestrator_command("/usr/bin/agtx", &project);
+
+    let merged: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    assert_eq!(merged["theme"], "dark", "user keys must survive");
+    assert_eq!(
+        merged["mcp"]["other"]["type"], "local",
+        "other servers must survive"
+    );
+    assert_eq!(merged["mcp"]["agtx"]["type"], "local");
+    assert_eq!(merged["mcp"]["agtx"]["command"][2], project);
+
+    // Pre-existing file → cleanup restores the backup, then removes it.
+    let restore_idx = cmd
+        .find("cp -f '")
+        .expect("cleanup must restore the pre-existing file:\n{cmd}");
+    assert!(
+        cmd[restore_idx..].contains(" && rm -f '"),
+        "cleanup must remove the backup after restoring:\n{cmd}"
+    );
+}
+
+#[test]
+fn test_build_orchestrator_command_codex_appends_toml_table() {
+    let agents = known_agents();
+    let codex = agents.iter().find(|a| a.name == "codex").unwrap().clone();
+    let ops = CodingAgent::new(codex);
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().to_string_lossy().to_string();
+
+    // A codex project with its own settings.
+    let cfg_path = dir.path().join(".codex").join("config.toml");
+    std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+    std::fs::write(&cfg_path, "[sandbox]\nmode = \"workspace-write\"\n").unwrap();
+
+    let cmd = ops.build_orchestrator_command("/usr/bin/agtx", &project);
+
+    let content = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(content.contains("[sandbox]"), "user table must survive:\n{content}");
+    assert!(content.contains("[mcp_servers.agtx]"), "{content}");
+    assert!(
+        content.contains(r#"command = "/usr/bin/agtx""#),
+        "{content}"
+    );
+    assert!(
+        content.contains(&format!(r#"args = ["mcp-serve", "{project}"]"#)),
+        "{content}"
+    );
+    assert!(
+        cmd.starts_with("codex --sandbox workspace-write; "),
+        "orchestrator must launch the agent:\n{cmd}"
+    );
+}
+
+#[test]
+fn test_build_orchestrator_command_toml_already_registered_leaves_file_alone() {
+    let agents = known_agents();
+    let codex = agents.iter().find(|a| a.name == "codex").unwrap().clone();
+    let ops = CodingAgent::new(codex);
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().to_string_lossy().to_string();
+
+    let cfg_path = dir.path().join(".codex").join("config.toml");
+    std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+    std::fs::write(&cfg_path, "[mcp_servers.agtx]\ncommand = \"other\"\n").unwrap();
+    let before = std::fs::read_to_string(&cfg_path).unwrap();
+
+    let cmd = ops.build_orchestrator_command("/usr/bin/agtx", &project);
+
+    assert_eq!(
+        cmd, "codex --sandbox workspace-write",
+        "no registration → bare launch:\n{cmd}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cfg_path).unwrap(),
+        before,
+        "file must be untouched"
+    );
+}
+
+#[test]
+fn test_build_orchestrator_command_copilot_launches_bare() {
+    let agents = known_agents();
+    let copilot = agents.iter().find(|a| a.name == "copilot").unwrap().clone();
+    let ops = CodingAgent::new(copilot);
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().to_string_lossy().to_string();
+
+    let cmd = ops.build_orchestrator_command("/usr/bin/agtx", &project);
+
+    assert_eq!(cmd, "copilot --allow-all-tools", "{cmd}");
+    // copilot declares no MCP config: nothing may be written at the root.
+    for absent in [
+        "opencode.json",
+        ".codex/config.toml",
+        ".gemini/settings.json",
+        ".cursor/mcp.json",
+        ".mcp.json",
+    ] {
+        assert!(
+            !dir.path().join(absent).exists(),
+            "copilot should get no MCP config, found {absent}"
+        );
+    }
 }
 
 // =============================================================================
