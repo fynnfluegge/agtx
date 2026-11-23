@@ -14115,7 +14115,7 @@ fn antigravity_hook_spec(
 
 /// The opencode v2 plugin agtx writes: a submitted prompt or an auto-approved
 /// permission reports `Working`; a permission that genuinely asks for approval
-/// reports `Blocked`.
+/// or a `question` tool call (agent waiting on user input) reports `Blocked`.
 ///
 /// The default export must be the plain object `{ id, setup }` — that is exactly
 /// the shape opencode's plugin-module schema validates (`{ id, setup: function }`),
@@ -14144,6 +14144,8 @@ export default {
       const dir = ctx?.location?.directory ?? process.cwd()
       ctx?.session?.hook("prompt", () => report("prompt", dir))
       ctx?.permission?.hook("evaluate", (event) => report(event?.effect === "ask" ? "permission.ask" : "working", dir))
+      ctx?.tool?.hook("execute.before", (event) => { if (event?.tool === "question") report("permission.ask", dir) })
+      ctx?.tool?.hook("execute.after", (event) => { if (event?.tool === "question") report("working", dir) })
     } catch {}
   },
 }
