@@ -13399,7 +13399,7 @@ fn test_opencode_hook_writes_its_plugin_file() {
     assert!(once.contains("\"--worktree\""), "must use the worktree form, got:\n{once}");
     assert!(once.contains("opencode"), "must name its agent");
     assert!(once.contains("\"prompt\""), "must register the prompt event");
-    assert!(once.contains("permission.evaluate"), "must register the permission event");
+    assert!(once.contains("permission.ask"), "must register the permission-ask event");
     assert!(!once.contains("__AGTX_BIN__"), "the binary path was not substituted in");
 
     // A second deploy rewrites the same file rather than stacking a second one.

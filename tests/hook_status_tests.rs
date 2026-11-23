@@ -522,10 +522,12 @@ fn vocabulary(kind: HookConfigKind) -> &'static [&'static str] {
             "PostToolUse",
             "Stop",
         ],
-        // opencode v2.1.3 — the two lifecycle events agtx reports on. opencode
-        // has no turn-end/idle hook, so a `Working` record ages out via
-        // staleness rather than a terminal event.
-        HookConfigKind::OpenCodePlugin => &["prompt", "permission.evaluate"],
+        // opencode v2.1.3 — the three lifecycle events agtx reports on.
+        // `working` and `permission.ask` both come from the single
+        // `permission.evaluate` hook; the plugin reads `event.effect` to
+        // distinguish them. opencode has no turn-end/idle hook, so a
+        // `Working` record ages out via staleness rather than a terminal event.
+        HookConfigKind::OpenCodePlugin => &["prompt", "working", "permission.ask"],
     }
 }
 
@@ -589,10 +591,10 @@ fn turn_end_is_expressible_for_every_agent() {
 }
 
 /// Which agents can report `Blocked`. Pinned so the set is not widened or
-/// narrowed later with a wrong mapping: opencode's `permission.evaluate` does
-/// block, while Cursor exposes only policy gates that decide
-/// (`beforeShellExecution`) and Antigravity's five events contain no permission
-/// prompt.
+/// narrowed later with a wrong mapping: opencode's `permission.ask` (fired when
+/// `event.effect === "ask"`) does block, while Cursor exposes only policy gates
+/// that decide (`beforeShellExecution`) and Antigravity's five events contain
+/// no permission prompt.
 #[test]
 fn only_agents_with_a_permission_event_report_blocked() {
     let can_block: Vec<HookConfigKind> = ALL_KINDS
@@ -690,9 +692,10 @@ fn an_agent_without_hooks_writes_nothing() {
 }
 
 /// opencode now reports through its plugin: `prompt` (the user submitted a
-/// message) maps to Working, `permission.evaluate` to Blocked — both passed in
-/// argv, exactly how the plugin sends them — and a foreign event it does not own
-/// is ignored.
+/// message) and `working` (an auto-approved permission) both map to Working;
+/// `permission.ask` (a permission genuinely waiting on a human) maps to
+/// Blocked — all passed in argv, exactly how the plugin sends them — and a
+/// foreign event it does not own is ignored.
 #[test]
 fn opencode_reports_via_its_plugin_events() {
     let dir = TempDir::new().unwrap();
@@ -704,15 +707,15 @@ fn opencode_reports_via_its_plugin_events() {
         HookState::Working
     );
 
-    agtx::agent::hook_status::record_hook_event(
-        "t-oc",
-        &wt,
-        "opencode",
-        Some("permission.evaluate"),
-        b"",
-    );
+    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "opencode", Some("working"), b"");
     assert_eq!(
-        read_status(dir.path(), "t-oc", 0).expect("a permission must report Blocked").state,
+        read_status(dir.path(), "t-oc", 0).expect("a working event must report Working").state,
+        HookState::Working
+    );
+
+    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "opencode", Some("permission.ask"), b"");
+    assert_eq!(
+        read_status(dir.path(), "t-oc", 0).expect("a permission.ask must report Blocked").state,
         HookState::Blocked
     );
 

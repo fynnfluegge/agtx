@@ -14113,8 +14113,9 @@ fn antigravity_hook_spec(
     serde_json::Value::Object(out)
 }
 
-/// The opencode v2 plugin agtx writes: a submitted prompt reports `Working`, a
-/// permission prompt reports `Blocked`.
+/// The opencode v2 plugin agtx writes: a submitted prompt or an auto-approved
+/// permission reports `Working`; a permission that genuinely asks for approval
+/// reports `Blocked`.
 ///
 /// The default export must be the plain object `{ id, setup }` — that is exactly
 /// the shape opencode's plugin-module schema validates (`{ id, setup: function }`),
@@ -14142,7 +14143,7 @@ export default {
     try {
       const dir = ctx?.location?.directory ?? process.cwd()
       ctx?.session?.hook("prompt", () => report("prompt", dir))
-      ctx?.permission?.hook("evaluate", () => report("permission.evaluate", dir))
+      ctx?.permission?.hook("evaluate", (event) => report(event?.effect === "ask" ? "permission.ask" : "working", dir))
     } catch {}
   },
 }
