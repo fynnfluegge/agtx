@@ -50,6 +50,7 @@ pub const HELP: &[HelpSection] = &[
             e(",", "Configuration"),
             e("P", "Select the workflow plugin"),
             e("e", "Toggle the project sidebar"),
+            e("E", "Focus the active task from the project sidebar"),
             e("u", "Install the update, when one was found"),
             e("O", "Toggle the orchestrator (--experimental)"),
         ],

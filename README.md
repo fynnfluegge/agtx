@@ -136,7 +136,14 @@ agtx --version
 | `W` | Serve the board to a phone (QR pairing, device list) |
 | `O` | Toggle orchestrator agent (`--experimental`) |
 | `e` | Toggle project sidebar |
+| `E` | From the project sidebar, focus the selected project's active task |
 | `q` | Quit |
+
+In the project sidebar, press `E` to select the first task in the first
+nonempty column in this order: Running, Planning, Review, Backlog/Research,
+Done. Press `Enter` in the sidebar to return to the board at its current
+selection. Selecting a task with `E` leaves its state and session alone.
+On an empty board, `E` just returns focus to the board.
 
 </details>
 
