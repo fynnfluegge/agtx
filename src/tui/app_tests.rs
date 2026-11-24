@@ -1924,7 +1924,7 @@ fn test_setup_task_worktree_success() {
     );
 
     assert!(result.is_ok());
-    let (target, _launched) = result.unwrap();
+    let target = result.unwrap().target;
     assert!(target.starts_with("my-project:task-"));
     assert!(task.session_name.is_some());
     assert!(task.worktree_path.is_some());
@@ -1984,7 +1984,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         None,
     )
     .unwrap();
-    let (target, _launched) = target;
+    let target = target.target;
 
     // session_name should be the returned target
     assert_eq!(task.session_name.as_ref().unwrap(), &target);
@@ -9801,6 +9801,78 @@ fn make_app_with_task(
     app.state.db.as_ref().unwrap().create_task(task).unwrap();
     app.refresh_tasks().unwrap();
     app
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn worktree_setup_warning_reaches_the_footer_without_failing_setup() {
+    let project = tempfile::tempdir().unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    let worktree_path = worktree.path().to_string_lossy().into_owned();
+
+    let mut mock_git = MockGitOperations::new();
+    mock_git
+        .expect_create_worktree()
+        .returning(move |_, _, _, _, _| Ok(worktree_path.clone()));
+    mock_git
+        .expect_initialize_worktree()
+        .returning(|_, _, _, _, _| vec!["copy_files: 'settings.toml' not found".into()]);
+
+    let mut mock_tmux = MockTmuxOperations::new();
+    mock_tmux.expect_window_exists().returning(|_| Ok(false));
+    mock_tmux.expect_has_session().returning(|_| true);
+    mock_tmux
+        .expect_create_window()
+        .returning(|_, _, _, _, _, _| Ok(()));
+
+    let mut mock_registry = MockAgentRegistry::new();
+    mock_registry.expect_get().returning(|_| {
+        let mut agent = MockAgentOperations::new();
+        agent
+            .expect_prompt_injection()
+            .returning(|| crate::agent::PromptInjection::Argv);
+        agent
+            .expect_build_interactive_command()
+            .returning(|_| "mock-agent".into());
+        Arc::new(agent)
+    });
+
+    let mut app = App::new_for_test(
+        Some(project.path().to_path_buf()),
+        Arc::new(mock_tmux),
+        Arc::new(mock_git),
+        Arc::new(MockGitProviderOperations::new()),
+        Arc::new(mock_registry),
+    )
+    .unwrap();
+    let task = make_test_task("worktree-warning", "Task", TaskStatus::Backlog);
+    app.state.db.as_ref().unwrap().create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
+    app.start_planning_from_backlog(&task.id).unwrap();
+    let result = app
+        .state
+        .setup_rx
+        .take()
+        .unwrap()
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let (tx, rx) = mpsc::channel();
+    tx.send(result).unwrap();
+    app.state.setup_rx = Some(rx);
+
+    assert!(app.pump_background_results().unwrap());
+    let saved = app
+        .state
+        .db
+        .as_ref()
+        .unwrap()
+        .get_task(&task.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.status, TaskStatus::Planning);
+    assert!(saved.worktree_path.is_some());
+    let (warning, _) = app.state.warning_message.as_ref().expect("setup warning");
+    assert!(warning.contains("settings.toml"), "{warning}");
 }
 
 // --- start_research ---

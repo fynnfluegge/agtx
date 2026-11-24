@@ -542,7 +542,15 @@ struct SetupResult {
     new_status: Option<TaskStatus>,
     agent: String,
     plugin: Option<String>,
+    warning: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug)]
+struct WorktreeSetup {
+    target: String,
+    launched_with_prompt: bool,
+    warning: Option<String>,
 }
 
 /// Pre-fetched info about a referenced task for worktree setup (avoids DB access in thread).
@@ -1444,6 +1452,9 @@ impl App {
                 if let Some(err) = result.error {
                     self.state.warning_message = Some((err, Instant::now()));
                 } else {
+                    if let Some(warning) = result.warning {
+                        self.state.warning_message = Some((warning, Instant::now()));
+                    }
                     // Update task with worktree info from background setup
                     if let Some(db) = &self.state.db {
                         if let Ok(Some(mut task)) = db.get_task(&result.task_id) {
@@ -6132,7 +6143,11 @@ impl App {
             );
 
             match result {
-                Ok((target, launched_with_prompt)) => {
+                Ok(WorktreeSetup {
+                    target,
+                    launched_with_prompt,
+                    warning,
+                }) => {
                     let _ = tx.send(SetupResult {
                         task_id: task_id.clone(),
                         session_name: tmp_task.session_name.unwrap_or_default(),
@@ -6141,6 +6156,7 @@ impl App {
                         new_status: Some(TaskStatus::Planning),
                         agent: planning_agent_clone.clone(),
                         plugin: plugin_name,
+                        warning,
                         error: None,
                     });
                     // Skip the whole send-after-ready dance when the agent was
@@ -6175,6 +6191,7 @@ impl App {
                         new_status: None,
                         agent: planning_agent_clone,
                         plugin: plugin_name,
+                        warning: None,
                         error: Some(format!("Planning setup failed: {}", e)),
                     });
                 }
@@ -6536,7 +6553,11 @@ impl App {
             );
 
             match result {
-                Ok((target, launched_with_prompt)) => {
+                Ok(WorktreeSetup {
+                    target,
+                    launched_with_prompt,
+                    warning,
+                }) => {
                     let worktree_path = tmp_task.worktree_path.clone().unwrap_or_default();
 
                     // Determine preresearch vs research by checking if preresearch artifacts
@@ -6582,6 +6603,7 @@ impl App {
                         new_status: None, // stays in Backlog
                         agent: agent_name.clone(),
                         plugin: plugin_name,
+                        warning,
                         error: None,
                     });
 
@@ -6615,6 +6637,7 @@ impl App {
                         new_status: None,
                         agent: agent_name,
                         plugin: plugin_name,
+                        warning: None,
                         error: Some(format!("Research setup failed: {}", e)),
                     });
                 }
@@ -7373,7 +7396,11 @@ impl App {
             );
 
             match result {
-                Ok((target, launched_with_prompt)) => {
+                Ok(WorktreeSetup {
+                    target,
+                    launched_with_prompt,
+                    warning,
+                }) => {
                     let _ = tx.send(SetupResult {
                         task_id: task_id.clone(),
                         session_name: tmp_task.session_name.unwrap_or_default(),
@@ -7382,6 +7409,7 @@ impl App {
                         new_status: Some(TaskStatus::Running),
                         agent: running_agent_clone.clone(),
                         plugin: plugin_name,
+                        warning,
                         error: None,
                     });
 
@@ -7417,6 +7445,7 @@ impl App {
                         new_status: None,
                         agent: running_agent_clone,
                         plugin: plugin_name,
+                        warning: None,
                         error: Some(format!("Running setup failed: {}", e)),
                     });
                 }
@@ -9935,7 +9964,7 @@ fn setup_task_worktree(
     skip_worktree: bool,
     agent_hooks: bool,
     skill_cmd: Option<&str>,
-) -> Result<(String, bool)> {
+) -> Result<WorktreeSetup> {
     let unique_slug = generate_task_slug(&task.id, &task.title);
     let window_name = format!("task-{}", unique_slug);
     let target = format!("{}:{}", tmux_project_name, window_name);
@@ -9996,8 +10025,19 @@ fn setup_task_worktree(
         init_script,
         copy_dirs,
     );
-    // Warnings from copy_files are expected (e.g. files don't exist yet on first run)
-    let _ = &init_warnings;
+    let warning = init_warnings.first().map(|first| {
+        let detail: String = first
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .collect();
+        match init_warnings.len() {
+            1 => format!("Worktree setup: {detail}"),
+            count => format!("Worktree setup: {detail} (+{} more)", count - 1),
+        }
+    });
 
     // Write skills to worktree .agtx/skills/ and agent-native discovery paths
     // Deploy for all unique agents configured across phases
@@ -10128,7 +10168,11 @@ fn setup_task_worktree(
     task.worktree_path = Some(worktree_path_str);
     task.branch_name = Some(format!("{}/{}", branch_prefix, unique_slug));
 
-    Ok((target, launched_with_prompt))
+    Ok(WorktreeSetup {
+        target,
+        launched_with_prompt,
+        warning,
+    })
 }
 
 /// Delete task resources: kill tmux window, run cleanup script, remove worktree, delete branch
