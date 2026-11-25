@@ -522,11 +522,9 @@ fn vocabulary(kind: HookConfigKind) -> &'static [&'static str] {
             "PostToolUse",
             "Stop",
         ],
-        // opencode v2.1.3 — the four lifecycle events agtx reports on.
-        // `working` and `permission.ask` both come from the single
-        // `permission.evaluate` hook; the plugin reads `event.effect` to
-        // distinguish them. `waiting` is reported when the turn ends (via
-        // `session.execution.*` events in the event stream).
+        // opencode v2.1.3. `working` and `permission.ask` come from the single
+        // `permission.evaluate` hook; the plugin picks which to report from
+        // `event.effect`. `waiting` arrives when the turn ends.
         HookConfigKind::OpenCodePlugin => &["prompt", "working", "permission.ask", "waiting"],
     }
 }
@@ -555,10 +553,8 @@ fn vocabularies_do_not_leak_across_agents() {
     );
 }
 
-/// The two states that drive a feature rather than an icon: `Blocked` fires the
-/// orchestrator's immediate stuck-task notification, and `Waiting` is what makes
-/// a finished turn distinguishable from a stalled one. Every agent must be able
-/// to report `Waiting`, including opencode (via `session.execution.*` events).
+/// `Waiting` is what makes a finished turn distinguishable from a stalled one,
+/// so every agent must be able to report it.
 #[test]
 fn turn_end_is_expressible_for_every_agent() {
     for kind in ALL_KINDS {
@@ -677,12 +673,9 @@ fn an_agent_without_hooks_writes_nothing() {
     assert!(b.is_none(), "an unknown agent must not borrow a vocabulary");
 }
 
-/// opencode now reports through its plugin: `prompt` (the user submitted a
-/// message) and `working` (an auto-approved permission) both map to Working;
-/// `permission.ask` (a permission genuinely waiting on a human) maps to
-/// Blocked; `waiting` (the turn ended) maps to Waiting — all passed in argv,
-/// exactly how the plugin sends them — and a foreign event it does not own
-/// is ignored.
+/// opencode reports through its plugin, with every event passed in argv
+/// (never a payload) exactly as the plugin sends them. A foreign event it
+/// does not own is ignored.
 #[test]
 fn opencode_reports_via_its_plugin_events() {
     let dir = TempDir::new().unwrap();

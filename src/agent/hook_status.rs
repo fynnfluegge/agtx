@@ -159,15 +159,10 @@ pub fn map_hook_event(kind: HookConfigKind, event: &str) -> Option<HookState> {
             "Stop" => Some(HookState::Waiting),
             _ => None,
         },
-        // opencode v2. Four events, all passed in argv. `prompt` fires when the
-        // user submits a message (turn start → Working). `working` and
-        // `permission.ask` come from the `permission.evaluate` hook, which
-        // fires for *every* permission check; the plugin reads `event.effect`
-        // to distinguish the two: `allow` (auto-approved, agent continues)
-        // reports `working` → Working, and `ask` (genuinely pending, waiting
-        // on a human) reports `permission.ask` → Blocked. `waiting` is
-        // reported when the turn ends (via `session.execution.*` events in
-        // the event stream) → Waiting/Idle.
+        // opencode v2. `working` and `permission.ask` both come from the single
+        // `permission.evaluate` hook — the plugin reads `event.effect` to pick
+        // which to report. `waiting` arrives via the `session.execution.*`
+        // event stream when the turn ends.
         OpenCodePlugin => match event {
             "prompt" | "working" => Some(HookState::Working),
             "permission.ask" => Some(HookState::Blocked),
@@ -266,10 +261,7 @@ pub fn hook_events(kind: HookConfigKind) -> &'static [(&'static str, Option<&'st
             ("PostToolUse", Some("*")),
             ("Stop", None),
         ],
-        // `prompt` (the user submitted a message), `working` (an auto-approved
-        // permission; the agent continues), `permission.ask` (a permission
-        // genuinely waiting on a human), and `waiting` (the turn ended).
-        // All are passed in argv, never in a payload, so all are unscoped.
+        // All four arrive in argv, never in a payload, so none is tool-scoped.
         OpenCodePlugin => &[
             ("prompt", None),
             ("working", None),
