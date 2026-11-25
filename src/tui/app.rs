@@ -14153,7 +14153,9 @@ export default {
       // resolve this session's id (by location.directory) and drop anything else.
       // Without this, any other agent finishing a turn flips this card to Ready.
       let me = null
-      ctx?.session?.list?.().then(
+      // `?.then` (not `.then`) so a missing `list` degrades to "no filtering"
+      // instead of throwing and aborting the hook registration below.
+      ctx?.session?.list?.()?.then(
         (r) => { me = (r?.data ?? []).find((s) => s?.location?.directory === dir)?.id ?? null },
         () => {}
       )
