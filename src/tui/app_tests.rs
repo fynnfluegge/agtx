@@ -13405,6 +13405,8 @@ fn test_opencode_hook_writes_its_plugin_file() {
     assert!(once.contains("\"question\""), "must detect the question tool");
     assert!(once.contains("session.execution.succeeded"), "must subscribe to turn-end events");
     assert!(once.contains("waiting"), "must report the waiting event");
+    assert!(once.contains("sessionID"), "must filter events to this session");
+    assert!(once.contains("ctx?.session?.list"), "must resolve its own session id");
     assert!(!once.contains("__AGTX_BIN__"), "the binary path was not substituted in");
 
     // A second deploy rewrites the same file rather than stacking a second one.

@@ -14118,6 +14118,11 @@ fn antigravity_hook_spec(
 /// tool call, and Waiting when the turn ends (via the `session.execution.*`
 /// event stream).
 ///
+/// The event bus is global — it delivers every session in every project — so the
+/// plugin resolves its own session id (by `location.directory`) and drops every
+/// event that is not its own; otherwise any other agent finishing a turn would
+/// flip this card to Ready.
+///
 /// The default export must be the plain object `{ id, setup }` — that is exactly
 /// the shape opencode's plugin-module schema validates (`{ id, setup: function }`),
 /// so this does not depend on any named `@opencode/plugin` export existing. It is
@@ -14137,16 +14142,34 @@ function report(event, dir) {
     c.unref()
   } catch {}
 }
+function sid(e) { return e?.sessionID ?? e?.data?.sessionID ?? e?.durable?.aggregateID ?? null }
 
 export default {
   id: "agtx.status",
   setup(ctx) {
     try {
       const dir = ctx?.location?.directory ?? process.cwd()
-      ctx?.session?.hook("prompt", () => report("prompt", dir))
-      ctx?.permission?.hook("evaluate", (event) => report(event?.effect === "ask" ? "permission.ask" : "working", dir))
-      ctx?.tool?.hook("execute.before", (event) => { if (event?.tool === "question") report("permission.ask", dir) })
-      ctx?.tool?.hook("execute.after", (event) => { if (event?.tool === "question") report("working", dir) })
+      // The event bus is global — it delivers every session in every project — so
+      // resolve this session's id (by location.directory) and drop anything else.
+      // Without this, any other agent finishing a turn flips this card to Ready.
+      let me = null
+      ctx?.session?.list?.().then(
+        (r) => { me = (r?.data ?? []).find((s) => s?.location?.directory === dir)?.id ?? null },
+        () => {}
+      )
+      const mine = (e) => { const s = sid(e); return !me || !s || s === me }
+      // A question tool call that has not yet been answered means the agent is
+      // waiting on the user (Blocked). The tool's own auto-allow and the turn
+      // ending both fire while it is open and must not clobber that state.
+      let questionOpen = false
+      ctx?.session?.hook("prompt", (e) => { if (!mine(e)) return; questionOpen = false; report("prompt", dir) })
+      ctx?.permission?.hook("evaluate", (e) => {
+        if (!mine(e)) return
+        if (questionOpen) return
+        report(e?.effect === "ask" ? "permission.ask" : "working", dir)
+      })
+      ctx?.tool?.hook("execute.before", (e) => { if (!mine(e)) return; if (e?.tool === "question") { questionOpen = true; report("permission.ask", dir) } })
+      ctx?.tool?.hook("execute.after", (e) => { if (!mine(e)) return; if (e?.tool === "question") { questionOpen = false; report("working", dir) } })
       const ctrl = new AbortController()
       void (async () => {
         try {
@@ -14154,7 +14177,11 @@ export default {
             types: ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"],
             signal: ctrl.signal
           })
-          for await (const _ of stream) report("waiting", dir)
+          for await (const e of stream) {
+            if (!me) continue
+            if (!mine(e)) continue
+            report(questionOpen ? "permission.ask" : "waiting", dir)
+          }
         } catch {}
       })()
       return () => ctrl.abort()
