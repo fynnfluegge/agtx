@@ -240,6 +240,13 @@ fn wrap_launch_command(shell_cmd: &str, keep_shell_on_exit: bool) -> String {
     }
 }
 
+/// Whether `target` is among `targets`. Membership, not name resolution:
+/// tmux refuses to resolve a duplicated (ambiguous) name, which would read a
+/// present window as absent.
+pub fn window_present_in(targets: &[String], target: &str) -> bool {
+    targets.iter().any(|t| t == target)
+}
+
 /// Real implementation using actual tmux commands
 pub struct RealTmuxOps;
 
@@ -347,11 +354,8 @@ impl TmuxOperations for RealTmuxOps {
     }
 
     fn window_exists(&self, target: &str) -> Result<bool> {
-        let output = std::process::Command::new("tmux")
-            .args(["-L", super::AGENT_SERVER])
-            .args(["list-windows", "-t", target])
-            .output()?;
-        Ok(output.status.success())
+        let targets = self.list_window_targets()?;
+        Ok(window_present_in(&targets, target))
     }
 
     fn send_keys(&self, target: &str, keys: &str) -> Result<()> {
@@ -626,5 +630,15 @@ mod tests {
     fn the_pane_drops_to_a_shell_only_when_asked() {
         assert!(wrap_launch_command("claude", true).ends_with("; exec $SHELL"));
         assert!(!wrap_launch_command("claude", false).contains("exec $SHELL"));
+    }
+
+    #[test]
+    fn existence_is_judged_by_membership_not_name_resolution() {
+        assert!(!window_present_in(&[], "proj:task-abc"));
+        assert!(window_present_in(&["proj:task-abc".to_string()], "proj:task-abc"));
+        // Duplicated name: present (the case name resolution got wrong).
+        let dup = vec!["proj:task-abc".to_string(), "proj:task-abc".to_string()];
+        assert!(window_present_in(&dup, "proj:task-abc"));
+        assert!(!window_present_in(&["proj:task-abc".to_string()], "proj:task-xyz"));
     }
 }

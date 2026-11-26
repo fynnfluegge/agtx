@@ -212,12 +212,8 @@ impl TmuxOperations for TestTmuxOps {
             .collect())
     }
     fn window_exists(&self, target: &str) -> Result<bool> {
-        Ok(Command::new("tmux")
-            .args(["-L", &self.server])
-            .args(["list-windows", "-t", target])
-            .output()?
-            .status
-            .success())
+        let targets = self.list_window_targets()?;
+        Ok(agtx::tmux::window_present_in(&targets, target))
     }
     fn send_keys(&self, target: &str, keys: &str) -> Result<()> {
         self.run(&["send-keys", "-t", target, keys]);
@@ -727,6 +723,30 @@ fn the_window_listing_names_every_window_as_session_colon_window() {
     // What the refresh actually asks of it.
     assert!(ops.window_exists("it:alpha").unwrap_or(false));
     assert!(!targets.iter().any(|t| t == "it:missing"));
+}
+
+/// A duplicated window name is still reported as present (tmux's
+/// name-resolution path refuses the ambiguous name).
+#[test]
+fn a_duplicated_window_name_is_still_reported_as_present() {
+    guard!();
+    let server = Server::start("dup");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "dupname", "cat"])
+        .expect("first dup window");
+    server
+        .tmux(&["new-window", "-d", "-t", "it:", "-n", "dupname", "cat"])
+        .expect("second dup window");
+    std::thread::sleep(Duration::from_millis(200));
+    let ops = TestTmuxOps {
+        server: server.name.clone(),
+    };
+    assert!(
+        ops.window_exists("it:dupname").unwrap_or(false),
+        "a duplicated window name must still be reported as present"
+    );
+    let targets = ops.list_window_targets().expect("listing");
+    assert_eq!(targets.iter().filter(|t| *t == "it:dupname").count(), 2);
 }
 
 /// With control mode off there is no connection to serve a capture, and the
