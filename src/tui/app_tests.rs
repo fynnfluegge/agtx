@@ -13380,6 +13380,52 @@ fn test_hook_config_is_written_for_every_hook_capable_agent() {
     }
 }
 
+/// opencode reports through a generated plugin file, not a JSON hook config, so
+/// it can't join the loops above (they assert `hook --env`, but opencode uses the
+/// `--worktree` form). Give it the same guarantees on its own: the file is
+/// written with the right form and both events, its binary path is substituted,
+/// it is idempotent, and it is removed — without clobbering opencode's other
+/// files — when hooks are turned off.
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_opencode_hook_writes_its_plugin_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+    let plugin = dir.path().join(".opencode/plugins/agtx-status.ts");
+
+    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"], true);
+    let once = std::fs::read_to_string(&plugin)
+        .unwrap_or_else(|e| panic!("opencode: no plugin at {:?}: {e}", plugin));
+    assert!(once.contains("\"--worktree\""), "must use the worktree form, got:\n{once}");
+    assert!(once.contains("opencode"), "must name its agent");
+    assert!(once.contains("\"prompt\""), "must register the prompt event");
+    assert!(once.contains("permission.ask"), "must register the permission-ask event");
+    assert!(once.contains("execute.before"), "must register tool.execute.before");
+    assert!(once.contains("execute.after"), "must register tool.execute.after");
+    assert!(once.contains("\"question\""), "must detect the question tool");
+    assert!(once.contains("session.execution.succeeded"), "must subscribe to turn-end events");
+    assert!(once.contains("waiting"), "must report the waiting event");
+    assert!(once.contains("sessionID"), "must filter events to this session");
+    assert!(once.contains("ctx?.session?.list"), "must resolve its own session id");
+    assert!(!once.contains("__AGTX_BIN__"), "the binary path was not substituted in");
+
+    // A second deploy rewrites the same file rather than stacking a second one.
+    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"], true);
+    assert_eq!(
+        once,
+        std::fs::read_to_string(&plugin).unwrap(),
+        "second deploy changed the plugin"
+    );
+
+    // Turning hooks off removes agtx's file, but leaves opencode's own files.
+    write_skills_to_worktree(&wt, dir.path(), &None, &["opencode"], false);
+    assert!(!plugin.exists(), "the plugin should be removed when hooks are off");
+    assert!(
+        dir.path().join(".opencode/command").exists(),
+        "must not clobber opencode's other files"
+    );
+}
+
 /// The agents whose hook file is shared with something else must merge. Gemini's
 /// `.gemini/settings.json` also carries `mcpServers` and `trust`, and the user's
 /// own hooks may already be in it.

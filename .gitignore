@@ -17,6 +17,9 @@ Thumbs.db
 # Local agtx data (per-project)
 .agtx/
 
+# agtx-deployed opencode runtime files (commands + status plugin), per worktree
+.opencode/
+
 # Logs
 *.log
 

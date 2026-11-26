@@ -14049,6 +14049,23 @@ fn write_hook_config(spec: &agent::AgentSpec, worktree_path: &str, agtx_bin: &st
             }
             write_json(&path, &serde_json::Value::Object(root));
         }
+        // opencode auto-discovers `.opencode/plugins/`, so agtx owns one `.ts`
+        // file in it and writes or removes it outright — there is no `hooks` key
+        // to merge. `ours` (the Claude-shaped JSON computed above) is unused here:
+        // this arm speaks TypeScript, not JSON (the same way the antigravity arm
+        // ignores it). The plugin reports through `agtx hook --worktree`, because
+        // the shared service's env is not the task's.
+        agent::HookConfigKind::OpenCodePlugin => {
+            let dir = wt.join(".opencode").join("plugins");
+            let path = dir.join("agtx-status.ts");
+            if enabled {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(&path, opencode_plugin(agtx_bin));
+            } else {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_dir(&dir);
+            }
+        }
     }
 }
 
@@ -14094,6 +14111,87 @@ fn antigravity_hook_spec(
         out.insert((*event).to_string(), entry);
     }
     serde_json::Value::Object(out)
+}
+
+/// The opencode v2 plugin agtx writes. It reports Working on a submitted prompt
+/// or an auto-approved permission, Blocked on a permission ask or a `question`
+/// tool call, and Waiting when the turn ends (via the `session.execution.*`
+/// event stream).
+///
+/// The event bus is global — it delivers every session in every project — so the
+/// plugin resolves its own session id (by `location.directory`) and drops every
+/// event that is not its own; otherwise any other agent finishing a turn would
+/// flip this card to Ready.
+///
+/// The default export must be the plain object `{ id, setup }` — that is exactly
+/// the shape opencode's plugin-module schema validates (`{ id, setup: function }`),
+/// so this does not depend on any named `@opencode/plugin` export existing. It is
+/// also fully guarded: a failure here must never break opencode's turn, so every
+/// access is optional-chained and every error is swallowed. The absolute `agtx`
+/// path is baked in, like every other agent's hook command.
+fn opencode_plugin(agtx_bin: &str) -> String {
+    const TEMPLATE: &str = r#"import { spawn } from "node:child_process"
+
+const AGTX = "__AGTX_BIN__"
+
+function report(event, dir) {
+  try {
+    const c = spawn(AGTX, ["hook", "--worktree", dir, "opencode", "--event", event],
+                    { stdio: "ignore", detached: true })
+    c.on("error", () => {})
+    c.unref()
+  } catch {}
+}
+function sid(e) { return e?.sessionID ?? e?.data?.sessionID ?? e?.durable?.aggregateID ?? null }
+
+export default {
+  id: "agtx.status",
+  setup(ctx) {
+    try {
+      const dir = ctx?.location?.directory ?? process.cwd()
+      // The event bus is global — it delivers every session in every project — so
+      // resolve this session's id (by location.directory) and drop anything else.
+      // Without this, any other agent finishing a turn flips this card to Ready.
+      let me = null
+      // `?.then` (not `.then`) so a missing `list` degrades to "no filtering"
+      // instead of throwing and aborting the hook registration below.
+      ctx?.session?.list?.()?.then(
+        (r) => { me = (r?.data ?? []).find((s) => s?.location?.directory === dir)?.id ?? null },
+        () => {}
+      )
+      const mine = (e) => { const s = sid(e); return !me || !s || s === me }
+      // A question tool call that has not yet been answered means the agent is
+      // waiting on the user (Blocked). The tool's own auto-allow and the turn
+      // ending both fire while it is open and must not clobber that state.
+      let questionOpen = false
+      ctx?.session?.hook("prompt", (e) => { if (!mine(e)) return; questionOpen = false; report("prompt", dir) })
+      ctx?.permission?.hook("evaluate", (e) => {
+        if (!mine(e)) return
+        if (questionOpen) return
+        report(e?.effect === "ask" ? "permission.ask" : "working", dir)
+      })
+      ctx?.tool?.hook("execute.before", (e) => { if (!mine(e)) return; if (e?.tool === "question") { questionOpen = true; report("permission.ask", dir) } })
+      ctx?.tool?.hook("execute.after", (e) => { if (!mine(e)) return; if (e?.tool === "question") { questionOpen = false; report("working", dir) } })
+      const ctrl = new AbortController()
+      void (async () => {
+        try {
+          const stream = ctx.event.subscribe({
+            types: ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"],
+            signal: ctrl.signal
+          })
+          for await (const e of stream) {
+            if (!me) continue
+            if (!mine(e)) continue
+            report(questionOpen ? "permission.ask" : "waiting", dir)
+          }
+        } catch {}
+      })()
+      return () => ctrl.abort()
+    } catch {}
+  },
+}
+"#;
+    TEMPLATE.replace("__AGTX_BIN__", agtx_bin)
 }
 
 /// Read a JSON file as an object, or an empty one if it is missing or not an

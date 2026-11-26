@@ -406,6 +406,7 @@ const ALL_KINDS: &[HookConfigKind] = &[
     HookConfigKind::CursorHooksJson,
     HookConfigKind::GrokHooksJson,
     HookConfigKind::AntigravityHooksJson,
+    HookConfigKind::OpenCodePlugin,
 ];
 
 /// Registering an event agtx cannot act on is dead weight in the agent's turn:
@@ -521,6 +522,10 @@ fn vocabulary(kind: HookConfigKind) -> &'static [&'static str] {
             "PostToolUse",
             "Stop",
         ],
+        // opencode v2.1.3. `working` and `permission.ask` come from the single
+        // `permission.evaluate` hook; the plugin picks which to report from
+        // `event.effect`. `waiting` arrives when the turn ends.
+        HookConfigKind::OpenCodePlugin => &["prompt", "working", "permission.ask", "waiting"],
     }
 }
 
@@ -548,9 +553,8 @@ fn vocabularies_do_not_leak_across_agents() {
     );
 }
 
-/// The two states that drive a feature rather than an icon: `Blocked` fires the
-/// orchestrator's immediate stuck-task notification, and `Waiting` is what makes
-/// a finished turn distinguishable from a stalled one.
+/// `Waiting` is what makes a finished turn distinguishable from a stalled one,
+/// so every agent must be able to report it.
 #[test]
 fn turn_end_is_expressible_for_every_agent() {
     for kind in ALL_KINDS {
@@ -568,8 +572,11 @@ fn turn_end_is_expressible_for_every_agent() {
     }
 }
 
-/// Cursor and Antigravity have no human-blocking event to subscribe to. Pinned
-/// so the gap is not closed later with a wrong mapping.
+/// Which agents can report `Blocked`. Pinned so the set is not widened or
+/// narrowed later with a wrong mapping: opencode's `permission.ask` (fired when
+/// `event.effect === "ask"`) does block, while Cursor exposes only policy gates
+/// that decide (`beforeShellExecution`) and Antigravity's five events contain
+/// no permission prompt.
 #[test]
 fn only_agents_with_a_permission_event_report_blocked() {
     let can_block: Vec<HookConfigKind> = ALL_KINDS
@@ -588,6 +595,7 @@ fn only_agents_with_a_permission_event_report_blocked() {
             HookConfigKind::CodexHooksJson,
             HookConfigKind::GeminiSettings,
             HookConfigKind::GrokHooksJson,
+            HookConfigKind::OpenCodePlugin,
         ],
         "Cursor exposes only policy gates that decide (beforeShellExecution), and \
          Antigravity's five events contain no permission prompt"
@@ -642,26 +650,114 @@ fn antigravity_payload_round_trips_through_the_cli() {
 
 /// An agent with `hook_config: None` writes nothing even when the CLI is invoked
 /// in its name, so a registration left behind by an older agtx cannot keep
-/// reporting under a vocabulary that no longer exists.
+/// reporting under a vocabulary that no longer exists. copilot is such an agent;
+/// opencode now reports, and is covered by the round-trip just below.
 #[test]
 fn an_agent_without_hooks_writes_nothing() {
     let dir = TempDir::new().unwrap();
-    std::env::set_var("AGTX_TASK_ID", "t-oc");
+    std::env::set_var("AGTX_TASK_ID", "t-cp");
     std::env::set_var("AGTX_WORKTREE", dir.path());
 
     let wt = dir.path().to_string_lossy().to_string();
     let payload = br#"{"hook_event_name":"SessionStart"}"#;
 
-    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "opencode", None, payload);
-    let a = read_status(dir.path(), "t-oc", 0);
+    agtx::agent::hook_status::record_hook_event("t-cp", &wt, "copilot", None, payload);
+    let a = read_status(dir.path(), "t-cp", 0);
 
-    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "not-an-agent", None, payload);
-    let b = read_status(dir.path(), "t-oc", 0);
+    agtx::agent::hook_status::record_hook_event("t-cp", &wt, "not-an-agent", None, payload);
+    let b = read_status(dir.path(), "t-cp", 0);
 
     std::env::remove_var("AGTX_TASK_ID");
     std::env::remove_var("AGTX_WORKTREE");
-    assert!(a.is_none(), "opencode has no hook support");
+    assert!(a.is_none(), "a hook-less agent must not report");
     assert!(b.is_none(), "an unknown agent must not borrow a vocabulary");
+}
+
+/// opencode reports through its plugin, with every event passed in argv
+/// (never a payload) exactly as the plugin sends them. A foreign event it
+/// does not own is ignored.
+#[test]
+fn opencode_reports_via_its_plugin_events() {
+    let dir = TempDir::new().unwrap();
+    let wt = dir.path().to_string_lossy().to_string();
+
+    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "opencode", Some("prompt"), b"");
+    assert_eq!(
+        read_status(dir.path(), "t-oc", 0).expect("a prompt must report Working").state,
+        HookState::Working
+    );
+
+    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "opencode", Some("working"), b"");
+    assert_eq!(
+        read_status(dir.path(), "t-oc", 0).expect("a working event must report Working").state,
+        HookState::Working
+    );
+
+    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "opencode", Some("permission.ask"), b"");
+    assert_eq!(
+        read_status(dir.path(), "t-oc", 0).expect("a permission.ask must report Blocked").state,
+        HookState::Blocked
+    );
+
+    agtx::agent::hook_status::record_hook_event("t-oc", &wt, "opencode", Some("waiting"), b"");
+    assert_eq!(
+        read_status(dir.path(), "t-oc", 0).expect("a waiting event must report Waiting").state,
+        HookState::Waiting
+    );
+
+    // A claude event is not borrowed by opencode's vocabulary.
+    let dir2 = TempDir::new().unwrap();
+    let wt2 = dir2.path().to_string_lossy().to_string();
+    agtx::agent::hook_status::record_hook_event(
+        "t-oc",
+        &wt2,
+        "opencode",
+        Some("SessionStart"),
+        b"",
+    );
+    assert!(
+        read_status(dir2.path(), "t-oc", 0).is_none(),
+        "opencode must not borrow claude's vocabulary"
+    );
+}
+
+/// Full loop for the opencode `--worktree` form: a task stored under the worktree
+/// is resolved from the worktree (not the env) and reports `Working`, with the
+/// record written under the worktree. Uses `AGTX_DATA_DIR` so it never touches
+/// the user's real agtx data. Run as a single test (it sets a process-global
+/// env var), with stdin from /dev/null (the hook reads an optional payload).
+#[test]
+fn opencode_worktree_form_resolves_and_reports() {
+    let dir = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let project = dir.path().join("proj");
+    let worktree = project.join(".agtx").join("worktrees").join("slug-1234");
+    std::fs::create_dir_all(&worktree).unwrap();
+
+    std::env::set_var("AGTX_DATA_DIR", data.path());
+
+    let db = agtx::db::Database::open_project(&project).unwrap();
+    let mut task = agtx::db::Task::new("t", "opencode", "p1");
+    task.worktree_path = Some(worktree.to_string_lossy().to_string());
+    db.create_task(&task).unwrap();
+    let task_id = task.id.clone();
+
+    // The exact argv the plugin spawns (verified live against opencode v2.1.3).
+    let args = vec![
+        "--worktree".to_string(),
+        worktree.to_string_lossy().to_string(),
+        "opencode".to_string(),
+        "--event".to_string(),
+        "prompt".to_string(),
+    ];
+    let result = agtx::agent::hook_status::run_hook_cli(&args);
+    std::env::remove_var("AGTX_DATA_DIR");
+
+    result.expect("the --worktree form must not error");
+    let got = read_status(&worktree, &task_id, 0)
+        .expect("the --worktree form must resolve the task and write a Working record");
+    assert_eq!(got.state, HookState::Working);
+    assert_eq!(got.agent, "opencode");
 }
 
 /// Grok registers `PreToolUse` and reports `pre_tool_use`. Matching only the
