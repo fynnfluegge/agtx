@@ -261,14 +261,14 @@ Databases stored centrally in the platform data dir (`GlobalConfig::data_dir`, v
 Dedicated tmux server named `agtx` (`tmux -L agtx`). Each project gets its own session (named after project); each task gets its own window in that session. Separate from the user's regular tmux. View: `tmux -L agtx list-windows -a`; attach: `tmux -L agtx attach`.
 
 ### Orchestrator Agent (Experimental)
-A dedicated Claude Code agent that autonomously manages the board. Enabled with `--experimental`, toggled with `O`.
+A dedicated agent (the project's `default_agent`) that autonomously manages the board. Enabled with `--experimental`, toggled with `O`.
 
 ```
-Orchestrator (Claude Code) ←MCP stdio→ MCP Server (agtx mcp-serve) ←SQLite→ DB
+Orchestrator (any agent) ←MCP stdio→ MCP Server (agtx mcp-serve) ←SQLite→ DB
 Orchestrator → TUI: transition_requests table.  TUI → Orchestrator: notifications (send_keys when idle)
 ```
 
-- MCP registered per-session via `claude mcp add-json --scope local` as **`agtx-orchestrator`** (not `agtx`, avoids config conflict), cleaned up on exit. Only Claude implements `build_orchestrator_command()`. Manages Planning/Running; the user triages Backlog/Research and handles merging. A coordinator, not a reviewer. Only "completed phase" notifications sent; on startup an existing session is reconnected with catch-up notifications (deduped via `peek_notifications`).
+- MCP registered per-session and cleaned up on exit, selected by `McpConfigKind` in `build_orchestrator_command()` (src/agent/operations.rs): Claude via `claude mcp add-json --scope local` as **`agtx-orchestrator`** (not `agtx`, avoids config conflict); file-based agents (opencode, codex, gemini, cursor, grok, antigravity, pi) by merging the entry into their config file at the project root (e.g. `opencode.json`), backed up first and restored — or removed, if created — when the orchestrator exits (src/agent/mcp.rs); agents with no MCP (copilot) launch bare. Manages Planning/Running; the user triages Backlog/Research and handles merging. A coordinator, not a reviewer. Only "completed phase" notifications sent; on startup an existing session is reconnected with catch-up notifications (deduped via `peek_notifications`).
 
 **MCP tools**:
 - Discovery: `list_projects` (global mode only), `get_config` (global + project merged — the only way a caller learns `auto_trust`; carries both file paths).

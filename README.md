@@ -937,7 +937,7 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 ```
 ┌─────────────-┐     MCP (stdio)     ┌──────────────┐     SQLite     ┌─────┐
 │ Orchestrator │ ←─────────────────→ │  MCP Server  │ ←────────────→ │ DB  │
-│ (Claude Code)│                     │ (agtx serve) │                └──┬──┘
+│ (any agent)  │                     │ (agtx serve) │                └──┬──┘
 └──────┬───────┘                     └──────────────┘                   │
        │  push-when-idle notifications                                  │
 ┌──────┴───────┐                                                        │
@@ -946,13 +946,13 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 ```
 
 **How it works:**
-1. When you press `O`, the TUI registers the MCP server with the orchestrator agent via `claude mcp add-json --scope local`
+1. When you press `O`, the TUI registers the MCP server with the orchestrator agent — Claude via `claude mcp add-json --scope local` (unique name `agtx-orchestrator`); other agents by merging the entry into their config file at the project root (e.g. `opencode.json` for OpenCode, `.codex/config.toml` for Codex)
 2. The orchestrator receives phase completion notifications pushed to its tmux pane when idle
 3. It reacts by calling `get_task` to check `allowed_actions`, then `move_task` to advance the task
 4. The TUI processes the transition request, executes all side effects (agent switching, skill deployment, prompt sending), and updates the database
 5. If a task has been idle for 1+ minute without a phase artifact, the orchestrator is notified — it reads the pane with `read_pane_content`, then either nudges the agent with `send_to_task` or calls `move_task` with `escalate_to_user` to flag it for your attention
 6. Escalated tasks show a `⚠` badge on the kanban board; opening the task popup shows the reason and dismisses the flag
-7. MCP registration is cleaned up when the orchestrator is stopped
+7. MCP registration is cleaned up when the orchestrator exits (Claude's CLI registration removed; file-based configs restored to their pre-launch state)
 
 ## Benchmark
 

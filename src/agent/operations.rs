@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[cfg(feature = "test-mocks")]
 use mockall::automock;
 
-use super::Agent;
+use super::{Agent, McpConfigKind};
 
 /// Operations for coding agents (Claude, Aider, Codex, etc.)
 #[cfg_attr(feature = "test-mocks", automock)]
@@ -39,10 +39,14 @@ pub trait AgentOperations: Send + Sync {
     }
 
     /// Build the full shell command to run this agent as an orchestrator.
-    /// Includes MCP registration (if supported by the agent) and cleanup on exit.
-    /// Default implementation: no MCP, just launches the agent interactively.
-    fn build_orchestrator_command(&self, mcp_json: &str, agtx_bin: &str) -> String {
-        let _ = (mcp_json, agtx_bin);
+    /// Includes MCP registration (if supported by the agent) and cleanup on
+    /// exit. `project_path` is the path the MCP server opens — and, for
+    /// file-based agents, the launch directory their config file is written
+    /// to (the project root: the orchestrator window is created there, not in
+    /// a worktree). Default implementation: no MCP, just launches the agent
+    /// interactively.
+    fn build_orchestrator_command(&self, agtx_bin: &str, project_path: &str) -> String {
+        let _ = (agtx_bin, project_path);
         self.build_interactive_command("")
     }
 }
@@ -91,8 +95,9 @@ impl AgentOperations for CodingAgent {
         self.agent.prompt_injection()
     }
 
-    fn build_orchestrator_command(&self, mcp_json: &str, _agtx_bin: &str) -> String {
-        match self.agent.name.as_str() {
+    fn build_orchestrator_command(&self, agtx_bin: &str, project_path: &str) -> String {
+        let interactive = self.build_interactive_command("");
+        match super::spec(&self.agent.name).and_then(|s| s.mcp_config) {
             // Register under a unique name (`agtx-orchestrator`) rather than
             // `agtx` to avoid colliding with an `agtx` server already defined in
             // another scope (the Claude Code plugin's `plugin:agtx:agtx`, a
@@ -110,17 +115,46 @@ impl AgentOperations for CodingAgent {
             // (`single_quote` in src/tmux/operations.rs), so the wrapping quotes
             // must **not** be pre-escaped here — doing so double-escapes them and
             // the inner shell dies on an unterminated quote before `add-json`
-            // ever runs. Any apostrophe *inside* the JSON is escaped by the
-            // caller, which is the only thing that needs handling at this layer.
-            "claude" => format!(
-                "claude mcp remove agtx-orchestrator --scope local 2>/dev/null || true; \
-                 claude mcp add-json agtx-orchestrator '{}' --scope local && {}; \
-                 claude mcp remove agtx-orchestrator --scope local",
-                mcp_json,
-                self.build_interactive_command("")
-            ),
-            // To add a new orchestrator agent, add a match arm here.
-            _ => self.build_interactive_command(""),
+            // ever runs. An apostrophe *inside* the JSON (only reachable via the
+            // project path) is escaped for that single-quoted word, below.
+            Some(McpConfigKind::ClaudeJson) => {
+                let mcp_json = serde_json::json!({
+                    "type": "stdio",
+                    "command": agtx_bin,
+                    "args": ["mcp-serve", project_path]
+                })
+                .to_string()
+                .replace('\'', "'\"'\"'");
+                format!(
+                    "claude mcp remove agtx-orchestrator --scope local 2>/dev/null || true; \
+                     claude mcp add-json agtx-orchestrator '{}' --scope local && {}; \
+                     claude mcp remove agtx-orchestrator --scope local",
+                    mcp_json, interactive
+                )
+            }
+            // File-based agents register by config file in their launch
+            // directory (the project root), with the cleanup chained after the
+            // launch — mirroring claude's self-cleaning command string. The
+            // writer merges into any pre-existing file and backs it up; see
+            // `super::mcp` for the per-kind targets and the merge rules.
+            Some(kind) => {
+                let Some(rel_path) = super::mcp::orchestrator_mcp_target(kind) else {
+                    return interactive; // defensive: only ClaudeJson maps to None
+                };
+                match super::mcp::register(
+                    Path::new(project_path),
+                    rel_path,
+                    kind,
+                    agtx_bin,
+                    project_path,
+                ) {
+                    Some(cleanup) => format!("{interactive}; {cleanup}"),
+                    None => interactive,
+                }
+            }
+            // No MCP for this agent (copilot, unknown agents): launch bare.
+            // A deliberate arm now, not a name-matching fallthrough.
+            None => interactive,
         }
     }
 }
