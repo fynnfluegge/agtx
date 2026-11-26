@@ -49,6 +49,27 @@ impl BoardState {
             .and_then(|&idx| self.tasks.get_mut(idx))
     }
 
+    /// Focus the first task in the highest-priority nonempty column.
+    pub fn focus_active_task(&mut self) {
+        for status in [
+            TaskStatus::Running,
+            TaskStatus::Planning,
+            TaskStatus::Review,
+            TaskStatus::Backlog,
+            TaskStatus::Done,
+        ] {
+            if let Some(column) = TaskStatus::columns()
+                .iter()
+                .position(|&column_status| column_status == status)
+                .filter(|_| self.tasks.iter().any(|task| task.status == status))
+            {
+                self.selected_column = column;
+                self.selected_row = 0;
+                return;
+            }
+        }
+    }
+
     /// Move selection left
     pub fn move_left(&mut self) {
         if self.selected_column > 0 {

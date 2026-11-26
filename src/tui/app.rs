@@ -62,7 +62,7 @@ fn build_footer_text(
     match wizard_step {
         None => {
             if sidebar_focused {
-                "[j/k] navigate  [Enter] board  ·  [e] hide  [?] help  [q] quit".to_string()
+                "[j/k] navigate  [Enter] board  [E] active task  ·  [e] hide  [?] help  [q] quit".to_string()
             } else {
                 let fullscreen = if fullscreen_on_enter {
                     ""
@@ -4685,8 +4685,10 @@ impl App {
                         }
                     }
                 }
-                KeyCode::Enter => {
-                    // Enter focuses the board (sidebar stays visible)
+                KeyCode::Enter | KeyCode::Char('E') => {
+                    if key == KeyCode::Char('E') {
+                        self.state.board.focus_active_task();
+                    }
                     self.state.sidebar_focused = false;
                 }
                 _ => {}

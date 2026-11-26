@@ -1769,6 +1769,7 @@ fn test_footer_text_sidebar_focused() {
     let text = build_footer_text(None, true, 0, false, false);
     assert!(text.contains("[j/k] navigate"));
     assert!(text.contains("[e] hide"));
+    assert!(text.contains("[E] active task"));
     assert!(!text.contains("[o] new"));
 }
 
@@ -5433,6 +5434,67 @@ fn make_test_app() -> App {
         Arc::new(MockAgentRegistry::new()),
     )
     .unwrap()
+}
+
+#[cfg(feature = "test-mocks")]
+#[test]
+fn sidebar_active_task_shortcut_follows_status_priority() {
+    let mut app = make_test_app();
+    app.state.sidebar_visible = true;
+
+    for status in [
+        TaskStatus::Done,
+        TaskStatus::Backlog,
+        TaskStatus::Review,
+        TaskStatus::Planning,
+        TaskStatus::Running,
+    ] {
+        let mut task = Task::new(status.as_str(), "test-agent", "project");
+        task.status = status;
+        app.state.board.tasks.push(task);
+    }
+
+    for status in [
+        TaskStatus::Running,
+        TaskStatus::Planning,
+        TaskStatus::Review,
+        TaskStatus::Backlog,
+        TaskStatus::Done,
+    ] {
+        app.state.sidebar_focused = true;
+        let before: Vec<_> = app.state.board.tasks.iter().map(|task| task.status).collect();
+        app.handle_normal_key(KeyCode::Char('E')).unwrap();
+
+        assert!(app.state.sidebar_visible);
+        assert!(!app.state.sidebar_focused);
+        assert_eq!(app.state.board.selected_task().unwrap().status, status);
+        assert!(app.state.board.tasks.iter().map(|task| task.status).eq(before));
+        app.state.board.tasks.retain(|task| task.status != status);
+    }
+
+    app.state.sidebar_focused = true;
+    app.handle_normal_key(KeyCode::Char('E')).unwrap();
+    assert!(!app.state.sidebar_focused);
+    assert!(app.state.board.selected_task().is_none());
+}
+
+#[cfg(feature = "test-mocks")]
+#[test]
+fn sidebar_enter_preserves_board_selection() {
+    let mut app = make_test_app();
+    app.state.sidebar_visible = true;
+    app.state.sidebar_focused = true;
+    let mut running = Task::new("Running", "test-agent", "project");
+    running.status = TaskStatus::Running;
+    app.state.board.tasks = vec![Task::new("Backlog", "test-agent", "project"), running];
+
+    app.handle_normal_key(KeyCode::Enter).unwrap();
+    assert!(app.state.sidebar_visible);
+    assert!(!app.state.sidebar_focused);
+    assert_eq!(
+        app.state.board.selected_task().unwrap().status,
+        TaskStatus::Backlog
+    );
 }
 
 /// The wizard's active text field — the title on the title step, the prompt on
